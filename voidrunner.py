@@ -836,7 +836,15 @@ def load_or_create_save(save_dir: Path, user_id: int, handle: str) -> tuple[Save
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             save = SaveData.from_dict(data)
-            save.pilot.handle = handle  # handle may have changed since last visit
+            # `handle` (the caller's current login name) is deliberately
+            # never written back onto `save.pilot.handle` here -- a
+            # dogfood playtest caught this line unconditionally
+            # clobbering a player's chosen in-game callsign back to
+            # their BBS handle on *every* login, silently discarding the
+            # whole point of `create_career`'s own callsign prompt. The
+            # save is already keyed by the stable numeric `user_id`
+            # (never the handle -- see this module's own docstring), so
+            # nothing here actually depends on the two staying in sync.
             return save, False, None
         except (OSError, ValueError, KeyError, TypeError):
             backup = path.with_suffix(f".corrupt-{int(time.time())}")

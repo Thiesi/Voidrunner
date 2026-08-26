@@ -169,6 +169,25 @@ def test_write_and_load_save_round_trips_on_disk(tmp_path):
     assert loaded.seed == save.seed
 
 
+def test_loading_an_existing_save_never_overwrites_the_chosen_callsign(tmp_path):
+    """Dogfood-caught: a live login handle is only ever the *default*
+    callsign at character creation -- once a save exists, the pilot's
+    own chosen callsign must survive regardless of what the current
+    login handle says, including when it's unchanged, changed, or a
+    totally different account (a save is keyed by stable user_id, never
+    handle -- see the module's own docstring). A prior version
+    unconditionally wrote the login handle over the saved callsign on
+    every single load, silently discarding it."""
+    save = vr._new_career("Claude")
+    save.pilot.handle = "Voyager1"  # the player's own chosen callsign
+    vr.write_save(tmp_path, user_id=99, save=save)
+
+    loaded, is_new, notice = vr.load_or_create_save(tmp_path, user_id=99, handle="Claude")
+
+    assert is_new is False
+    assert loaded.pilot.handle == "Voyager1"
+
+
 def test_corrupt_save_is_backed_up_not_silently_discarded(tmp_path):
     path = tmp_path / "5.json"
     path.write_text("not valid json{{{", encoding="utf-8")
