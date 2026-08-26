@@ -510,7 +510,21 @@ def generate_galaxy(seed: int) -> list[GalaxySystem]:
     home.station_name = "Freeport Anchorage"
     home.discovered = True
     for nid in home.connections:
-        systems[nid].discovered = True
+        neighbor = systems[nid]
+        neighbor.discovered = True
+        # Dogfood-caught: every system's danger/tier is drawn from the
+        # same distribution regardless of distance from home, so purely
+        # by seed luck a brand-new character could find a near-
+        # unwinnable tier-4 raider one jump from Freeport, before ever
+        # having a chance to earn a single upgrade. Capping *only* the
+        # systems immediately reachable from home -- not the whole
+        # galaxy, which would flatten the intended "push further, get
+        # stronger" difficulty curve -- guarantees every new career gets
+        # a short, real ramp before the tougher tiers start showing up
+        # further out. No new `rng` calls here, so this doesn't disturb
+        # this function's own seed-determinism invariant (see this
+        # module's docstring).
+        neighbor.danger = min(neighbor.danger, 2)
     return systems
 
 

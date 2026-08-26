@@ -76,6 +76,21 @@ def test_home_system_and_its_neighbors_start_discovered_nothing_else_does():
     assert any(not s.discovered for s in far_systems)
 
 
+def test_home_systems_direct_neighbors_never_exceed_a_safe_danger_ceiling():
+    """Dogfood-caught: every system's danger tier is drawn from the same
+    distribution regardless of distance from home, so before this fix a
+    galaxy could seed a near-unwinnable tier-4 raider system one jump
+    from Freeport, before a new character had any chance to earn a
+    single upgrade. Checked across a wide range of seeds, not just one,
+    since the original bug only showed up for *some* seeds -- a single
+    lucky seed passing would have hidden the regression."""
+    for seed in range(200):
+        galaxy = vr.generate_galaxy(seed)
+        home = galaxy[0]
+        for nid in home.connections:
+            assert galaxy[nid].danger <= 2, f"seed={seed} neighbor={nid} danger={galaxy[nid].danger}"
+
+
 def test_every_system_has_at_least_one_connection():
     galaxy = vr.generate_galaxy(7)
     assert all(len(s.connections) >= 1 for s in galaxy)
