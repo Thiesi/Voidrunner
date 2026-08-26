@@ -1,9 +1,12 @@
-"""Tests for the Voidrunner door's domain layer (examples/doors/
-voidrunner.py) -- galaxy generation, economy, save round-tripping,
-missions, and combat resolution. Not part of the installed package (see
-examples/README.md), so loaded directly from its file path rather than
-imported as `netbbs.*` -- same reasoning as `test_doors_runtime.py`
-running `retro_trivia.py` by path, just exercising the pure domain
+"""Tests for the Voidrunner door's domain layer (netbbs.doors.bundled.
+voidrunner) -- galaxy generation, economy, save round-tripping,
+missions, and combat resolution. Loaded directly from its file path
+rather than a normal `from netbbs.doors.bundled import voidrunner`
+import -- same reasoning as `test_doors_runtime.py` running it and
+`retro_trivia.py` this same way: this is the exact file NetBBS itself
+launches as a standalone subprocess (see `netbbs.doors.runtime`), not
+an ordinarily-imported library module, so testing it by path exercises
+precisely what actually ships. This file just exercises the pure domain
 functions in-process instead of the whole door end to end.
 
 Regression-focused: several of these exist specifically to pin behavior
@@ -21,7 +24,9 @@ import random
 import sys
 from pathlib import Path
 
-_VOIDRUNNER_PATH = Path(__file__).resolve().parent.parent / "examples" / "doors" / "voidrunner.py"
+_VOIDRUNNER_PATH = (
+    Path(__file__).resolve().parent.parent / "src" / "netbbs" / "doors" / "bundled" / "voidrunner.py"
+)
 
 
 def _load_voidrunner():

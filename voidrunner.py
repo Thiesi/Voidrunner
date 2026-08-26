@@ -3,7 +3,7 @@
 Voidrunner -- a persistent single-player space trading/exploration door
 for NetBBS (issue #172 vertical: door-managed private save).
 
-Same v1 door contract as `examples/doors/retro_trivia.py`: reads the
+Same v1 door contract as `netbbs.doors.bundled.retro_trivia`: reads the
 drop-file NetBBS hands it via `NETBBS_DOOR_INFO` for handle/user_id/color
 depth, then owns raw stdin/stdout for the whole session (single keystroke
 reads; this module adds its own small raw line-reader on top, for
@@ -16,12 +16,22 @@ and deletes its scratch working directory after every session (see
 `netbbs.doors.runtime`'s own docstring) -- a door manages any save data
 entirely itself. This door keeps one JSON save file per caller, keyed by
 the drop-file's stable numeric `user_id` (never the handle, which can
-change), under `VOIDRUNNER_SAVE_DIR` if set, else a `voidrunner_saves/`
-directory next to this script. State is written after every
-state-changing action (atomically, via a temp file + `os.replace`), not
-just on explicit quit -- a door can be killed at any moment (caller
-disconnect, wall-clock timeout) with no graceful-shutdown guarantee, so
-"save on quit only" would lose real progress.
+change), under `VOIDRUNNER_SAVE_DIR` if set, else `~/.netbbs/
+voidrunner_saves/`. State is written after every state-changing action
+(atomically, via a temp file + `os.replace`), not just on explicit quit
+-- a door can be killed at any moment (caller disconnect, wall-clock
+timeout) with no graceful-shutdown guarantee, so "save on quit only"
+would lose real progress.
+
+The default save location is deliberately *not* relative to this
+script's own path: this module now ships as real installed package data
+(`netbbs.doors.bundled`, resolved via `importlib.resources` -- see
+`netbbs.doors.bundled.resolve_bundled_door_path`), and an installed
+package's own directory is routinely read-only and/or wiped clean on
+every upgrade, neither of which a save file can tolerate. A production
+node with an unusual layout should set `VOIDRUNNER_SAVE_DIR` explicitly
+rather than rely on the home-directory default holding for its own
+service account.
 
 **Architecture** (deliberate, for a reason beyond this door): the rules
 of the game -- galaxy generation, pricing, combat resolution, mission
@@ -60,6 +70,7 @@ import json
 import os
 import random
 import sys
+import tempfile
 import time
 import zlib
 from dataclasses import dataclass, field
@@ -815,7 +826,28 @@ def _default_save_dir() -> Path:
     override = os.environ.get("VOIDRUNNER_SAVE_DIR")
     if override:
         return Path(override)
-    return Path(__file__).resolve().parent / "voidrunner_saves"
+    # Not `Path(__file__).resolve().parent` -- this module ships as real
+    # installed package data now (see this module's own docstring), and
+    # an installed package's own directory is routinely read-only and/or
+    # wiped on upgrade. `Path.home()` resolves to whatever OS user is
+    # actually running NetBBS (the door sandbox's own same-OS-user
+    # model), the same account that already owns the node's other state.
+    try:
+        home = Path.home()
+    except RuntimeError:
+        # `netbbs.doors.runtime.run_door` launches every door with its
+        # environment replaced outright -- only `NETBBS_DOOR_INFO`
+        # survives (see that module's own docstring) -- so `HOME`/
+        # `USERPROFILE` never reach this process either. POSIX's
+        # `Path.home()` falls back to the OS password database
+        # regardless of env vars and still resolves correctly; Windows
+        # has no such fallback and raises exactly this. A production
+        # Windows deployment (not NetBBS's primary NetBSD target) should
+        # set `VOIDRUNNER_SAVE_DIR` explicitly rather than rely on this
+        # -- functional, but not as durable a location as a real home
+        # directory would be.
+        home = Path(tempfile.gettempdir())
+    return home / ".netbbs" / "voidrunner_saves"
 
 
 def _save_path(save_dir: Path, user_id: int) -> Path:
