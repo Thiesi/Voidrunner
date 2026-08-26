@@ -1011,9 +1011,19 @@ def screen_shipyard(p: Palette, world: World) -> None:
                 cost = u["cost"](tier)
                 out_line(f"  {p.gold}[{LETTERS[i]}]{RESET} {u['label']:<24} "
                           f"tier {tier}->{tier + 1}  {cost}cr  ({u['effect']})")
-        refit_line = f"  {p.gold}[F]{RESET} Flagship Refit -- {FLAGSHIP_REFIT_COST}cr"
+        # A distinct letter, one past the last upgrade slot -- not a
+        # hardcoded "[F]", which silently collided with Hull
+        # Reinforcement's own slot letter (also "F", the 6th of 6
+        # upgrades) the instant a 6th upgrade category existed. Two rows
+        # both showing "[F]" on the same screen was never actually
+        # ambiguous to the code (this is a different prompt from
+        # [U]pgrade's own follow-up "Which upgrade?" letter), but it was
+        # a real dogfood-caught display bug regardless -- confusing to
+        # read even when not to press.
+        refit_key = LETTERS[len(keys)]
+        refit_line = f"  {p.gold}[{refit_key}]{RESET} Flagship Refit -- {FLAGSHIP_REFIT_COST}cr"
         if ship.hull_class == "Carrier":
-            out_line(f"  {p.muted}[F] Flagship Refit -- already flying a Carrier{RESET}")
+            out_line(f"  {p.muted}[{refit_key}] Flagship Refit -- already flying a Carrier{RESET}")
         else:
             out_line(refit_line)
         out(f"{p.muted}Fuel: {ship.fuel}cr@ 6cr/unit  [U]pgrade [R]efuel [P]air hull [Q]back: {RESET}")
@@ -1032,7 +1042,7 @@ def screen_shipyard(p: Palette, world: World) -> None:
             _refuel(p, world)
         elif action == "P":
             _repair(p, world)
-        elif action == "F":
+        elif action == refit_key:
             _flagship_refit(p, world)
 
 
@@ -1225,13 +1235,23 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
     if bounty is not None:
         pirate = generate_pirate(world, tier=bounty.pirate_tier)
         out_line(f"{p.wrong}Your bounty target, the {pirate.name}, is waiting.{RESET}")
-        won = screen_combat(p, world, pirate)
-        if won:
+        outcome = screen_combat(p, world, pirate)
+        if outcome == "won":
             world.save.active_missions.remove(bounty)
             world.save.pilot.credits += bounty.reward
             world.save.pilot.missions_completed += 1
             world.save.pilot.note(f"Bounty complete: {bounty.description} (+{bounty.reward}cr)")
             out_line(f"{p.gold}Bounty complete! +{bounty.reward}cr{RESET}")
+        elif outcome == "destroyed":
+            # Losing must also clear the bounty -- otherwise it stays
+            # active forever and re-triggers this same guaranteed fight
+            # on every future visit to this system (see screen_combat's
+            # own docstring for the real playtest that found this).
+            world.save.active_missions.remove(bounty)
+            world.save.pilot.note(f"Bounty failed: {bounty.description}")
+            out_line(f"{p.wrong}Bounty failed -- the {pirate.name} was too much this time.{RESET}")
+        # outcome == "escaped": left active on purpose -- a deliberate
+        # retreat to come back stronger later isn't a failure.
     elif world.event_rng.random() < 0.08 + dest.danger * 0.05:
         pirate = generate_pirate(world)
         out_line(f"{p.wrong}Raider contact: the {pirate.name}!{RESET}")
@@ -1252,10 +1272,17 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
     out_line()
 
 
-def screen_combat(p: Palette, world: World, pirate: Pirate) -> bool:
-    """Returns True if the player wins outright (pirate destroyed).
-    Fleeing/bribing successfully also ends the encounter but returns
-    False (no kill, no loot -- relevant for bounty completion)."""
+def screen_combat(p: Palette, world: World, pirate: Pirate) -> str:
+    """Returns "won" (pirate destroyed), "escaped" (evaded or bribed
+    away, ship intact), or "destroyed" (the player's own ship was lost)
+    -- a bounty's own caller needs to tell all three apart: "won"
+    completes it, "escaped" leaves it active to retry later (a real
+    tactical retreat-and-come-back-stronger choice), and "destroyed"
+    must also clear it, or a bounty the player has already lost respawns
+    as a mandatory, unwinnable-at-current-gear ambush on every future
+    visit to that system forever (dogfood-caught: a real playtest got
+    stuck fighting the same tier-2 bounty target to the death four times
+    in a row, since nothing ever removed it)."""
     ship = world.save.ship
     while True:
         out_line(f"{p.wrong}{pirate.name}{RESET} (tier {pirate.tier})  HP {pirate.hp}/{pirate.hp_max}   "
@@ -1276,10 +1303,10 @@ def screen_combat(p: Palette, world: World, pirate: Pirate) -> bool:
                 adjust_reputation(world, FACTION_CONCORD, 2)
                 adjust_reputation(world, FACTION_BLACKWAKE, -1)
                 out_line(f"{p.correct}Salvage recovered: {loot}cr.{RESET}")
-                return True
+                return "won"
             if ship.hull_hp <= 0:
                 out_line(f"{p.wrong}{destroy_ship(world)}{RESET}")
-                return False
+                return "destroyed"
         elif action in ("E", "D"):
             dumped = False
             if action == "D" and world.save.cargo:
@@ -1291,7 +1318,7 @@ def screen_combat(p: Palette, world: World, pirate: Pirate) -> bool:
                 out_line(f"{p.muted}You dump cargo to lighten the ship.{RESET}")
             if world.event_rng.random() < evade_chance(world, pirate, dumped_cargo=dumped):
                 out_line(f"{p.correct}You break contact and escape.{RESET}")
-                return False
+                return "escaped"
             out_line(f"{p.wrong}Evasion failed -- they're still on you.{RESET}")
             raw = world.event_rng.randint(4, 9) + pirate.tier * 4
             dmg = max(1, raw - ship.shield_tier * 3)
@@ -1299,14 +1326,14 @@ def screen_combat(p: Palette, world: World, pirate: Pirate) -> bool:
             out_line(f"  The {pirate.name} hits you for {dmg} damage.")
             if ship.hull_hp <= 0:
                 out_line(f"{p.wrong}{destroy_ship(world)}{RESET}")
-                return False
+                return "destroyed"
         elif action == "B" and can_bribe:
             cost = bribe_cost(pirate)
             if world.event_rng.random() < bribe_chance(world, pirate):
                 world.save.pilot.credits -= cost
                 adjust_reputation(world, FACTION_BLACKWAKE, 2)
                 out_line(f"{p.correct}The {pirate.name} takes {cost}cr and peels off.{RESET}")
-                return False
+                return "escaped"
             out_line(f"{p.wrong}They refuse the bribe and press the attack!{RESET}")
 
 

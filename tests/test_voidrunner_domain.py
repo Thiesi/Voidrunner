@@ -14,7 +14,9 @@ restate what the code already visibly does.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import random
 import sys
 from pathlib import Path
@@ -249,6 +251,81 @@ def test_scan_mission_completes_when_target_system_is_discovered():
 
     assert any("Mission complete" in m for m in messages)
     assert world.save.pilot.credits == 1200 + 200
+
+
+# -- bounty missions in screen_travel (dogfood-caught: losing used to
+# leave the bounty active forever, turning its target system into a
+# mandatory, unwinnable-at-current-gear ambush on every future visit) --
+
+
+def _accept_bounty(world, *, target_system: int, pirate_tier: int = 2, reward: int = 800) -> "vr.Mission":
+    mission = vr.Mission(id=1, kind="bounty", description="test bounty", reward=reward,
+                          origin_system=world.save.current_system, target_system=target_system,
+                          pirate_tier=pirate_tier)
+    vr.accept_mission(world, mission)
+    return mission
+
+
+def _travel_with_stubbed_combat(monkeypatch, world, dest_id: int, outcome: str) -> None:
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: outcome)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
+
+
+def test_losing_a_bounty_fight_clears_it_instead_of_leaving_a_permanent_ambush(monkeypatch):
+    world = _world_with_seed(20)
+    dest_id = world.here.connections[0]
+    mission = _accept_bounty(world, target_system=dest_id)
+
+    _travel_with_stubbed_combat(monkeypatch, world, dest_id, "destroyed")
+
+    assert mission not in world.save.active_missions
+    assert world.save.pilot.missions_completed == 0
+    assert any("Bounty failed" in entry for entry in world.save.pilot.log)
+
+
+def test_winning_a_bounty_fight_completes_it_and_pays_the_reward(monkeypatch):
+    world = _world_with_seed(21)
+    dest_id = world.here.connections[0]
+    mission = _accept_bounty(world, target_system=dest_id, reward=800)
+    starting_credits = world.save.pilot.credits
+
+    _travel_with_stubbed_combat(monkeypatch, world, dest_id, "won")
+
+    assert mission not in world.save.active_missions
+    assert world.save.pilot.missions_completed == 1
+    assert world.save.pilot.credits == starting_credits + 800
+
+
+def test_escaping_a_bounty_fight_leaves_it_active_to_retry_later(monkeypatch):
+    world = _world_with_seed(22)
+    dest_id = world.here.connections[0]
+    mission = _accept_bounty(world, target_system=dest_id)
+
+    _travel_with_stubbed_combat(monkeypatch, world, dest_id, "escaped")
+
+    assert mission in world.save.active_missions
+
+
+def test_revisiting_a_system_with_a_still_active_bounty_triggers_it_again(monkeypatch):
+    """Confirms the guaranteed-encounter re-trigger itself (the thing
+    that made the original bug a repeating trap, not a one-off) still
+    works -- only losing should stop it, an escape should not."""
+    world = _world_with_seed(23)
+    dest_id = world.here.connections[0]
+    _accept_bounty(world, target_system=dest_id)
+    origin_id = world.save.current_system
+
+    calls = []
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: calls.append(1) or "escaped")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
+        vr.screen_travel(vr.Palette(truecolor=False), world, origin_id)
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
+
+    assert len(calls) == 2  # both visits to dest_id triggered the bounty fight
 
 
 # -- combat ------------------------------------------------------------
