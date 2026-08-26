@@ -350,6 +350,13 @@ def test_revisiting_a_system_with_a_still_active_bounty_triggers_it_again(monkey
     dest_id = world.here.connections[0]
     _accept_bounty(world, target_system=dest_id)
     origin_id = world.save.current_system
+    # The trip back through origin_id is otherwise still subject to the
+    # *ordinary* random-encounter roll (unrelated to the bounty, which
+    # triggers unconditionally) -- world.event_rng is real, unseeded
+    # entropy (see World.__init__), so without pinning it here this test
+    # was genuinely flaky: an occasional unlucky roll at origin_id calls
+    # the stubbed screen_combat a 3rd time and fails the assertion below.
+    world.event_rng.random = lambda: 1.0  # always above every danger threshold
 
     calls = []
     monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: calls.append(1) or "escaped")
