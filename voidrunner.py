@@ -821,7 +821,7 @@ def generate_mission_board(world: World) -> list[Mission]:
     rng = world.event_rng
     hops = bfs_hops(world.by_id, world.save.current_system)
     board: list[Mission] = []
-    for kind in rng.sample(["delivery", "delivery", "bounty", "scan"], k=rng.randint(3, 4)):
+    for kind in rng.sample(["delivery", "delivery", "bounty", "scan", "escort"], k=rng.randint(3, 4)):
         mission = _generate_mission(world, kind, hops)
         if mission is not None:
             board.append(mission)
@@ -863,6 +863,23 @@ def _generate_mission(world: World, kind: str, hops: dict[int, int]) -> Mission 
         desc = f"Survey the uncharted system {hops[target]} jump(s) out (bearing logged)"
         return Mission(id=world.save.next_mission_id, kind=kind, description=desc, reward=reward,
                         origin_system=origin, target_system=target, deadline_turn=None)
+    if kind == "escort":
+        # A minimum of 2 hops, unlike bounty's single-system framing --
+        # the whole point is "several jumps" of scripted waves, not one
+        # fight at a fixed point. No `discovered` filter on the target,
+        # matching delivery's own precedent of naming an uncharted
+        # destination in the description.
+        candidates = [sid for sid, h in hops.items() if 2 <= h <= 5 and sid != origin]
+        if not candidates:
+            return None
+        target = rng.choice(candidates)
+        tier = max(0, min(4, world.by_id[target].danger + rng.randint(-1, 1)))
+        reward = 250 + hops[target] * 150 + tier * 150
+        desc = (f"Escort a supply convoy to {world.by_id[target].name} "
+                 f"({hops[target]} jump(s), raider activity expected)")
+        return Mission(id=world.save.next_mission_id, kind=kind, description=desc, reward=reward,
+                        origin_system=origin, target_system=target, pirate_tier=tier,
+                        deadline_turn=world.save.turn + hops[target] * 6 + 10)
     return None
 
 
@@ -1887,6 +1904,44 @@ def _encounter_market_tip(p: Palette, world: World, dest: GalaxySystem) -> None:
               f"{label} is going for {price}cr at {system.name}.{RESET}")
 
 
+def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
+    """Runs once per hop, after `screen_travel`'s own bounty/patrol/
+    random-encounter chain above -- an escort contract means a scripted
+    pirate wave finds the convoy on *every* leg of the trip, unlike an
+    ordinary encounter's own probabilistic roll, since the whole point
+    of the mission is guaranteed danger across several jumps. Evading
+    (or being bribed away from) the fight fails the contract exactly
+    like losing it does -- the convoy is left to the raiders either
+    way -- only a genuine win lets it continue, and pays out the moment
+    it reaches its destination. Iterates a snapshot of the list since
+    a completed or failed mission removes itself from `active_missions`
+    mid-loop."""
+    dest = world.by_id[dest_id]
+    for mission in [m for m in world.save.active_missions if m.kind == "escort"]:
+        pirate = generate_pirate(world, tier=mission.pirate_tier)
+        out_line(f"{p.wrong}Raiders ambush the convoy you're escorting -- the {pirate.name} closes in.{RESET}")
+        outcome = screen_combat(p, world, pirate)
+        if outcome == "won":
+            if dest_id == mission.target_system:
+                world.save.active_missions.remove(mission)
+                world.save.pilot.credits += mission.reward
+                if world.save.pilot.missions_completed == 0:
+                    world.save.pilot.highlight(f"First mission complete: {mission.description}.")
+                world.save.pilot.missions_completed += 1
+                world.save.pilot.note(f"Escort complete: {mission.description} (+{mission.reward}cr)")
+                world.save.pilot.highlight(f"Escorted a convoy safely to {dest.name}.")
+                out_line(f"{p.gold}Convoy delivered safely! +{mission.reward}cr{RESET}")
+            else:
+                out_line(f"{p.correct}The convoy presses on.{RESET}")
+        else:
+            world.save.active_missions.remove(mission)
+            world.save.pilot.note(f"Escort failed: {mission.description}")
+            if outcome == "escaped":
+                out_line(f"{p.wrong}You disengage -- the convoy is left defenseless. Escort contract failed.{RESET}")
+            else:
+                out_line(f"{p.wrong}Escort contract failed -- the convoy was lost.{RESET}")
+
+
 def screen_travel(p: Palette, world: World, dest_id: int) -> None:
     origin = world.here
     dest = world.by_id[dest_id]
@@ -1944,6 +1999,8 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         screen_notoriety_patrol(p, world)
     else:
         _resolve_random_travel_encounter(p, world, dest)
+
+    _resolve_escort_missions(p, world, dest_id)
 
     was_discovered = dest.discovered
     dest.discovered = True

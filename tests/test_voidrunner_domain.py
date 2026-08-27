@@ -1676,3 +1676,121 @@ def test_station_menu_offers_dump_only_with_contraband_aboard(monkeypatch):
     with contextlib.redirect_stdout(buf2):
         vr.screen_station_menu(vr.Palette(truecolor=False), world)
     assert "[D]" in buf2.getvalue()
+
+
+# -- escort missions -----------------------------------------------------
+
+
+def _accepted_escort_mission(world, dest_id, tier=1):
+    hops = vr.bfs_hops(world.by_id, 0)
+    mission = vr.Mission(id=999, kind="escort", description="Escort a supply convoy to Somewhere",
+                          reward=500, origin_system=0, target_system=dest_id, pirate_tier=tier,
+                          deadline_turn=world.save.turn + 50)
+    vr.accept_mission(world, mission)
+    return mission
+
+
+def test_generate_mission_board_can_include_escort_missions():
+    world = _world_with_seed(132)
+    world.event_rng = random.Random(0)
+    found = False
+    for seed in range(200):
+        world.event_rng = random.Random(seed)
+        board = vr.generate_mission_board(world)
+        if any(m.kind == "escort" for m in board):
+            found = True
+            break
+    assert found
+
+
+def test_generate_escort_mission_spans_at_least_two_hops():
+    world = _world_with_seed(133)
+    hops = vr.bfs_hops(world.by_id, world.save.current_system)
+    mission = vr._generate_mission(world, "escort", hops)
+    assert mission is not None
+    assert hops[mission.target_system] >= 2
+
+
+def test_escort_wave_fires_on_every_hop_while_active(monkeypatch):
+    world = _world_with_seed(134)
+    dest = next(sid for sid in world.by_id[0].connections)
+    far_dest = next(sid for sid, h in vr.bfs_hops(world.by_id, 0).items() if h >= 2)
+    mission = _accepted_escort_mission(world, far_dest)
+
+    calls = []
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: calls.append(pirate) or "won")
+    world.event_rng.random = lambda: 1.0  # suppress ordinary encounters
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest)
+
+    assert len(calls) == 1  # the wave fired this hop
+    assert mission in world.save.active_missions  # not yet at target -- still active
+
+
+def test_escort_completes_and_pays_out_on_arrival_at_target(monkeypatch):
+    world = _world_with_seed(135)
+    dest = next(sid for sid in world.by_id[0].connections)
+    mission = _accepted_escort_mission(world, dest)
+    before_credits = world.save.pilot.credits
+
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: "won")
+    world.event_rng.random = lambda: 1.0
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest)
+
+    assert mission not in world.save.active_missions
+    assert world.save.pilot.credits == before_credits + mission.reward
+
+
+def test_escort_fails_on_ship_loss(monkeypatch):
+    world = _world_with_seed(136)
+    dest = next(sid for sid in world.by_id[0].connections)
+    mission = _accepted_escort_mission(world, dest)
+
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: "destroyed")
+    world.event_rng.random = lambda: 1.0
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest)
+
+    assert mission not in world.save.active_missions
+
+
+def test_escort_fails_on_evasion_even_though_ship_survives(monkeypatch):
+    """Evading protects the player's own ship, but the convoy is left
+    behind either way -- the contract still fails, unlike a bounty's own
+    "escaped" outcome, which leaves the mission active to retry."""
+    world = _world_with_seed(137)
+    dest = next(sid for sid in world.by_id[0].connections)
+    mission = _accepted_escort_mission(world, dest)
+
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: "escaped")
+    world.event_rng.random = lambda: 1.0
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest)
+
+    assert mission not in world.save.active_missions
+    assert "failed" in buf.getvalue().lower()
+
+
+def test_multiple_escort_missions_each_get_their_own_wave(monkeypatch):
+    world = _world_with_seed(138)
+    dest = next(sid for sid in world.by_id[0].connections)
+    m1 = _accepted_escort_mission(world, dest)
+    far_dest = next(sid for sid, h in vr.bfs_hops(world.by_id, 0).items() if h >= 2 and sid != dest)
+    m2 = _accepted_escort_mission(world, far_dest)
+
+    calls = []
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: calls.append(pirate) or "won")
+    world.event_rng.random = lambda: 1.0
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest)
+
+    assert len(calls) == 2
+    assert m1 not in world.save.active_missions  # completed -- arrived at its target
+    assert m2 in world.save.active_missions  # still en route
