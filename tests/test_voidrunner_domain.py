@@ -1794,3 +1794,133 @@ def test_multiple_escort_missions_each_get_their_own_wave(monkeypatch):
     assert len(calls) == 2
     assert m1 not in world.save.active_missions  # completed -- arrived at its target
     assert m2 in world.save.active_missions  # still en route
+
+
+# -- cross-save hall of fame ----------------------------------------------
+
+
+def test_load_hall_of_fame_returns_empty_list_when_missing(tmp_path):
+    assert vr.load_hall_of_fame(tmp_path) == []
+
+
+def test_load_hall_of_fame_returns_empty_list_on_corrupt_file(tmp_path):
+    (tmp_path / "leaderboard.json").write_text("not json{{{", encoding="utf-8")
+    assert vr.load_hall_of_fame(tmp_path) == []
+
+
+def test_load_hall_of_fame_returns_empty_list_when_not_a_list(tmp_path):
+    (tmp_path / "leaderboard.json").write_text('{"oops": true}', encoding="utf-8")
+    assert vr.load_hall_of_fame(tmp_path) == []
+
+
+def test_update_hall_of_fame_creates_an_entry_for_a_new_pilot(tmp_path):
+    save = vr._new_career("Newcomer")
+    save.pilot.credits = 5000
+
+    vr.update_hall_of_fame(tmp_path, 42, save)
+
+    entries = vr.load_hall_of_fame(tmp_path)
+    assert len(entries) == 1
+    assert entries[0]["user_id"] == 42
+    assert entries[0]["handle"] == "Newcomer"
+    assert entries[0]["best_credits"] == 5000
+    assert entries[0]["rank"] == vr.rank_for(5000)
+
+
+def test_update_hall_of_fame_never_lowers_best_credits(tmp_path):
+    save = vr._new_career("Vet")
+    save.pilot.credits = 10_000
+    vr.update_hall_of_fame(tmp_path, 1, save)
+
+    save.pilot.credits = 500  # a losing streak, or a retirement's own reset
+    vr.update_hall_of_fame(tmp_path, 1, save)
+
+    entries = vr.load_hall_of_fame(tmp_path)
+    assert entries[0]["best_credits"] == 10_000
+
+
+def test_update_hall_of_fame_refreshes_non_credit_fields_every_time(tmp_path):
+    save = vr._new_career("Vet")
+    save.pilot.credits = 10_000
+    vr.update_hall_of_fame(tmp_path, 1, save)
+
+    save.pilot.credits = 500
+    save.pilot.retirements = 3
+    save.pilot.kills = 7
+    vr.update_hall_of_fame(tmp_path, 1, save)
+
+    entries = vr.load_hall_of_fame(tmp_path)
+    assert entries[0]["retirements"] == 3
+    assert entries[0]["kills"] == 7
+    assert entries[0]["best_credits"] == 10_000  # still the high-water mark
+
+
+def test_update_hall_of_fame_keeps_separate_pilots_separate(tmp_path):
+    save_a = vr._new_career("Alice")
+    save_a.pilot.credits = 3000
+    save_b = vr._new_career("Bob")
+    save_b.pilot.credits = 7000
+
+    vr.update_hall_of_fame(tmp_path, 1, save_a)
+    vr.update_hall_of_fame(tmp_path, 2, save_b)
+
+    entries = vr.load_hall_of_fame(tmp_path)
+    assert len(entries) == 2
+    assert entries[0]["handle"] == "Bob"  # sorted by best_credits, descending
+    assert entries[1]["handle"] == "Alice"
+
+
+def test_update_hall_of_fame_caps_at_hall_of_fame_size(tmp_path):
+    for uid in range(vr.HALL_OF_FAME_SIZE + 5):
+        save = vr._new_career(f"Pilot{uid}")
+        save.pilot.credits = uid
+        vr.update_hall_of_fame(tmp_path, uid, save)
+
+    entries = vr.load_hall_of_fame(tmp_path)
+    assert len(entries) == vr.HALL_OF_FAME_SIZE
+    # The lowest-credit pilots were the ones dropped, not the highest.
+    assert entries[-1]["best_credits"] == 5
+
+
+def test_persist_updates_both_the_save_and_the_hall_of_fame(tmp_path):
+    save = vr._new_career("Persisted")
+    save.pilot.credits = 4200
+    world = vr.World(save)
+
+    vr.persist(world, tmp_path, 7)
+
+    assert (tmp_path / "7.json").exists()
+    entries = vr.load_hall_of_fame(tmp_path)
+    assert entries and entries[0]["user_id"] == 7
+
+
+def test_screen_hall_of_fame_shows_no_pilots_message_when_empty(tmp_path, monkeypatch):
+    world = _world_with_seed(139)
+    monkeypatch.setattr(vr, "read_key", lambda: " ")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_hall_of_fame(vr.Palette(truecolor=False), world, tmp_path, 1)
+
+    assert "No pilots recorded" in buf.getvalue()
+
+
+def test_screen_hall_of_fame_marks_the_current_pilot(tmp_path, monkeypatch):
+    save = vr._new_career("Me")
+    save.pilot.credits = 9000
+    vr.update_hall_of_fame(tmp_path, 5, save)
+    other = vr._new_career("Someone Else")
+    other.pilot.credits = 200
+    vr.update_hall_of_fame(tmp_path, 6, other)
+
+    world = _world_with_seed(140)
+    monkeypatch.setattr(vr, "read_key", lambda: " ")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_hall_of_fame(vr.Palette(truecolor=False), world, tmp_path, 5)
+
+    text = buf.getvalue()
+    assert "Me" in text and "Someone Else" in text
+    me_line = next(line for line in text.splitlines() if "Me" in line and "Someone" not in line)
+    assert "*" in me_line

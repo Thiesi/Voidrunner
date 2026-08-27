@@ -1296,9 +1296,75 @@ def write_save(save_dir: Path, user_id: int, save: SaveData) -> None:
     os.replace(tmp, path)
 
 
+# Cross-save Hall of Fame: a single shared leaderboard file living
+# alongside every individual `{user_id}.json` save in the same sandbox
+# directory -- no DB access needed, since the door's own save directory
+# is already a real per-door filesystem sandbox (see this module's own
+# docstring). "leaderboard.json" can never collide with a save file,
+# since every save file's own name is a bare integer user_id.
+HALL_OF_FAME_SIZE = 20
+
+
+def _hall_of_fame_path(save_dir: Path) -> Path:
+    return save_dir / "leaderboard.json"
+
+
+def load_hall_of_fame(save_dir: Path) -> list[dict]:
+    """Best-effort read of the shared leaderboard -- a missing or
+    corrupt file just means an empty leaderboard, never a hard failure.
+    This file is pure flavor for every individual save; nothing else in
+    the game may ever depend on its contents."""
+    path = _hall_of_fame_path(save_dir)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def update_hall_of_fame(save_dir: Path, user_id: int, save: SaveData) -> None:
+    """Refreshes this pilot's entry on the shared leaderboard -- called
+    from `persist()`, so it happens automatically after every state-
+    changing action, the same cadence as `write_save` itself. Every
+    field except `best_credits` always reflects the pilot's current,
+    latest-known state (so retirements/kills/missions_completed never
+    go stale); `best_credits` alone only ever ratchets upward, since a
+    losing streak -- or a deliberate retirement's own credits reset --
+    shouldn't erase a prior high-water mark. Entirely best-effort and
+    additive: any failure here must never interrupt or corrupt the real
+    per-pilot save file written right next to it."""
+    try:
+        all_entries = load_hall_of_fame(save_dir)
+        prior_best = next((e.get("best_credits", 0) for e in all_entries if e.get("user_id") == user_id), 0)
+        entries = [e for e in all_entries if e.get("user_id") != user_id]
+        pilot = save.pilot
+        best_credits = max(pilot.credits, prior_best)
+        entries.append({
+            "user_id": user_id,
+            "handle": pilot.handle,
+            "best_credits": best_credits,
+            "rank": rank_for(best_credits),
+            "retirements": pilot.retirements,
+            "kills": pilot.kills,
+            "missions_completed": pilot.missions_completed,
+        })
+        entries.sort(key=lambda e: e.get("best_credits", 0), reverse=True)
+        entries = entries[:HALL_OF_FAME_SIZE]
+        save_dir.mkdir(parents=True, exist_ok=True)
+        path = _hall_of_fame_path(save_dir)
+        tmp = path.with_suffix(".hof.tmp")
+        tmp.write_text(json.dumps(entries), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 def persist(world: World, save_dir: Path, user_id: int) -> None:
     world.sync_discovered()
     write_save(save_dir, user_id, world.save)
+    update_hall_of_fame(save_dir, user_id, world.save)
 
 
 # ---------------------------------------------------------------------------
@@ -1363,7 +1429,8 @@ def screen_station_menu(p: Palette, world: World) -> str:
     draw_status_bar(p, world)
     out_line(f"{p.accent}{BOLD}{world.here.station_name}{RESET}")
     menu = (f"  {p.gold}[M]{RESET}arket   {p.gold}[Y]{RESET}ard   {p.gold}[B]{RESET}oard   "
-            f"{p.gold}[C]{RESET}hart   {p.gold}[S]{RESET}tatus   {p.gold}[Q]{RESET}uit & save")
+            f"{p.gold}[C]{RESET}hart   {p.gold}[S]{RESET}tatus   {p.gold}[H]{RESET}all of Fame   "
+            f"{p.gold}[Q]{RESET}uit & save")
     if landmark_available_here(world):
         menu += f"   {p.gold}[L]{RESET} {world.landmark['label']}"
     if has_contraband(world):
@@ -1677,6 +1744,23 @@ def screen_status(p: Palette, world: World) -> None:
                 out_line()
                 out_line(f"{p.accent}{BOLD}A new career begins.{RESET}")
         return
+    pause(p)
+
+
+def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) -> None:
+    entries = load_hall_of_fame(save_dir)
+    out_line()
+    out_line(f"{p.accent}{BOLD}Hall of Fame{RESET}")
+    if not entries:
+        out_line(f"{p.muted}No pilots recorded yet -- be the first.{RESET}")
+    else:
+        for i, e in enumerate(entries, start=1):
+            marker = f"{p.gold}*{RESET}" if e.get("user_id") == user_id else " "
+            out_line(f"{marker}{i:>2}. {e.get('handle', '?'):<16} {e.get('rank', '?'):<24} "
+                      f"{e.get('best_credits', 0):>8}cr   "
+                      f"{p.muted}Retirements {e.get('retirements', 0)}   "
+                      f"Kills {e.get('kills', 0)}   "
+                      f"Missions {e.get('missions_completed', 0)}{RESET}")
     pause(p)
 
 
@@ -2219,6 +2303,8 @@ def main() -> int:
                     screen_travel(p, world, dest)
             elif choice == "S":
                 screen_status(p, world)
+            elif choice == "H":
+                screen_hall_of_fame(p, world, save_dir, user_id)
             elif choice == "L" and landmark_available_here(world):
                 screen_landmark(p, world)
             elif choice == "D" and has_contraband(world):
