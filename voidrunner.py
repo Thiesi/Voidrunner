@@ -439,6 +439,13 @@ class Pilot:
     # default via from_dict's own .get() below -- no SCHEMA_VERSION
     # bump needed.
     highest_rank_seen: int = 0
+    # Faction endgame arcs (see concord_commission_available/
+    # blackwake_made_available) -- each a one-time-unlockable, lifelong
+    # perk at high standing with its faction, not a repeatable mission.
+    # Additive fields, safe default via from_dict's own .get() below --
+    # no SCHEMA_VERSION bump needed.
+    has_concord_commission: bool = False
+    has_blackwake_made: bool = False
 
     def note(self, msg: str) -> None:
         self.log.append(msg)
@@ -459,6 +466,8 @@ class Pilot:
             career_started=d.get("career_started", ""), log=list(d.get("log", [])),
             notoriety=d.get("notoriety", 0), retirements=d.get("retirements", 0),
             highlights=list(d.get("highlights", [])), highest_rank_seen=d.get("highest_rank_seen", 0),
+            has_concord_commission=d.get("has_concord_commission", False),
+            has_blackwake_made=d.get("has_blackwake_made", False),
         )
 
 
@@ -1237,6 +1246,71 @@ def adjust_reputation(world: World, faction: str, delta: int) -> None:
     rep[faction] = max(-100, min(100, rep.get(faction, 0) + delta))
 
 
+# Faction endgame arcs: each faction's own reputation, previously only
+# ever affecting bribe odds and customs outcomes in the moment, now has
+# one exclusive, one-time-unlockable, lifelong reward at high standing.
+# Deliberately a single permanent perk plus flavor per faction, not a
+# repeatable mission chain -- matching the scope every other #179
+# feature in this file settled on (retirement, landmark, etc.), not an
+# open-ended new content system.
+CONCORD_COMMISSION_THRESHOLD = 75
+BLACKWAKE_MADE_THRESHOLD = 75
+CONCORD_COMMISSION_BOUNTY_BONUS = 0.25  # +25% bounty/escort mission rewards, for life
+BLACKWAKE_MADE_CUSTOMS_REDUCTION = 0.5  # halves customs check chance, for life
+CONCORD_COMMISSION_BONUS_CREDITS = 2000
+BLACKWAKE_MADE_BONUS_CREDITS = 2000
+
+
+def concord_commission_available(world: World) -> bool:
+    return (not world.save.pilot.has_concord_commission
+            and world.save.pilot.reputation.get(FACTION_CONCORD, 0) >= CONCORD_COMMISSION_THRESHOLD)
+
+
+def blackwake_made_available(world: World) -> bool:
+    return (not world.save.pilot.has_blackwake_made
+            and world.save.pilot.reputation.get(FACTION_BLACKWAKE, 0) >= BLACKWAKE_MADE_THRESHOLD)
+
+
+def bounty_reward_for(world: World, base_reward: int) -> int:
+    """Applies the Concord Privateer Commission's own bounty/escort
+    reward bonus -- a permanent, one-time-unlocked perk (see
+    screen_concord_commission), not a per-mission roll."""
+    if world.save.pilot.has_concord_commission:
+        return round(base_reward * (1 + CONCORD_COMMISSION_BOUNTY_BONUS))
+    return base_reward
+
+
+def screen_concord_commission(p: Palette, world: World) -> None:
+    out_line()
+    out_line(f"{p.accent}{BOLD}Concord Privateer Commission{RESET}")
+    out_line(f"  {p.muted}Naval Command has taken notice of your record. A formal privateer's "
+              f"commission is on the table -- official sanction to hunt raiders under Concord "
+              f"colors, and a standing enhancement to every bounty and escort payout for as "
+              f"long as you fly.{RESET}")
+    if not confirm(f"Accept the commission ({CONCORD_COMMISSION_BONUS_CREDITS}cr signing bonus)?", p):
+        return
+    world.save.pilot.has_concord_commission = True
+    world.save.pilot.credits += CONCORD_COMMISSION_BONUS_CREDITS
+    world.save.pilot.note("Accepted a Concord privateer commission.")
+    world.save.pilot.highlight("Commissioned as a Concord privateer -- bounty/escort rewards enhanced for life.")
+    out_line(f"{p.correct}Commission accepted. Bounty and escort rewards are enhanced from here on.{RESET}")
+
+
+def screen_blackwake_made(p: Palette, world: World) -> None:
+    out_line()
+    out_line(f"{p.accent}{BOLD}Blackwake Cartel{RESET}")
+    out_line(f"  {p.muted}You've proven yourself to the Cartel's satisfaction. Full membership is "
+              f"on offer -- its network of contacts eases your way through customs for as long "
+              f"as you're one of them.{RESET}")
+    if not confirm(f"Accept full membership ({BLACKWAKE_MADE_BONUS_CREDITS}cr welcome gift)?", p):
+        return
+    world.save.pilot.has_blackwake_made = True
+    world.save.pilot.credits += BLACKWAKE_MADE_BONUS_CREDITS
+    world.save.pilot.note("Made a full member of the Blackwake Cartel.")
+    world.save.pilot.highlight("Made a full member of the Blackwake Cartel -- customs risk reduced for life.")
+    out_line(f"{p.correct}Welcome to the family. Customs checks are less likely to find you now.{RESET}")
+
+
 def destroy_ship(world: World) -> str:
     """Ship destruction has real consequences -- lost cargo, a credit
     penalty, and a tow back home -- but is never a dead end. A door
@@ -1660,6 +1734,10 @@ def screen_station_menu(p: Palette, world: World) -> str:
         menu += f"   {p.gold}[L]{RESET} {world.landmark['label']}"
     if has_contraband(world):
         menu += f"   {p.gold}[D]{RESET}ump contraband"
+    if concord_commission_available(world):
+        menu += f"   {p.gold}[P]{RESET}rivateer Commission"
+    if blackwake_made_available(world):
+        menu += f"   {p.gold}[W]{RESET}elcome to the Wake"
     out_line(menu)
     out(f"{p.muted}> {RESET}")
     return read_key().upper()
@@ -2072,6 +2150,10 @@ def screen_status(p: Palette, world: World) -> None:
               f"{p.gold}Raiders defeated:{RESET} {pilot.kills}")
     if pilot.retirements:
         out_line(f"  {p.gold}Retirements:{RESET} {pilot.retirements}")
+    if pilot.has_concord_commission:
+        out_line(f"  {p.gold}Standing:{RESET} Concord Privateer")
+    if pilot.has_blackwake_made:
+        out_line(f"  {p.gold}Standing:{RESET} Made (Blackwake Cartel)")
     if pilot.highlights:
         out_line(f"{p.gold}Career highlights:{RESET}")
         for entry in pilot.highlights[-15:]:
@@ -2384,13 +2466,14 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
         if outcome == "won":
             if dest_id == mission.target_system:
                 world.save.active_missions.remove(mission)
-                world.save.pilot.credits += mission.reward
+                reward = bounty_reward_for(world, mission.reward)
+                world.save.pilot.credits += reward
                 if world.save.pilot.missions_completed == 0:
                     world.save.pilot.highlight(f"First mission complete: {mission.description}.")
                 world.save.pilot.missions_completed += 1
-                world.save.pilot.note(f"Escort complete: {mission.description} (+{mission.reward}cr)")
+                world.save.pilot.note(f"Escort complete: {mission.description} (+{reward}cr)")
                 world.save.pilot.highlight(f"Escorted a convoy safely to {dest.name}.")
-                out_line(f"{p.gold}Convoy delivered safely! +{mission.reward}cr{RESET}")
+                out_line(f"{p.gold}Convoy delivered safely! +{reward}cr{RESET}")
             else:
                 out_line(f"{p.correct}The convoy presses on.{RESET}")
         else:
@@ -2426,12 +2509,13 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         outcome = screen_combat(p, world, pirate)
         if outcome == "won":
             world.save.active_missions.remove(bounty)
-            world.save.pilot.credits += bounty.reward
+            reward = bounty_reward_for(world, bounty.reward)
+            world.save.pilot.credits += reward
             if world.save.pilot.missions_completed == 0:
                 world.save.pilot.highlight(f"First mission complete: {bounty.description}.")
             world.save.pilot.missions_completed += 1
-            world.save.pilot.note(f"Bounty complete: {bounty.description} (+{bounty.reward}cr)")
-            out_line(f"{p.gold}Bounty complete! +{bounty.reward}cr{RESET}")
+            world.save.pilot.note(f"Bounty complete: {bounty.description} (+{reward}cr)")
+            out_line(f"{p.gold}Bounty complete! +{reward}cr{RESET}")
             # A flat, tier-independent chance the kill turns out to have
             # been mistaken identity -- discovered only after the fact,
             # since a bounty target always *looks* like a legitimate
@@ -2479,7 +2563,10 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         out_line(f"{p.gold}{msg}{RESET}")
 
     if world.save.cargo and any(not COMMODITIES[c]["legal"] for c in world.save.cargo) and dest.economy != "Haven":
-        if world.event_rng.random() < customs_check_chance(dest):
+        chance = customs_check_chance(dest)
+        if world.save.pilot.has_blackwake_made:
+            chance *= (1 - BLACKWAKE_MADE_CUSTOMS_REDUCTION)
+        if world.event_rng.random() < chance:
             screen_customs(p, world)
     out_line()
 
@@ -2692,6 +2779,10 @@ def main() -> int:
                 screen_landmark(p, world)
             elif choice == "D" and has_contraband(world):
                 screen_dump_contraband(p, world)
+            elif choice == "P" and concord_commission_available(world):
+                screen_concord_commission(p, world)
+            elif choice == "W" and blackwake_made_available(world):
+                screen_blackwake_made(p, world)
             elif choice == "Q":
                 out_line(f"{p.muted}Docking clamps engaged. Fly safe, {world.save.pilot.handle}.{RESET}")
                 persist(world, save_dir, user_id)

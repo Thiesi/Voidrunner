@@ -2535,3 +2535,119 @@ def test_retiring_resets_futures_contracts():
     new_save = vr.retire_pilot(old_save)
 
     assert new_save.active_futures == []
+
+
+# -- faction endgame arcs ----------------------------------------------
+
+def test_pilot_from_dict_defaults_faction_arc_fields_for_old_saves():
+    save = vr._new_career("Legacy")
+    d = save.pilot.to_dict()
+    del d["has_concord_commission"], d["has_blackwake_made"]
+
+    pilot = vr.Pilot.from_dict(d)
+
+    assert not pilot.has_concord_commission
+    assert not pilot.has_blackwake_made
+
+
+def test_concord_commission_unavailable_below_threshold():
+    world = _world_with_seed(180)
+    world.save.pilot.reputation[vr.FACTION_CONCORD] = vr.CONCORD_COMMISSION_THRESHOLD - 1
+    assert not vr.concord_commission_available(world)
+
+
+def test_concord_commission_available_at_threshold():
+    world = _world_with_seed(181)
+    world.save.pilot.reputation[vr.FACTION_CONCORD] = vr.CONCORD_COMMISSION_THRESHOLD
+    assert vr.concord_commission_available(world)
+
+
+def test_concord_commission_unavailable_once_already_held():
+    world = _world_with_seed(182)
+    world.save.pilot.reputation[vr.FACTION_CONCORD] = vr.CONCORD_COMMISSION_THRESHOLD
+    world.save.pilot.has_concord_commission = True
+    assert not vr.concord_commission_available(world)
+
+
+def test_blackwake_made_available_at_threshold():
+    world = _world_with_seed(183)
+    world.save.pilot.reputation[vr.FACTION_BLACKWAKE] = vr.BLACKWAKE_MADE_THRESHOLD
+    assert vr.blackwake_made_available(world)
+
+
+def test_blackwake_made_unavailable_once_already_held():
+    world = _world_with_seed(184)
+    world.save.pilot.reputation[vr.FACTION_BLACKWAKE] = vr.BLACKWAKE_MADE_THRESHOLD
+    world.save.pilot.has_blackwake_made = True
+    assert not vr.blackwake_made_available(world)
+
+
+def test_bounty_reward_for_applies_the_commission_bonus():
+    world = _world_with_seed(185)
+    assert vr.bounty_reward_for(world, 100) == 100
+
+    world.save.pilot.has_concord_commission = True
+    assert vr.bounty_reward_for(world, 100) == round(100 * (1 + vr.CONCORD_COMMISSION_BOUNTY_BONUS))
+
+
+def test_screen_concord_commission_grants_perk_and_bonus_on_confirmation(monkeypatch):
+    world = _world_with_seed(186)
+    before_credits = world.save.pilot.credits
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_concord_commission(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.has_concord_commission
+    assert world.save.pilot.credits == before_credits + vr.CONCORD_COMMISSION_BONUS_CREDITS
+    assert any("privateer" in h.lower() for h in world.save.pilot.highlights)
+
+
+def test_screen_concord_commission_declines_without_confirmation(monkeypatch):
+    world = _world_with_seed(187)
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: False)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_concord_commission(vr.Palette(truecolor=False), world)
+
+    assert not world.save.pilot.has_concord_commission
+
+
+def test_screen_blackwake_made_grants_perk_and_bonus_on_confirmation(monkeypatch):
+    world = _world_with_seed(188)
+    before_credits = world.save.pilot.credits
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_blackwake_made(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.has_blackwake_made
+    assert world.save.pilot.credits == before_credits + vr.BLACKWAKE_MADE_BONUS_CREDITS
+
+
+def test_station_menu_offers_arcs_only_when_available(monkeypatch):
+    world = _world_with_seed(189)
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_station_menu(vr.Palette(truecolor=False), world)
+    assert "[P]" not in buf.getvalue() and "[W]" not in buf.getvalue()
+
+    world.save.pilot.reputation[vr.FACTION_CONCORD] = vr.CONCORD_COMMISSION_THRESHOLD
+    world.save.pilot.reputation[vr.FACTION_BLACKWAKE] = vr.BLACKWAKE_MADE_THRESHOLD
+    buf2 = io.StringIO()
+    with contextlib.redirect_stdout(buf2):
+        vr.screen_station_menu(vr.Palette(truecolor=False), world)
+    assert "[P]" in buf2.getvalue() and "[W]" in buf2.getvalue()
+
+
+def test_retiring_resets_faction_arcs():
+    old_save = vr._new_career("Vet")
+    old_save.pilot.has_concord_commission = True
+    old_save.pilot.has_blackwake_made = True
+
+    new_save = vr.retire_pilot(old_save)
+
+    assert not new_save.pilot.has_concord_commission
+    assert not new_save.pilot.has_blackwake_made
