@@ -1205,3 +1205,149 @@ def test_screen_status_declines_retirement_without_committing(monkeypatch):
 
     assert world.save.pilot.retirements == 0
     assert world.save.seed == old_seed
+
+
+# -- auto-route -------------------------------------------------------------
+
+
+def test_bfs_path_returns_empty_for_same_start_and_dest():
+    world = _world_with_seed(98)
+    assert vr.bfs_path(world.by_id, 0, 0) == []
+
+
+def test_bfs_path_matches_bfs_hops_distance_on_a_real_galaxy():
+    world = _world_with_seed(99)
+    hops = vr.bfs_hops(world.by_id, 0)
+    for dest_id in (hops.keys() - {0}):
+        path = vr.bfs_path(world.by_id, 0, dest_id)
+        assert len(path) == hops[dest_id]
+        assert path[-1] == dest_id
+
+
+def test_bfs_path_every_consecutive_pair_is_a_real_connection():
+    world = _world_with_seed(100)
+    dest_id = next(sid for sid in world.by_id if sid != 0)
+    path = vr.bfs_path(world.by_id, 0, dest_id)
+    cur = 0
+    for hop in path:
+        assert hop in world.by_id[cur].connections
+        cur = hop
+
+
+def test_bfs_path_on_a_small_synthetic_graph():
+    class _Sys:
+        def __init__(self, connections):
+            self.connections = connections
+
+    by_id = {
+        0: _Sys([1, 2]),
+        1: _Sys([0, 3]),
+        2: _Sys([0]),
+        3: _Sys([1]),
+    }
+    assert vr.bfs_path(by_id, 0, 3) == [1, 3]
+
+
+def test_auto_route_rejects_an_unknown_system_name(monkeypatch):
+    world = _world_with_seed(101)
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: "Nonexistent Place")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr._screen_auto_route(vr.Palette(truecolor=False), world)
+
+    assert "no charted system matches" in buf.getvalue().lower()
+    assert world.save.current_system == 0
+
+
+def test_auto_route_wont_match_an_undiscovered_system_by_name(monkeypatch):
+    world = _world_with_seed(102)
+    undiscovered = next(s for s in world.galaxy if not s.discovered)
+
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: undiscovered.name)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr._screen_auto_route(vr.Palette(truecolor=False), world)
+
+    assert "no charted system matches" in buf.getvalue().lower()
+
+
+def test_auto_route_declines_without_enough_fuel(monkeypatch):
+    world = _world_with_seed(103)
+    dest = next(s for s in world.galaxy if s.discovered and s.id != 0)
+    world.save.ship.fuel = 0
+
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: dest.name)
+    calls = []
+    monkeypatch.setattr(vr, "screen_travel", lambda p, w, hop_id: calls.append(hop_id))
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr._screen_auto_route(vr.Palette(truecolor=False), world)
+
+    assert "not enough fuel" in buf.getvalue().lower()
+    assert calls == []
+
+
+def test_auto_route_travels_every_hop_on_confirmation(monkeypatch):
+    world = _world_with_seed(104)
+    dest = next(s for s in world.galaxy if s.discovered and s.id != 0)
+    world.save.ship.fuel = 999
+    expected_path = vr.bfs_path(world.by_id, 0, dest.id)
+
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: dest.name)
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+    calls = []
+
+    def fake_travel(p, w, hop_id):
+        calls.append(hop_id)
+        w.save.current_system = hop_id
+
+    monkeypatch.setattr(vr, "screen_travel", fake_travel)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._screen_auto_route(vr.Palette(truecolor=False), world)
+
+    assert calls == expected_path
+    assert world.save.current_system == dest.id
+
+
+def test_auto_route_declines_on_confirmation_refusal(monkeypatch):
+    world = _world_with_seed(105)
+    dest = next(s for s in world.galaxy if s.discovered and s.id != 0)
+    world.save.ship.fuel = 999
+
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: dest.name)
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: False)
+    calls = []
+    monkeypatch.setattr(vr, "screen_travel", lambda p, w, hop_id: calls.append(hop_id))
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._screen_auto_route(vr.Palette(truecolor=False), world)
+
+    assert calls == []
+
+
+def test_auto_route_stops_early_when_a_hop_diverts_the_plan(monkeypatch):
+    """Simulates a mid-route ship loss: `screen_travel` sends the pilot
+    back to Freeport instead of the planned hop, and the route must not
+    barrel on to the next hop regardless."""
+    world = _world_with_seed(106)
+    dest = next(s for s in world.galaxy if s.id != 0 and len(vr.bfs_path(world.by_id, 0, s.id)) >= 2)
+    dest.discovered = True  # otherwise no far-away system is nameable yet, this early in a career
+    world.save.ship.fuel = 999
+
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: dest.name)
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+    calls = []
+
+    def fake_travel(p, w, hop_id):
+        calls.append(hop_id)
+        w.save.current_system = 0  # diverted back to Freeport
+
+    monkeypatch.setattr(vr, "screen_travel", fake_travel)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._screen_auto_route(vr.Palette(truecolor=False), world)
+
+    assert len(calls) == 1

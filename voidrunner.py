@@ -666,6 +666,35 @@ def fuel_cost_for_jump(a: GalaxySystem, b: GalaxySystem) -> int:
     return max(1, round(_distance(a, b) / 6))
 
 
+def bfs_path(by_id: dict[int, GalaxySystem], start_id: int, dest_id: int) -> list[int]:
+    """Shortest hop-by-hop path from `start_id` to `dest_id`, as the
+    list of system ids to jump through in order (excludes `start_id`,
+    ends with `dest_id`; empty if they're the same system). The galaxy
+    graph is always fully connected -- `_connect_systems` builds it from
+    a spanning tree before adding any extra edges -- so a path always
+    exists between any two system ids from the same galaxy."""
+    if start_id == dest_id:
+        return []
+    came_from: dict[int, int] = {}
+    seen = {start_id}
+    q = collections.deque([start_id])
+    while q:
+        cur = q.popleft()
+        if cur == dest_id:
+            break
+        for nxt in by_id[cur].connections:
+            if nxt not in seen:
+                seen.add(nxt)
+                came_from[nxt] = cur
+                q.append(nxt)
+    path = [dest_id]
+    while path[-1] != start_id:
+        path.append(came_from[path[-1]])
+    path.pop()
+    path.reverse()
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Economy
 # ---------------------------------------------------------------------------
@@ -1482,6 +1511,7 @@ def screen_chart(p: Palette, world: World) -> str | None:
         scan_available = world.save.ship.scanner_tier > 0
         if scan_available:
             out_line(f"  {p.gold}[S]{RESET}can for distant contacts")
+        out_line(f"  {p.gold}[G]{RESET}o to a charted system by name")
         out(f"{p.muted}Jump to which, or [Q] back? {RESET}")
         key = read_key().upper()
         out_line(key)
@@ -1489,6 +1519,9 @@ def screen_chart(p: Palette, world: World) -> str | None:
             return None
         if key == "S" and scan_available:
             _do_scan(p, world)
+            continue
+        if key == "G":
+            _screen_auto_route(p, world)
             continue
         idx = LETTERS.index(key) if key in LETTERS else -1
         if idx < 0 or idx >= len(options):
@@ -1514,6 +1547,72 @@ def _do_scan(p: Palette, world: World) -> None:
     out_line(f"{p.correct}Sensor contact! {world.by_id[target].name} is now on your chart.{RESET}")
     for msg in check_mission_completions(world, just_discovered=target):
         out_line(f"{p.gold}{msg}{RESET}")
+
+
+def _screen_auto_route(p: Palette, world: World) -> None:
+    """"[G]o to" from the star chart: type a (partial) system name
+    instead of jumping one connection at a time. Only matches already-
+    discovered systems -- an uncharted system's name isn't known to the
+    player to type in the first place -- but the shortest path found
+    can still pass *through* undiscovered systems along the way, same
+    as a manual one-hop jump onto an uncharted neighbor already can.
+
+    Executes every hop via the ordinary `screen_travel`, completely
+    unmodified, so combat, customs, and travel encounters all still
+    trigger exactly as they would one hop at a time. Stops early if a
+    hop can't be afforded or diverts the plan (e.g. the ship is
+    destroyed and towed back to Freeport mid-route) -- never force-
+    marches the player through a route they can no longer see the cost
+    of one hop ahead."""
+    out(f"{p.muted}Go to (system name, Enter to cancel): {RESET}")
+    typed = read_line_raw(max_len=20, allowed=lambda c: c.isalnum() or c in " '").strip()
+    if not typed:
+        return
+    here_id = world.save.current_system
+    candidates = [s for s in world.galaxy
+                  if s.discovered and s.id != here_id and typed.lower() in s.name.lower()]
+    if not candidates:
+        out_line(f"{p.wrong}No charted system matches '{typed}'.{RESET}")
+        return
+    if len(candidates) == 1:
+        target = candidates[0]
+    else:
+        out_line(f"{p.muted}Multiple matches:{RESET}")
+        shown = candidates[:len(LETTERS)]
+        for i, s in enumerate(shown):
+            out_line(f"  {p.gold}[{LETTERS[i]}]{RESET} {s.name}")
+        out(f"{p.muted}Which one, or [Q] cancel? {RESET}")
+        key = read_key().upper()
+        out_line(key)
+        idx = LETTERS.index(key) if key in LETTERS else -1
+        if idx < 0 or idx >= len(shown):
+            return
+        target = shown[idx]
+
+    path = bfs_path(world.by_id, here_id, target.id)
+    total_fuel = 0
+    cur = world.by_id[here_id]
+    for hop_id in path:
+        total_fuel += fuel_cost_for_jump(cur, world.by_id[hop_id])
+        cur = world.by_id[hop_id]
+    out_line(f"{p.muted}Route to {target.name}: {len(path)} jump(s), {total_fuel} fuel total.{RESET}")
+    if world.save.ship.fuel < total_fuel:
+        out_line(f"{p.wrong}Not enough fuel for the full route "
+                  f"({total_fuel} needed, have {world.save.ship.fuel}).{RESET}")
+        return
+    if not confirm("Engage auto-route?", p):
+        return
+
+    for hop_id in path:
+        cost = fuel_cost_for_jump(world.here, world.by_id[hop_id])
+        if world.save.ship.fuel < cost:
+            out_line(f"{p.wrong}Route interrupted -- not enough fuel to continue "
+                      f"({cost} needed, have {world.save.ship.fuel}).{RESET}")
+            return
+        screen_travel(p, world, hop_id)
+        if world.save.current_system != hop_id:
+            out_line(f"{p.wrong}Route interrupted.{RESET}")
+            return
 
 
 def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySystem) -> None:
