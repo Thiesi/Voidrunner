@@ -2370,3 +2370,168 @@ def test_retiring_resets_active_economy_event():
     new_save = vr.retire_pilot(old_save)
 
     assert new_save.active_event is None
+
+
+# -- futures contracts -------------------------------------------------
+
+def test_save_from_dict_defaults_futures_fields_for_old_saves():
+    save = vr._new_career("Legacy")
+    d = save.to_dict()
+    del d["active_futures"], d["next_futures_id"]
+
+    loaded = vr.SaveData.from_dict(d)
+
+    assert loaded.active_futures == []
+    assert loaded.next_futures_id == 1
+
+
+def test_buy_futures_contract_charges_the_premium_and_locks_the_price():
+    world = _world_with_seed(169)
+    spot = vr.price_for(world, world.save.current_system, "food")
+    before_credits = world.save.pilot.credits
+
+    vr.buy_futures_contract(world, "food", 5, 10)
+
+    expected_unit = round(spot * vr.FUTURES_PREMIUM)
+    assert len(world.save.active_futures) == 1
+    contract = world.save.active_futures[0]
+    assert contract.commodity == "food"
+    assert contract.quantity == 5
+    assert contract.locked_price == expected_unit * 5
+    assert contract.settle_turn == world.save.turn + 10
+    assert world.save.pilot.credits == before_credits - expected_unit * 5
+
+
+def test_buy_futures_contract_increments_the_id_counter():
+    world = _world_with_seed(170)
+    vr.buy_futures_contract(world, "food", 1, 5)
+    vr.buy_futures_contract(world, "textiles", 1, 5)
+
+    ids = [c.id for c in world.save.active_futures]
+    assert len(set(ids)) == 2
+    assert world.save.next_futures_id == 3
+
+
+def test_settle_futures_contracts_does_nothing_before_settle_turn():
+    world = _world_with_seed(171)
+    vr.buy_futures_contract(world, "food", 3, 10)
+
+    messages = vr.settle_futures_contracts(world)
+
+    assert messages == []
+    assert len(world.save.active_futures) == 1
+
+
+def test_settle_futures_contracts_delivers_to_cargo_when_due():
+    world = _world_with_seed(172)
+    vr.buy_futures_contract(world, "food", 3, 5)
+    world.save.turn += 5
+
+    messages = vr.settle_futures_contracts(world)
+
+    assert len(messages) == 1
+    assert "delivered" in messages[0]
+    assert world.save.cargo.get("food") == 3
+    assert world.save.active_futures == []
+
+
+def test_settle_futures_contracts_refunds_when_cargo_is_full():
+    world = _world_with_seed(173)
+    cap = vr.cargo_capacity(world.save.ship)
+    vr.buy_futures_contract(world, "food", cap, 5)
+    world.save.cargo["textiles"] = cap  # fill the hold with something else before settlement
+    before_credits = world.save.pilot.credits
+    contract = world.save.active_futures[0]
+    world.save.turn += 5
+
+    messages = vr.settle_futures_contracts(world)
+
+    assert len(messages) == 1
+    assert "refunded" in messages[0]
+    assert "food" not in world.save.cargo
+    assert world.save.pilot.credits == before_credits + contract.locked_price
+
+
+def test_settle_futures_contracts_settles_regardless_of_current_location():
+    world = _world_with_seed(174)
+    vr.buy_futures_contract(world, "food", 2, 5)
+    world.save.current_system = world.by_id[0].connections[0]  # moved away before settlement
+    world.save.turn += 5
+
+    messages = vr.settle_futures_contracts(world)
+
+    assert len(messages) == 1
+    assert world.save.cargo.get("food") == 2
+
+
+def test_screen_market_offers_futures_exchange(monkeypatch):
+    world = _world_with_seed(175)
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_market(vr.Palette(truecolor=False), world)
+
+    assert "[X]" in buf.getvalue()
+
+
+def test_screen_futures_lists_tradeable_goods_and_outstanding_contracts(monkeypatch):
+    world = _world_with_seed(176)
+    vr.buy_futures_contract(world, "food", 2, 5)
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_futures(vr.Palette(truecolor=False), world, vr.LEGAL_COMMODITIES)
+
+    text = buf.getvalue()
+    assert "Food" in text
+    assert "Outstanding contracts" in text
+
+
+def test_screen_buy_futures_rejects_an_invalid_duration(monkeypatch):
+    world = _world_with_seed(177)
+    world.save.pilot.credits = 100_000
+    inputs = iter(["10", "7"])  # 7 isn't one of FUTURES_DURATIONS
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: next(inputs))
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._screen_buy_futures(vr.Palette(truecolor=False), world, "food")
+
+    assert world.save.active_futures == []
+
+
+def test_screen_buy_futures_creates_a_contract_on_confirmation(monkeypatch):
+    world = _world_with_seed(178)
+    world.save.pilot.credits = 100_000
+    inputs = iter(["10", str(vr.FUTURES_DURATIONS[0])])
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: next(inputs))
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._screen_buy_futures(vr.Palette(truecolor=False), world, "food")
+
+    assert len(world.save.active_futures) == 1
+    assert world.save.active_futures[0].quantity == 10
+
+
+def test_screen_buy_futures_declines_on_confirmation_refusal(monkeypatch):
+    world = _world_with_seed(179)
+    world.save.pilot.credits = 100_000
+    inputs = iter(["10", str(vr.FUTURES_DURATIONS[0])])
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: next(inputs))
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: False)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._screen_buy_futures(vr.Palette(truecolor=False), world, "food")
+
+    assert world.save.active_futures == []
+
+
+def test_retiring_resets_futures_contracts():
+    old_save = vr._new_career("Vet")
+    vr.buy_futures_contract(vr.World(old_save), "food", 2, 5)
+
+    new_save = vr.retire_pilot(old_save)
+
+    assert new_save.active_futures == []

@@ -525,6 +525,28 @@ class Mission:
 
 
 @dataclass
+class FuturesContract:
+    """Locks in today's price for a commodity, paid up front, settling
+    -- the goods actually arriving in cargo -- some number of turns
+    later regardless of where the pilot ends up traveling in the
+    meantime. Lets a trader hedge against (or speculate ahead of) a
+    price swing, notably a scheduled economy event's own crash/boom,
+    without needing cargo room for the goods today."""
+    id: int
+    commodity: str
+    quantity: int
+    locked_price: int  # total paid up front, already including FUTURES_PREMIUM
+    settle_turn: int
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "FuturesContract":
+        return cls(**{f.name: d[f.name] for f in dataclasses.fields(cls) if f.name in d})
+
+
+@dataclass
 class SaveData:
     schema_version: int
     seed: int
@@ -544,6 +566,11 @@ class SaveData:
     # Additive field, safe default via from_dict's own .get() below --
     # no SCHEMA_VERSION bump needed.
     active_event: dict | None = None
+    # Outstanding futures contracts (see FuturesContract/settle_futures_
+    # contracts) -- additive field, safe default via from_dict's own
+    # .get() below -- no SCHEMA_VERSION bump needed.
+    active_futures: list[FuturesContract] = field(default_factory=list)
+    next_futures_id: int = 1
 
     def to_dict(self) -> dict:
         return {
@@ -560,6 +587,8 @@ class SaveData:
             "next_mission_id": self.next_mission_id,
             "flags": self.flags,
             "active_event": self.active_event,
+            "active_futures": [f.to_dict() for f in self.active_futures],
+            "next_futures_id": self.next_futures_id,
         }
 
     @classmethod
@@ -578,6 +607,8 @@ class SaveData:
             next_mission_id=d.get("next_mission_id", 1),
             flags=dict(d.get("flags", {})),
             active_event=d.get("active_event"),
+            active_futures=[FuturesContract.from_dict(f) for f in d.get("active_futures", [])],
+            next_futures_id=d.get("next_futures_id", 1),
         )
 
 
@@ -918,6 +949,69 @@ def tick_economy_event(world: World) -> str | None:
             table = world.save.market_drift.setdefault(system.id, {})
             table[commodity] = level
     return f"Galaxy news: {description} (roughly {turns} turns)."
+
+
+# Futures contracts: lock in *today's* price for a commodity, paid up
+# front, for delivery some number of turns out -- a hedge against (or a
+# speculative bet ahead of) a price swing, notably a scheduled economy
+# event's own crash/boom, without needing cargo room for the goods
+# today. FUTURES_PREMIUM is the brokerage's own cut for the service --
+# without it, a futures contract would be a strictly-better free option
+# on top of an ordinary purchase (lock in today's price for later
+# delivery, at literally no cost, whenever cargo room is the only
+# constraint), rather than a real hedging trade-off.
+FUTURES_PREMIUM = 1.08
+FUTURES_DURATIONS = (5, 10, 20)
+
+
+def buy_futures_contract(world: World, commodity: str, quantity: int, duration: int) -> str:
+    """Locks in `quantity` units of `commodity` at today's price (plus
+    `FUTURES_PREMIUM`) for delivery `duration` turns from now. Caller
+    (`_screen_futures_buy`) is responsible for checking affordability
+    and confirming with the player first -- this always executes."""
+    unit_price = round(price_for(world, world.save.current_system, commodity) * FUTURES_PREMIUM)
+    total = unit_price * quantity
+    world.save.pilot.credits -= total
+    contract = FuturesContract(
+        id=world.save.next_futures_id, commodity=commodity, quantity=quantity,
+        locked_price=total, settle_turn=world.save.turn + duration,
+    )
+    world.save.active_futures.append(contract)
+    world.save.next_futures_id += 1
+    label = COMMODITIES[commodity]["label"]
+    msg = f"Futures contract: {quantity}x {label} locked at {unit_price}cr/unit, delivery in {duration} turns."
+    world.save.pilot.note(msg)
+    return msg
+
+
+def settle_futures_contracts(world: World) -> list[str]:
+    """Called once per turn, alongside the other per-turn ticks in
+    `screen_travel` -- delivers every contract whose `settle_turn` has
+    arrived straight into cargo, wherever the pilot currently is (the
+    whole point of a futures contract is not needing to be anywhere in
+    particular when it settles). A contract that no longer fits in the
+    hold is refunded in full rather than silently lost or force-fit
+    over capacity -- "never a dead end" applies to a bad hold-space
+    gamble as much as it does to a bad fight."""
+    ship = world.save.ship
+    due = [f for f in world.save.active_futures if world.save.turn >= f.settle_turn]
+    if not due:
+        return []
+    messages: list[str] = []
+    for contract in due:
+        world.save.active_futures.remove(contract)
+        label = COMMODITIES[contract.commodity]["label"]
+        room = cargo_capacity(ship) - sum(world.save.cargo.values())
+        if room < contract.quantity:
+            world.save.pilot.credits += contract.locked_price
+            msg = (f"Futures contract for {contract.quantity}x {label} settled, but there's no cargo "
+                    f"room -- refunded {contract.locked_price}cr.")
+        else:
+            world.save.cargo[contract.commodity] = world.save.cargo.get(contract.commodity, 0) + contract.quantity
+            msg = f"Futures contract settled: {contract.quantity}x {label} delivered to your hold."
+        world.save.pilot.note(msg)
+        messages.append(msg)
+    return messages
 
 
 # ---------------------------------------------------------------------------
@@ -1624,16 +1718,78 @@ def screen_market(p: Palette, world: World) -> None:
         cap = cargo_capacity(world.save.ship)
         used = sum(world.save.cargo.values())
         out_line(f"{p.muted}Cargo hold: {used}/{cap}{RESET}")
+        out_line(f"  {p.gold}[X]{RESET} Futures Exchange")
         out(f"{p.muted}Trade which, or [Q] back? {RESET}")
         key = read_key().upper()
         out_line(key)
         if key == "Q":
             return
+        if key == "X":
+            screen_futures(p, world, goods)
+            continue
         idx = LETTERS.index(key) if key in LETTERS else -1
         if idx < 0 or idx >= len(rows):
             continue
         commodity, _ = rows[idx]
         _trade_commodity(p, world, commodity)
+
+
+def screen_futures(p: Palette, world: World, goods: list[str]) -> None:
+    """The Futures Exchange, reached from `screen_market`'s own [X]
+    option -- `goods` is that same market's own tradeable-commodity
+    list, so a contract can only be locked in for something this
+    system's market actually deals in."""
+    while True:
+        out_line()
+        out_line(f"{p.accent}{BOLD}Futures Exchange -- {world.here.station_name}{RESET}")
+        out_line(f"{p.muted}Lock in today's price ({round((FUTURES_PREMIUM - 1) * 100)}% brokerage premium) "
+                  f"for delivery to your hold, wherever you are, N turns from now.{RESET}")
+        if world.save.active_futures:
+            out_line(f"{p.muted}Outstanding contracts:{RESET}")
+            for contract in world.save.active_futures:
+                label = COMMODITIES[contract.commodity]["label"]
+                remaining = contract.settle_turn - world.save.turn
+                out_line(f"  {p.muted}- {contract.quantity}x {label}, settles in "
+                          f"{max(0, remaining)} turn(s){RESET}")
+        for i, commodity in enumerate(goods):
+            price = round(price_for(world, world.here.id, commodity) * FUTURES_PREMIUM)
+            label = COMMODITIES[commodity]["label"]
+            out_line(f"  {p.gold}[{LETTERS[i]}]{RESET} {label:<16} {price}cr/unit locked")
+        out(f"{p.muted}Buy a contract for which, or [Q] back? {RESET}")
+        key = read_key().upper()
+        out_line(key)
+        if key == "Q":
+            return
+        idx = LETTERS.index(key) if key in LETTERS else -1
+        if idx < 0 or idx >= len(goods):
+            continue
+        _screen_buy_futures(p, world, goods[idx])
+
+
+def _screen_buy_futures(p: Palette, world: World, commodity: str) -> None:
+    unit_price = round(price_for(world, world.here.id, commodity) * FUTURES_PREMIUM)
+    label = COMMODITIES[commodity]["label"]
+    max_qty = world.save.pilot.credits // unit_price if unit_price > 0 else 0
+    if max_qty <= 0:
+        out_line(f"{p.wrong}Can't afford even one unit at {unit_price}cr.{RESET}")
+        return
+    out(f"{p.muted}{label} -- {unit_price}cr/unit locked. Quantity (max {max_qty}, Enter to cancel): {RESET}")
+    raw = read_line_raw(max_len=5)
+    qty = int(raw) if raw.isdigit() else 0
+    qty = min(qty, max_qty)
+    if qty <= 0:
+        return
+    out(f"{p.muted}Delivery in how many turns -- "
+        f"{'/'.join(f'[{d}]' for d in FUTURES_DURATIONS)}? {RESET}")
+    raw_duration = read_line_raw(max_len=3)
+    duration = int(raw_duration) if raw_duration.isdigit() else 0
+    if duration not in FUTURES_DURATIONS:
+        out_line(f"{p.wrong}Choose one of {', '.join(str(d) for d in FUTURES_DURATIONS)}.{RESET}")
+        return
+    total = unit_price * qty
+    if not confirm(f"Lock in {qty}x {label} for {total}cr, delivered in {duration} turns?", p):
+        return
+    out_line(f"{p.correct}{buy_futures_contract(world, commodity, qty, duration)}{RESET}")
 
 
 def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
@@ -2258,6 +2414,8 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         out_line(f"{p.gold}{event_msg}{RESET}")
     for msg in pay_crew_wages(world):
         out_line(f"{p.wrong}{msg}{RESET}")
+    for msg in settle_futures_contracts(world):
+        out_line(f"{p.gold}{msg}{RESET}")
     out_line(f"{p.muted}Jumping to {'the unknown' if not dest.discovered else dest.name}...{RESET}")
 
     bounty = next((m for m in world.save.active_missions
