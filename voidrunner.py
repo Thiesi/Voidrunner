@@ -2534,6 +2534,22 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
     for msg in settle_futures_contracts(world):
         out_line(f"{p.gold}{msg}{RESET}")
 
+    # Announced here, before any mission resolution below, so every
+    # kind of mission completion this hop -- bounty/escort (resolved
+    # inline in this same function) as much as delivery/scan (resolved
+    # afterward via check_mission_completions) -- reads consistently as
+    # "you arrived, then this happened," not sometimes before and
+    # sometimes after the arrival announcement. Deliberately does *not*
+    # also move the actual `dest.discovered`/`current_system` state
+    # mutation earlier -- `generate_pirate`'s own tier logic reads
+    # `world.here.danger` (the *origin* system, unrelated and
+    # intentional, see generate_pirate_squadron's own docstring), which
+    # would silently start using the destination's danger instead if
+    # `current_system` flipped over before the encounter below runs.
+    was_discovered = dest.discovered
+    if not was_discovered:
+        out_line(f"{p.gold}New system charted: {dest.name}.{RESET}")
+
     bounty = next((m for m in world.save.active_missions
                     if m.kind == "bounty" and m.target_system == dest_id), None)
     if bounty is not None:
@@ -2586,12 +2602,9 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
 
     _resolve_escort_missions(p, world, dest_id)
 
-    was_discovered = dest.discovered
     dest.discovered = True
     world.save.current_system = dest_id
     world.sync_discovered()
-    if not was_discovered:
-        out_line(f"{p.gold}New system charted: {dest.name}.{RESET}")
     for msg in check_mission_completions(world, just_discovered=None if was_discovered else dest_id):
         out_line(f"{p.gold}{msg}{RESET}")
 

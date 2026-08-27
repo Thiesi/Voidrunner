@@ -457,6 +457,88 @@ def test_winning_a_bounty_fight_completes_it_and_pays_the_reward(monkeypatch):
     assert world.save.pilot.credits == starting_credits + 800
 
 
+def test_new_system_charted_announcement_prints_before_bounty_completion(monkeypatch):
+    """Regression guard for a real dogfood-caught inconsistency: bounty/
+    escort completions used to print *before* "New system charted",
+    while delivery/scan completions (via check_mission_completions)
+    always printed after it -- two similar "you arrived and this
+    happened" moments reading in a different relative order depending
+    on mission kind. Forces an undiscovered destination -- real bounty
+    generation only ever targets already-discovered systems, but the
+    ordering being tested doesn't depend on how the destination got
+    into this state."""
+    world = _world_with_seed(24)
+    dest_id = world.here.connections[0]
+    world.by_id[dest_id].discovered = False
+    mission = _accept_bounty(world, target_system=dest_id, reward=500)
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: "won")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
+    text = buf.getvalue()
+
+    assert mission not in world.save.active_missions
+    assert "New system charted" in text and "Bounty complete" in text
+    assert text.index("New system charted") < text.index("Bounty complete")
+
+
+def test_new_system_charted_announcement_prints_before_escort_completion(monkeypatch):
+    world = _world_with_seed(25)
+    hops = vr.bfs_hops(world.by_id, world.save.current_system)
+    dest_id = next(sid for sid, h in hops.items() if h == 1)
+    world.by_id[dest_id].discovered = False
+    mission = vr.Mission(id=2, kind="escort", description="test escort", reward=500,
+                          origin_system=world.save.current_system, target_system=dest_id,
+                          pirate_tier=1, deadline_turn=world.save.turn + 50)
+    vr.accept_mission(world, mission)
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: "won")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
+    text = buf.getvalue()
+
+    assert mission not in world.save.active_missions
+    assert "New system charted" in text and "Convoy delivered safely" in text
+    assert text.index("New system charted") < text.index("Convoy delivered safely")
+
+
+def test_random_encounter_pirate_tier_still_uses_origin_system_danger(monkeypatch):
+    """Guards the exact regression the "New system charted" reordering
+    above had to avoid: generate_pirate's own tier defaults to
+    `world.here.danger` (deliberately the *origin* system, not the
+    destination -- see generate_pirate_squadron's own docstring), which
+    only stays correct as long as `world.save.current_system` isn't
+    flipped to the destination before the encounter resolves."""
+    world = _world_with_seed(26)
+    origin = world.here
+    origin.danger = 3
+    dest_id = world.here.connections[0]
+    dest = world.by_id[dest_id]
+    dest.danger = 0
+    world.event_rng.random = lambda: 0.0  # always triggers an encounter
+    world.event_rng.choices = lambda population, weights: ["pirate"]
+    world.event_rng.randint = lambda a, b: 0  # pin generate_pirate's own +/-1 noise term
+
+    captured_tiers = []
+    real_generate_pirate = vr.generate_pirate
+
+    def spy_generate_pirate(w, tier=None):
+        pirate = real_generate_pirate(w, tier=tier)
+        captured_tiers.append(pirate.tier)
+        return pirate
+
+    monkeypatch.setattr(vr, "generate_pirate", spy_generate_pirate)
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: "escaped")
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
+
+    assert captured_tiers
+    assert captured_tiers[0] == origin.danger  # not dest.danger (0)
+
+
 def test_escaping_a_bounty_fight_leaves_it_active_to_retry_later(monkeypatch):
     world = _world_with_seed(22)
     dest_id = world.here.connections[0]
