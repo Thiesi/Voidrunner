@@ -275,13 +275,13 @@ UPGRADES: dict[str, dict] = {
     "cargo": {"label": "Cargo Bay Expansion", "max_tier": 5, "cost": lambda t: 800 + t * 600,
               "effect": "+8 cargo capacity"},
     "engine": {"label": "Engine Tuning", "max_tier": 3, "cost": lambda t: 1200 + t * 1000,
-               "effect": "+8 fuel capacity, cheaper/safer jumps"},
+               "effect": "+8 fuel, +evasion"},
     "weapon": {"label": "Weapon Systems", "max_tier": 4, "cost": lambda t: 1000 + t * 900,
                "effect": "+combat damage"},
     "shield": {"label": "Deflector Shields", "max_tier": 3, "cost": lambda t: 1100 + t * 950,
                "effect": "-incoming damage"},
     "scanner": {"label": "Long-Range Scanner", "max_tier": 2, "cost": lambda t: 900 + t * 700,
-                "effect": "+scan range/quality"},
+                "effect": "+scan range"},
     "hull": {"label": "Hull Reinforcement", "max_tier": 4, "cost": lambda t: 700 + t * 550,
              "effect": "+35 max hull"},
 }
@@ -292,7 +292,7 @@ UPGRADES: dict[str, dict] = {
 # fields exactly.
 CREW_ROLES: dict[str, dict] = {
     "gunner": {"label": "Gunner", "hire_cost": 800, "wage": 15, "effect": "+3 combat damage per hit"},
-    "engineer": {"label": "Engineer", "hire_cost": 700, "wage": 12, "effect": "-1 fuel cost per jump (min 1)"},
+    "engineer": {"label": "Engineer", "hire_cost": 700, "wage": 12, "effect": "-1 fuel/jump (min 1)"},
     "navigator": {"label": "Navigator", "hire_cost": 600, "wage": 10, "effect": "+1 scan range"},
 }
 # hull class -> base cargo/fuel/hull, before any tier upgrades are added
@@ -1691,6 +1691,20 @@ def _vis_len(text: str) -> int:
     return len(_ANSI_RE.sub("", text))
 
 
+def _box_title(p: "Palette", text: str, width: int = 77) -> str:
+    """A `╭── {text} ───...───╮` title border sized so its right corner
+    always lands on the same column as every other row in the same box
+    (see the module-wide 77-visible-column interior convention) --
+    `text` routinely embeds a variable-length station/system name or
+    pilot handle, so a fixed literal dash count (this box family's
+    original, hand-typed approach) drifts out of alignment with the
+    box's other rows for any name that isn't exactly the length the
+    dashes were originally counted for."""
+    head = f"── {text} "
+    dashes = "─" * max(1, width - _vis_len(head))
+    return f"{p.accent}{BOLD}╭{head}{dashes}╮{RESET}"
+
+
 def _pad(text: str, width: int, align: str = "left") -> str:
     """Pad text containing ANSI codes to a target visual column width."""
     diff = max(0, width - _vis_len(text))
@@ -1795,16 +1809,15 @@ def screen_station_menu(p: Palette, world: World) -> str:
     out_line()
     draw_status_bar(p, world)
 
-    out_line(f"{p.accent}╭── Station Services: {world.here.station_name} ─────────────────────────────╮{RESET}")
-    out_line(
-        f"{p.accent}│{RESET}   {p.gold}[M]{RESET} Commodity Market     {p.gold}[Y]{RESET} Engineering Yard     {p.gold}[B]{RESET} Mission Board      {p.accent}│{RESET}"
-    )
-    out_line(
-        f"{p.accent}│{RESET}   {p.gold}[C]{RESET} Navigation Chart     {p.gold}[S]{RESET} Pilot Status         {p.gold}[H]{RESET} Hall of Fame       {p.accent}│{RESET}"
-    )
-    out_line(
-        f"{p.accent}│{RESET}   {p.gold}[Q]{RESET} Disembark & Save                                                  {p.accent}│{RESET}"
-    )
+    out_line(_box_title(p, f"Station Services: {world.here.station_name}"))
+    menu_rows = [
+        f"   {p.gold}[M]{RESET} Commodity Market     {p.gold}[Y]{RESET} Engineering Yard     {p.gold}[B]{RESET} Mission Board",
+        f"   {p.gold}[C]{RESET} Navigation Chart     {p.gold}[S]{RESET} Pilot Status         {p.gold}[H]{RESET} Hall of Fame",
+        f"   {p.gold}[Q]{RESET} Disembark & Save",
+    ]
+    for row in menu_rows:
+        pad_len = max(0, 77 - _vis_len(row))
+        out_line(f"{p.accent}│{RESET}{row}{' ' * pad_len}{p.accent}│{RESET}")
 
     special_ops = []
     if landmark_available_here(world):
@@ -1819,8 +1832,9 @@ def screen_station_menu(p: Palette, world: World) -> str:
     if special_ops:
         out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
         for op in special_ops:
-            pad_len = max(0, 75 - _vis_len(op))
-            out_line(f"{p.accent}│{RESET}   {op}{' ' * pad_len}{p.accent}│{RESET}")
+            row = f"   {op}"
+            pad_len = max(0, 77 - _vis_len(row))
+            out_line(f"{p.accent}│{RESET}{row}{' ' * pad_len}{p.accent}│{RESET}")
     out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
     out(f"  {p.gold}Command Deck{RESET} {p.muted}> {RESET}")
     return read_key().upper()
@@ -1859,8 +1873,9 @@ def screen_market(p: Palette, world: World) -> None:
     system = world.here
     while True:
         out_line()
-        out_line(f"{p.accent}{BOLD}╭── Interstellar Commodity Exchange: {system.station_name} ────────────────╮{RESET}")
-        out_line(f"{p.accent}│ {p.gold}KEY  COMMODITY            BUY/UNIT    SELL/UNIT    SPREAD   IN HOLD  STATUS  {p.accent}│{RESET}")
+        out_line(_box_title(p, f"Interstellar Commodity Exchange: {system.station_name}"))
+        header = f" {p.gold}KEY  COMMODITY            BUY/UNIT    SELL/UNIT    SPREAD   IN HOLD  STATUS{RESET}"
+        out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
         out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
         rows: list[tuple[str, str]] = []
         goods = LEGAL_COMMODITIES + [c for c in CONTRABAND_COMMODITIES if system.economy == "Haven" or world.save.cargo.get(c, 0) > 0]
@@ -1873,7 +1888,7 @@ def screen_market(p: Palette, world: World) -> None:
 
             tag = ""
             if not COMMODITIES[commodity]["legal"]:
-                tag = f"{p.wrong}[CONTRABAND]{RESET}"
+                tag = f"{p.wrong}Illegal{RESET}"
             event = world.save.active_event
             if event and event["commodity"] == commodity and event["economy"] == system.economy:
                 tag = (f"{p.wrong}[CRASH]{RESET}" if event["direction"] == "crash"
@@ -1888,7 +1903,7 @@ def screen_market(p: Palette, world: World) -> None:
                 f"{have:>5}   {tag}"
             )
             rows.append((commodity, row_str))
-            pad_len = max(0, 75 - _vis_len(row_str))
+            pad_len = max(0, 77 - _vis_len(row_str))
             out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
 
         out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
@@ -1919,25 +1934,28 @@ def screen_futures(p: Palette, world: World, goods: list[str]) -> None:
     system's market actually deals in."""
     while True:
         out_line()
-        out_line(f"{p.accent}{BOLD}╭── Futures Exchange: {world.here.station_name} ─────────────────────────────╮{RESET}")
-        out_line(f"{p.accent}│ {p.muted}Lock in today's price ({round((FUTURES_PREMIUM - 1) * 100)}% fee) for remote delivery to your hold.{RESET}     {p.accent}│{RESET}")
+        out_line(_box_title(p, f"Futures Exchange: {world.here.station_name}"))
+        intro = f" {p.muted}Lock in today's price ({round((FUTURES_PREMIUM - 1) * 100)}% fee) for remote delivery to your hold.{RESET}"
+        out_line(f"{p.accent}│{RESET}{intro}{' ' * max(0, 77 - _vis_len(intro))}{p.accent}│{RESET}")
         if world.save.active_futures:
             out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
-            out_line(f"{p.accent}│ {p.gold}Outstanding contracts:{RESET}" + " " * 52 + f"{p.accent}│{RESET}")
+            outstanding = f" {p.gold}Outstanding contracts:{RESET}"
+            out_line(f"{p.accent}│{RESET}{outstanding}{' ' * max(0, 77 - _vis_len(outstanding))}{p.accent}│{RESET}")
             for contract in world.save.active_futures:
                 label = COMMODITIES[contract.commodity]["label"]
                 remaining = contract.settle_turn - world.save.turn
                 f_str = f"    • {contract.quantity}x {label:<16} settles in {max(0, remaining)} turn(s)"
-                pad_len = max(0, 75 - _vis_len(f_str))
+                pad_len = max(0, 77 - _vis_len(f_str))
                 out_line(f"{p.accent}│{RESET}{f_str}{' ' * pad_len}{p.accent}│{RESET}")
         out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
-        out_line(f"{p.accent}│ {p.gold}KEY  COMMODITY            FUTURES LOCK PRICE       TERMS                     {p.accent}│{RESET}")
+        header = f" {p.gold}KEY  COMMODITY            FUTURES LOCK PRICE       TERMS{RESET}"
+        out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
         out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
         for i, commodity in enumerate(goods):
             price = round(price_for(world, world.here.id, commodity) * FUTURES_PREMIUM)
             label = COMMODITIES[commodity]["label"]
             f_row = f"  {p.gold}[{LETTERS[i]}]{RESET}  {label:<18} {price:>6} cr / unit locked   Guaranteed Delivery"
-            pad_len = max(0, 75 - _vis_len(f_row))
+            pad_len = max(0, 77 - _vis_len(f_row))
             out_line(f"{p.accent}│{RESET}{f_row}{' ' * pad_len}{p.accent}│{RESET}")
         out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
         out(f"  {p.muted}Buy forward contract for which, or [Q] back? {RESET}")
@@ -2034,8 +2052,9 @@ def screen_shipyard(p: Palette, world: World) -> None:
     ship = world.save.ship
     while True:
         out_line()
-        out_line(f"{p.accent}{BOLD}╭── Engineering Shipyard: {world.here.station_name} ────────────────────────╮{RESET}")
-        out_line(f"{p.accent}│ {p.gold}KEY  SUBSYSTEM UPGRADE       CURRENT STATUS     NEXT TIER COST  UPGRADE EFFECT {p.accent}│{RESET}")
+        out_line(_box_title(p, f"Engineering Shipyard: {world.here.station_name}"))
+        header = f" {p.gold}KEY  SUBSYSTEM UPGRADE       CURRENT STATUS   NEXT TIER COST  UPGRADE EFFECT{RESET}"
+        out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
         out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
         keys = list(UPGRADES.keys())
         for i, key in enumerate(keys):
@@ -2045,13 +2064,13 @@ def screen_shipyard(p: Palette, world: World) -> None:
             bar = _gauge_bar(tier, max_t, 5, p)
             if tier >= max_t:
                 status_str = f"MAXED {bar}"
-                cost_str = "    --  "
+                cost_str = f"{'--':>6}   "
             else:
                 cost = u["cost"](tier)
                 status_str = f"Tier {tier}->{tier + 1} {bar}"
                 cost_str = f"{cost:>6} cr"
-            row_str = f"  {p.gold}[{LETTERS[i]}]{RESET}  {u['label']:<20} {status_str:<18} {cost_str}   {p.muted}({u['effect']}){RESET}"
-            pad_len = max(0, 75 - _vis_len(row_str))
+            row_str = f"  {p.gold}[{LETTERS[i]}]{RESET}  {u['label']:<20} {_pad(status_str, 18)} {cost_str}  {p.muted}({u['effect']}){RESET}"
+            pad_len = max(0, 77 - _vis_len(row_str))
             out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
 
         refit_options = HULL_REFITS[ship.hull_class]
@@ -2059,12 +2078,12 @@ def screen_shipyard(p: Palette, world: World) -> None:
         out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
         if not refit_options:
             refit_msg = f"  {p.muted}Hull: already flying our best available class ({ship.hull_class}){RESET}"
-            pad_len = max(0, 75 - _vis_len(refit_msg))
+            pad_len = max(0, 77 - _vis_len(refit_msg))
             out_line(f"{p.accent}│{RESET}{refit_msg}{' ' * pad_len}{p.accent}│{RESET}")
         else:
             for refit_key, (target_class, cost) in zip(refit_keys, refit_options):
                 refit_msg = f"  {p.gold}[{refit_key}]{RESET}  {target_class}-Class Refit -- {cost:,} cr"
-                pad_len = max(0, 75 - _vis_len(refit_msg))
+                pad_len = max(0, 77 - _vis_len(refit_msg))
                 out_line(f"{p.accent}│{RESET}{refit_msg}{' ' * pad_len}{p.accent}│{RESET}")
 
         out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
@@ -2099,7 +2118,8 @@ def screen_crew(p: Palette, world: World) -> None:
     while True:
         out_line()
         out_line(f"{p.accent}{BOLD}╭── Crew Quarters & Specialist Roster ────────────────────────────────────────╮{RESET}")
-        out_line(f"{p.accent}│ {p.gold}KEY  ROLE           STATUS      WAGE RATE      SPECIALTY / BENEFIT            {p.accent}│{RESET}")
+        header = f" {p.gold}KEY  ROLE           STATUS      WAGE RATE      SPECIALTY / BENEFIT{RESET}"
+        out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
         out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
         keys = list(CREW_ROLES.keys())
         for i, role in enumerate(keys):
@@ -2112,7 +2132,7 @@ def screen_crew(p: Palette, world: World) -> None:
                 status = f"{p.muted}Available{RESET}"
                 wage = f"{info['hire_cost']}cr + {info['wage']}cr/j"
             row_str = f"  {p.gold}[{letter}]{RESET}  {info['label']:<14} {status} {wage:<16} {info['effect']}"
-            pad_len = max(0, 75 - _vis_len(row_str))
+            pad_len = max(0, 77 - _vis_len(row_str))
             out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
         out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
         out(f"  {p.muted}Hire/dismiss which [A-{LETTERS[len(keys)-1]}], or [Q] back? {RESET}")
@@ -2234,8 +2254,9 @@ def screen_missions(p: Palette, world: World) -> None:
     board = generate_mission_board(world)
     while True:
         out_line()
-        out_line(f"{p.accent}{BOLD}╭── Bounty & Contract Board: {world.here.station_name} ─────────────────────╮{RESET}")
-        out_line(f"{p.accent}│ {p.gold}KEY  TYPE      MISSION CONTRACT & OBJECTIVES                        REWARD   {p.accent}│{RESET}")
+        out_line(_box_title(p, f"Bounty & Contract Board: {world.here.station_name}"))
+        header = f" {p.gold}KEY  TYPE      MISSION CONTRACT & OBJECTIVES                        REWARD{RESET}"
+        out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
         out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
         for i, m in enumerate(board):
             if m.kind == "bounty":
@@ -2248,8 +2269,8 @@ def screen_missions(p: Palette, world: World) -> None:
             m_desc = m.description
             if _vis_len(m_desc) > 44:
                 m_desc = m_desc[:41] + "..."
-            row_str = f"  {p.gold}[{LETTERS[i]}]{RESET}  {badge_str} {m_desc:<44} {reward_str:>10}"
-            pad_len = max(0, 75 - _vis_len(row_str))
+            row_str = f"  {p.gold}[{LETTERS[i]}]{RESET}  {badge_str} {m_desc:<44} {_pad(reward_str, 10, 'right')}"
+            pad_len = max(0, 77 - _vis_len(row_str))
             out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
 
         out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
@@ -2274,15 +2295,17 @@ def screen_status(p: Palette, world: World) -> None:
     pilot, ship = world.save.pilot, world.save.ship
     out_line()
     rank_name = rank_for(pilot.credits)
-    out_line(f"{p.accent}{BOLD}╭── Pilot Record: {pilot.handle} ── [ Rank: {rank_name} ] ──╮{RESET}")
-    creds_str = f"{pilot.credits:,} cr"
-    out_line(f"{p.accent}│{RESET}  {p.gold}Credits:{RESET} {pilot.credits:,} cr" + " " * max(0, 61 - len(creds_str)) + f"{p.accent}│{RESET}")
+    title_head = f"── Pilot Record: {pilot.handle} ── [ Rank: {rank_name} ] "
+    out_line(f"{p.accent}{BOLD}╭{title_head}{'─' * max(1, 77 - _vis_len(title_head))}╮{RESET}")
+    creds_line = f"  {p.gold}Credits:{RESET} {pilot.credits:,} cr"
+    pad_len = max(0, 77 - _vis_len(creds_line))
+    out_line(f"{p.accent}│{RESET}{creds_line}{' ' * pad_len}{p.accent}│{RESET}")
     for faction in FACTIONS:
         rep = pilot.reputation.get(faction, 0)
         rep_label = "Allied" if rep >= 10 else ("Friendly" if rep >= 4 else ("Hostile" if rep <= -5 else "Neutral"))
         rep_col = p.correct if rep > 0 else (p.wrong if rep < 0 else p.muted)
         f_line = f"  {p.gold}{FACTION_LABEL[faction]} standing:{RESET} {rep_col}{rep:+d} ({rep_label}){RESET}"
-        pad_len = max(0, 75 - _vis_len(f_line))
+        pad_len = max(0, 77 - _vis_len(f_line))
         out_line(f"{p.accent}│{RESET}{f_line}{' ' * pad_len}{p.accent}│{RESET}")
     out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
     ship_line = (
@@ -2291,46 +2314,46 @@ def screen_status(p: Palette, world: World) -> None:
         f"{p.accent}Fuel:{RESET} {_gauge_bar(ship.fuel, fuel_capacity(ship), 6, p)} {ship.fuel}/{fuel_capacity(ship)} │ "
         f"{p.accent}Cargo:{RESET} {cargo_capacity(ship)}"
     )
-    pad_len = max(0, 75 - _vis_len(ship_line))
+    pad_len = max(0, 77 - _vis_len(ship_line))
     out_line(f"{p.accent}│{RESET}{ship_line}{' ' * pad_len}{p.accent}│{RESET}")
 
     crew = [info["label"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
     if crew:
         c_line = f"  {p.gold}Crew:{RESET} {', '.join(crew)}"
-        pad_len = max(0, 75 - _vis_len(c_line))
+        pad_len = max(0, 77 - _vis_len(c_line))
         out_line(f"{p.accent}│{RESET}{c_line}{' ' * pad_len}{p.accent}│{RESET}")
 
     disc_count = sum(1 for s in world.galaxy if s.discovered)
     pct = round((disc_count / len(world.galaxy)) * 100)
     chart_line = f"  {p.gold}Systems charted:{RESET} {disc_count}/{len(world.galaxy)} ({pct}%)   │  {p.gold}Raiders defeated:{RESET} {pilot.kills}"
-    pad_len = max(0, 75 - _vis_len(chart_line))
+    pad_len = max(0, 77 - _vis_len(chart_line))
     out_line(f"{p.accent}│{RESET}{chart_line}{' ' * pad_len}{p.accent}│{RESET}")
 
     m_line = f"  {p.gold}Missions completed:{RESET} {pilot.missions_completed}"
     if pilot.retirements:
         m_line += f"   │  {p.gold}Retirements:{RESET} {pilot.retirements}"
-    pad_len = max(0, 75 - _vis_len(m_line))
+    pad_len = max(0, 77 - _vis_len(m_line))
     out_line(f"{p.accent}│{RESET}{m_line}{' ' * pad_len}{p.accent}│{RESET}")
 
     if pilot.has_concord_commission:
         st_line = f"  {p.gold}Standing:{RESET} Concord Privateer"
-        pad_len = max(0, 75 - _vis_len(st_line))
+        pad_len = max(0, 77 - _vis_len(st_line))
         out_line(f"{p.accent}│{RESET}{st_line}{' ' * pad_len}{p.accent}│{RESET}")
     if pilot.has_blackwake_made:
         bw_line = f"  {p.gold}Standing:{RESET} Made (Blackwake Cartel)"
-        pad_len = max(0, 75 - _vis_len(bw_line))
+        pad_len = max(0, 77 - _vis_len(bw_line))
         out_line(f"{p.accent}│{RESET}{bw_line}{' ' * pad_len}{p.accent}│{RESET}")
 
     event = world.save.active_event
     if event:
         ev_line = f"  {p.gold}Economy event:{RESET} {event['description']} ({event['turns_remaining']} turn(s) left)"
-        pad_len = max(0, 75 - _vis_len(ev_line))
+        pad_len = max(0, 77 - _vis_len(ev_line))
         out_line(f"{p.accent}│{RESET}{ev_line}{' ' * pad_len}{p.accent}│{RESET}")
 
     if world.save.active_missions:
         out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
         head_str = f"  {p.gold}Active Contracts & Missions:{RESET}"
-        pad_len = max(0, 75 - _vis_len(head_str))
+        pad_len = max(0, 77 - _vis_len(head_str))
         out_line(f"{p.accent}│{RESET}{head_str}{' ' * pad_len}{p.accent}│{RESET}")
         for m in world.save.active_missions:
             if m.deadline_turn is not None:
@@ -2338,8 +2361,11 @@ def screen_status(p: Palette, world: World) -> None:
                 time_str = f"{rem} turn(s) left"
             else:
                 time_str = "no deadline"
-            m_str = f"    • {m.description:<40} {time_str:>14}  +{m.reward}cr"
-            pad_len = max(0, 75 - _vis_len(m_str))
+            desc = m.description
+            if _vis_len(desc) > 40:
+                desc = desc[:37] + "..."
+            m_str = f"    • {desc:<40} {time_str:>14}  +{m.reward}cr"
+            pad_len = max(0, 77 - _vis_len(m_str))
             out_line(f"{p.accent}│{RESET}{m_str}{' ' * pad_len}{p.accent}│{RESET}")
 
     out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
@@ -2371,10 +2397,12 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
     out_line()
     out_line(f"{p.accent}{BOLD}╭── Interstellar Pilot Hall of Fame ──────────────────────────────────────────╮{RESET}")
     if not entries:
-        out_line(f"{p.accent}│{RESET}  {p.muted}No pilots recorded yet -- be the first.{RESET}" + " " * 36 + f"{p.accent}│{RESET}")
+        empty_line = f"  {p.muted}No pilots recorded yet -- be the first.{RESET}"
+        out_line(f"{p.accent}│{RESET}{empty_line}{' ' * max(0, 77 - _vis_len(empty_line))}{p.accent}│{RESET}")
         out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
     else:
-        out_line(f"{p.accent}│ {p.gold}RK  PILOT CALLSIGN   RANK TITLE                 CREDITS  KILLS  MISSIONS RET  {p.accent}│{RESET}")
+        header = f" {p.gold}RK  PILOT CALLSIGN   RANK TITLE                 CREDITS  KILLS  MISSIONS RET{RESET}"
+        out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
         out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
         for i, e in enumerate(entries, start=1):
             marker = f"{p.gold}*{RESET}" if e.get("user_id") == user_id else " "
@@ -2382,9 +2410,9 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
             row_str = (
                 f" {marker}{col}{i:>2}.{RESET} {e.get('handle', '?'):<16} "
                 f"{e.get('rank', '?'):<22} {e.get('best_credits', 0):>8,}cr "
-                f"{e.get('kills', 0):>6} {e.get('missions_completed', 0):>9} {e.get('retirements', 0):>4}"
+                f"{e.get('kills', 0):>6} {e.get('missions_completed', 0):>8} {e.get('retirements', 0):>4}"
             )
-            pad_len = max(0, 75 - _vis_len(row_str))
+            pad_len = max(0, 77 - _vis_len(row_str))
             out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
         out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
     pause(p)
@@ -2409,8 +2437,9 @@ def screen_chart(p: Palette, world: World) -> str | None:
     while True:
         here = world.here
         out_line()
-        out_line(f"{p.accent}{BOLD}╭── Navigation Star Chart: {here.name} ──────────────────────────────────────╮{RESET}")
-        out_line(f"{p.accent}│ {p.gold}KEY  BEARING DESTINATION       SECTOR      ECONOMY       DANGER   JUMP COST   {p.accent}│{RESET}")
+        out_line(_box_title(p, f"Navigation Star Chart: {here.name}"))
+        header = f" {p.gold}KEY  BEARING DESTINATION       SECTOR      ECONOMY       DANGER   JUMP COST{RESET}"
+        out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
         out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
         options: list[int] = []
         for sid in sorted(here.connections):
@@ -2427,10 +2456,13 @@ def screen_chart(p: Palette, world: World) -> str | None:
                     f"{p.correct}Safe (0){RESET}" if dest.danger == 0
                     else (f"{p.gold}Danger {dest.danger}{RESET}" if dest.danger == 1 else f"{p.wrong}Danger {dest.danger}{RESET}")
                 )
-                row_str = f"  {p.gold}[{letter}]{RESET}  {dest.name:<24} {sector_for(dest):<11} {dest.economy:<13} {danger_str:<17} {fuel_label}"
+                row_str = f"  {p.gold}[{letter}]{RESET}  {dest.name:<17} {sector_for(dest):<15} {dest.economy:<13} {_pad(danger_str, 9)} {_pad(fuel_label, 12)}"
             else:
-                row_str = f"  {p.gold}[{letter}]{RESET}  {p.muted}??? (Uncharted Bearing)  Unknown     Uncharted     Unknown           {fuel_label}{RESET}"
-            pad_len = max(0, 75 - _vis_len(row_str))
+                row_str = (
+                    f"  {p.gold}[{letter}]{RESET}  {p.muted}??? (Uncharted Bearing)  "
+                    f"Unknown   Uncharted   Unknown   {fuel_label}{RESET}"
+                )
+            pad_len = max(0, 77 - _vis_len(row_str))
             out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
 
         out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
@@ -2498,14 +2530,14 @@ def screen_galaxy_map(p: Palette, world: World) -> None:
         out_line(f"{p.accent}│{RESET}  {p.muted}Nothing charted yet.{RESET}" + " " * 52 + f"{p.accent}│{RESET}")
     for sector in sorted(by_sector):
         sec_str = f"  {p.gold}{BOLD}▼ Sector: {sector}{RESET}"
-        pad_len = max(0, 75 - _vis_len(sec_str))
+        pad_len = max(0, 77 - _vis_len(sec_str))
         out_line(f"{p.accent}│{RESET}{sec_str}{' ' * pad_len}{p.accent}│{RESET}")
         for system in sorted(by_sector[sector], key=lambda s: s.name):
             marker = f"{p.accent}*{RESET}" if system.id == world.save.current_system else " "
             hop = hops.get(system.id)
             hop_label = "here" if hop == 0 else (f"{hop} jump(s)" if hop is not None else "unreachable")
             row_str = f"  {marker} {system.name:<18} {system.economy:<12} danger {system.danger}   {p.muted}{hop_label}{RESET}"
-            pad_len = max(0, 75 - _vis_len(row_str))
+            pad_len = max(0, 77 - _vis_len(row_str))
             out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
     out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
     pause(p)
@@ -3019,8 +3051,10 @@ def screen_customs(p: Palette, world: World) -> None:
     contraband_qty = sum(q for c, q in world.save.cargo.items() if not COMMODITIES[c]["legal"])
     out_line()
     out_line(f"{p.wrong}{BOLD}╭── CONCORD CUSTOMS INSPECTION CHECKPOINT ────────────────────────────────────╮{RESET}")
-    out_line(f"{p.wrong}│{RESET}  {p.wrong}Concord customs hails you for a cargo inspection.{RESET}" + " " * 25 + f"{p.wrong}│{RESET}")
-    out_line(f"{p.wrong}│{RESET}  {p.muted}Scanners detect {contraband_qty} units of unauthorized contraband in your cargo hold.{RESET}  {p.wrong}│{RESET}")
+    hail_line = f"  {p.wrong}Concord customs hails you for a cargo inspection.{RESET}"
+    out_line(f"{p.wrong}│{RESET}{hail_line}{' ' * max(0, 77 - _vis_len(hail_line))}{p.wrong}│{RESET}")
+    scan_line = f"  {p.muted}Scanners detect {contraband_qty} units of unauthorized contraband in your cargo hold.{RESET}"
+    out_line(f"{p.wrong}│{RESET}{scan_line}{' ' * max(0, 77 - _vis_len(scan_line))}{p.wrong}│{RESET}")
     out_line(f"{p.wrong}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
     value = sum(q * COMMODITIES[c]["base"] for c, q in world.save.cargo.items() if not COMMODITIES[c]["legal"])
     out(f"  {p.muted}[S]urrender contraband [B]ribe the inspector: {RESET}")

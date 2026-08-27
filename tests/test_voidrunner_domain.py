@@ -2910,3 +2910,238 @@ def test_retiring_resets_faction_arcs():
 
     assert not new_save.pilot.has_concord_commission
     assert not new_save.pilot.has_blackwake_made
+
+
+# -- box/column alignment (dogfood pass, post-#190 visual overhaul) -------
+#
+# The tactical-HUD box rendering #190 introduced draws every screen as a
+# "|...content...|" box whose outer border (the "|--- ... ---|" separator
+# rows) is always exactly 79 columns wide. Content rows are supposed to
+# right-pad to match that same width, but several screens either hand-
+# typed a header row's spacing without counting it precisely, or let an
+# unbounded piece of text (a mission description, a sector name, an
+# upgrade's effect blurb) run past its column budget -- both silently
+# push that one row's right-hand border past (or short of) where every
+# other row's border sits, breaking the box. These tests pin the fixed
+# cases directly rather than re-deriving the whole checker, since the
+# box style itself (a fixed 79-column border) is what every one of these
+# regressions would otherwise quietly reappear against.
+
+
+def _assert_box_rows_match_border(text: str, label: str) -> None:
+    stripped = [vr._ANSI_RE.sub("", line) for line in text.split("\r\n")]
+    border_widths = {len(l) for l in stripped if l.strip().startswith(("╭", "├", "╰"))}
+    assert len(border_widths) <= 1, f"{label}: inconsistent border widths {border_widths}"
+    if not border_widths:
+        return
+    (border_width,) = border_widths
+    for line in stripped:
+        if line.strip().startswith("│"):
+            assert line.rstrip().endswith("│"), f"{label}: right border missing: {line!r}"
+            assert len(line) == border_width, (
+                f"{label}: content row width {len(line)} != border width {border_width}: {line!r}"
+            )
+
+
+def test_screen_status_truncates_long_mission_descriptions_to_fit_the_box(monkeypatch):
+    world = _world_with_seed(300)
+    world.save.pilot.credits = 15_000
+    world.save.active_missions = [
+        vr.Mission(id=1, kind="escort",
+                   description="Escort a supply convoy to Perrin's Folly (4 jump(s), raider activity expected)",
+                   reward=900, origin_system=0, target_system=5, pirate_tier=3, deadline_turn=40),
+    ]
+    monkeypatch.setattr(vr, "read_key", lambda: "X")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_status(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_status")
+
+
+def test_screen_status_credits_line_matches_box_border(monkeypatch):
+    world = _world_with_seed(301)
+    world.save.pilot.credits = 1_234_567
+    monkeypatch.setattr(vr, "read_key", lambda: "X")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_status(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_status")
+
+
+def test_screen_shipyard_rows_fit_the_box_at_every_tier(monkeypatch):
+    world = _world_with_seed(302)
+    world.save.pilot.credits = 100_000
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_shipyard(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_shipyard@tier0")
+
+    for key in vr.UPGRADES:
+        setattr(world.save.ship, f"{key}_tier", vr.UPGRADES[key]["max_tier"])
+    buf2 = io.StringIO()
+    with contextlib.redirect_stdout(buf2):
+        vr.screen_shipyard(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf2.getvalue(), "screen_shipyard@maxed")
+
+
+def test_screen_market_contraband_row_fits_the_box(monkeypatch):
+    world = _world_with_seed(303)
+    world.save.pilot.credits = 50_000
+    haven = next(s for s in world.galaxy if s.economy == "Haven")
+    world.save.current_system = haven.id
+    haven.discovered = True
+    world.save.cargo = {"weapons": 5, "narcotics": 3}
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_market(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_market@Haven")
+
+
+def test_screen_station_menu_special_ops_rows_fit_the_box(monkeypatch):
+    world = _world_with_seed(304)
+    world.save.current_system = world.landmark["system_id"]
+    world.by_id[world.save.current_system].discovered = True
+    world.save.cargo = {"weapons": 2}
+    world.save.pilot.reputation[vr.FACTION_CONCORD] = vr.CONCORD_COMMISSION_THRESHOLD
+    world.save.pilot.reputation[vr.FACTION_BLACKWAKE] = vr.BLACKWAKE_MADE_THRESHOLD
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_station_menu(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_station_menu@all-special-ops")
+
+
+def test_screen_chart_rows_fit_the_box_for_every_sector_name(monkeypatch):
+    # Every one of the six named sectors (SECTOR_NAMES) is at least 12
+    # characters -- longer than the chart row's own sector column used to
+    # budget for -- so any discovered system, in any sector, is enough to
+    # exercise the fix; picking the highest-degree system just maximizes
+    # how many rows get checked in one pass.
+    world = _world_with_seed(305)
+    best = max(world.galaxy, key=lambda s: len(s.connections))
+    world.save.current_system = best.id
+    best.discovered = True
+    for nid in best.connections:
+        world.by_id[nid].discovered = True
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_chart(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_chart")
+
+
+def test_screen_chart_uncharted_bearing_row_fits_the_box(monkeypatch):
+    world = _world_with_seed(306)
+    best = max(world.galaxy, key=lambda s: len(s.connections))
+    world.save.current_system = best.id
+    best.discovered = True
+    # Leave every neighbor undiscovered to force the "??? (Uncharted
+    # Bearing)" placeholder row instead of a real destination row.
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_chart(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_chart@uncharted")
+
+
+def test_screen_hall_of_fame_rows_fit_the_box_at_max_field_widths(monkeypatch):
+    world = _world_with_seed(307)
+    import json
+    import tempfile
+    from pathlib import Path
+
+    entries = [{
+        "user_id": 1, "handle": "SixteenCharHandl", "best_credits": 999_999,
+        "rank": vr.RANKS[-1][1], "retirements": 3, "kills": 120, "missions_completed": 88,
+    }]
+    save_dir = Path(tempfile.mkdtemp())
+    (save_dir / "leaderboard.json").write_text(json.dumps(entries), encoding="utf-8")
+    monkeypatch.setattr(vr, "read_key", lambda: "X")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_hall_of_fame(vr.Palette(truecolor=False), world, save_dir, 1)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_hall_of_fame")
+
+
+def test_screen_customs_rows_fit_the_box_for_a_large_contraband_stash(monkeypatch):
+    world = _world_with_seed(308)
+    world.save.cargo = {"weapons": 20, "narcotics": 15}
+    world.save.pilot.credits = 50_000
+    monkeypatch.setattr(vr, "read_key", lambda: "S")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_customs(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_customs")
+
+
+# The box-border checks above only pin the *right edge* of each row -- they
+# can't catch a column that starts or ends in a different place from row to
+# row, because a naive `f"{ansi_colored_value:<N}"` format spec counts the
+# invisible escape bytes as part of N. Since every colored value in this
+# module (`_gauge_bar`'s output, the market/chart/shipyard status strings)
+# happens to share the same fixed-length ANSI overhead across rows, the
+# resulting under-padding is *constant* and the box border still lands in
+# the right place -- but the column itself silently drifts out of alignment
+# with its neighbors. These tests pin the actual column position of the
+# text immediately after each fixed-width colored field.
+
+
+def test_screen_shipyard_effect_column_aligns_between_tiered_and_maxed_rows(monkeypatch):
+    world = _world_with_seed(309)
+    world.save.pilot.credits = 100_000
+    for key in vr.UPGRADES:
+        setattr(world.save.ship, f"{key}_tier", 0)
+    world.save.ship.engine_tier = vr.UPGRADES["engine"]["max_tier"]
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_shipyard(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_shipyard@mixed-tiers")
+    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n")]
+    effect_columns = {line.index("(") for line in stripped if "Tier" in line or "MAXED" in line}
+    assert len(effect_columns) == 1, f"effect column drifted between rows: {effect_columns}"
+
+
+def test_screen_missions_reward_column_aligns_across_reward_digit_widths(monkeypatch):
+    world = _world_with_seed(310)
+    world.save.pilot.credits = 5_000
+    monkeypatch.setattr(
+        vr, "generate_mission_board",
+        lambda world: [
+            vr.Mission(id=1, kind="bounty", description="Short", reward=5,
+                       origin_system=0, target_system=1, pirate_tier=1, deadline_turn=None),
+            vr.Mission(id=2, kind="cargo", description="Also short", reward=123_456,
+                       origin_system=0, target_system=2, pirate_tier=0, deadline_turn=None),
+        ],
+    )
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_missions(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_missions@mixed-rewards")
+    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n")]
+    reward_ends = {line.index("cr") for line in stripped if "cr" in line and "[" in line}
+    assert len(reward_ends) == 1, f"reward column drifted between rows: {reward_ends}"
+
+
+def test_screen_chart_danger_and_fuel_columns_align_between_safe_and_danger_rows(monkeypatch):
+    world = _world_with_seed(311)
+    here = world.here
+    # Force at least one safe (danger 0) and one dangerous connected system
+    # so both branches of `danger_str` render in the same screen.
+    assert len(here.connections) >= 2, "seed 311's start system needs 2+ connections for this test"
+    safe_id, danger_id = here.connections[0], here.connections[1]
+    world.by_id[safe_id].danger = 0
+    world.by_id[danger_id].danger = 3
+    for sid in (safe_id, danger_id):
+        world.by_id[sid].discovered = True
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_chart(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_chart@safe-and-danger")
+    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n")]
+    fuel_columns = {line.index("fuel") for line in stripped if "fuel" in line and "[" in line}
+    assert len(fuel_columns) == 1, f"fuel-cost column drifted between rows: {fuel_columns}"
