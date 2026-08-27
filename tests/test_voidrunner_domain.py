@@ -1111,3 +1111,97 @@ def test_bfs_hops_on_a_small_synthetic_graph():
     }
     hops = vr.bfs_hops(by_id, 0)
     assert hops == {0: 0, 1: 1, 2: 1, 3: 2}
+
+
+# -- retirement / New Game+ ------------------------------------------------
+
+
+def test_retire_pilot_increments_retirements_and_grants_cumulative_bonus():
+    old_save = vr._new_career("Vet")
+    old_save.pilot.retirements = 2
+    old_save.pilot.credits = 300_000
+
+    new_save = vr.retire_pilot(old_save)
+
+    assert new_save.pilot.retirements == 3
+    assert new_save.pilot.credits == 1200 + 3 * vr.RETIREMENT_STARTING_CREDITS_BONUS
+
+
+def test_retire_pilot_resets_career_progress_and_keeps_handle():
+    old_save = vr._new_career("Vet")
+    old_save.pilot.handle = "Vet"
+    old_save.pilot.credits = 300_000
+    old_save.pilot.kills = 40
+    old_save.pilot.missions_completed = 12
+    old_save.pilot.notoriety = 9
+    old_save.pilot.reputation["pirates"] = 5
+    old_save.pilot.log.append("did something memorable")
+    old_save.discovered = [0, 1, 2, 3]
+
+    new_save = vr.retire_pilot(old_save)
+
+    assert new_save.pilot.handle == "Vet"
+    assert new_save.pilot.kills == 0
+    assert new_save.pilot.missions_completed == 0
+    assert new_save.pilot.notoriety == 0
+    assert all(v == 0 for v in new_save.pilot.reputation.values())
+    assert new_save.discovered == [0]
+    assert any("Retired" in entry for entry in new_save.pilot.log)
+
+
+def test_retire_pilot_rerolls_the_galaxy_seed():
+    old_save = vr._new_career("Vet")
+    original_seed = old_save.seed
+
+    new_save = vr.retire_pilot(old_save)
+
+    assert new_save.seed != original_seed
+
+
+def test_pilot_from_dict_defaults_retirements_to_zero_for_old_saves():
+    d = vr._new_career("Legacy").pilot.to_dict()
+    del d["retirements"]
+
+    pilot = vr.Pilot.from_dict(d)
+
+    assert pilot.retirements == 0
+
+
+def test_screen_status_offers_retirement_only_at_top_rank(monkeypatch):
+    world = _world_with_seed(95)
+    world.save.pilot.credits = 100  # far below top rank
+
+    monkeypatch.setattr(vr, "read_key", lambda: (_ for _ in ()).throw(AssertionError("should not prompt")))
+    monkeypatch.setattr(vr, "pause", lambda p, msg="Press any key to continue...": None)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_status(vr.Palette(truecolor=False), world)
+
+
+def test_screen_status_retires_on_confirmation_at_top_rank(monkeypatch):
+    world = _world_with_seed(96)
+    world.save.pilot.credits = vr.RANKS[-1][0]
+    old_seed = world.save.seed
+
+    keys = iter(["R", "Y"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_status(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.retirements == 1
+    assert world.save.seed != old_seed
+
+
+def test_screen_status_declines_retirement_without_committing(monkeypatch):
+    world = _world_with_seed(97)
+    world.save.pilot.credits = vr.RANKS[-1][0]
+    old_seed = world.save.seed
+
+    keys = iter(["R", "N"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_status(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.retirements == 0
+    assert world.save.seed == old_seed

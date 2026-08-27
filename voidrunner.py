@@ -404,6 +404,12 @@ class Pilot:
     # Additive field, safe default for every pre-existing save via
     # from_dict's own .get() below -- no SCHEMA_VERSION bump needed.
     notoriety: int = 0
+    # How many times this pilot has retired (New Game+, see
+    # retire_pilot) -- the one field a retirement carries forward into
+    # the otherwise brand-new career that replaces it. Additive field,
+    # safe default for every pre-existing save via from_dict's own
+    # .get() below -- no SCHEMA_VERSION bump needed.
+    retirements: int = 0
 
     def note(self, msg: str) -> None:
         self.log.append(msg)
@@ -418,7 +424,7 @@ class Pilot:
             handle=d["handle"], credits=d["credits"], reputation=dict(d["reputation"]),
             missions_completed=d.get("missions_completed", 0), kills=d.get("kills", 0),
             career_started=d.get("career_started", ""), log=list(d.get("log", [])),
-            notoriety=d.get("notoriety", 0),
+            notoriety=d.get("notoriety", 0), retirements=d.get("retirements", 0),
         )
 
 
@@ -531,6 +537,17 @@ class World:
     see this module's own docstring for why that boundary matters."""
 
     def __init__(self, save: SaveData):
+        self.reset(save)
+
+    def reset(self, save: SaveData) -> None:
+        """Re-derives every galaxy-shaped attribute from `save` in
+        place -- the same work `__init__` itself does (and now
+        delegates to), factored out so `retire_pilot`'s own New Game+
+        reset can reuse it exactly rather than duplicating "how to
+        rebuild a World from a SaveData" a second time. Never disturbs
+        an existing `World` object's identity, only its contents -- a
+        retiring pilot's `world` variable stays the same object, just
+        pointed at a fresh galaxy/save underneath."""
         self.save = save
         self.galaxy: list[GalaxySystem] = generate_galaxy(save.seed)
         self.by_id: dict[int, GalaxySystem] = {s.id: s for s in self.galaxy}
@@ -1038,6 +1055,33 @@ def _new_career(handle: str) -> SaveData:
     )
 
 
+# New Game+ credit head start, per retirement, cumulative -- modest
+# relative to the 250,000cr top-rank threshold that unlocks retirement
+# in the first place, so it's a nice edge on the next run rather than a
+# shortcut that trivializes it.
+RETIREMENT_STARTING_CREDITS_BONUS = 500
+
+
+def retire_pilot(old_save: SaveData) -> SaveData:
+    """New Game+, available once a pilot reaches the top rank
+    (`RANKS`'s own last entry -- see `screen_status`'s own eligibility
+    check). Reuses `_new_career` almost entirely -- a genuinely fresh
+    run: new seed (a different galaxy to explore, not the same map
+    memorized), fresh ship/credits/reputation/notoriety/kills/missions,
+    an empty log. Deliberately not a "New Game+ carries most things
+    forward" design -- `retirements` (incremented) and its own small,
+    cumulative starting-credit bonus are the *only* things that survive
+    the reset, the "legacy" this feature is actually about; everything
+    else restarting is what makes it a real new run rather than the same
+    character continuing under a different name."""
+    retirements = old_save.pilot.retirements + 1
+    new_save = _new_career(old_save.pilot.handle)
+    new_save.pilot.retirements = retirements
+    new_save.pilot.credits += retirements * RETIREMENT_STARTING_CREDITS_BONUS
+    new_save.pilot.note(f"Retired as a {RANKS[-1][1]} (retirement #{retirements}) -- a new career begins.")
+    return new_save
+
+
 def load_or_create_save(save_dir: Path, user_id: int, handle: str) -> tuple[SaveData, bool, str | None]:
     """Returns (save, is_new_career, notice). `notice`, if not None, is a
     message the UI should show the player once (e.g. a corrupt save was
@@ -1398,10 +1442,22 @@ def screen_status(p: Palette, world: World) -> None:
     out_line(f"  {p.gold}Systems charted:{RESET} {sum(1 for s in world.galaxy if s.discovered)}/{len(world.galaxy)}")
     out_line(f"  {p.gold}Missions completed:{RESET} {pilot.missions_completed}   "
               f"{p.gold}Raiders defeated:{RESET} {pilot.kills}")
+    if pilot.retirements:
+        out_line(f"  {p.gold}Retirements:{RESET} {pilot.retirements}")
     if pilot.log:
         out_line(f"{p.muted}Recent log:{RESET}")
         for entry in pilot.log[-8:]:
             out_line(f"  {p.muted}- {entry}{RESET}")
+    if rank_for(pilot.credits) == RANKS[-1][1]:
+        out(f"{p.muted}[R]etire and start a new career, or any other key to continue... {RESET}")
+        key = read_key().upper()
+        out_line(key)
+        if key == "R":
+            if confirm("This ends your current career for good and begins a new one. Retire?", p):
+                world.reset(retire_pilot(world.save))
+                out_line()
+                out_line(f"{p.accent}{BOLD}A new career begins.{RESET}")
+        return
     pause(p)
 
 
