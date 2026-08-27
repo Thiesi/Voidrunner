@@ -557,6 +557,155 @@ def test_destroy_ship_clears_cargo_and_returns_player_to_freeport_with_full_hull
     assert world.save.pilot.credits < 1200  # salvage fee charged
 
 
+# -- travel encounter variety -------------------------------------------
+
+
+def test_no_encounter_when_the_overall_roll_fails():
+    world = _world_with_seed(50)
+    dest = world.by_id[world.here.connections[0]]
+    world.event_rng.random = lambda: 1.0  # always above every danger threshold
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr._resolve_random_travel_encounter(vr.Palette(truecolor=False), world, dest)
+
+    assert buf.getvalue() == ""
+
+
+def test_encounter_dispatches_to_pirate_kind(monkeypatch):
+    world = _world_with_seed(51)
+    dest = world.by_id[world.here.connections[0]]
+    world.event_rng.random = lambda: 0.0  # always triggers an encounter
+    world.event_rng.choices = lambda population, weights: ["pirate"]
+    calls = []
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: calls.append(pirate) or "escaped")
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._resolve_random_travel_encounter(vr.Palette(truecolor=False), world, dest)
+
+    assert len(calls) == 1
+
+
+def test_encounter_dispatches_to_each_new_kind(monkeypatch):
+    world = _world_with_seed(52)
+    dest = world.by_id[world.here.connections[0]]
+    world.event_rng.random = lambda: 0.0
+
+    for kind, target in (
+        ("derelict", "_encounter_derelict"),
+        ("distress", "_encounter_distress_call"),
+    ):
+        calls = []
+        monkeypatch.setattr(vr, target, lambda p, w, _calls=calls: _calls.append(1))
+        world.event_rng.choices = lambda population, weights, _kind=kind: [_kind]
+        with contextlib.redirect_stdout(io.StringIO()):
+            vr._resolve_random_travel_encounter(vr.Palette(truecolor=False), world, dest)
+        assert calls == [1], f"{kind} did not dispatch to {target}"
+        monkeypatch.undo()
+
+
+def test_derelict_ignore_leaves_world_unchanged():
+    world = _world_with_seed(53)
+    before_credits = world.save.pilot.credits
+    vr.read_key = lambda: "I"
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._encounter_derelict(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.credits == before_credits
+
+
+def test_derelict_board_success_grants_credits_and_logs():
+    world = _world_with_seed(54)
+    before_credits = world.save.pilot.credits
+    before_log_len = len(world.save.pilot.log)
+    vr.read_key = lambda: "B"
+    world.event_rng.random = lambda: 0.0  # always the salvage-success branch
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._encounter_derelict(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.credits > before_credits
+    assert len(world.save.pilot.log) == before_log_len + 1
+
+
+def test_derelict_board_trap_triggers_combat(monkeypatch):
+    world = _world_with_seed(55)
+    vr.read_key = lambda: "B"
+    world.event_rng.random = lambda: 0.99  # always the trap branch
+
+    calls = []
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: calls.append(pirate) or "escaped")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._encounter_derelict(vr.Palette(truecolor=False), world)
+
+    assert len(calls) == 1
+
+
+def test_distress_ignore_leaves_world_unchanged():
+    world = _world_with_seed(56)
+    before_credits = world.save.pilot.credits
+    before_fuel = world.save.ship.fuel
+    vr.read_key = lambda: "I"
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._encounter_distress_call(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.credits == before_credits
+    assert world.save.ship.fuel == before_fuel
+
+
+def test_distress_help_costs_fuel_grants_credits_and_reputation():
+    world = _world_with_seed(57)
+    before_credits = world.save.pilot.credits
+    before_fuel = world.save.ship.fuel
+    before_rep = world.save.pilot.reputation[vr.FACTION_CONCORD]
+    vr.read_key = lambda: "H"
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._encounter_distress_call(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.credits > before_credits
+    assert world.save.ship.fuel < before_fuel
+    assert world.save.pilot.reputation[vr.FACTION_CONCORD] > before_rep
+
+
+def test_distress_help_never_costs_more_fuel_than_available():
+    world = _world_with_seed(58)
+    world.save.ship.fuel = 1
+    vr.read_key = lambda: "H"
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._encounter_distress_call(vr.Palette(truecolor=False), world)
+
+    assert world.save.ship.fuel == 0
+
+
+def test_market_tip_reveals_a_real_price_at_a_nearby_discovered_system():
+    world = _world_with_seed(59)
+    dest = world.by_id[world.here.connections[0]]
+    dest.discovered = True
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr._encounter_market_tip(vr.Palette(truecolor=False), world, dest)
+
+    assert "going for" in buf.getvalue()
+
+
+def test_market_tip_with_no_discovered_neighbors_shows_fallback_without_crashing():
+    world = _world_with_seed(60)
+    dest = world.by_id[world.here.connections[0]]
+    for system in world.galaxy:
+        system.discovered = system.id == dest.id  # only dest itself, nothing "nearby"
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr._encounter_market_tip(vr.Palette(truecolor=False), world, dest)
+
+    assert "nothing usable" in buf.getvalue()
+
+
 # -- stranded-pilot rescue --------------------------------------------
 
 

@@ -337,6 +337,14 @@ PIRATE_NAMES = [
     "Static Ghost", "Void Jackal", "Cinder Raider", "Nullshade", "Ravage",
 ]
 
+# What kind of random travel encounter fires, once the overall "does
+# anything happen at all" roll already succeeds (screen_travel's own
+# 0.08 + danger*0.05 chance, unchanged) -- diversifying travel without
+# changing how *often* something happens. Pirate stays the dominant
+# outcome on purpose, matching the difficulty this chance was originally
+# tuned around; derelict/distress/tip share the remainder roughly evenly.
+TRAVEL_ENCOUNTER_WEIGHTS: dict[str, int] = {"pirate": 55, "derelict": 15, "distress": 15, "tip": 15}
+
 
 # ---------------------------------------------------------------------------
 # Domain model
@@ -1368,6 +1376,95 @@ def _do_scan(p: Palette, world: World) -> None:
         out_line(f"{p.gold}{msg}{RESET}")
 
 
+def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySystem) -> None:
+    """Only reached when no bounty target is waiting at `dest`
+    (`screen_travel`'s own bounty branch takes unconditional priority
+    and never calls this). Rolls once for whether anything happens at
+    all -- the same `0.08 + danger*0.05` chance that used to gate a
+    single pirate check directly, unchanged, so overall encounter
+    frequency/difficulty is unaffected -- then, only if so, rolls a
+    second time for *what kind*, via `TRAVEL_ENCOUNTER_WEIGHTS`. This is
+    what actually diversifies travel, not a higher overall chance of
+    something happening."""
+    if world.event_rng.random() >= 0.08 + dest.danger * 0.05:
+        return
+    kind = world.event_rng.choices(
+        list(TRAVEL_ENCOUNTER_WEIGHTS), weights=list(TRAVEL_ENCOUNTER_WEIGHTS.values())
+    )[0]
+    if kind == "pirate":
+        pirate = generate_pirate(world)
+        out_line(f"{p.wrong}Raider contact: the {pirate.name}!{RESET}")
+        screen_combat(p, world, pirate)
+    elif kind == "derelict":
+        _encounter_derelict(p, world)
+    elif kind == "distress":
+        _encounter_distress_call(p, world)
+    elif kind == "tip":
+        _encounter_market_tip(p, world, dest)
+
+
+def _encounter_derelict(p: Palette, world: World) -> None:
+    """A passive salvage opportunity, not a fight -- boarding is a real
+    risk/reward choice (a genuine haul most of the time, a hidden
+    ambush occasionally); declining is free, matching every other
+    optional-encounter convention already in this file (bribe, evade)
+    where the safe choice alone is never punished."""
+    out_line(f"{p.muted}Sensors pick up a derelict hulk drifting nearby.{RESET}")
+    out(f"{p.muted}[B]oard for salvage or [I]gnore and continue? {RESET}")
+    action = read_key().upper()
+    out_line(action)
+    if action != "B":
+        return
+    if world.event_rng.random() < 0.70:
+        reward = world.event_rng.randint(80, 60 + world.here.danger * 120)
+        world.save.pilot.credits += reward
+        world.save.pilot.note(f"Salvaged a derelict hulk (+{reward}cr).")
+        out_line(f"{p.correct}Salvage recovered: {reward}cr.{RESET}")
+    else:
+        out_line(f"{p.wrong}The wreck's defenses weren't as dead as they looked!{RESET}")
+        pirate = generate_pirate(world)
+        screen_combat(p, world, pirate)
+
+
+def _encounter_distress_call(p: Palette, world: World) -> None:
+    """Helping costs a few fuel units (diverting off the direct route)
+    for a credit reward and Concord standing; ignoring is free, same
+    "declining costs nothing" convention as `_encounter_derelict`."""
+    out_line(f"{p.muted}A garbled distress signal reaches your comms.{RESET}")
+    out(f"{p.muted}[H]elp (costs fuel) or [I]gnore and continue? {RESET}")
+    action = read_key().upper()
+    out_line(action)
+    if action != "H":
+        return
+    fuel_cost = min(world.save.ship.fuel, world.event_rng.randint(2, 4))
+    world.save.ship.fuel -= fuel_cost
+    reward = world.event_rng.randint(60, 180)
+    world.save.pilot.credits += reward
+    adjust_reputation(world, FACTION_CONCORD, 3)
+    world.save.pilot.note(f"Answered a distress call (+{reward}cr, Concord standing up).")
+    out_line(f"{p.correct}You divert to help -- {fuel_cost} fuel spent. Grateful survivors "
+              f"pay {reward}cr, and Concord takes note.{RESET}")
+
+
+def _encounter_market_tip(p: Palette, world: World, dest: GalaxySystem) -> None:
+    """Pure flavor/utility -- reveals a real, already-computed price
+    (`price_for`) at a nearby, already-discovered system. No new state,
+    no choice to make, and no `random.Random` calls that could affect
+    anything but which system/commodity the tip names."""
+    hops = bfs_hops(world.by_id, dest.id)
+    candidates = [sid for sid, h in hops.items() if 1 <= h <= 4 and world.by_id[sid].discovered]
+    if not candidates:
+        out_line(f"{p.muted}You intercept a garbled data burst -- nothing usable in it.{RESET}")
+        return
+    sid = world.event_rng.choice(candidates)
+    system = world.by_id[sid]
+    commodity = world.event_rng.choice(list(COMMODITIES))
+    price = price_for(world, sid, commodity)
+    label = COMMODITIES[commodity]["label"]
+    out_line(f"{p.muted}You intercept a trader's data burst: "
+              f"{label} is going for {price}cr at {system.name}.{RESET}")
+
+
 def screen_travel(p: Palette, world: World, dest_id: int) -> None:
     origin = world.here
     dest = world.by_id[dest_id]
@@ -1399,10 +1496,8 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
             out_line(f"{p.wrong}Bounty failed -- the {pirate.name} was too much this time.{RESET}")
         # outcome == "escaped": left active on purpose -- a deliberate
         # retreat to come back stronger later isn't a failure.
-    elif world.event_rng.random() < 0.08 + dest.danger * 0.05:
-        pirate = generate_pirate(world)
-        out_line(f"{p.wrong}Raider contact: the {pirate.name}!{RESET}")
-        screen_combat(p, world, pirate)
+    else:
+        _resolve_random_travel_encounter(p, world, dest)
 
     was_discovered = dest.discovered
     dest.discovered = True
