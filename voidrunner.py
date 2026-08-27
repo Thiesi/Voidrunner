@@ -647,6 +647,14 @@ class World:
                 self.by_id[sid].discovered = True
         self.landmark: dict = generate_landmark(save.seed, self.galaxy)
         self.event_rng = random.Random()
+        # Transient, per-hop signal -- never persisted, reset at the top
+        # of every screen_travel call. Set by destroy_ship so that
+        # function's own many nested call sites (bounty combat, squadron
+        # fights, a derelict's hidden ambush, escort waves, a Concord
+        # Patrol fight) don't each need their own plumbing back to the
+        # travel loop just to answer "did the ship get destroyed and
+        # towed home mid-transit" -- see screen_travel's own use of it.
+        self.ship_destroyed_this_hop = False
 
     @property
     def here(self) -> GalaxySystem:
@@ -1329,6 +1337,7 @@ def destroy_ship(world: World) -> str:
     world.save.ship.hull_hp = hull_hp_max(world.save.ship)
     world.save.current_system = 0
     world.save.pilot.notoriety = 0
+    world.ship_destroyed_this_hop = True
     world.save.pilot.note("Ship destroyed -- salvage tug towed you back to Freeport.")
     return (f"Your ship is destroyed! {lost_cargo} units of cargo lost, "
             f"a {penalty}cr salvage fee charged. You wake up at Freeport Anchorage.")
@@ -2513,6 +2522,12 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
                 out_line(f"{p.wrong}You disengage -- the convoy is left defenseless. Escort contract failed.{RESET}")
             else:
                 out_line(f"{p.wrong}Escort contract failed -- the convoy was lost.{RESET}")
+            if world.ship_destroyed_this_hop:
+                # A second (or third) escort contract's own wave must
+                # not also fire against a pilot who was just destroyed
+                # and towed back to Freeport by *this* mission's fight --
+                # they're no longer actually en route to anywhere.
+                break
 
 
 def screen_travel(p: Palette, world: World, dest_id: int) -> None:
@@ -2521,6 +2536,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
     cost = fuel_cost_for_jump(origin, dest, world.save.ship)
     world.save.ship.fuel -= cost
     world.save.turn += 1
+    world.ship_destroyed_this_hop = False
     # "Jumping to..." prints before any of this turn's other news --
     # otherwise the player sees economy/crew/futures narration for a
     # trip they haven't been told they're taking yet.
@@ -2539,14 +2555,18 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
     # inline in this same function) as much as delivery/scan (resolved
     # afterward via check_mission_completions) -- reads consistently as
     # "you arrived, then this happened," not sometimes before and
-    # sometimes after the arrival announcement. Deliberately does *not*
-    # also move the actual `dest.discovered`/`current_system` state
-    # mutation earlier -- `generate_pirate`'s own tier logic reads
-    # `world.here.danger` (the *origin* system, unrelated and
-    # intentional, see generate_pirate_squadron's own docstring), which
-    # would silently start using the destination's danger instead if
-    # `current_system` flipped over before the encounter below runs.
+    # sometimes after the arrival announcement. `dest.discovered` is set
+    # right here too (charting a system's coordinates is the nav
+    # computer's job the moment you're close enough for something there
+    # to intercept you, independent of whether you then survive to
+    # actually dock) -- but deliberately *not* `current_system` itself:
+    # `generate_pirate`'s own tier logic reads `world.here.danger` (the
+    # *origin* system, unrelated and intentional, see
+    # generate_pirate_squadron's own docstring), which would silently
+    # start using the destination's danger instead if `current_system`
+    # flipped over before the encounter below runs.
     was_discovered = dest.discovered
+    dest.discovered = True
     if not was_discovered:
         out_line(f"{p.gold}New system charted: {dest.name}.{RESET}")
 
@@ -2600,20 +2620,37 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
     else:
         _resolve_random_travel_encounter(p, world, dest)
 
-    _resolve_escort_missions(p, world, dest_id)
+    # Skipped once the bounty/patrol/random-encounter branch above has
+    # already destroyed the ship -- otherwise a second, unrelated
+    # combat (an escort wave) would fire in the very same hop against a
+    # pilot who was just blown up and towed back to Freeport, as if
+    # they were still en route to dest_id.
+    if not world.ship_destroyed_this_hop:
+        _resolve_escort_missions(p, world, dest_id)
 
-    dest.discovered = True
-    world.save.current_system = dest_id
-    world.sync_discovered()
-    for msg in check_mission_completions(world, just_discovered=None if was_discovered else dest_id):
-        out_line(f"{p.gold}{msg}{RESET}")
+    # A mid-hop ship loss already relocated the pilot to Freeport
+    # (destroy_ship's own tow-home, flagged via ship_destroyed_this_hop
+    # since none of the four call paths that can trigger it -- bounty
+    # combat, a squadron fight, a derelict's hidden ambush, a Concord
+    # Patrol -- otherwise surface that fact back up to this loop). Every
+    # effect below requires *actually being at* dest_id -- completing a
+    # delivery, a customs inspection -- so all of it is skipped rather
+    # than silently overwriting destroy_ship's own current_system with
+    # the very system the pilot was just towed away from, contradicting
+    # its own "you wake up at Freeport Anchorage" narration.
+    world.sync_discovered()  # unconditional -- dest.discovered was already set above regardless
+    if not world.ship_destroyed_this_hop:
+        world.save.current_system = dest_id
+        for msg in check_mission_completions(world, just_discovered=None if was_discovered else dest_id):
+            out_line(f"{p.gold}{msg}{RESET}")
 
-    if world.save.cargo and any(not COMMODITIES[c]["legal"] for c in world.save.cargo) and dest.economy != "Haven":
-        chance = customs_check_chance(dest)
-        if world.save.pilot.has_blackwake_made:
-            chance *= (1 - BLACKWAKE_MADE_CUSTOMS_REDUCTION)
-        if world.event_rng.random() < chance:
-            screen_customs(p, world)
+        if (world.save.cargo and any(not COMMODITIES[c]["legal"] for c in world.save.cargo)
+                and dest.economy != "Haven"):
+            chance = customs_check_chance(dest)
+            if world.save.pilot.has_blackwake_made:
+                chance *= (1 - BLACKWAKE_MADE_CUSTOMS_REDUCTION)
+            if world.event_rng.random() < chance:
+                screen_customs(p, world)
     out_line()
 
 

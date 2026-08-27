@@ -444,6 +444,105 @@ def test_losing_a_bounty_fight_clears_it_instead_of_leaving_a_permanent_ambush(m
     assert any("Bounty failed" in entry for entry in world.save.pilot.log)
 
 
+def _travel_with_real_destruction(monkeypatch, world, dest_id: int) -> None:
+    """Unlike `_travel_with_stubbed_combat`, this actually calls the
+    real `destroy_ship` (setting `current_system`/`ship_destroyed_this_hop`
+    exactly as a genuine combat loss would) rather than only faking the
+    string `screen_combat` returns -- needed for regression tests of the
+    "don't relocate to a destination the pilot never actually reached"
+    fix below, which depends on those real side effects."""
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: (vr.destroy_ship(w), "destroyed")[1])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
+
+
+def test_bounty_loss_does_not_relocate_to_the_unreached_destination(monkeypatch):
+    """Regression guard for a real dogfood-caught bug: destroy_ship's
+    own tow-home sets current_system to Freeport, but screen_travel's
+    own unconditional arrival bookkeeping used to immediately overwrite
+    that back to dest_id -- silently contradicting destroy_ship's own
+    "you wake up at Freeport Anchorage" narration."""
+    world = _world_with_seed(191)
+    dest_id = world.here.connections[0]
+    _accept_bounty(world, target_system=dest_id)
+
+    _travel_with_real_destruction(monkeypatch, world, dest_id)
+
+    assert world.save.current_system == 0
+
+
+def test_destroyed_mid_hop_skips_customs_and_delivery_completion(monkeypatch):
+    """A pilot towed home mid-transit was never actually *at* dest_id --
+    a delivery mission targeting it must not complete, and a customs
+    check (which only makes sense while actually docked somewhere)
+    must not fire either."""
+    world = _world_with_seed(192)
+    dest_id = world.here.connections[0]
+    _accept_bounty(world, target_system=dest_id)
+    world.save.cargo[vr.CONTRABAND_COMMODITIES[0]] = 3
+    world.by_id[dest_id].economy = "Industrial"  # not Haven, so contraband would normally risk a customs check
+    world.event_rng.random = lambda: 0.0  # would force a customs check if reached
+
+    _travel_with_real_destruction(monkeypatch, world, dest_id)
+
+    assert vr.CONTRABAND_COMMODITIES[0] not in world.save.cargo  # destroy_ship cleared cargo, not customs
+
+
+def test_dest_is_still_charted_even_when_the_ship_is_destroyed_en_route(monkeypatch):
+    """Deliberately the opposite of the current_system fix above --
+    charting a system's coordinates is treated as happening the moment
+    something there is close enough to intercept the pilot, independent
+    of whether they then survive to actually dock."""
+    world = _world_with_seed(193)
+    dest_id = world.here.connections[0]
+    world.by_id[dest_id].discovered = False
+    _accept_bounty(world, target_system=dest_id)
+
+    _travel_with_real_destruction(monkeypatch, world, dest_id)
+
+    assert world.by_id[dest_id].discovered is True
+
+
+def test_second_escort_mission_wave_does_not_fire_after_the_first_ones_destroys_the_ship(monkeypatch):
+    """Regression guard for the same class of bug as the bounty fix
+    above, inside _resolve_escort_missions' own loop over multiple
+    active escort contracts: a mid-loop destruction must not let a
+    second contract's own wave fight a pilot who was just towed home."""
+    world = _world_with_seed(194)
+    dest_id = world.here.connections[0]
+    m1 = vr.Mission(id=10, kind="escort", description="first convoy", reward=100,
+                     origin_system=0, target_system=dest_id, pirate_tier=1,
+                     deadline_turn=world.save.turn + 50)
+    m2 = vr.Mission(id=11, kind="escort", description="second convoy", reward=100,
+                     origin_system=0, target_system=dest_id, pirate_tier=1,
+                     deadline_turn=world.save.turn + 50)
+    vr.accept_mission(world, m1)
+    vr.accept_mission(world, m2)
+    # No bounty exists at dest_id here, so the ordinary random-encounter
+    # roll isn't preempted -- world.event_rng is unseeded (see
+    # _world_with_seed), so without this it can occasionally (flakily)
+    # land on a derelict/distress encounter needing the real read_key(),
+    # which crashes under pytest's captured stdout. Not a correctness
+    # concern, just determinism.
+    world.event_rng.random = lambda: 1.0
+
+    calls = []
+
+    def destroy_on_first_call(p, w, pirate):
+        calls.append(pirate)
+        vr.destroy_ship(w)
+        return "destroyed"
+
+    monkeypatch.setattr(vr, "screen_combat", destroy_on_first_call)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
+
+    assert len(calls) == 1  # the second mission's own wave never fired
+    assert world.save.current_system == 0
+
+
 def test_winning_a_bounty_fight_completes_it_and_pays_the_reward(monkeypatch):
     world = _world_with_seed(21)
     dest_id = world.here.connections[0]
@@ -493,6 +592,15 @@ def test_new_system_charted_announcement_prints_before_escort_completion(monkeyp
                           pirate_tier=1, deadline_turn=world.save.turn + 50)
     vr.accept_mission(world, mission)
     monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: "won")
+    # No bounty exists at dest_id here (unlike the sibling bounty test
+    # above), so screen_travel's own bounty branch doesn't preempt the
+    # ordinary random-encounter roll -- world.event_rng is unseeded
+    # (see _world_with_seed), so without this it can occasionally
+    # (flakily) land on a derelict/distress encounter, which calls the
+    # real read_key() directly and crashes under pytest's captured
+    # stdout. Suppressing it here isn't about correctness, just about
+    # keeping this test deterministic.
+    world.event_rng.random = lambda: 1.0
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
