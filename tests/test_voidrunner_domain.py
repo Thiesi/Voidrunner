@@ -548,6 +548,7 @@ def test_destroy_ship_clears_cargo_and_returns_player_to_freeport_with_full_hull
     world.save.cargo["ore"] = 10
     world.save.current_system = world.here.connections[0]
     world.save.ship.hull_hp = 0
+    world.save.pilot.notoriety = 7
 
     vr.destroy_ship(world)
 
@@ -555,6 +556,7 @@ def test_destroy_ship_clears_cargo_and_returns_player_to_freeport_with_full_hull
     assert world.save.current_system == 0
     assert world.save.ship.hull_hp == vr.hull_hp_max(world.save.ship)
     assert world.save.pilot.credits < 1200  # salvage fee charged
+    assert world.save.pilot.notoriety == 0  # any ship loss wipes wanted status
 
 
 # -- travel encounter variety -------------------------------------------
@@ -704,6 +706,217 @@ def test_market_tip_with_no_discovered_neighbors_shows_fallback_without_crashing
         vr._encounter_market_tip(vr.Palette(truecolor=False), world, dest)
 
     assert "nothing usable" in buf.getvalue()
+
+
+# -- player notoriety ----------------------------------------------------
+
+
+def test_notoriety_patrol_chance_is_zero_at_zero_notoriety():
+    assert vr.notoriety_patrol_chance(0) == 0.0
+
+
+def test_notoriety_patrol_chance_scales_with_notoriety_and_caps():
+    assert vr.notoriety_patrol_chance(5) < vr.notoriety_patrol_chance(10)
+    assert vr.notoriety_patrol_chance(1000) == vr.NOTORIETY_PATROL_MAX_CHANCE
+
+
+def test_notoriety_fine_cost_scales_with_notoriety():
+    assert vr.notoriety_fine_cost(0) < vr.notoriety_fine_cost(10)
+
+
+def test_concord_patrol_tier_scales_with_notoriety_and_caps_at_four():
+    world = _world_with_seed(70)
+    world.save.pilot.notoriety = 0
+    low = vr.generate_concord_patrol(world)
+    world.save.pilot.notoriety = 1000
+    high = vr.generate_concord_patrol(world)
+    assert low.tier == 0
+    assert high.tier == 4
+    assert high.hp > low.hp
+
+
+def test_pilot_save_round_trip_defaults_notoriety_for_old_saves_without_it():
+    save = vr._new_career("Legacy")
+    as_dict = save.to_dict()
+    del as_dict["pilot"]["notoriety"]  # simulate a pre-notoriety save file
+    restored = vr.SaveData.from_dict(as_dict)
+    assert restored.pilot.notoriety == 0
+
+
+def test_customs_bribe_refused_raises_notoriety(monkeypatch):
+    world = _world_with_seed(71)
+    world.save.cargo["narcotics"] = 5
+    world.save.pilot.credits = 0  # can't afford the bribe cost -> refused path
+    vr.read_key = lambda: "B"
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_customs(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.notoriety == vr.NOTORIETY_PER_CUSTOMS_BUST
+
+
+def test_customs_cooperative_surrender_does_not_raise_notoriety():
+    world = _world_with_seed(72)
+    world.save.cargo["narcotics"] = 5
+    vr.read_key = lambda: "S"
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_customs(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.notoriety == 0
+
+
+def test_customs_successful_bribe_does_not_raise_notoriety():
+    world = _world_with_seed(73)
+    world.save.cargo["narcotics"] = 5
+    world.save.pilot.credits = 10_000
+    world.event_rng.random = lambda: 0.0  # always the bribe-succeeds branch
+    vr.read_key = lambda: "B"
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_customs(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.notoriety == 0
+
+
+def test_wrong_bounty_kill_raises_notoriety_and_lowers_concord_rep(monkeypatch):
+    world = _world_with_seed(74)
+    dest_id = world.here.connections[0]
+    _accept_bounty(world, target_system=dest_id)
+    before_rep = world.save.pilot.reputation[vr.FACTION_CONCORD]
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: "won")
+    world.event_rng.random = lambda: 0.0  # always triggers the wrong-kill roll
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
+
+    assert world.save.pilot.notoriety == vr.NOTORIETY_PER_WRONG_BOUNTY_KILL
+    assert world.save.pilot.reputation[vr.FACTION_CONCORD] < before_rep
+
+
+def test_bounty_win_without_the_wrong_kill_roll_leaves_notoriety_at_zero(monkeypatch):
+    world = _world_with_seed(75)
+    dest_id = world.here.connections[0]
+    _accept_bounty(world, target_system=dest_id)
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: "won")
+    world.event_rng.random = lambda: 1.0  # never triggers the wrong-kill roll
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
+
+    assert world.save.pilot.notoriety == 0
+
+
+def test_travel_dispatches_to_patrol_when_wanted_and_the_roll_succeeds(monkeypatch):
+    world = _world_with_seed(76)
+    dest_id = world.here.connections[0]
+    world.save.pilot.notoriety = 20  # well above zero -- patrol chance > 0
+    world.event_rng.random = lambda: 0.0  # always within the patrol chance
+    calls = []
+    monkeypatch.setattr(vr, "screen_notoriety_patrol", lambda p, w: calls.append(1))
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
+
+    assert calls == [1]
+
+
+def test_travel_never_dispatches_to_patrol_at_zero_notoriety(monkeypatch):
+    world = _world_with_seed(77)
+    dest_id = world.here.connections[0]
+    world.save.pilot.notoriety = 0
+    world.event_rng.random = lambda: 0.0  # would trigger everything else, but not this
+    calls = []
+    monkeypatch.setattr(vr, "screen_notoriety_patrol", lambda p, w: calls.append(1))
+    monkeypatch.setattr(vr, "_resolve_random_travel_encounter", lambda p, w, dest: None)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
+
+    assert calls == []
+
+
+def test_notoriety_patrol_evade_success_leaves_notoriety_and_reputation_unchanged():
+    world = _world_with_seed(78)
+    world.save.pilot.notoriety = 10
+    before_notoriety = world.save.pilot.notoriety
+    before_rep = dict(world.save.pilot.reputation)
+    vr.read_key = lambda: "E"
+    world.event_rng.random = lambda: 0.0  # always evades successfully
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_notoriety_patrol(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.notoriety == before_notoriety
+    assert world.save.pilot.reputation == before_rep
+
+
+def test_notoriety_patrol_surrender_clears_notoriety_and_charges_the_fine():
+    world = _world_with_seed(79)
+    world.save.pilot.notoriety = 10
+    world.save.pilot.credits = 10_000
+    before_credits = world.save.pilot.credits
+    fine = vr.notoriety_fine_cost(10)
+    vr.read_key = lambda: "S"
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_notoriety_patrol(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.notoriety == 0
+    assert world.save.pilot.credits == before_credits - fine
+
+
+def test_notoriety_patrol_surrender_is_not_offered_without_enough_credits():
+    world = _world_with_seed(80)
+    world.save.pilot.notoriety = 10
+    world.save.pilot.credits = 0
+    keys = iter(["S", "E"])  # "S" isn't a valid choice here -- must fall through, not crash
+    vr.read_key = lambda: next(keys)
+    world.event_rng.random = lambda: 0.0  # evade succeeds once actually reached
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_notoriety_patrol(vr.Palette(truecolor=False), world)
+
+    assert "Surrender" not in buf.getvalue()
+    assert world.save.pilot.notoriety == 10  # the stray "S" did nothing
+
+
+def test_notoriety_patrol_win_raises_notoriety_further_and_flips_reputation(monkeypatch):
+    world = _world_with_seed(81)
+    world.save.pilot.notoriety = 4
+    before_concord = world.save.pilot.reputation[vr.FACTION_CONCORD]
+    before_blackwake = world.save.pilot.reputation[vr.FACTION_BLACKWAKE]
+    vr.read_key = lambda: "F"
+
+    def _one_shot_kill(world, patrol):
+        patrol.hp = 0
+        return 999, 0, ["one-shot kill"]
+
+    monkeypatch.setattr(vr, "fight_round", _one_shot_kill)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_notoriety_patrol(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.notoriety == 4 + 3
+    assert world.save.pilot.reputation[vr.FACTION_CONCORD] < before_concord
+    assert world.save.pilot.reputation[vr.FACTION_BLACKWAKE] > before_blackwake
+
+
+def test_notoriety_patrol_loss_wipes_notoriety_via_destroy_ship(monkeypatch):
+    world = _world_with_seed(82)
+    world.save.pilot.notoriety = 10
+    vr.read_key = lambda: "F"
+
+    def _one_shot_loss(world, patrol):
+        world.save.ship.hull_hp = 0
+        return 0, 999, ["one-shot loss"]
+
+    monkeypatch.setattr(vr, "fight_round", _one_shot_loss)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_notoriety_patrol(vr.Palette(truecolor=False), world)
+
+    assert world.save.pilot.notoriety == 0
+    assert world.save.current_system == 0
 
 
 # -- stranded-pilot rescue --------------------------------------------

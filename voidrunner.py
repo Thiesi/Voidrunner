@@ -345,6 +345,30 @@ PIRATE_NAMES = [
 # tuned around; derelict/distress/tip share the remainder roughly evenly.
 TRAVEL_ENCOUNTER_WEIGHTS: dict[str, int] = {"pirate": 55, "derelict": 15, "distress": 15, "tip": 15}
 
+# Player notoriety: a "wanted" counter, independent of the two faction
+# reputation tracks -- rises from a caught (bribe-refused) customs bust
+# or a bounty kill that turns out to be mistaken identity, and gates how
+# often a Concord Patrol travel encounter fires. Continuous in the raw
+# notoriety count (not a small tier bucket) so the very first bust
+# already carries some real risk rather than a dead zone before a
+# threshold. Patrol *difficulty* (the intercepting ship's own combat
+# tier) still buckets into the same 0-4 range every other tier stat in
+# this file uses, for stat-generation consistency with generate_pirate.
+NOTORIETY_PER_CUSTOMS_BUST = 2
+NOTORIETY_PER_WRONG_BOUNTY_KILL = 2
+WRONG_BOUNTY_KILL_CHANCE = 0.12
+NOTORIETY_PATROL_CHANCE_PER_POINT = 0.03
+NOTORIETY_PATROL_MAX_CHANCE = 0.40
+CONCORD_PATROL_NAMES = ["CNS Vigilant", "CNS Warden", "CNS Sentinel", "CNS Bastion", "CNS Arbiter"]
+
+
+def notoriety_patrol_chance(notoriety: int) -> float:
+    return min(NOTORIETY_PATROL_MAX_CHANCE, notoriety * NOTORIETY_PATROL_CHANCE_PER_POINT)
+
+
+def notoriety_fine_cost(notoriety: int) -> int:
+    return 100 + notoriety * 40
+
 
 # ---------------------------------------------------------------------------
 # Domain model
@@ -373,6 +397,13 @@ class Pilot:
     kills: int = 0
     career_started: str = ""
     log: list[str] = field(default_factory=list)
+    # How "wanted" the pilot currently is with Concord -- rises from a
+    # caught (bribe-refused) customs bust or a bounty kill that turns out
+    # to have been a mistaken identity, and is the only thing that gates
+    # Concord Patrol travel encounters (see notoriety_patrol_chance).
+    # Additive field, safe default for every pre-existing save via
+    # from_dict's own .get() below -- no SCHEMA_VERSION bump needed.
+    notoriety: int = 0
 
     def note(self, msg: str) -> None:
         self.log.append(msg)
@@ -387,6 +418,7 @@ class Pilot:
             handle=d["handle"], credits=d["credits"], reputation=dict(d["reputation"]),
             missions_completed=d.get("missions_completed", 0), kills=d.get("kills", 0),
             career_started=d.get("career_started", ""), log=list(d.get("log", [])),
+            notoriety=d.get("notoriety", 0),
         )
 
 
@@ -762,6 +794,21 @@ def generate_pirate(world: World, tier: int | None = None) -> Pirate:
     return Pirate(name=rng.choice(PIRATE_NAMES), tier=t, hp=hp, hp_max=hp)
 
 
+def generate_concord_patrol(world: World) -> Pirate:
+    """A Concord Patrol "hostile ship" for `screen_notoriety_patrol` --
+    reuses the `Pirate` dataclass shape as-is (name/tier/hp/hp_max is all
+    `fight_round`/`evade_chance` actually need structurally; nothing
+    about those functions is pirate-specific) rather than introducing a
+    second, parallel combatant type for one field's worth of
+    difference. Difficulty scales with the pilot's own notoriety, not
+    the system's danger rating -- a patrol is hunting *this pilot*
+    specifically, unlike an ordinary raider encounter."""
+    rng = world.event_rng
+    tier = min(4, world.save.pilot.notoriety // 4)
+    hp = 20 + tier * 15
+    return Pirate(name=rng.choice(CONCORD_PATROL_NAMES), tier=tier, hp=hp, hp_max=hp)
+
+
 def cargo_load_fraction(world: World) -> float:
     total = sum(world.save.cargo.values())
     cap = cargo_capacity(world.save.ship)
@@ -816,13 +863,20 @@ def destroy_ship(world: World) -> str:
     """Ship destruction has real consequences -- lost cargo, a credit
     penalty, and a tow back home -- but is never a dead end. A door
     game with no way back from one bad fight is a needlessly hostile
-    interaction, not a difficulty setting."""
+    interaction, not a difficulty setting.
+
+    Also wipes notoriety unconditionally, for any cause of destruction
+    (an ordinary pirate as much as a Concord Patrol) -- a generic "near-
+    death wipes your wanted status, fresh start" rule is simpler and
+    easier to explain than a patrol-specific special case, and reads
+    fine narratively either way: word doesn't travel from a wreck."""
     lost_cargo = sum(world.save.cargo.values())
     world.save.cargo.clear()
     penalty = min(world.save.pilot.credits, 200 + world.save.ship.hull_tier * 50)
     world.save.pilot.credits -= penalty
     world.save.ship.hull_hp = hull_hp_max(world.save.ship)
     world.save.current_system = 0
+    world.save.pilot.notoriety = 0
     world.save.pilot.note("Ship destroyed -- salvage tug towed you back to Freeport.")
     return (f"Your ship is destroyed! {lost_cargo} units of cargo lost, "
             f"a {penalty}cr salvage fee charged. You wake up at Freeport Anchorage.")
@@ -1486,6 +1540,19 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
             world.save.pilot.missions_completed += 1
             world.save.pilot.note(f"Bounty complete: {bounty.description} (+{bounty.reward}cr)")
             out_line(f"{p.gold}Bounty complete! +{bounty.reward}cr{RESET}")
+            # A flat, tier-independent chance the kill turns out to have
+            # been mistaken identity -- discovered only after the fact,
+            # since a bounty target always *looks* like a legitimate
+            # raider going in (there is no way for the player to have
+            # known beforehand, matching the "not a difficulty setting"
+            # philosophy the rest of this file's own consequence design
+            # already follows).
+            if world.event_rng.random() < WRONG_BOUNTY_KILL_CHANCE:
+                world.save.pilot.notoriety += NOTORIETY_PER_WRONG_BOUNTY_KILL
+                adjust_reputation(world, FACTION_CONCORD, -3)
+                world.save.pilot.note("Concord inquiry: that bounty kill was mistaken identity -- notoriety rises.")
+                out_line(f"{p.wrong}Later, a Concord inquiry flags an irregularity: that 'raider' matches an "
+                          f"informant's registered ship. Notoriety rises.{RESET}")
         elif outcome == "destroyed":
             # Losing must also clear the bounty -- otherwise it stays
             # active forever and re-triggers this same guaranteed fight
@@ -1496,6 +1563,15 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
             out_line(f"{p.wrong}Bounty failed -- the {pirate.name} was too much this time.{RESET}")
         # outcome == "escaped": left active on purpose -- a deliberate
         # retreat to come back stronger later isn't a failure.
+    elif world.event_rng.random() < notoriety_patrol_chance(world.save.pilot.notoriety):
+        # Same unconditional-priority slot as a bounty target -- checked
+        # before the ordinary random-encounter roll, not folded into
+        # TRAVEL_ENCOUNTER_WEIGHTS's own slice, since a wanted pilot
+        # should face a meaningfully higher (and continuously scaling)
+        # interception chance than one more flavor-encounter option
+        # would give it. `notoriety_patrol_chance` is 0.0 at notoriety 0,
+        # so an unwanted pilot never reaches this branch at all.
+        screen_notoriety_patrol(p, world)
     else:
         _resolve_random_travel_encounter(p, world, dest)
 
@@ -1579,6 +1655,67 @@ def screen_combat(p: Palette, world: World, pirate: Pirate) -> str:
             out_line(f"{p.wrong}They refuse the bribe and press the attack!{RESET}")
 
 
+def screen_notoriety_patrol(p: Palette, world: World) -> None:
+    """A Concord Patrol intercepting a wanted pilot -- structurally
+    similar to `screen_combat`'s own fight/evade loop (built on the same
+    `fight_round`/`evade_chance` pure functions), but a deliberately
+    separate function rather than a reuse of `screen_combat` itself:
+    this is law enforcement, not pirates, and the consequences genuinely
+    differ. `screen_combat`'s own "won" branch pays salvage loot and
+    *raises* Concord standing -- exactly backward here, where winning
+    means a wanted pilot just killed a Concord officer. `[S]urrender`
+    replaces `[B]ribe` as the peaceful resolution, and is the *only* way
+    notoriety ever goes back down outside of `destroy_ship`'s own
+    unconditional wipe -- there is no passive decay."""
+    ship = world.save.ship
+    patrol = generate_concord_patrol(world)
+    fine = notoriety_fine_cost(world.save.pilot.notoriety)
+    out_line(f"{p.wrong}A Concord patrol vessel, the {patrol.name}, intercepts you -- "
+              f"your transponder flags as wanted.{RESET}")
+    while True:
+        out_line(f"{p.wrong}{patrol.name}{RESET} (tier {patrol.tier})  HP {patrol.hp}/{patrol.hp_max}   "
+                  f"{p.accent}Your hull{RESET} {ship.hull_hp}/{hull_hp_max(ship)}")
+        can_surrender = world.save.pilot.credits >= fine
+        out(f"{p.muted}[F]ight [E]vade" + (f" [S]urrender & pay {fine}cr" if can_surrender else "") +
+            f" [Q]uick status: {RESET}")
+        action = read_key().upper()
+        out_line(action)
+        if action == "F":
+            _, _, lines = fight_round(world, patrol)
+            for line in lines:
+                out_line(f"  {line}")
+            if patrol.hp <= 0:
+                world.save.pilot.kills += 1
+                world.save.pilot.notoriety += 3
+                adjust_reputation(world, FACTION_CONCORD, -10)
+                adjust_reputation(world, FACTION_BLACKWAKE, 3)
+                world.save.pilot.note("Destroyed a Concord patrol vessel -- notoriety rises further.")
+                out_line(f"{p.wrong}The {patrol.name} is destroyed -- Concord will not forget this.{RESET}")
+                return
+            if ship.hull_hp <= 0:
+                out_line(f"{p.wrong}{destroy_ship(world)}{RESET}")
+                return
+        elif action == "E":
+            if world.event_rng.random() < evade_chance(world, patrol, dumped_cargo=False):
+                out_line(f"{p.correct}You break contact and escape.{RESET}")
+                return
+            out_line(f"{p.wrong}Evasion failed -- they're still on you.{RESET}")
+            raw = world.event_rng.randint(4, 9) + patrol.tier * 4
+            dmg = max(1, raw - ship.shield_tier * 3)
+            ship.hull_hp = max(0, ship.hull_hp - dmg)
+            out_line(f"  The {patrol.name} hits you for {dmg} damage.")
+            if ship.hull_hp <= 0:
+                out_line(f"{p.wrong}{destroy_ship(world)}{RESET}")
+                return
+        elif action == "S" and can_surrender:
+            world.save.pilot.credits -= fine
+            world.save.pilot.notoriety = 0
+            adjust_reputation(world, FACTION_CONCORD, 2)
+            world.save.pilot.note(f"Paid a {fine}cr fine to Concord -- notoriety cleared.")
+            out_line(f"{p.correct}You power down and pay the {fine}cr fine. Notoriety cleared.{RESET}")
+            return
+
+
 def screen_customs(p: Palette, world: World) -> None:
     contraband_qty = sum(q for c, q in world.save.cargo.items() if not COMMODITIES[c]["legal"])
     out_line(f"{p.wrong}Concord customs hails you for a cargo inspection.{RESET}")
@@ -1597,6 +1734,13 @@ def screen_customs(p: Palette, world: World) -> None:
         for c in CONTRABAND_COMMODITIES:
             world.save.cargo.pop(c, None)
         adjust_reputation(world, FACTION_CONCORD, -5)
+        # Notoriety only rises here, not on the cooperative "surrender
+        # outright" path below -- a caught, refused bribe is a repeat-
+        # offender bust; volunteering the contraband before a fight ever
+        # starts is already the game's own "played fair, small rep
+        # bonus" outcome (see the +1 just below), not a wanted-status
+        # event on top of that.
+        world.save.pilot.notoriety += NOTORIETY_PER_CUSTOMS_BUST
         out_line(f"{p.wrong}Bribe refused -- contraband confiscated and a {fine}cr fine levied.{RESET}")
         return
     for c in CONTRABAND_COMMODITIES:
