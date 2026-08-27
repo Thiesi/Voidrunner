@@ -3145,3 +3145,107 @@ def test_screen_chart_danger_and_fuel_columns_align_between_safe_and_danger_rows
     stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n")]
     fuel_columns = {line.index("fuel") for line in stripped if "fuel" in line and "[" in line}
     assert len(fuel_columns) == 1, f"fuel-cost column drifted between rows: {fuel_columns}"
+
+
+def test_screen_title_renders_full_splash_with_tagline_and_exact_box_width():
+    p = vr.Palette(truecolor=False)
+    for node, handle in [("Central BBS", "Alice"), ("A Very Long BBS Node Name Here", "SixteenCharHandl")]:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            vr.screen_title(p, {"node_name": node, "handle": handle})
+        output = buf.getvalue()
+        assert "a NetBBS door game" in output
+        assert "V O I D R U N N E R" in output
+        stripped = [vr._ANSI_RE.sub("", line) for line in output.split("\r\n") if line.strip()]
+        box_lines = [line for line in stripped if line.startswith(("╔", "║", "╠", "╚"))]
+        assert len(box_lines) == 11
+        widths = {len(line) for line in box_lines}
+        assert widths == {79}, f"expected all splash box rows to be 79 visible chars, got {widths}"
+
+
+def test_create_career_box_rows_fit_79_column_border(monkeypatch):
+    p = vr.Palette(truecolor=False)
+    monkeypatch.setattr(vr, "read_line_raw", lambda max_len=16, allowed=None: "TestPilot")
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        callsign = vr.create_career(p, {"handle": "SixteenCharHandl"})
+    assert callsign == "TestPilot"
+    _assert_box_rows_match_border(buf.getvalue(), "create_career@long-handle")
+    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n") if line.strip()]
+    border_lines = [line for line in stripped if line.startswith(("╭", "╰"))]
+    assert len(border_lines) == 2
+    assert {len(line) for line in border_lines} == {79}
+
+
+def test_screen_crew_and_galaxy_map_boxes_match_79_columns(monkeypatch):
+    world = _world_with_seed(312)
+    p = vr.Palette(truecolor=False)
+
+    # screen_crew
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_crew(p, world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_crew")
+    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n") if line.strip()]
+    crew_borders = {len(line) for line in stripped if line.startswith(("╭", "├", "╰"))}
+    assert crew_borders == {79}
+
+    # screen_galaxy_map
+    monkeypatch.setattr(vr, "pause", lambda p: None)
+    buf2 = io.StringIO()
+    with contextlib.redirect_stdout(buf2):
+        vr.screen_galaxy_map(p, world)
+    _assert_box_rows_match_border(buf2.getvalue(), "screen_galaxy_map")
+    stripped2 = [vr._ANSI_RE.sub("", line) for line in buf2.getvalue().split("\r\n") if line.strip()]
+    map_borders = {len(line) for line in stripped2 if line.startswith(("╭", "╰"))}
+    assert map_borders == {79}
+
+
+def test_empty_mission_board_renders_clean_notice_in_box(monkeypatch):
+    world = _world_with_seed(313)
+    p = vr.Palette(truecolor=False)
+    monkeypatch.setattr(vr, "generate_mission_board", lambda w: [])
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_missions(p, world)
+    output = buf.getvalue()
+    assert "No contracts currently available" in output
+    _assert_box_rows_match_border(output, "screen_missions@empty")
+
+
+def test_commission_and_cartel_screens_use_tactical_framing(monkeypatch):
+    world = _world_with_seed(314)
+    p = vr.Palette(truecolor=False)
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: False)
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_concord_commission(p, world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_concord_commission")
+    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n") if line.strip()]
+    concord_borders = {len(line) for line in stripped if line.startswith(("╭", "╰"))}
+    assert concord_borders == {79}
+
+    buf2 = io.StringIO()
+    with contextlib.redirect_stdout(buf2):
+        vr.screen_blackwake_made(p, world)
+    _assert_box_rows_match_border(buf2.getvalue(), "screen_blackwake_made")
+    stripped2 = [vr._ANSI_RE.sub("", line) for line in buf2.getvalue().split("\r\n") if line.strip()]
+    blackwake_borders = {len(line) for line in stripped2 if line.startswith(("╭", "╰"))}
+    assert blackwake_borders == {79}
+
+
+def test_status_bar_separator_is_79_columns():
+    world = _world_with_seed(315)
+    p = vr.Palette(truecolor=False)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.draw_status_bar(p, world)
+    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n") if line.strip()]
+    rule_line = [line for line in stripped if line.startswith("─") and set(line) == {"─"}]
+    assert len(rule_line) == 1
+    assert len(rule_line[0]) == 79
+
