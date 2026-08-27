@@ -538,6 +538,12 @@ class SaveData:
     active_missions: list[Mission]
     next_mission_id: int
     flags: dict[str, bool]
+    # At most one galaxy-wide economy event active at a time (see
+    # tick_economy_event) -- a plain dict rather than its own dataclass,
+    # matching `flags`'s own precedent for simple additive save state.
+    # Additive field, safe default via from_dict's own .get() below --
+    # no SCHEMA_VERSION bump needed.
+    active_event: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -553,6 +559,7 @@ class SaveData:
             "active_missions": [m.to_dict() for m in self.active_missions],
             "next_mission_id": self.next_mission_id,
             "flags": self.flags,
+            "active_event": self.active_event,
         }
 
     @classmethod
@@ -570,6 +577,7 @@ class SaveData:
             active_missions=[Mission.from_dict(m) for m in d.get("active_missions", [])],
             next_mission_id=d.get("next_mission_id", 1),
             flags=dict(d.get("flags", {})),
+            active_event=d.get("active_event"),
         )
 
 
@@ -854,6 +862,62 @@ def tick_price_reversion(world: World) -> None:
             reverted = value + (1.0 - value) * 0.08
             reverted += world.event_rng.uniform(-0.01, 0.01)
             table[commodity] = max(0.6, min(1.6, reverted))
+
+
+# At most one galaxy-wide economy event active at a time. Deliberately
+# a fixed drift *level* re-asserted every turn while active (see
+# tick_economy_event), not a one-time nudge -- a one-time nudge would
+# just be erased by tick_price_reversion's own per-turn pull toward 1.0
+# within a couple of turns, defeating "temporary but real for a while."
+ECONOMY_EVENT_CHANCE_PER_TURN = 0.05
+ECONOMY_EVENT_MIN_TURNS = 8
+ECONOMY_EVENT_MAX_TURNS = 15
+ECONOMY_EVENT_CRASH_LEVEL = 0.7
+ECONOMY_EVENT_BOOM_LEVEL = 1.3
+
+
+def tick_economy_event(world: World) -> str | None:
+    """Called once per turn, right after `tick_price_reversion` -- ages
+    and ends an already-active event, or (only when none is active)
+    rolls a small chance to start a new one. Returns a narrative line
+    on the turn an event starts or ends, else None (most turns, most
+    careers -- this is meant to be a rare, notable happening, not
+    background noise)."""
+    event = world.save.active_event
+    if event is not None:
+        level = ECONOMY_EVENT_CRASH_LEVEL if event["direction"] == "crash" else ECONOMY_EVENT_BOOM_LEVEL
+        for system in world.galaxy:
+            if system.economy == event["economy"]:
+                table = world.save.market_drift.setdefault(system.id, {})
+                table[event["commodity"]] = level
+        event["turns_remaining"] -= 1
+        if event["turns_remaining"] <= 0:
+            world.save.active_event = None
+            return f"Galaxy news: the {event['description']} has ended -- prices normalize."
+        return None
+
+    if world.event_rng.random() >= ECONOMY_EVENT_CHANCE_PER_TURN:
+        return None
+    economy = world.event_rng.choice(ECONOMIES)
+    commodities = sorted(set(ECONOMY_PRODUCES[economy]) | set(ECONOMY_DEMANDS[economy]))
+    if not commodities:
+        return None
+    commodity = world.event_rng.choice(commodities)
+    direction = world.event_rng.choice(["crash", "boom"])
+    turns = world.event_rng.randint(ECONOMY_EVENT_MIN_TURNS, ECONOMY_EVENT_MAX_TURNS)
+    label = COMMODITIES[commodity]["label"]
+    verb = "crash" if direction == "crash" else "spike"
+    description = f"{label} prices {verb} across every {economy} system"
+    world.save.active_event = {
+        "economy": economy, "commodity": commodity, "direction": direction,
+        "turns_remaining": turns, "description": description,
+    }
+    level = ECONOMY_EVENT_CRASH_LEVEL if direction == "crash" else ECONOMY_EVENT_BOOM_LEVEL
+    for system in world.galaxy:
+        if system.economy == economy:
+            table = world.save.market_drift.setdefault(system.id, {})
+            table[commodity] = level
+    return f"Galaxy news: {description} (roughly {turns} turns)."
 
 
 # ---------------------------------------------------------------------------
@@ -1549,6 +1613,10 @@ def screen_market(p: Palette, world: World) -> None:
             have = world.save.cargo.get(commodity, 0)
             label = COMMODITIES[commodity]["label"]
             tag = f"{p.wrong}[contraband]{RESET} " if not COMMODITIES[commodity]["legal"] else ""
+            event = world.save.active_event
+            if event and event["commodity"] == commodity and event["economy"] == system.economy:
+                tag += (f"{p.wrong}[CRASH]{RESET} " if event["direction"] == "crash"
+                        else f"{p.correct}[BOOM]{RESET} ")
             rows.append((commodity, f"  {p.gold}[{LETTERS[len(rows)]}]{RESET} {tag}{label:<16} "
                                      f"Buy {buy:>5}  Sell {sell:>5}   (have {have})"))
         for _, text in rows:
@@ -1840,6 +1908,10 @@ def screen_status(p: Palette, world: World) -> None:
     if crew:
         out_line(f"  {p.gold}Crew:{RESET} {', '.join(crew)}")
     out_line(f"  {p.gold}Systems charted:{RESET} {sum(1 for s in world.galaxy if s.discovered)}/{len(world.galaxy)}")
+    event = world.save.active_event
+    if event:
+        out_line(f"  {p.gold}Economy event:{RESET} {event['description']} "
+                  f"({event['turns_remaining']} turn(s) left)")
     out_line(f"  {p.gold}Missions completed:{RESET} {pilot.missions_completed}   "
               f"{p.gold}Raiders defeated:{RESET} {pilot.kills}")
     if pilot.retirements:
@@ -2181,6 +2253,9 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
     world.save.ship.fuel -= cost
     world.save.turn += 1
     tick_price_reversion(world)
+    event_msg = tick_economy_event(world)
+    if event_msg:
+        out_line(f"{p.gold}{event_msg}{RESET}")
     for msg in pay_crew_wages(world):
         out_line(f"{p.wrong}{msg}{RESET}")
     out_line(f"{p.muted}Jumping to {'the unknown' if not dest.discovered else dest.name}...{RESET}")

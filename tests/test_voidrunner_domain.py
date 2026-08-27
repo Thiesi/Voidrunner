@@ -2241,3 +2241,132 @@ def test_retiring_resets_crew():
     new_save = vr.retire_pilot(old_save)
 
     assert not new_save.ship.has_gunner and not new_save.ship.has_engineer
+
+
+# -- scheduled economy events -----------------------------------------------
+
+
+def test_save_from_dict_defaults_active_event_to_none_for_old_saves():
+    save = vr._new_career("Legacy")
+    d = save.to_dict()
+    del d["active_event"]
+
+    loaded = vr.SaveData.from_dict(d)
+
+    assert loaded.active_event is None
+
+
+def test_tick_economy_event_does_not_start_one_when_roll_fails():
+    world = _world_with_seed(162)
+    world.event_rng.random = lambda: 1.0  # always fails the trigger roll
+
+    msg = vr.tick_economy_event(world)
+
+    assert msg is None
+    assert world.save.active_event is None
+
+
+def test_tick_economy_event_starts_one_and_applies_drift_immediately(monkeypatch):
+    world = _world_with_seed(163)
+    world.event_rng.random = lambda: 0.0  # always triggers
+    world.event_rng.choice = lambda seq: seq[0]
+    world.event_rng.randint = lambda a, b: a
+
+    msg = vr.tick_economy_event(world)
+
+    assert msg is not None
+    assert world.save.active_event is not None
+    event = world.save.active_event
+    affected = [s for s in world.galaxy if s.economy == event["economy"]]
+    assert affected
+    for system in affected:
+        assert world.save.market_drift[system.id][event["commodity"]] in (
+            vr.ECONOMY_EVENT_CRASH_LEVEL, vr.ECONOMY_EVENT_BOOM_LEVEL)
+
+
+def test_tick_economy_event_reasserts_drift_level_each_turn_while_active():
+    world = _world_with_seed(164)
+    system = next(s for s in world.galaxy if s.economy == "Agricultural")
+    world.save.active_event = {
+        "economy": "Agricultural", "commodity": "food", "direction": "crash",
+        "turns_remaining": 3, "description": "Food prices crash across every Agricultural system",
+    }
+
+    vr.tick_economy_event(world)
+    world.save.market_drift[system.id]["food"] = 1.0  # simulate reversion trying to pull it back
+    vr.tick_economy_event(world)
+
+    assert world.save.market_drift[system.id]["food"] == vr.ECONOMY_EVENT_CRASH_LEVEL
+
+
+def test_tick_economy_event_counts_down_and_ends():
+    world = _world_with_seed(165)
+    world.save.active_event = {
+        "economy": "Agricultural", "commodity": "food", "direction": "crash",
+        "turns_remaining": 1, "description": "Food prices crash across every Agricultural system",
+    }
+
+    msg = vr.tick_economy_event(world)
+
+    assert msg is not None
+    assert "ended" in msg
+    assert world.save.active_event is None
+
+
+def test_tick_economy_event_never_starts_a_second_one_while_active():
+    world = _world_with_seed(166)
+    world.save.active_event = {
+        "economy": "Mining", "commodity": "ore", "direction": "boom",
+        "turns_remaining": 5, "description": "Raw Ore prices spike across every Mining system",
+    }
+    world.event_rng.random = lambda: 0.0  # would otherwise always trigger a new one
+
+    vr.tick_economy_event(world)
+
+    assert world.save.active_event["economy"] == "Mining"
+    assert world.save.active_event["turns_remaining"] == 4
+
+
+def test_screen_market_tags_the_affected_commodity(monkeypatch):
+    world = _world_with_seed(167)
+    system = world.here
+    system.economy = "Agricultural"
+    world.save.active_event = {
+        "economy": "Agricultural", "commodity": "food", "direction": "crash",
+        "turns_remaining": 5, "description": "Food prices crash across every Agricultural system",
+    }
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_market(vr.Palette(truecolor=False), world)
+
+    assert "CRASH" in buf.getvalue()
+
+
+def test_screen_status_shows_active_economy_event(monkeypatch):
+    world = _world_with_seed(168)
+    world.save.active_event = {
+        "economy": "Tech", "commodity": "electronics", "direction": "boom",
+        "turns_remaining": 4, "description": "Electronics prices spike across every Tech system",
+    }
+    monkeypatch.setattr(vr, "read_key", lambda: " ")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_status(vr.Palette(truecolor=False), world)
+
+    assert "Economy event" in buf.getvalue()
+    assert "4 turn(s) left" in buf.getvalue()
+
+
+def test_retiring_resets_active_economy_event():
+    old_save = vr._new_career("Vet")
+    old_save.active_event = {
+        "economy": "Haven", "commodity": "weapons", "direction": "crash",
+        "turns_remaining": 5, "description": "Weapons prices crash across every Haven system",
+    }
+
+    new_save = vr.retire_pilot(old_save)
+
+    assert new_save.active_event is None
