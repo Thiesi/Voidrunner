@@ -1585,3 +1585,94 @@ def test_station_menu_announces_a_promotion(monkeypatch):
         vr.screen_station_menu(vr.Palette(truecolor=False), world)
 
     assert "Promoted to" in buf.getvalue()
+
+
+# -- dump all contraband ------------------------------------------------
+
+
+def _some_contraband_commodity():
+    return vr.CONTRABAND_COMMODITIES[0]
+
+
+def test_has_contraband_false_for_an_empty_or_legal_only_hold():
+    world = _world_with_seed(124)
+    assert not vr.has_contraband(world)
+    world.save.cargo["food"] = 5
+    assert not vr.has_contraband(world)
+
+
+def test_has_contraband_true_once_any_illegal_good_is_in_cargo():
+    world = _world_with_seed(125)
+    world.save.cargo[_some_contraband_commodity()] = 3
+    assert vr.has_contraband(world)
+
+
+def test_dump_all_contraband_clears_only_illegal_goods():
+    world = _world_with_seed(126)
+    contraband = _some_contraband_commodity()
+    world.save.cargo[contraband] = 7
+    world.save.cargo["food"] = 4
+
+    msg = vr.dump_all_contraband(world)
+
+    assert contraband not in world.save.cargo
+    assert world.save.cargo["food"] == 4
+    assert "7" in msg
+
+
+def test_dump_all_contraband_grants_no_credits():
+    world = _world_with_seed(127)
+    world.save.cargo[_some_contraband_commodity()] = 10
+    before = world.save.pilot.credits
+
+    vr.dump_all_contraband(world)
+
+    assert world.save.pilot.credits == before
+
+
+def test_screen_dump_contraband_does_nothing_without_contraband(monkeypatch):
+    world = _world_with_seed(128)
+    monkeypatch.setattr(vr, "read_key", lambda: (_ for _ in ()).throw(AssertionError("should not prompt")))
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_dump_contraband(vr.Palette(truecolor=False), world)
+
+
+def test_screen_dump_contraband_declines_without_confirmation(monkeypatch):
+    world = _world_with_seed(129)
+    contraband = _some_contraband_commodity()
+    world.save.cargo[contraband] = 5
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: False)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_dump_contraband(vr.Palette(truecolor=False), world)
+
+    assert world.save.cargo[contraband] == 5
+
+
+def test_screen_dump_contraband_clears_cargo_on_confirmation(monkeypatch):
+    world = _world_with_seed(130)
+    contraband = _some_contraband_commodity()
+    world.save.cargo[contraband] = 5
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_dump_contraband(vr.Palette(truecolor=False), world)
+
+    assert contraband not in world.save.cargo
+
+
+def test_station_menu_offers_dump_only_with_contraband_aboard(monkeypatch):
+    world = _world_with_seed(131)
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_station_menu(vr.Palette(truecolor=False), world)
+    assert "[D]" not in buf.getvalue()
+
+    world.save.cargo[_some_contraband_commodity()] = 2
+    buf2 = io.StringIO()
+    with contextlib.redirect_stdout(buf2):
+        vr.screen_station_menu(vr.Palette(truecolor=False), world)
+    assert "[D]" in buf2.getvalue()

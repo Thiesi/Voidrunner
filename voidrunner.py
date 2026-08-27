@@ -1045,6 +1045,28 @@ def customs_check_chance(system: GalaxySystem) -> float:
     return max(0.0, 0.15 + (5 - system.danger) * 0.03)
 
 
+def has_contraband(world: World) -> bool:
+    return any(not COMMODITIES[c]["legal"] for c in world.save.cargo)
+
+
+def dump_all_contraband(world: World) -> str:
+    """Jettisons every illegal commodity in cargo at once, for zero
+    credit -- a proactive alternative to `screen_customs`'s own
+    "surrender contraband" outcome, without waiting to actually get
+    stopped for it (and without risking a refused bribe's fine and
+    notoriety if a customs check does fire). Strictly a QoL shortcut for
+    a choice the player could already make one commodity at a time via
+    the market, at any system with a market for it in the first place --
+    dumping needs no market at all, since nothing is being sold."""
+    dumped = {c: q for c, q in world.save.cargo.items() if not COMMODITIES[c]["legal"]}
+    for c in dumped:
+        del world.save.cargo[c]
+    total = sum(dumped.values())
+    msg = f"Jettisoned {total} units of contraband before a customs risk."
+    world.save.pilot.note(msg)
+    return msg
+
+
 def is_stranded(world: World) -> bool:
     """True when the pilot has no way to leave the current system under
     their own power: no cargo to sell for cash, not enough fuel for even
@@ -1327,6 +1349,8 @@ def screen_station_menu(p: Palette, world: World) -> str:
             f"{p.gold}[C]{RESET}hart   {p.gold}[S]{RESET}tatus   {p.gold}[Q]{RESET}uit & save")
     if landmark_available_here(world):
         menu += f"   {p.gold}[L]{RESET} {world.landmark['label']}"
+    if has_contraband(world):
+        menu += f"   {p.gold}[D]{RESET}ump contraband"
     out_line(menu)
     out(f"{p.muted}> {RESET}")
     return read_key().upper()
@@ -1335,6 +1359,17 @@ def screen_station_menu(p: Palette, world: World) -> str:
 def landmark_available_here(world: World) -> bool:
     return (world.here.id == world.landmark["system_id"]
             and not world.save.flags.get("landmark_investigated"))
+
+
+def screen_dump_contraband(p: Palette, world: World) -> None:
+    items = {c: q for c, q in world.save.cargo.items() if not COMMODITIES[c]["legal"]}
+    if not items:
+        return
+    listing = ", ".join(f"{q} {COMMODITIES[c]['label']}" for c, q in items.items())
+    out_line(f"{p.wrong}This forfeits {listing} for good -- no sale, no refund.{RESET}")
+    if not confirm("Dump it all now?", p):
+        return
+    out_line(f"{p.muted}{dump_all_contraband(world)}{RESET}")
 
 
 def screen_landmark(p: Palette, world: World) -> None:
@@ -2129,6 +2164,8 @@ def main() -> int:
                 screen_status(p, world)
             elif choice == "L" and landmark_available_here(world):
                 screen_landmark(p, world)
+            elif choice == "D" and has_contraband(world):
+                screen_dump_contraband(p, world)
             elif choice == "Q":
                 out_line(f"{p.muted}Docking clamps engaged. Fly safe, {world.save.pilot.handle}.{RESET}")
                 persist(world, save_dir, user_id)
