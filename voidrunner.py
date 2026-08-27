@@ -801,6 +801,56 @@ def customs_check_chance(system: GalaxySystem) -> float:
     return max(0.0, 0.15 + (5 - system.danger) * 0.03)
 
 
+def is_stranded(world: World) -> bool:
+    """True when the pilot has no way to leave the current system under
+    their own power: no cargo to sell for cash, not enough fuel for even
+    the cheapest reachable jump, and not enough credits to buy the
+    shortfall at 6cr/unit either.
+
+    Deliberately narrower than "ship destroyed" -- `destroy_ship` already
+    has its own tow-home recovery, and a destroyed ship can never reach
+    this check (hull_hp <= 0 always routes through that path first,
+    resetting location/fuel/hull as a side effect). This instead catches
+    a pilot who quietly spent down to nothing -- one refuel or repair too
+    many, or a jump that used the last unit of fuel with no encounter
+    along the way -- without ever losing a fight. `screen_station_menu`
+    checks this on every single redraw (the outer loop's own home base,
+    reached after every action), so a pilot can never linger in this
+    state unnoticed."""
+    if world.save.cargo:
+        return False
+    here = world.here
+    if not here.connections:
+        return False  # defensive: _connect_systems never leaves a system isolated
+    cheapest = min(fuel_cost_for_jump(here, world.by_id[nid]) for nid in here.connections)
+    if world.save.ship.fuel >= cheapest:
+        return False
+    shortfall = cheapest - world.save.ship.fuel
+    return world.save.pilot.credits < shortfall * 6
+
+
+def rescue_stranded_pilot(world: World) -> str:
+    """Recovery for `is_stranded`, mirroring `destroy_ship`'s own "never
+    a dead end" shape: tops the tank up to just enough for one more jump
+    out of Freeport, towing the pilot there first if they aren't already
+    home. No credit charge -- the whole point is a pilot who has nothing
+    left to charge, unlike `destroy_ship`'s own salvage fee (capped at
+    whatever the pilot can actually afford, which here is nothing)."""
+    home = world.by_id[0]
+    towed = world.save.current_system != 0
+    if towed:
+        world.save.current_system = 0
+    cheapest = min(fuel_cost_for_jump(home, world.by_id[nid]) for nid in home.connections)
+    world.save.ship.fuel = max(world.save.ship.fuel, cheapest)
+    if towed:
+        msg = ("Stranded with an empty tank and empty pockets, a passing salvage tug answers "
+               "your beacon and tows you back to Freeport Anchorage, no charge.")
+    else:
+        msg = "The dockmaster spots your empty tank and tops you off enough to get moving again, no charge."
+    world.save.pilot.note(msg)
+    return msg
+
+
 # ---------------------------------------------------------------------------
 # Ranks / status
 # ---------------------------------------------------------------------------
@@ -961,6 +1011,15 @@ def create_career(p: Palette, info: dict) -> str:
 
 
 def screen_station_menu(p: Palette, world: World) -> str:
+    if is_stranded(world):
+        # Checked here, not only right after the action that could cause
+        # it -- this is the outer loop's own home base, reached after
+        # every single action, so it catches every path into the stuck
+        # state (a refuel/repair that spent the last credits, a jump
+        # that burned the last fuel with no encounter) in one place.
+        out_line()
+        out_line(f"{p.wrong}{rescue_stranded_pilot(world)}{RESET}")
+        pause(p)
     out_line()
     draw_status_bar(p, world)
     out_line(f"{p.accent}{BOLD}{world.here.station_name}{RESET}")

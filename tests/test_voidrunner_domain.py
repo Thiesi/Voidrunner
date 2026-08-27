@@ -437,6 +437,116 @@ def test_destroy_ship_clears_cargo_and_returns_player_to_freeport_with_full_hull
     assert world.save.pilot.credits < 1200  # salvage fee charged
 
 
+# -- stranded-pilot rescue --------------------------------------------
+
+
+def _cheapest_jump_cost(world) -> int:
+    here = world.here
+    return min(vr.fuel_cost_for_jump(here, world.by_id[nid]) for nid in here.connections)
+
+
+def test_not_stranded_with_cargo_even_at_zero_fuel_and_credits(monkeypatch):
+    world = _world_with_seed(20)
+    world.save.current_system = world.here.connections[0]
+    world.save.ship.fuel = 0
+    world.save.pilot.credits = 0
+    world.save.cargo["ore"] = 1
+    assert vr.is_stranded(world) is False
+
+
+def test_not_stranded_when_fuel_covers_the_cheapest_jump():
+    world = _world_with_seed(21)
+    world.save.current_system = world.here.connections[0]
+    world.save.pilot.credits = 0
+    world.save.ship.fuel = _cheapest_jump_cost(world)
+    assert vr.is_stranded(world) is False
+
+
+def test_not_stranded_when_credits_cover_the_fuel_shortfall():
+    world = _world_with_seed(22)
+    world.save.current_system = world.here.connections[0]
+    world.save.ship.fuel = 0
+    cheapest = _cheapest_jump_cost(world)
+    world.save.pilot.credits = cheapest * 6  # exactly enough to buy the shortfall
+    assert vr.is_stranded(world) is False
+
+
+def test_stranded_when_no_cargo_not_enough_fuel_and_not_enough_credits():
+    world = _world_with_seed(23)
+    world.save.current_system = world.here.connections[0]
+    world.save.ship.fuel = 0
+    cheapest = _cheapest_jump_cost(world)
+    world.save.pilot.credits = cheapest * 6 - 1  # one credit short
+    assert vr.is_stranded(world) is True
+
+
+def test_rescue_tows_a_stranded_pilot_home_and_refuels_enough_to_leave_again():
+    world = _world_with_seed(24)
+    away = world.here.connections[0]
+    world.save.current_system = away
+    world.save.ship.fuel = 0
+    world.save.pilot.credits = 0
+    assert vr.is_stranded(world) is True
+
+    msg = vr.rescue_stranded_pilot(world)
+
+    assert world.save.current_system == 0
+    assert "tug" in msg.lower()
+    home_cheapest = min(vr.fuel_cost_for_jump(world.by_id[0], world.by_id[nid]) for nid in world.by_id[0].connections)
+    assert world.save.ship.fuel >= home_cheapest
+    assert world.save.pilot.credits == 0  # no charge -- nothing to charge
+    assert vr.is_stranded(world) is False
+
+
+def test_rescue_when_already_home_just_tops_off_fuel_with_a_different_message():
+    world = _world_with_seed(25)
+    world.save.current_system = 0  # already at Freeport
+    world.save.ship.fuel = 0
+    world.save.pilot.credits = 0
+    assert vr.is_stranded(world) is True
+
+    msg = vr.rescue_stranded_pilot(world)
+
+    assert world.save.current_system == 0
+    assert "tug" not in msg.lower()
+    assert "dockmaster" in msg.lower()
+    assert vr.is_stranded(world) is False
+
+
+def test_rescue_logs_a_pilot_note():
+    world = _world_with_seed(26)
+    world.save.current_system = world.here.connections[0]
+    world.save.ship.fuel = 0
+    world.save.pilot.credits = 0
+    before = len(world.save.pilot.log)
+
+    vr.rescue_stranded_pilot(world)
+
+    assert len(world.save.pilot.log) == before + 1
+
+
+def test_station_menu_auto_rescues_a_stranded_pilot_before_drawing(monkeypatch):
+    """Integration-shaped: the UI layer's own hook (`screen_station_menu`),
+    not just the domain functions in isolation -- proves a stranded save
+    actually gets rescued on its very next menu draw, not merely that the
+    domain functions work if a caller remembers to call them."""
+    world = _world_with_seed(27)
+    away = world.here.connections[0]
+    world.save.current_system = away
+    world.save.ship.fuel = 0
+    world.save.pilot.credits = 0
+
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        choice = vr.screen_station_menu(vr.Palette(truecolor=False), world)
+
+    assert choice == "Q"
+    assert world.save.current_system == 0
+    assert not vr.is_stranded(world)
+    assert "tug" in buf.getvalue().lower()
+
+
 def test_bfs_hops_on_a_small_synthetic_graph():
     class _Sys:
         def __init__(self, connections):
