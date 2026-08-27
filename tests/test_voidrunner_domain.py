@@ -2040,3 +2040,204 @@ def test_chart_screen_v_key_opens_the_galaxy_map(monkeypatch):
         vr.screen_chart(vr.Palette(truecolor=False), world)
 
     assert "Charted Systems" in buf.getvalue()
+
+
+# -- paid NPC crew ----------------------------------------------------------
+
+
+def test_ship_from_dict_defaults_crew_fields_for_old_saves():
+    save = vr._new_career("Legacy")
+    d = save.ship.to_dict()
+    del d["has_gunner"], d["has_engineer"], d["has_navigator"]
+
+    ship = vr.Ship.from_dict(d)
+
+    assert not ship.has_gunner and not ship.has_engineer and not ship.has_navigator
+
+
+def test_gunner_adds_flat_combat_damage(monkeypatch):
+    world = _world_with_seed(148)
+    pirate = vr.Pirate(name="Target", tier=0, hp=999, hp_max=999)
+    world.event_rng.randint = lambda a, b: a  # pin the random roll for a clean comparison
+
+    dmg_without, _, _ = vr.fight_round(world, pirate)
+
+    world.save.ship.has_gunner = True
+    pirate2 = vr.Pirate(name="Target", tier=0, hp=999, hp_max=999)
+    dmg_with, _, _ = vr.fight_round(world, pirate2)
+
+    assert dmg_with == dmg_without + 3
+
+
+def test_engineer_discounts_fuel_cost_but_never_below_one():
+    world = _world_with_seed(149)
+    a, b = world.by_id[0], world.by_id[world.by_id[0].connections[0]]
+    base = vr.fuel_cost_for_jump(a, b)
+
+    world.save.ship.has_engineer = True
+    discounted = vr.fuel_cost_for_jump(a, b, world.save.ship)
+
+    assert discounted == max(1, base - 1)
+
+
+def test_engineer_discount_never_goes_below_one_even_on_the_cheapest_jump():
+    class _Sys:
+        x = 0
+        y = 0
+
+    ship = vr.Ship(hull_class="Shuttle", hull_hp=60, fuel=24, has_engineer=True)
+    assert vr.fuel_cost_for_jump(_Sys(), _Sys(), ship) == 1
+
+
+def test_navigator_extends_scan_range(monkeypatch):
+    world = _world_with_seed(150)
+    world.save.ship.scanner_tier = 1
+
+    without = 2 + world.save.ship.scanner_tier
+    world.save.ship.has_navigator = True
+    with_nav = 2 + world.save.ship.scanner_tier + (1 if world.save.ship.has_navigator else 0)
+
+    assert with_nav == without + 1
+
+
+def test_pay_crew_wages_deducts_for_each_hired_role():
+    world = _world_with_seed(151)
+    world.save.pilot.credits = 1000
+    world.save.ship.has_gunner = True
+    world.save.ship.has_navigator = True
+
+    messages = vr.pay_crew_wages(world)
+
+    assert messages == []
+    expected = 1000 - vr.CREW_ROLES["gunner"]["wage"] - vr.CREW_ROLES["navigator"]["wage"]
+    assert world.save.pilot.credits == expected
+    assert world.save.ship.has_gunner and world.save.ship.has_navigator
+
+
+def test_pay_crew_wages_resigns_a_crew_member_who_cant_be_paid():
+    world = _world_with_seed(152)
+    world.save.pilot.credits = 5
+    world.save.ship.has_engineer = True
+
+    messages = vr.pay_crew_wages(world)
+
+    assert len(messages) == 1
+    assert "resigns" in messages[0]
+    assert not world.save.ship.has_engineer
+    assert world.save.pilot.credits == 5  # never driven negative
+
+
+def test_pay_crew_wages_never_drives_credits_negative():
+    world = _world_with_seed(153)
+    world.save.pilot.credits = 0
+    world.save.ship.has_gunner = True
+    world.save.ship.has_engineer = True
+    world.save.ship.has_navigator = True
+
+    vr.pay_crew_wages(world)
+
+    assert world.save.pilot.credits == 0
+
+
+def test_toggle_crew_hires_when_affordable(monkeypatch):
+    world = _world_with_seed(154)
+    world.save.pilot.credits = 10_000
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._toggle_crew(vr.Palette(truecolor=False), world, "gunner")
+
+    assert world.save.ship.has_gunner
+    assert world.save.pilot.credits == 10_000 - vr.CREW_ROLES["gunner"]["hire_cost"]
+
+
+def test_toggle_crew_refuses_when_unaffordable(monkeypatch):
+    world = _world_with_seed(155)
+    world.save.pilot.credits = 10
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._toggle_crew(vr.Palette(truecolor=False), world, "gunner")
+
+    assert not world.save.ship.has_gunner
+    assert world.save.pilot.credits == 10
+
+
+def test_toggle_crew_dismisses_on_confirmation(monkeypatch):
+    world = _world_with_seed(156)
+    world.save.ship.has_navigator = True
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._toggle_crew(vr.Palette(truecolor=False), world, "navigator")
+
+    assert not world.save.ship.has_navigator
+
+
+def test_toggle_crew_keeps_crew_without_dismissal_confirmation(monkeypatch):
+    world = _world_with_seed(157)
+    world.save.ship.has_navigator = True
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: False)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._toggle_crew(vr.Palette(truecolor=False), world, "navigator")
+
+    assert world.save.ship.has_navigator
+
+
+def test_screen_crew_lists_all_roles(monkeypatch):
+    world = _world_with_seed(158)
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_crew(vr.Palette(truecolor=False), world)
+
+    text = buf.getvalue()
+    for info in vr.CREW_ROLES.values():
+        assert info["label"] in text
+
+
+def test_shipyard_offers_crew_option(monkeypatch):
+    world = _world_with_seed(159)
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_shipyard(vr.Palette(truecolor=False), world)
+
+    assert "[C]" in buf.getvalue()
+
+
+def test_shipyard_c_key_opens_crew_screen(monkeypatch):
+    world = _world_with_seed(160)
+    keys = iter(["C", "Q", "Q"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_shipyard(vr.Palette(truecolor=False), world)
+
+    assert "Crew Quarters" in buf.getvalue()
+
+
+def test_screen_status_shows_hired_crew(monkeypatch):
+    world = _world_with_seed(161)
+    world.save.ship.has_gunner = True
+    monkeypatch.setattr(vr, "read_key", lambda: " ")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_status(vr.Palette(truecolor=False), world)
+
+    assert "Gunner" in buf.getvalue()
+
+
+def test_retiring_resets_crew():
+    old_save = vr._new_career("Vet")
+    old_save.ship.has_gunner = True
+    old_save.ship.has_engineer = True
+
+    new_save = vr.retire_pilot(old_save)
+
+    assert not new_save.ship.has_gunner and not new_save.ship.has_engineer

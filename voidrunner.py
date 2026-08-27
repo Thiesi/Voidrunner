@@ -284,6 +284,16 @@ UPGRADES: dict[str, dict] = {
     "hull": {"label": "Hull Reinforcement", "max_tier": 4, "cost": lambda t: 700 + t * 550,
              "effect": "+35 max hull"},
 }
+# Hired NPC crew (see screen_crew) -- unlike every entry in UPGRADES
+# above, this is an ongoing per-jump wage instead of a one-time
+# purchase, and each role is a simple binary hired/not-hired switch
+# rather than a tier ladder. Keyed to match Ship's own `has_<role>`
+# fields exactly.
+CREW_ROLES: dict[str, dict] = {
+    "gunner": {"label": "Gunner", "hire_cost": 800, "wage": 15, "effect": "+3 combat damage per hit"},
+    "engineer": {"label": "Engineer", "hire_cost": 700, "wage": 12, "effect": "-1 fuel cost per jump (min 1)"},
+    "navigator": {"label": "Navigator", "hire_cost": 600, "wage": 10, "effect": "+1 scan range"},
+}
 # hull class -> base cargo/fuel/hull, before any tier upgrades are added
 # on top (cargo_capacity/fuel_capacity/hull_hp_max below still add
 # +8/+8/+35 per tier regardless of class -- only the base changes).
@@ -463,6 +473,15 @@ class Ship:
     shield_tier: int = 0
     scanner_tier: int = 0
     hull_tier: int = 0
+    # Hired NPC crew (see CREW_ROLES/screen_crew) -- an ongoing per-jump
+    # wage instead of a one-time upgrade purchase, unlike every other
+    # field on this dataclass. Additive fields; `Ship.from_dict`'s own
+    # generic reconstruction (only passes keys present in the loaded
+    # dict) already defaults every pre-existing save to False with no
+    # further change needed there.
+    has_gunner: bool = False
+    has_engineer: bool = False
+    has_navigator: bool = False
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -765,8 +784,11 @@ def bfs_hops(by_id: dict[int, GalaxySystem], start_id: int) -> dict[int, int]:
     return dist
 
 
-def fuel_cost_for_jump(a: GalaxySystem, b: GalaxySystem) -> int:
-    return max(1, round(_distance(a, b) / 6))
+def fuel_cost_for_jump(a: GalaxySystem, b: GalaxySystem, ship: Ship | None = None) -> int:
+    cost = max(1, round(_distance(a, b) / 6))
+    if ship is not None and ship.has_engineer:
+        cost = max(1, cost - 1)
+    return cost
 
 
 def bfs_path(by_id: dict[int, GalaxySystem], start_id: int, dest_id: int) -> list[int]:
@@ -1020,7 +1042,7 @@ def fight_round(world: World, pirate: Pirate) -> tuple[int, int, list[str]]:
     rng = world.event_rng
     ship = world.save.ship
     lines = []
-    dmg_to_pirate = rng.randint(5, 10) + ship.weapon_tier * 4
+    dmg_to_pirate = rng.randint(5, 10) + ship.weapon_tier * 4 + (3 if ship.has_gunner else 0)
     pirate.hp = max(0, pirate.hp - dmg_to_pirate)
     lines.append(f"You hit the {pirate.name} for {dmg_to_pirate} damage.")
     if pirate.hp > 0:
@@ -1127,7 +1149,7 @@ def is_stranded(world: World) -> bool:
     here = world.here
     if not here.connections:
         return False  # defensive: _connect_systems never leaves a system isolated
-    cheapest = min(fuel_cost_for_jump(here, world.by_id[nid]) for nid in here.connections)
+    cheapest = min(fuel_cost_for_jump(here, world.by_id[nid], world.save.ship) for nid in here.connections)
     if world.save.ship.fuel >= cheapest:
         return False
     shortfall = cheapest - world.save.ship.fuel
@@ -1145,7 +1167,7 @@ def rescue_stranded_pilot(world: World) -> str:
     towed = world.save.current_system != 0
     if towed:
         world.save.current_system = 0
-    cheapest = min(fuel_cost_for_jump(home, world.by_id[nid]) for nid in home.connections)
+    cheapest = min(fuel_cost_for_jump(home, world.by_id[nid], world.save.ship) for nid in home.connections)
     world.save.ship.fuel = max(world.save.ship.fuel, cheapest)
     if towed:
         msg = ("Stranded with an empty tank and empty pockets, a passing salvage tug answers "
@@ -1154,6 +1176,29 @@ def rescue_stranded_pilot(world: World) -> str:
         msg = "The dockmaster spots your empty tank and tops you off enough to get moving again, no charge."
     world.save.pilot.note(msg)
     return msg
+
+
+def pay_crew_wages(world: World) -> list[str]:
+    """Deducts each hired crew member's per-turn wage -- called once per
+    hop in `screen_travel`, the same cadence as the turn counter itself.
+    A crew member whose wage can't be afforded resigns automatically
+    (never drives credits negative, matching this file's own "never a
+    dead end" consequence philosophy -- see `destroy_ship`/
+    `rescue_stranded_pilot`) rather than being carried forward as debt."""
+    ship = world.save.ship
+    messages: list[str] = []
+    for role, info in CREW_ROLES.items():
+        if not getattr(ship, f"has_{role}"):
+            continue
+        wage = info["wage"]
+        if world.save.pilot.credits >= wage:
+            world.save.pilot.credits -= wage
+        else:
+            setattr(ship, f"has_{role}", False)
+            msg = f"Your {info['label']} resigns -- you can't cover their wages."
+            world.save.pilot.note(msg)
+            messages.append(msg)
+    return messages
 
 
 # ---------------------------------------------------------------------------
@@ -1606,7 +1651,8 @@ def screen_shipyard(p: Palette, world: World) -> None:
         else:
             for refit_key, (target_class, cost) in zip(refit_keys, refit_options):
                 out_line(f"  {p.gold}[{refit_key}]{RESET} {target_class}-Class Refit -- {cost}cr")
-        out(f"{p.muted}Fuel: {ship.fuel}cr@ 6cr/unit  [U]pgrade [R]efuel [P]air hull [Q]back: {RESET}")
+        out(f"{p.muted}Fuel: {ship.fuel}cr@ 6cr/unit  [U]pgrade [R]efuel [P]air hull "
+            f"[C]rew [Q]back: {RESET}")
         action = read_key().upper()
         out_line(action)
         if action == "Q":
@@ -1626,6 +1672,53 @@ def screen_shipyard(p: Palette, world: World) -> None:
             _refuel(p, world)
         elif action == "P":
             _repair(p, world)
+        elif action == "C":
+            screen_crew(p, world)
+
+
+def screen_crew(p: Palette, world: World) -> None:
+    ship = world.save.ship
+    while True:
+        out_line()
+        out_line(f"{p.accent}{BOLD}Crew Quarters{RESET}")
+        keys = list(CREW_ROLES.keys())
+        for i, role in enumerate(keys):
+            info = CREW_ROLES[role]
+            letter = LETTERS[i]
+            if getattr(ship, f"has_{role}"):
+                out_line(f"  {p.gold}[{letter}]{RESET} {info['label']:<12} "
+                          f"HIRED -- {info['wage']}cr/jump  ({info['effect']})")
+            else:
+                out_line(f"  {p.gold}[{letter}]{RESET} {info['label']:<12} "
+                          f"Hire for {info['hire_cost']}cr + {info['wage']}cr/jump  ({info['effect']})")
+        out(f"{p.muted}Hire/dismiss which, or [Q] back? {RESET}")
+        key = read_key().upper()
+        out_line(key)
+        if key == "Q":
+            return
+        idx = LETTERS.index(key) if key in LETTERS else -1
+        if idx < 0 or idx >= len(keys):
+            continue
+        _toggle_crew(p, world, keys[idx])
+
+
+def _toggle_crew(p: Palette, world: World, role: str) -> None:
+    ship = world.save.ship
+    info = CREW_ROLES[role]
+    if getattr(ship, f"has_{role}"):
+        if confirm(f"Dismiss your {info['label']}?", p):
+            setattr(ship, f"has_{role}", False)
+            out_line(f"{p.muted}{info['label']} dismissed.{RESET}")
+        return
+    if world.save.pilot.credits < info["hire_cost"]:
+        out_line(f"{p.wrong}Need {info['hire_cost']}cr to hire a {info['label']}.{RESET}")
+        return
+    if not confirm(f"Hire a {info['label']} for {info['hire_cost']}cr "
+                    f"(+{info['wage']}cr/jump ongoing wage)?", p):
+        return
+    world.save.pilot.credits -= info["hire_cost"]
+    setattr(ship, f"has_{role}", True)
+    out_line(f"{p.correct}{info['label']} hired.{RESET}")
 
 
 def _buy_upgrade(p: Palette, world: World, key: str) -> None:
@@ -1743,6 +1836,9 @@ def screen_status(p: Palette, world: World) -> None:
         out_line(f"  {p.gold}{FACTION_LABEL[faction]} standing:{RESET} {pilot.reputation.get(faction, 0)}")
     out_line(f"  {p.gold}Ship:{RESET} {ship.hull_class}  Hull {ship.hull_hp}/{hull_hp_max(ship)}  "
               f"Fuel {ship.fuel}/{fuel_capacity(ship)}  Cargo {cargo_capacity(ship)}")
+    crew = [info["label"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
+    if crew:
+        out_line(f"  {p.gold}Crew:{RESET} {', '.join(crew)}")
     out_line(f"  {p.gold}Systems charted:{RESET} {sum(1 for s in world.galaxy if s.discovered)}/{len(world.galaxy)}")
     out_line(f"  {p.gold}Missions completed:{RESET} {pilot.missions_completed}   "
               f"{p.gold}Raiders defeated:{RESET} {pilot.kills}")
@@ -1796,7 +1892,7 @@ def screen_chart(p: Palette, world: World) -> str | None:
         options: list[int] = []
         for sid in sorted(here.connections):
             dest = world.by_id[sid]
-            cost = fuel_cost_for_jump(here, dest)
+            cost = fuel_cost_for_jump(here, dest, world.save.ship)
             letter = LETTERS[len(options)]
             if dest.discovered:
                 out_line(f"  {p.gold}[{letter}]{RESET} {dest.name} ({dest.economy}, danger {dest.danger}) "
@@ -1827,7 +1923,7 @@ def screen_chart(p: Palette, world: World) -> str | None:
         if idx < 0 or idx >= len(options):
             continue
         dest_id = options[idx]
-        cost = fuel_cost_for_jump(here, world.by_id[dest_id])
+        cost = fuel_cost_for_jump(here, world.by_id[dest_id], world.save.ship)
         if world.save.ship.fuel < cost:
             out_line(f"{p.wrong}Not enough fuel ({cost} needed, have {world.save.ship.fuel}).{RESET}")
             continue
@@ -1835,7 +1931,7 @@ def screen_chart(p: Palette, world: World) -> str | None:
 
 
 def _do_scan(p: Palette, world: World) -> None:
-    range_hops = 2 + world.save.ship.scanner_tier
+    range_hops = 2 + world.save.ship.scanner_tier + (1 if world.save.ship.has_navigator else 0)
     hops = bfs_hops(world.by_id, world.save.current_system)
     candidates = [sid for sid, h in hops.items() if h <= range_hops and not world.by_id[sid].discovered]
     if not candidates:
@@ -1919,7 +2015,7 @@ def _screen_auto_route(p: Palette, world: World) -> None:
     total_fuel = 0
     cur = world.by_id[here_id]
     for hop_id in path:
-        total_fuel += fuel_cost_for_jump(cur, world.by_id[hop_id])
+        total_fuel += fuel_cost_for_jump(cur, world.by_id[hop_id], world.save.ship)
         cur = world.by_id[hop_id]
     out_line(f"{p.muted}Route to {target.name}: {len(path)} jump(s), {total_fuel} fuel total.{RESET}")
     if world.save.ship.fuel < total_fuel:
@@ -1930,7 +2026,7 @@ def _screen_auto_route(p: Palette, world: World) -> None:
         return
 
     for hop_id in path:
-        cost = fuel_cost_for_jump(world.here, world.by_id[hop_id])
+        cost = fuel_cost_for_jump(world.here, world.by_id[hop_id], world.save.ship)
         if world.save.ship.fuel < cost:
             out_line(f"{p.wrong}Route interrupted -- not enough fuel to continue "
                       f"({cost} needed, have {world.save.ship.fuel}).{RESET}")
@@ -2081,10 +2177,12 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
 def screen_travel(p: Palette, world: World, dest_id: int) -> None:
     origin = world.here
     dest = world.by_id[dest_id]
-    cost = fuel_cost_for_jump(origin, dest)
+    cost = fuel_cost_for_jump(origin, dest, world.save.ship)
     world.save.ship.fuel -= cost
     world.save.turn += 1
     tick_price_reversion(world)
+    for msg in pay_crew_wages(world):
+        out_line(f"{p.wrong}{msg}{RESET}")
     out_line(f"{p.muted}Jumping to {'the unknown' if not dest.discovered else dest.name}...{RESET}")
 
     bounty = next((m for m in world.save.active_missions
