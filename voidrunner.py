@@ -1790,6 +1790,8 @@ def screen_station_menu(p: Palette, world: World) -> str:
         out_line()
         out_line(f"{p.gold}{BOLD}★ ★ ★ Promoted to {promoted}! ★ ★ ★{RESET}")
         pause(p)
+    for msg in check_mission_completions(world):
+        out_line(f"{p.gold}{msg}{RESET}")
     out_line()
     draw_status_bar(p, world)
 
@@ -1861,7 +1863,7 @@ def screen_market(p: Palette, world: World) -> None:
         out_line(f"{p.accent}│ {p.gold}KEY  COMMODITY            BUY/UNIT    SELL/UNIT    SPREAD   IN HOLD  STATUS  {p.accent}│{RESET}")
         out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
         rows: list[tuple[str, str]] = []
-        goods = LEGAL_COMMODITIES + (CONTRABAND_COMMODITIES if system.economy == "Haven" else [])
+        goods = LEGAL_COMMODITIES + [c for c in CONTRABAND_COMMODITIES if system.economy == "Haven" or world.save.cargo.get(c, 0) > 0]
         for commodity in goods:
             buy = price_for(world, system.id, commodity)
             sell = round(buy * SELL_SPREAD)
@@ -1900,7 +1902,8 @@ def screen_market(p: Palette, world: World) -> None:
         if key == "Q":
             return
         if key == "X":
-            screen_futures(p, world, goods)
+            futures_goods = [c for c in goods if COMMODITIES[c]["legal"] or world.here.economy == "Haven"]
+            screen_futures(p, world, futures_goods)
             continue
         idx = LETTERS.index(key) if key in LETTERS else -1
         if idx < 0 or idx >= len(rows):
@@ -1983,6 +1986,9 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
     action = read_key().upper()
     out_line(action)
     if action == "B":
+        if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
+            out_line(f"{p.wrong}Station authorities prohibit the open purchase of contraband.{RESET}")
+            return
         room = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
         affordable = world.save.pilot.credits // buy if buy else room
         max_qty = max(0, min(room, affordable))
@@ -2020,6 +2026,8 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
             del world.save.cargo[commodity]
         _nudge_drift(world, world.here.id, commodity, -min(0.05, qty * 0.01))
         out_line(f"{p.correct}Sold {qty}x {label} for {proceeds}cr.{RESET}")
+        if not COMMODITIES[commodity]["legal"]:
+            adjust_reputation(world, FACTION_BLACKWAKE, 1)
 
 
 def screen_shipyard(p: Palette, world: World) -> None:
@@ -2163,6 +2171,9 @@ def _refuel(p: Palette, world: World) -> None:
         return
     affordable = world.save.pilot.credits // 6
     max_qty = max(0, min(room, affordable))
+    if max_qty <= 0:
+        out_line(f"{p.wrong}Not enough credits to buy fuel (6cr/unit).{RESET}")
+        return
     out(f"{p.muted}Fuel to buy (max {max_qty}, 6cr/unit): {RESET}")
     raw = read_line_raw(max_len=4)
     qty = int(raw) if raw.isdigit() else 0
@@ -2315,6 +2326,21 @@ def screen_status(p: Palette, world: World) -> None:
         ev_line = f"  {p.gold}Economy event:{RESET} {event['description']} ({event['turns_remaining']} turn(s) left)"
         pad_len = max(0, 75 - _vis_len(ev_line))
         out_line(f"{p.accent}│{RESET}{ev_line}{' ' * pad_len}{p.accent}│{RESET}")
+
+    if world.save.active_missions:
+        out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
+        head_str = f"  {p.gold}Active Contracts & Missions:{RESET}"
+        pad_len = max(0, 75 - _vis_len(head_str))
+        out_line(f"{p.accent}│{RESET}{head_str}{' ' * pad_len}{p.accent}│{RESET}")
+        for m in world.save.active_missions:
+            if m.deadline_turn is not None:
+                rem = max(0, m.deadline_turn - world.save.turn)
+                time_str = f"{rem} turn(s) left"
+            else:
+                time_str = "no deadline"
+            m_str = f"    • {m.description:<40} {time_str:>14}  +{m.reward}cr"
+            pad_len = max(0, 75 - _vis_len(m_str))
+            out_line(f"{p.accent}│{RESET}{m_str}{' ' * pad_len}{p.accent}│{RESET}")
 
     out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
 
@@ -2581,7 +2607,9 @@ def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySyste
             out_line(f"{p.wrong}Raider squadron contact: {len(pirates)} ships incoming!{RESET}")
         else:
             out_line(f"{p.wrong}Raider contact: the {pirates[0].name}!{RESET}")
-        for pirate in pirates:
+        for i, pirate in enumerate(pirates):
+            if i > 0:
+                out_line(f"{p.wrong}The next raider closes in -- the {pirate.name} engages!{RESET}")
             # Only a genuine kill lets the fight continue to the next
             # ship -- an evade/bribe ("escaped") or a destroyed ship
             # ends the whole encounter, not just this one ship. Bribing
@@ -2610,7 +2638,7 @@ def _encounter_derelict(p: Palette, world: World) -> None:
     if action != "B":
         return
     if world.event_rng.random() < 0.70:
-        reward = world.event_rng.randint(80, 60 + world.here.danger * 120)
+        reward = world.event_rng.randint(60, 100 + max(0, world.here.danger) * 120)
         world.save.pilot.credits += reward
         world.save.pilot.note(f"Salvaged a derelict hulk (+{reward}cr).")
         out_line(f"{p.correct}Salvage recovered: {reward}cr.{RESET}")
@@ -2898,6 +2926,13 @@ def screen_combat(p: Palette, world: World, pirate: Pirate) -> str:
                 out_line(f"{p.correct}The {pirate.name} takes {cost}cr and peels off.{RESET}")
                 return "escaped"
             out_line(f"{p.wrong}They refuse the bribe and press the attack!{RESET}")
+            raw = world.event_rng.randint(4, 9) + pirate.tier * 4
+            dmg = max(1, raw - ship.shield_tier * 3)
+            ship.hull_hp = max(0, ship.hull_hp - dmg)
+            out_line(f"  The {pirate.name} hits you for {dmg} damage.")
+            if ship.hull_hp <= 0:
+                out_line(f"{p.wrong}{destroy_ship(world)}{RESET}")
+                return "destroyed"
         elif action == "Q":
             out_line(
                 f"  {p.accent}Tactical Systems:{RESET} Hull {_gauge_bar(ship.hull_hp, hull_hp_max(ship), 8, p)} "
