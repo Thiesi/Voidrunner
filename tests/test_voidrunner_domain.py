@@ -160,6 +160,126 @@ def test_carrier_hull_class_has_higher_base_stats_than_shuttle_at_same_tiers():
     assert vr.fuel_capacity(carrier) > vr.fuel_capacity(shuttle)
 
 
+# -- hull class ladder (branching Shuttle -> Freighter|Cutter -> Carrier) --
+
+
+def test_hull_refits_branch_from_shuttle_into_freighter_or_cutter():
+    targets = {target for target, _cost in vr.HULL_REFITS["Shuttle"]}
+    assert targets == {"Freighter", "Cutter"}
+
+
+def test_hull_refits_from_freighter_or_cutter_only_offer_carrier():
+    assert [target for target, _cost in vr.HULL_REFITS["Freighter"]] == ["Carrier"]
+    assert [target for target, _cost in vr.HULL_REFITS["Cutter"]] == ["Carrier"]
+
+
+def test_carrier_has_no_further_refits():
+    assert vr.HULL_REFITS["Carrier"] == []
+
+
+def test_carrier_base_stats_exceed_both_freighter_and_cutter_in_every_dimension():
+    """Carrier is the unified endgame hull, not a third competing
+    tradeoff -- it must never be strictly worse than either mid-tier
+    branch in any single stat, or a Freighter/Cutter owner would have a
+    real reason never to take the final refit."""
+    freighter = vr.Ship(hull_class="Freighter", hull_hp=1, fuel=0)
+    cutter = vr.Ship(hull_class="Cutter", hull_hp=1, fuel=0)
+    carrier = vr.Ship(hull_class="Carrier", hull_hp=1, fuel=0)
+    for other in (freighter, cutter):
+        assert vr.cargo_capacity(carrier) > vr.cargo_capacity(other)
+        assert vr.fuel_capacity(carrier) > vr.fuel_capacity(other)
+        assert vr.hull_hp_max(carrier) > vr.hull_hp_max(other)
+
+
+def test_freighter_and_cutter_are_a_genuine_tradeoff_not_one_strictly_better():
+    """The branching choice only means something if neither mid-tier hull
+    dominates the other in every stat."""
+    freighter = vr.Ship(hull_class="Freighter", hull_hp=1, fuel=0)
+    cutter = vr.Ship(hull_class="Cutter", hull_hp=1, fuel=0)
+    assert vr.cargo_capacity(freighter) > vr.cargo_capacity(cutter)
+    assert vr.hull_hp_max(cutter) > vr.hull_hp_max(freighter)
+    assert vr.fuel_capacity(cutter) > vr.fuel_capacity(freighter)
+
+
+def test_hull_refit_screen_declines_without_enough_credits(monkeypatch):
+    world = _world_with_seed(30)
+    world.save.pilot.credits = 100
+    monkeypatch.setattr(vr, "confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not prompt")))
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr._hull_refit_screen(vr.Palette(truecolor=False), world, "Freighter", 15_000)
+
+    assert world.save.ship.hull_class == "Shuttle"
+    assert world.save.pilot.credits == 100
+    assert "Need" in buf.getvalue()
+
+
+def test_hull_refit_screen_declining_confirmation_makes_no_change(monkeypatch):
+    world = _world_with_seed(31)
+    world.save.pilot.credits = 20_000
+
+    monkeypatch.setattr(vr, "read_key", lambda: "N")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._hull_refit_screen(vr.Palette(truecolor=False), world, "Freighter", 15_000)
+
+    assert world.save.ship.hull_class == "Shuttle"
+    assert world.save.pilot.credits == 20_000
+
+
+def test_hull_refit_screen_applies_the_refit_charges_credits_and_resets_hull_to_new_max(monkeypatch):
+    world = _world_with_seed(32)
+    world.save.pilot.credits = 20_000
+    world.save.ship.hull_hp = 10  # damaged, below Shuttle's own max
+
+    monkeypatch.setattr(vr, "read_key", lambda: "Y")
+    before_log_len = len(world.save.pilot.log)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._hull_refit_screen(vr.Palette(truecolor=False), world, "Freighter", 15_000)
+
+    assert world.save.ship.hull_class == "Freighter"
+    assert world.save.pilot.credits == 5_000
+    assert world.save.ship.hull_hp == vr.hull_hp_max(world.save.ship)
+    assert len(world.save.pilot.log) == before_log_len + 1
+
+
+def test_hull_refit_narrative_names_the_actual_previous_class_not_a_hardcoded_one(monkeypatch):
+    """Dogfood-shaped regression: the original single-hull-class refit's
+    own narrative hardcoded "Your Shuttle is towed..." -- generalizing to
+    a branching ladder means a Freighter or Cutter owner refitting into a
+    Carrier must see their own actual previous class named, not a stale
+    "Shuttle" literal."""
+    world = _world_with_seed(33)
+    world.save.ship.hull_class = "Cutter"
+    world.save.pilot.credits = 50_000
+
+    monkeypatch.setattr(vr, "read_key", lambda: "Y")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr._hull_refit_screen(vr.Palette(truecolor=False), world, "Carrier", 45_000)
+
+    assert "Your Cutter is towed" in buf.getvalue()
+    assert world.save.ship.hull_class == "Carrier"
+
+
+def test_shipyard_offers_two_refit_choices_from_shuttle_and_one_after_committing(monkeypatch):
+    """Integration-shaped: `screen_shipyard`'s own display/dispatch, not
+    just the domain functions in isolation."""
+    world = _world_with_seed(34)
+    world.save.pilot.credits = 20_000
+
+    keys = iter(["G", "Y", "Q"])  # pick the first refit slot (Freighter), confirm, then leave
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_shipyard(vr.Palette(truecolor=False), world)
+
+    text = buf.getvalue()
+    assert "[G]" in text and "Freighter-Class Refit" in text
+    assert "[H]" in text and "Cutter-Class Refit" in text
+    assert world.save.ship.hull_class == "Freighter"
+
+
 # -- save round-tripping ---------------------------------------------------
 
 

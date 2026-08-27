@@ -279,7 +279,33 @@ UPGRADES: dict[str, dict] = {
     "hull": {"label": "Hull Reinforcement", "max_tier": 4, "cost": lambda t: 700 + t * 550,
              "effect": "+35 max hull"},
 }
-FLAGSHIP_REFIT_COST = 50_000
+# hull class -> base cargo/fuel/hull, before any tier upgrades are added
+# on top (cargo_capacity/fuel_capacity/hull_hp_max below still add
+# +8/+8/+35 per tier regardless of class -- only the base changes).
+# Carrier's own base exceeds both Freighter's and Cutter's in every
+# stat on purpose -- it's the unified endgame hull, not a third
+# competing tradeoff.
+HULL_CLASSES: dict[str, dict] = {
+    "Shuttle": {"cargo_base": 24, "fuel_base": 24, "hull_base": 60},
+    "Freighter": {"cargo_base": 100, "fuel_base": 40, "hull_base": 140},
+    "Cutter": {"cargo_base": 40, "fuel_base": 50, "hull_base": 180},
+    "Carrier": {"cargo_base": 160, "fuel_base": 60, "hull_base": 260},
+}
+
+# current hull class -> [(target class, refit cost), ...] refits available
+# from here. A branching ladder, not a strict sequence: Shuttle refits
+# into *either* Freighter (cargo-focused trader build) *or* Cutter
+# (hull/fuel-focused fighter build) -- a one-time playstyle commitment,
+# not a step everyone takes in the same order -- and either then refits
+# into Carrier later, unifying back into one endgame hull. No refit ever
+# goes backward, matching the existing "flagship refit" tone this
+# generalizes (a permanent commissioning, not a reversible choice).
+HULL_REFITS: dict[str, list[tuple[str, int]]] = {
+    "Shuttle": [("Freighter", 15_000), ("Cutter", 15_000)],
+    "Freighter": [("Carrier", 45_000)],
+    "Cutter": [("Carrier", 45_000)],
+    "Carrier": [],
+}
 
 RANKS = [
     (0, "Rookie Hauler"),
@@ -377,18 +403,15 @@ class Ship:
 
 
 def cargo_capacity(ship: Ship) -> int:
-    base = 24 if ship.hull_class == "Shuttle" else 64
-    return base + ship.cargo_tier * 8
+    return HULL_CLASSES[ship.hull_class]["cargo_base"] + ship.cargo_tier * 8
 
 
 def fuel_capacity(ship: Ship) -> int:
-    base = 24 if ship.hull_class == "Shuttle" else 44
-    return base + ship.engine_tier * 8
+    return HULL_CLASSES[ship.hull_class]["fuel_base"] + ship.engine_tier * 8
 
 
 def hull_hp_max(ship: Ship) -> int:
-    base = 60 if ship.hull_class == "Shuttle" else 210
-    return base + ship.hull_tier * 35
+    return HULL_CLASSES[ship.hull_class]["hull_base"] + ship.hull_tier * 35
 
 
 @dataclass
@@ -1124,7 +1147,7 @@ def screen_shipyard(p: Palette, world: World) -> None:
                 cost = u["cost"](tier)
                 out_line(f"  {p.gold}[{LETTERS[i]}]{RESET} {u['label']:<24} "
                           f"tier {tier}->{tier + 1}  {cost}cr  ({u['effect']})")
-        # A distinct letter, one past the last upgrade slot -- not a
+        # Distinct letters, one past the last upgrade slot -- not a
         # hardcoded "[F]", which silently collided with Hull
         # Reinforcement's own slot letter (also "F", the 6th of 6
         # upgrades) the instant a 6th upgrade category existed. Two rows
@@ -1132,18 +1155,27 @@ def screen_shipyard(p: Palette, world: World) -> None:
         # ambiguous to the code (this is a different prompt from
         # [U]pgrade's own follow-up "Which upgrade?" letter), but it was
         # a real dogfood-caught display bug regardless -- confusing to
-        # read even when not to press.
-        refit_key = LETTERS[len(keys)]
-        refit_line = f"  {p.gold}[{refit_key}]{RESET} Flagship Refit -- {FLAGSHIP_REFIT_COST}cr"
-        if ship.hull_class == "Carrier":
-            out_line(f"  {p.muted}[{refit_key}] Flagship Refit -- already flying a Carrier{RESET}")
+        # read even when not to press. `HULL_REFITS`'s own branching
+        # ladder means this is 0, 1, or 2 rows depending on the current
+        # hull class -- Shuttle owners see two independent refit choices
+        # (Freighter or Cutter), not a hardcoded single "Flagship Refit"
+        # row.
+        refit_options = HULL_REFITS[ship.hull_class]
+        refit_keys = LETTERS[len(keys) : len(keys) + len(refit_options)]
+        if not refit_options:
+            out_line(f"  {p.muted}Hull: already flying our best available class ({ship.hull_class}){RESET}")
         else:
-            out_line(refit_line)
+            for refit_key, (target_class, cost) in zip(refit_keys, refit_options):
+                out_line(f"  {p.gold}[{refit_key}]{RESET} {target_class}-Class Refit -- {cost}cr")
         out(f"{p.muted}Fuel: {ship.fuel}cr@ 6cr/unit  [U]pgrade [R]efuel [P]air hull [Q]back: {RESET}")
         action = read_key().upper()
         out_line(action)
         if action == "Q":
             return
+        if action in refit_keys:
+            target_class, cost = refit_options[refit_keys.index(action)]
+            _hull_refit_screen(p, world, target_class, cost)
+            continue
         if action == "U":
             out(f"{p.muted}Which upgrade? {RESET}")
             key_choice = read_key().upper()
@@ -1155,8 +1187,6 @@ def screen_shipyard(p: Palette, world: World) -> None:
             _refuel(p, world)
         elif action == "P":
             _repair(p, world)
-        elif action == refit_key:
-            _flagship_refit(p, world)
 
 
 def _buy_upgrade(p: Palette, world: World, key: str) -> None:
@@ -1218,21 +1248,25 @@ def _repair(p: Palette, world: World) -> None:
     out_line(f"{p.correct}Hull repaired to {ship.hull_hp}/{hull_hp_max(ship)}.{RESET}")
 
 
-def _flagship_refit(p: Palette, world: World) -> None:
+def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -> None:
+    """One hull-class refit, generalized over `HULL_REFITS`'s own
+    branching ladder -- Shuttle owners see two independent calls of this
+    (Freighter or Cutter), Freighter/Cutter owners see one (Carrier),
+    Carrier owners see none. Never reversible, matching this refit's own
+    "permanent commissioning" tone -- there is no downgrade path."""
     ship = world.save.ship
-    if ship.hull_class == "Carrier":
+    if world.save.pilot.credits < cost:
+        out_line(f"{p.wrong}Need {cost}cr for the {target_class} refit.{RESET}")
         return
-    if world.save.pilot.credits < FLAGSHIP_REFIT_COST:
-        out_line(f"{p.wrong}Need {FLAGSHIP_REFIT_COST}cr for the refit.{RESET}")
+    if not confirm(f"Commission a {target_class}-class refit for {cost}cr? "
+                    f"This is a permanent hull upgrade.", p):
         return
-    if not confirm(f"Commission a Carrier-class refit for {FLAGSHIP_REFIT_COST}cr? "
-                    f"This is a one-time flagship upgrade.", p):
-        return
-    world.save.pilot.credits -= FLAGSHIP_REFIT_COST
-    ship.hull_class = "Carrier"
+    previous_class = ship.hull_class
+    world.save.pilot.credits -= cost
+    ship.hull_class = target_class
     ship.hull_hp = hull_hp_max(ship)
-    world.save.pilot.note("Commissioned a Carrier-class flagship refit.")
-    out_line(f"{p.gold}{BOLD}Your Shuttle is towed into drydock and emerges a Carrier.{RESET}")
+    world.save.pilot.note(f"Commissioned a {target_class}-class hull refit.")
+    out_line(f"{p.gold}{BOLD}Your {previous_class} is towed into drydock and emerges a {target_class}.{RESET}")
     out_line(f"{p.gold}Cargo, hull, and fuel capacity all jump considerably.{RESET}")
 
 
