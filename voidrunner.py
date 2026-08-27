@@ -1953,8 +1953,16 @@ def screen_shipyard(p: Palette, world: World) -> None:
         else:
             for refit_key, (target_class, cost) in zip(refit_keys, refit_options):
                 out_line(f"  {p.gold}[{refit_key}]{RESET} {target_class}-Class Refit -- {cost}cr")
+        # "[K] Crew", not "[C]rew" -- "C" is already Weapon Systems' own
+        # row letter above (the 3rd of 6 UPGRADES entries), and this
+        # footer's fixed action keys share one namespace with those row
+        # letters at this same prompt (unlike [U]pgrade's own separate
+        # "Which upgrade?" follow-up, which is the *only* place A-F/G-H
+        # are ever actually read). Two different things on one screen
+        # both showing "[C]" is exactly the ambiguity this screen's own
+        # `refit_keys` comment above already documents fixing once.
         out(f"{p.muted}Fuel: {ship.fuel}cr@ 6cr/unit  [U]pgrade [R]efuel [P]air hull "
-            f"[C]rew [Q]back: {RESET}")
+            f"[K] Crew [Q]back: {RESET}")
         action = read_key().upper()
         out_line(action)
         if action == "Q":
@@ -1974,7 +1982,7 @@ def screen_shipyard(p: Palette, world: World) -> None:
             _refuel(p, world)
         elif action == "P":
             _repair(p, world)
-        elif action == "C":
+        elif action == "K":
             screen_crew(p, world)
 
 
@@ -2192,6 +2200,19 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
     pause(p)
 
 
+# [S]can, [G]o to, [V]iew are fixed control keys on this same prompt,
+# not per-connection row letters -- never assigned to a connection.
+# Dogfood-caught: `_connect_systems`'s own extra-edge pass can give a
+# single system up to ~7 connections (seen across a few thousand random
+# seeds), and "G" is only the *7th* letter -- a plain `LETTERS[index]`
+# assignment would silently make that 7th connection's own row letter
+# collide with (and be permanently shadowed by) the "[G]o to" hotkey,
+# unlike "S"/"V" which sit late enough in the alphabet to never
+# realistically collide with any observed degree.
+CHART_RESERVED_LETTERS = "SGV"
+CHART_CONNECTION_LETTERS = [c for c in LETTERS if c not in CHART_RESERVED_LETTERS]
+
+
 def screen_chart(p: Palette, world: World) -> str | None:
     """Returns a destination system id to travel to, or None if the
     player backed out."""
@@ -2203,7 +2224,7 @@ def screen_chart(p: Palette, world: World) -> str | None:
         for sid in sorted(here.connections):
             dest = world.by_id[sid]
             cost = fuel_cost_for_jump(here, dest, world.save.ship)
-            letter = LETTERS[len(options)]
+            letter = CHART_CONNECTION_LETTERS[len(options)]
             if dest.discovered:
                 out_line(f"  {p.gold}[{letter}]{RESET} {dest.name} ({dest.economy}, danger {dest.danger}) "
                           f"-- {cost} fuel")
@@ -2229,7 +2250,7 @@ def screen_chart(p: Palette, world: World) -> str | None:
         if key == "V":
             screen_galaxy_map(p, world)
             continue
-        idx = LETTERS.index(key) if key in LETTERS else -1
+        idx = CHART_CONNECTION_LETTERS.index(key) if key in CHART_CONNECTION_LETTERS else -1
         if idx < 0 or idx >= len(options):
             continue
         dest_id = options[idx]
@@ -2309,14 +2330,23 @@ def _screen_auto_route(p: Palette, world: World) -> None:
     if len(candidates) == 1:
         target = candidates[0]
     else:
+        # Dogfood-caught: a short, common substring (a single vowel,
+        # say) can match 30+ of the 48 galaxy systems at once -- with
+        # plain `LETTERS`, that many matches reaches "Q" as a real row
+        # letter (the 17th), making it ambiguous with this same
+        # prompt's own "[Q] cancel". Reuses the same reserved-letters
+        # pattern as the chart screen's own CHART_RESERVED_LETTERS fix.
+        pick_letters = [c for c in LETTERS if c != "Q"]
         out_line(f"{p.muted}Multiple matches:{RESET}")
-        shown = candidates[:len(LETTERS)]
+        shown = candidates[:len(pick_letters)]
         for i, s in enumerate(shown):
-            out_line(f"  {p.gold}[{LETTERS[i]}]{RESET} {s.name}")
+            out_line(f"  {p.gold}[{pick_letters[i]}]{RESET} {s.name}")
         out(f"{p.muted}Which one, or [Q] cancel? {RESET}")
         key = read_key().upper()
         out_line(key)
-        idx = LETTERS.index(key) if key in LETTERS else -1
+        if key == "Q":
+            return
+        idx = pick_letters.index(key) if key in pick_letters else -1
         if idx < 0 or idx >= len(shown):
             return
         target = shown[idx]
@@ -2491,6 +2521,10 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
     cost = fuel_cost_for_jump(origin, dest, world.save.ship)
     world.save.ship.fuel -= cost
     world.save.turn += 1
+    # "Jumping to..." prints before any of this turn's other news --
+    # otherwise the player sees economy/crew/futures narration for a
+    # trip they haven't been told they're taking yet.
+    out_line(f"{p.muted}Jumping to {'the unknown' if not dest.discovered else dest.name}...{RESET}")
     tick_price_reversion(world)
     event_msg = tick_economy_event(world)
     if event_msg:
@@ -2499,7 +2533,6 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         out_line(f"{p.wrong}{msg}{RESET}")
     for msg in settle_futures_contracts(world):
         out_line(f"{p.gold}{msg}{RESET}")
-    out_line(f"{p.muted}Jumping to {'the unknown' if not dest.discovered else dest.name}...{RESET}")
 
     bounty = next((m for m in world.save.active_missions
                     if m.kind == "bounty" and m.target_system == dest_id), None)

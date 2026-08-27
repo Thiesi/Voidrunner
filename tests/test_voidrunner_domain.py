@@ -1328,6 +1328,33 @@ def test_auto_route_declines_on_confirmation_refusal(monkeypatch):
     assert calls == []
 
 
+def test_auto_route_disambiguation_reserves_q_for_cancel_with_many_matches(monkeypatch):
+    """Regression guard for a real dogfood-caught bug: a short, common
+    substring can match 17+ discovered systems at once, and with plain
+    `LETTERS` that reaches "Q" as a real row letter (the 17th) --
+    colliding with this same prompt's own "[Q] cancel", so pressing Q
+    would silently pick a system instead of backing out."""
+    world = _world_with_seed(200)
+    for system in world.galaxy:
+        system.discovered = True  # every system is now a candidate for a 1-char search
+    world.save.ship.fuel = 999
+
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: "a")
+    calls = []
+    monkeypatch.setattr(vr, "screen_travel", lambda p, w, hop_id: calls.append(hop_id))
+    # A single "Q" -- if this regresses, the buggy path selects a system
+    # instead of canceling and falls through to `confirm()`, whose own
+    # read-until-Y/N loop would call read_key() again; StopIteration
+    # fails the test fast instead of hanging forever on a constant mock.
+    keys = iter(["Q"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._screen_auto_route(vr.Palette(truecolor=False), world)
+
+    assert calls == []
+
+
 def test_auto_route_stops_early_when_a_hop_diverts_the_plan(monkeypatch):
     """Simulates a mid-route ship loss: `screen_travel` sends the pilot
     back to Freeport instead of the planned hop, and the route must not
@@ -2206,12 +2233,23 @@ def test_shipyard_offers_crew_option(monkeypatch):
     with contextlib.redirect_stdout(buf):
         vr.screen_shipyard(vr.Palette(truecolor=False), world)
 
-    assert "[C]" in buf.getvalue()
+    assert "[K] Crew" in buf.getvalue()
 
 
-def test_shipyard_c_key_opens_crew_screen(monkeypatch):
+def test_shipyard_crew_row_letter_never_collides_with_an_upgrade_row():
+    """Regression guard for a real dogfood-caught bug: Crew's own footer
+    hotkey used to be "[C]", which is also Weapon Systems' own row
+    letter (the 3rd of 6 UPGRADES entries) shown just above it on the
+    same screen -- two different things both labeled "[C]" on one
+    prompt, the exact ambiguity this file's own `refit_keys` comment
+    already documents fixing once before."""
+    upgrade_row_letters = set(vr.LETTERS[: len(vr.UPGRADES)])
+    assert "K" not in upgrade_row_letters
+
+
+def test_shipyard_k_key_opens_crew_screen(monkeypatch):
     world = _world_with_seed(160)
-    keys = iter(["C", "Q", "Q"])
+    keys = iter(["K", "Q", "Q"])
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
 
     buf = io.StringIO()
@@ -2219,6 +2257,37 @@ def test_shipyard_c_key_opens_crew_screen(monkeypatch):
         vr.screen_shipyard(vr.Palette(truecolor=False), world)
 
     assert "Crew Quarters" in buf.getvalue()
+
+
+def test_chart_screen_reserves_sgv_and_never_assigns_them_to_a_connection(monkeypatch):
+    """Regression guard for a real dogfood-caught bug: `_connect_systems`'s
+    own extra-edge pass can give a single system up to ~7 connections
+    (seen across a few thousand random seeds), and a plain `LETTERS[i]`
+    assignment would silently give the 7th one the same row letter as
+    the "[G]o to" hotkey -- permanently shadowing that connection,
+    since "G" was checked as a fixed control key before ever falling
+    through to the row lookup. Forces a system with 8 connections
+    (more than "G"'s own position, 7th letter) and confirms the 8th
+    one is both drawn with, and selectable via, a non-reserved letter."""
+    world = _world_with_seed(190)
+    world.here.connections = list(range(1, 9))  # 8 synthetic neighbors
+    for sid in world.here.connections:
+        world.by_id[sid].discovered = True
+    world.save.ship.fuel = 999
+
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_chart(vr.Palette(truecolor=False), world)
+
+    for letter in "SGV":
+        assert letter not in vr.CHART_CONNECTION_LETTERS[:8]
+
+    eighth_letter = vr.CHART_CONNECTION_LETTERS[7]
+    keys = iter([eighth_letter])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()):
+        dest = vr.screen_chart(vr.Palette(truecolor=False), world)
+    assert dest == 8  # the 8th synthetic connection, reachable via its own real letter
 
 
 def test_screen_status_shows_hired_crew(monkeypatch):
