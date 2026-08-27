@@ -1443,3 +1443,145 @@ def test_retiring_resets_landmark_investigated_flag():
     new_save = vr.retire_pilot(old_save)
 
     assert "landmark_investigated" not in new_save.flags
+
+
+# -- career highlights -------------------------------------------------
+
+
+def test_pilot_highlight_appends_and_caps_at_max_highlights():
+    save = vr._new_career("Recorder")
+    for i in range(vr.MAX_HIGHLIGHTS + 5):
+        save.pilot.highlight(f"Event {i}")
+    assert len(save.pilot.highlights) == vr.MAX_HIGHLIGHTS
+    assert save.pilot.highlights[-1] == f"Event {vr.MAX_HIGHLIGHTS + 4}"
+    assert save.pilot.highlights[0] == "Event 5"
+
+
+def test_pilot_from_dict_defaults_highlights_and_rank_seen_for_old_saves():
+    d = vr._new_career("Legacy").pilot.to_dict()
+    del d["highlights"]
+    del d["highest_rank_seen"]
+
+    pilot = vr.Pilot.from_dict(d)
+
+    assert pilot.highlights == []
+    assert pilot.highest_rank_seen == 0
+
+
+def test_check_rank_up_fires_once_per_rank_and_records_a_highlight():
+    world = _world_with_seed(115)
+    world.save.pilot.credits = vr.RANKS[1][0]
+
+    title = vr.check_rank_up(world)
+    assert title == vr.RANKS[1][1]
+    assert world.save.pilot.highest_rank_seen == 1
+    assert any("Promoted" in h for h in world.save.pilot.highlights)
+
+    # Same rank again -- must not re-fire.
+    assert vr.check_rank_up(world) is None
+
+
+def test_check_rank_up_does_not_fire_for_a_fresh_career():
+    world = _world_with_seed(116)
+    assert vr.check_rank_up(world) is None
+
+
+def test_check_rank_up_skips_ahead_correctly_on_a_big_jump():
+    world = _world_with_seed(117)
+    world.save.pilot.credits = vr.RANKS[-1][0]
+
+    title = vr.check_rank_up(world)
+
+    assert title == vr.RANKS[-1][1]
+    assert world.save.pilot.highest_rank_seen == len(vr.RANKS) - 1
+
+
+def test_first_kill_records_a_highlight_but_not_the_second(monkeypatch):
+    world = _world_with_seed(118)
+    pirate = vr.generate_pirate(world, tier=1)
+
+    def win_the_fight(w, target):
+        target.hp = 0
+        return (0, 0, [])
+
+    monkeypatch.setattr(vr, "fight_round", win_the_fight)
+    monkeypatch.setattr(vr, "read_key", lambda: "F")
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        outcome = vr.screen_combat(vr.Palette(truecolor=False), world, pirate)
+    assert outcome == "won"
+    assert sum("First kill" in h for h in world.save.pilot.highlights) == 1
+
+    pirate2 = vr.generate_pirate(world, tier=1)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_combat(vr.Palette(truecolor=False), world, pirate2)
+    assert sum("First kill" in h for h in world.save.pilot.highlights) == 1
+
+
+def test_first_mission_completion_records_a_highlight():
+    world = _world_with_seed(119)
+    mission = vr.Mission(id=1, kind="delivery", description="Haul food", reward=100,
+                          origin_system=0, target_system=0, commodity="food", quantity=1)
+    world.save.active_missions.append(mission)
+    world.save.cargo["food"] = 1
+
+    msgs = vr.check_mission_completions(world)
+
+    assert msgs
+    assert any("First mission" in h for h in world.save.pilot.highlights)
+
+
+def test_hull_refit_records_a_highlight(monkeypatch):
+    world = _world_with_seed(120)
+    world.save.pilot.credits = 100_000
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._hull_refit_screen(vr.Palette(truecolor=False), world, "Freighter", 5000)
+
+    assert any("Freighter-class hull refit" in h for h in world.save.pilot.highlights)
+
+
+def test_landmark_investigation_records_a_highlight():
+    world = _world_with_seed(121)
+    world.save.current_system = world.landmark["system_id"]
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_landmark(vr.Palette(truecolor=False), world)
+
+    assert any(world.landmark["label"] in h for h in world.save.pilot.highlights)
+
+
+def test_retire_pilot_records_a_highlight_on_the_new_career():
+    old_save = vr._new_career("Vet")
+    old_save.pilot.credits = vr.RANKS[-1][0]
+
+    new_save = vr.retire_pilot(old_save)
+
+    assert any("Retired" in h for h in new_save.pilot.highlights)
+
+
+def test_screen_status_shows_career_highlights(monkeypatch):
+    world = _world_with_seed(122)
+    world.save.pilot.highlight("Something notable happened.")
+    monkeypatch.setattr(vr, "read_key", lambda: " ")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_status(vr.Palette(truecolor=False), world)
+
+    assert "Career highlights" in buf.getvalue()
+    assert "Something notable happened." in buf.getvalue()
+
+
+def test_station_menu_announces_a_promotion(monkeypatch):
+    world = _world_with_seed(123)
+    world.save.pilot.credits = vr.RANKS[1][0]
+    keys = iter([" ", "Q"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_station_menu(vr.Palette(truecolor=False), world)
+
+    assert "Promoted to" in buf.getvalue()

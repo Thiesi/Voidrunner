@@ -224,6 +224,11 @@ def pause(p: Palette, msg: str = "Press any key to continue...") -> None:
 
 GALAXY_SYSTEM_COUNT = 48
 
+# Cap for Pilot.highlights (see Pilot.highlight) -- bounds an extremely
+# long career's save file size without ever summarizing the record down
+# to "recent," which is `log`'s own job.
+MAX_HIGHLIGHTS = 40
+
 ECONOMIES = ["Agricultural", "Industrial", "Mining", "Tech", "Haven"]
 ECONOMY_WEIGHTS = [30, 25, 25, 15, 5]
 ECONOMY_BASE_DANGER = {"Agricultural": 1, "Industrial": 1, "Mining": 2, "Tech": 1, "Haven": 3}
@@ -410,10 +415,28 @@ class Pilot:
     # safe default for every pre-existing save via from_dict's own
     # .get() below -- no SCHEMA_VERSION bump needed.
     retirements: int = 0
+    # A permanent milestone record -- first kill, first mission, rank
+    # promotions, ship upgrades, landmark finds, retirements -- distinct
+    # from `log`'s own rolling 8-entry buffer, which can't answer "what
+    # did I ever actually do" once anything scrolls off it. Capped (see
+    # `highlight()`) only to bound an extremely long career's save file
+    # size, not to summarize down to "recent." Additive field, safe
+    # default via from_dict's own .get() below -- no SCHEMA_VERSION
+    # bump needed.
+    highlights: list[str] = field(default_factory=list)
+    # The highest RANKS index this pilot has already been credited a
+    # promotion highlight for -- see check_rank_up. Additive field, safe
+    # default via from_dict's own .get() below -- no SCHEMA_VERSION
+    # bump needed.
+    highest_rank_seen: int = 0
 
     def note(self, msg: str) -> None:
         self.log.append(msg)
         del self.log[:-8]
+
+    def highlight(self, msg: str) -> None:
+        self.highlights.append(msg)
+        del self.highlights[:-MAX_HIGHLIGHTS]
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -425,6 +448,7 @@ class Pilot:
             missions_completed=d.get("missions_completed", 0), kills=d.get("kills", 0),
             career_started=d.get("career_started", ""), log=list(d.get("log", [])),
             notoriety=d.get("notoriety", 0), retirements=d.get("retirements", 0),
+            highlights=list(d.get("highlights", [])), highest_rank_seen=d.get("highest_rank_seen", 0),
         )
 
 
@@ -863,6 +887,8 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
             done = True
         if done:
             world.save.pilot.credits += m.reward
+            if world.save.pilot.missions_completed == 0:
+                world.save.pilot.highlight(f"First mission complete: {m.description}.")
             world.save.pilot.missions_completed += 1
             msg = f"Mission complete: {m.description} (+{m.reward}cr)"
             world.save.pilot.note(msg)
@@ -1082,6 +1108,29 @@ def rank_for(credits: int) -> str:
     return title
 
 
+def check_rank_up(world: World) -> str | None:
+    """Checked once per station-menu draw (the same "catches every
+    path" reasoning `is_stranded`'s own check there already relies on)
+    rather than wrapped around every credit-earning call site
+    individually -- credits change in enough places (trading, missions,
+    bounties, landmarks, patrol fines) that hooking each one would be
+    far more invasive than noticing the promotion the next time the
+    pilot is back at a menu. Returns the new rank's title if this call
+    just crossed into it, else None -- fires at most once per rank,
+    tracked by `Pilot.highest_rank_seen`."""
+    pilot = world.save.pilot
+    idx = 0
+    for i, (threshold, _) in enumerate(RANKS):
+        if pilot.credits >= threshold:
+            idx = i
+    if idx > pilot.highest_rank_seen:
+        pilot.highest_rank_seen = idx
+        title = RANKS[idx][1]
+        pilot.highlight(f"Promoted to {title}.")
+        return title
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Storage layer -- the only code in this file that touches a filesystem
 # path for game state (see this module's own docstring).
@@ -1165,6 +1214,7 @@ def retire_pilot(old_save: SaveData) -> SaveData:
     new_save.pilot.retirements = retirements
     new_save.pilot.credits += retirements * RETIREMENT_STARTING_CREDITS_BONUS
     new_save.pilot.note(f"Retired as a {RANKS[-1][1]} (retirement #{retirements}) -- a new career begins.")
+    new_save.pilot.highlight(f"Retired as a {RANKS[-1][1]} (retirement #{retirements}).")
     return new_save
 
 
@@ -1265,6 +1315,11 @@ def screen_station_menu(p: Palette, world: World) -> str:
         out_line()
         out_line(f"{p.wrong}{rescue_stranded_pilot(world)}{RESET}")
         pause(p)
+    promoted = check_rank_up(world)
+    if promoted:
+        out_line()
+        out_line(f"{p.gold}{BOLD}Promoted to {promoted}!{RESET}")
+        pause(p)
     out_line()
     draw_status_bar(p, world)
     out_line(f"{p.accent}{BOLD}{world.here.station_name}{RESET}")
@@ -1290,6 +1345,7 @@ def screen_landmark(p: Palette, world: World) -> None:
     world.save.flags["landmark_investigated"] = True
     world.save.pilot.credits += landmark["reward_credits"]
     world.save.pilot.note(f"Investigated {landmark['label']} (+{landmark['reward_credits']}cr)")
+    world.save.pilot.highlight(f"Investigated {landmark['label']} (+{landmark['reward_credits']}cr).")
     out_line(f"{p.gold}Salvage recovered: +{landmark['reward_credits']}cr{RESET}")
     pause(p)
 
@@ -1508,6 +1564,7 @@ def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -
     ship.hull_class = target_class
     ship.hull_hp = hull_hp_max(ship)
     world.save.pilot.note(f"Commissioned a {target_class}-class hull refit.")
+    world.save.pilot.highlight(f"Commissioned a {target_class}-class hull refit.")
     out_line(f"{p.gold}{BOLD}Your {previous_class} is towed into drydock and emerges a {target_class}.{RESET}")
     out_line(f"{p.gold}Cargo, hull, and fuel capacity all jump considerably.{RESET}")
 
@@ -1550,6 +1607,10 @@ def screen_status(p: Palette, world: World) -> None:
               f"{p.gold}Raiders defeated:{RESET} {pilot.kills}")
     if pilot.retirements:
         out_line(f"  {p.gold}Retirements:{RESET} {pilot.retirements}")
+    if pilot.highlights:
+        out_line(f"{p.gold}Career highlights:{RESET}")
+        for entry in pilot.highlights[-15:]:
+            out_line(f"  {p.gold}* {entry}{RESET}")
     if pilot.log:
         out_line(f"{p.muted}Recent log:{RESET}")
         for entry in pilot.log[-8:]:
@@ -1809,6 +1870,8 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         if outcome == "won":
             world.save.active_missions.remove(bounty)
             world.save.pilot.credits += bounty.reward
+            if world.save.pilot.missions_completed == 0:
+                world.save.pilot.highlight(f"First mission complete: {bounty.description}.")
             world.save.pilot.missions_completed += 1
             world.save.pilot.note(f"Bounty complete: {bounty.description} (+{bounty.reward}cr)")
             out_line(f"{p.gold}Bounty complete! +{bounty.reward}cr{RESET}")
@@ -1889,6 +1952,8 @@ def screen_combat(p: Palette, world: World, pirate: Pirate) -> str:
             if pirate.hp <= 0:
                 loot = 40 + pirate.tier * 60
                 world.save.pilot.credits += loot
+                if world.save.pilot.kills == 0:
+                    world.save.pilot.highlight(f"First kill: destroyed the {pirate.name}.")
                 world.save.pilot.kills += 1
                 adjust_reputation(world, FACTION_CONCORD, 2)
                 adjust_reputation(world, FACTION_BLACKWAKE, -1)
@@ -1957,6 +2022,8 @@ def screen_notoriety_patrol(p: Palette, world: World) -> None:
             for line in lines:
                 out_line(f"  {line}")
             if patrol.hp <= 0:
+                if world.save.pilot.kills == 0:
+                    world.save.pilot.highlight(f"First kill: destroyed the Concord patrol vessel {patrol.name}.")
                 world.save.pilot.kills += 1
                 world.save.pilot.notoriety += 3
                 adjust_reputation(world, FACTION_CONCORD, -10)
