@@ -554,6 +554,7 @@ class World:
         for sid in save.discovered:
             if sid in self.by_id:
                 self.by_id[sid].discovered = True
+        self.landmark: dict = generate_landmark(save.seed, self.galaxy)
         self.event_rng = random.Random()
 
     @property
@@ -648,6 +649,62 @@ def _connect_systems(systems: list[GalaxySystem], rng: random.Random) -> None:
         systems[i].connections.append(j)
         systems[j].connections.append(i)
         extra -= 1
+
+
+# A distinguishing offset, not a real magic constant -- just keeps this
+# module's own separate landmark `random.Random` instance from ever
+# producing the same sequence as anything else seeded from `save.seed`
+# directly (`event_rng`'s own reseeding, notably).
+_LANDMARK_SEED_OFFSET = 0x4C414E44  # ASCII "LAND"
+
+LANDMARK_FLAVORS = [
+    {
+        "label": "the Derelict Ark",
+        "flavor": "A colony ship, generations old, drifting silent -- its hull scarred "
+                   "by something that met it partway. The cargo bay's cryo-pods are long "
+                   "since empty, but the ship's strongroom never was.",
+        "reward_credits": 3000,
+    },
+    {
+        "label": "the Silent Cathedral",
+        "flavor": "A pre-Concord religious station, abandoned mid-service. The console "
+                   "logs stop the same day, mid-sentence. Whatever the congregation left "
+                   "behind, no one ever came back for it.",
+        "reward_credits": 3000,
+    },
+    {
+        "label": "the Shattered Yard",
+        "flavor": "A shipyard that lost containment on something it was building. Half "
+                   "the hull frames are still in their cradles, fused to the deck plating. "
+                   "The other half is scattered across a debris field worth picking through.",
+        "reward_credits": 3000,
+    },
+    {
+        "label": "the Long Watch",
+        "flavor": "An automated listening post, decades past its decommission date, still "
+                   "quietly logging every ship that passes. Its archive is worth more to the "
+                   "right buyer than the station's actual hardware ever was.",
+        "reward_credits": 3000,
+    },
+]
+
+
+def generate_landmark(seed: int, galaxy: list[GalaxySystem]) -> dict:
+    """Picks one fixed system per galaxy to be a landmark -- a ruin or
+    derelict station carrying a one-time lore payoff, per the #179
+    backlog. Uses its own `random.Random` instance seeded from (but
+    distinct from) the save's own seed, so it is fully reproducible for
+    a given save without ever touching `generate_galaxy`'s own call
+    sequence -- the seed-determinism invariant in that function's
+    docstring only governs *its own* `random.Random` calls, not an
+    unrelated, independently-seeded instance derived elsewhere. Never
+    picks system 0 (Freeport) -- the landmark should be a destination
+    worth traveling to, not home."""
+    rng = random.Random(seed ^ _LANDMARK_SEED_OFFSET)
+    candidates = [s.id for s in galaxy if s.id != 0]
+    system_id = rng.choice(candidates)
+    flavor = rng.choice(LANDMARK_FLAVORS)
+    return {"system_id": system_id, **flavor}
 
 
 def bfs_hops(by_id: dict[int, GalaxySystem], start_id: int) -> dict[int, int]:
@@ -1211,10 +1268,30 @@ def screen_station_menu(p: Palette, world: World) -> str:
     out_line()
     draw_status_bar(p, world)
     out_line(f"{p.accent}{BOLD}{world.here.station_name}{RESET}")
-    out_line(f"  {p.gold}[M]{RESET}arket   {p.gold}[Y]{RESET}ard   {p.gold}[B]{RESET}oard   "
-              f"{p.gold}[C]{RESET}hart   {p.gold}[S]{RESET}tatus   {p.gold}[Q]{RESET}uit & save")
+    menu = (f"  {p.gold}[M]{RESET}arket   {p.gold}[Y]{RESET}ard   {p.gold}[B]{RESET}oard   "
+            f"{p.gold}[C]{RESET}hart   {p.gold}[S]{RESET}tatus   {p.gold}[Q]{RESET}uit & save")
+    if landmark_available_here(world):
+        menu += f"   {p.gold}[L]{RESET} {world.landmark['label']}"
+    out_line(menu)
     out(f"{p.muted}> {RESET}")
     return read_key().upper()
+
+
+def landmark_available_here(world: World) -> bool:
+    return (world.here.id == world.landmark["system_id"]
+            and not world.save.flags.get("landmark_investigated"))
+
+
+def screen_landmark(p: Palette, world: World) -> None:
+    landmark = world.landmark
+    out_line()
+    out_line(f"{p.accent}{BOLD}{landmark['label']}{RESET}")
+    out_line(f"  {landmark['flavor']}")
+    world.save.flags["landmark_investigated"] = True
+    world.save.pilot.credits += landmark["reward_credits"]
+    world.save.pilot.note(f"Investigated {landmark['label']} (+{landmark['reward_credits']}cr)")
+    out_line(f"{p.gold}Salvage recovered: +{landmark['reward_credits']}cr{RESET}")
+    pause(p)
 
 
 def screen_market(p: Palette, world: World) -> None:
@@ -1983,6 +2060,8 @@ def main() -> int:
                     screen_travel(p, world, dest)
             elif choice == "S":
                 screen_status(p, world)
+            elif choice == "L" and landmark_available_here(world):
+                screen_landmark(p, world)
             elif choice == "Q":
                 out_line(f"{p.muted}Docking clamps engaged. Fly safe, {world.save.pilot.handle}.{RESET}")
                 persist(world, save_dir, user_id)

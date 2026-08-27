@@ -1351,3 +1351,95 @@ def test_auto_route_stops_early_when_a_hop_diverts_the_plan(monkeypatch):
         vr._screen_auto_route(vr.Palette(truecolor=False), world)
 
     assert len(calls) == 1
+
+
+# -- landmark systems --------------------------------------------------
+
+
+def test_generate_landmark_never_picks_freeport():
+    world = _world_with_seed(107)
+    landmark = vr.generate_landmark(world.save.seed, world.galaxy)
+    assert landmark["system_id"] != 0
+
+
+def test_generate_landmark_is_deterministic_for_the_same_seed():
+    world = _world_with_seed(108)
+    first = vr.generate_landmark(world.save.seed, world.galaxy)
+    second = vr.generate_landmark(world.save.seed, world.galaxy)
+    assert first == second
+
+
+def test_generate_landmark_does_not_call_the_galaxy_rng():
+    """The seed-determinism invariant only allows appending brand-new
+    `random.Random` calls at the very end of `generate_galaxy` itself --
+    proves landmark generation uses a wholly separate RNG instance and
+    never perturbs an existing save's galaxy layout."""
+    seed = 109
+    before = vr.generate_galaxy(seed)
+    vr.generate_landmark(seed, before)
+    after = vr.generate_galaxy(seed)
+    for a, b in zip(before, after):
+        assert a.x == b.x and a.y == b.y and a.connections == b.connections
+
+
+def test_world_reset_computes_a_landmark():
+    world = _world_with_seed(110)
+    assert world.landmark["system_id"] in world.by_id
+    assert world.landmark["system_id"] != 0
+
+
+def test_landmark_available_here_true_only_at_the_landmark_system_and_uninvestigated():
+    world = _world_with_seed(111)
+    world.save.current_system = world.landmark["system_id"]
+    assert vr.landmark_available_here(world)
+
+    world.save.flags["landmark_investigated"] = True
+    assert not vr.landmark_available_here(world)
+
+
+def test_landmark_available_here_false_elsewhere():
+    world = _world_with_seed(112)
+    other = next(sid for sid in world.by_id if sid != world.landmark["system_id"])
+    world.save.current_system = other
+    assert not vr.landmark_available_here(world)
+
+
+def test_screen_landmark_grants_reward_once_and_sets_flag():
+    world = _world_with_seed(113)
+    world.save.current_system = world.landmark["system_id"]
+    before_credits = world.save.pilot.credits
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_landmark(vr.Palette(truecolor=False), world)
+
+    assert world.save.flags["landmark_investigated"] is True
+    assert world.save.pilot.credits == before_credits + world.landmark["reward_credits"]
+    assert not vr.landmark_available_here(world)
+
+
+def test_station_menu_offers_landmark_only_when_available(monkeypatch):
+    world = _world_with_seed(114)
+    world.save.current_system = world.landmark["system_id"]
+
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_station_menu(vr.Palette(truecolor=False), world)
+
+    assert "[L]" in buf.getvalue()
+
+    world.save.flags["landmark_investigated"] = True
+    buf2 = io.StringIO()
+    with contextlib.redirect_stdout(buf2):
+        vr.screen_station_menu(vr.Palette(truecolor=False), world)
+
+    assert "[L]" not in buf2.getvalue()
+
+
+def test_retiring_resets_landmark_investigated_flag():
+    old_save = vr._new_career("Vet")
+    old_save.flags["landmark_investigated"] = True
+
+    new_save = vr.retire_pilot(old_save)
+
+    assert "landmark_investigated" not in new_save.flags
