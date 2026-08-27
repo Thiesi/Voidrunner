@@ -543,6 +543,75 @@ def test_shields_reduce_incoming_damage():
     assert dmg_shielded <= dmg_bare
 
 
+# -- squadron fights ------------------------------------------------------
+
+
+def _system_with_danger(world, danger: int):
+    system = world.by_id[world.here.connections[0]]
+    system.danger = danger
+    return system
+
+
+def test_squadron_never_spawns_below_the_minimum_danger():
+    world = _world_with_seed(90)
+    dest = _system_with_danger(world, vr.SQUADRON_MIN_DANGER - 1)
+    world.event_rng.random = lambda: 0.0  # would always succeed the squadron roll, if it ran at all
+
+    pirates = vr.generate_pirate_squadron(world, dest)
+
+    assert len(pirates) == 1
+
+
+def test_squadron_spawns_at_the_minimum_danger_when_the_roll_succeeds():
+    world = _world_with_seed(91)
+    dest = _system_with_danger(world, vr.SQUADRON_MIN_DANGER)
+    world.event_rng.random = lambda: 0.0  # always below SQUADRON_CHANCE
+
+    pirates = vr.generate_pirate_squadron(world, dest)
+
+    assert len(pirates) == vr.SQUADRON_SIZE
+
+
+def test_squadron_does_not_spawn_at_high_danger_when_the_roll_fails():
+    world = _world_with_seed(92)
+    dest = _system_with_danger(world, vr.SQUADRON_MIN_DANGER)
+    world.event_rng.random = lambda: 1.0  # always above SQUADRON_CHANCE
+
+    pirates = vr.generate_pirate_squadron(world, dest)
+
+    assert len(pirates) == 1
+
+
+def test_squadron_encounter_fights_every_ship_on_a_full_win(monkeypatch):
+    world = _world_with_seed(93)
+    dest = _system_with_danger(world, vr.SQUADRON_MIN_DANGER)
+    world.event_rng.random = lambda: 0.0  # triggers the encounter, then spawns a squadron
+
+    calls = []
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: calls.append(pirate) or "won")
+    world.event_rng.choices = lambda population, weights: ["pirate"]
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._resolve_random_travel_encounter(vr.Palette(truecolor=False), world, dest)
+
+    assert len(calls) == vr.SQUADRON_SIZE
+
+
+def test_squadron_encounter_stops_after_an_escape_not_a_full_win(monkeypatch):
+    world = _world_with_seed(94)
+    dest = _system_with_danger(world, vr.SQUADRON_MIN_DANGER)
+    world.event_rng.random = lambda: 0.0
+
+    calls = []
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: calls.append(pirate) or "escaped")
+    world.event_rng.choices = lambda population, weights: ["pirate"]
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._resolve_random_travel_encounter(vr.Palette(truecolor=False), world, dest)
+
+    assert len(calls) == 1  # never reached the second ship
+
+
 def test_destroy_ship_clears_cargo_and_returns_player_to_freeport_with_full_hull():
     world = _world_with_seed(12)
     world.save.cargo["ore"] = 10

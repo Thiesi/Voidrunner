@@ -794,6 +794,36 @@ def generate_pirate(world: World, tier: int | None = None) -> Pirate:
     return Pirate(name=rng.choice(PIRATE_NAMES), tier=t, hp=hp, hp_max=hp)
 
 
+# Squadron fights: only at the two highest danger tiers, and even then
+# not guaranteed -- most raider encounters stay a single ship. Scoped
+# to the ordinary random "pirate" travel encounter only, not a bounty
+# target (a mission's own singular "hunt down A raider" framing/reward
+# doesn't fit a multi-ship fight) or a derelict's trap pirate (that
+# encounter already compounds one risk -- boarding -- with combat;
+# adding squadron risk on top would stack two escalations onto a single
+# choice).
+SQUADRON_MIN_DANGER = 4
+SQUADRON_CHANCE = 0.35
+SQUADRON_SIZE = 2
+
+
+def generate_pirate_squadron(world: World, dest: GalaxySystem) -> list[Pirate]:
+    """One ship most of the time; two at the highest danger tiers, with
+    `SQUADRON_CHANCE` still deciding whether this particular encounter
+    actually is one. Ships fight in sequence (the caller runs
+    `screen_combat` once per ship, itself completely unmodified) with no
+    auto-heal between them -- a squadron is meaningfully scarier because
+    damage from the first ship carries into the fight against the
+    second, not because the underlying combat math changes at all. Uses
+    `dest.danger` for the spawn decision, matching `_resolve_random_
+    travel_encounter`'s own "does anything happen at all" roll -- each
+    individual ship's own tier still comes from `generate_pirate`'s
+    existing (unrelated, origin-based) tier logic, unchanged."""
+    if dest.danger >= SQUADRON_MIN_DANGER and world.event_rng.random() < SQUADRON_CHANCE:
+        return [generate_pirate(world) for _ in range(SQUADRON_SIZE)]
+    return [generate_pirate(world)]
+
+
 def generate_concord_patrol(world: World) -> Pirate:
     """A Concord Patrol "hostile ship" for `screen_notoriety_patrol` --
     reuses the `Pirate` dataclass shape as-is (name/tier/hp/hp_max is all
@@ -1446,9 +1476,19 @@ def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySyste
         list(TRAVEL_ENCOUNTER_WEIGHTS), weights=list(TRAVEL_ENCOUNTER_WEIGHTS.values())
     )[0]
     if kind == "pirate":
-        pirate = generate_pirate(world)
-        out_line(f"{p.wrong}Raider contact: the {pirate.name}!{RESET}")
-        screen_combat(p, world, pirate)
+        pirates = generate_pirate_squadron(world, dest)
+        if len(pirates) > 1:
+            out_line(f"{p.wrong}Raider squadron contact: {len(pirates)} ships incoming!{RESET}")
+        else:
+            out_line(f"{p.wrong}Raider contact: the {pirates[0].name}!{RESET}")
+        for pirate in pirates:
+            # Only a genuine kill lets the fight continue to the next
+            # ship -- an evade/bribe ("escaped") or a destroyed ship
+            # ends the whole encounter, not just this one ship. Bribing
+            # or evading pirate #1 and then being ambushed by pirate #2
+            # anyway would read as a bait-and-switch, not a squadron.
+            if screen_combat(p, world, pirate) != "won":
+                break
     elif kind == "derelict":
         _encounter_derelict(p, world)
     elif kind == "distress":
