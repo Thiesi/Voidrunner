@@ -1924,3 +1924,119 @@ def test_screen_hall_of_fame_marks_the_current_pilot(tmp_path, monkeypatch):
     assert "Me" in text and "Someone Else" in text
     me_line = next(line for line in text.splitlines() if "Me" in line and "Someone" not in line)
     assert "*" in me_line
+
+
+# -- named sectors ---------------------------------------------------------
+
+
+class _Sys:
+    def __init__(self, x, y, discovered=True):
+        self.x = x
+        self.y = y
+        self.discovered = discovered
+
+
+def test_sector_for_covers_the_full_coordinate_grid_without_error():
+    world = _world_with_seed(141)
+    for system in world.galaxy:
+        sector = vr.sector_for(system)
+        assert sector in vr.SECTOR_NAMES
+
+
+def test_sector_for_is_a_pure_function_of_position():
+    a = _Sys(10, 5)
+    b = _Sys(10, 5)
+    assert vr.sector_for(a) == vr.sector_for(b)
+
+
+def test_sector_for_distinguishes_far_apart_corners():
+    top_left = _Sys(0, 0)
+    bottom_right = _Sys(99, 49)
+    assert vr.sector_for(top_left) != vr.sector_for(bottom_right)
+
+
+def test_sector_for_never_indexes_out_of_range_at_grid_edges():
+    for x in (0, 99):
+        for y in (0, 49):
+            assert vr.sector_for(_Sys(x, y)) in vr.SECTOR_NAMES
+
+
+def test_sector_assignment_does_not_touch_the_galaxy_rng():
+    """sector_for takes no RNG at all -- proves calling it repeatedly
+    never perturbs a subsequent generate_galaxy call for the same seed,
+    protecting that function's own seed-determinism invariant."""
+    seed = 142
+    before = vr.generate_galaxy(seed)
+    for system in before:
+        vr.sector_for(system)
+    after = vr.generate_galaxy(seed)
+    for a, b in zip(before, after):
+        assert a.x == b.x and a.y == b.y and a.connections == b.connections
+
+
+def test_screen_galaxy_map_shows_nothing_charted_message_when_empty(monkeypatch):
+    world = _world_with_seed(143)
+    for system in world.galaxy:
+        system.discovered = False
+    monkeypatch.setattr(vr, "read_key", lambda: " ")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_galaxy_map(vr.Palette(truecolor=False), world)
+
+    assert "Nothing charted yet" in buf.getvalue()
+
+
+def test_screen_galaxy_map_lists_only_discovered_systems_grouped_by_sector(monkeypatch):
+    world = _world_with_seed(144)
+    monkeypatch.setattr(vr, "read_key", lambda: " ")
+
+    discovered_names = {s.name for s in world.galaxy if s.discovered}
+    undiscovered_names = {s.name for s in world.galaxy if not s.discovered}
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_galaxy_map(vr.Palette(truecolor=False), world)
+
+    text = buf.getvalue()
+    for name in discovered_names:
+        assert name in text
+    for name in undiscovered_names:
+        assert name not in text
+    assert any(sector in text for sector in vr.SECTOR_NAMES)
+
+
+def test_screen_galaxy_map_marks_the_current_system(monkeypatch):
+    world = _world_with_seed(145)
+    monkeypatch.setattr(vr, "read_key", lambda: " ")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_galaxy_map(vr.Palette(truecolor=False), world)
+
+    here_line = next(line for line in buf.getvalue().splitlines() if world.here.name in line)
+    assert "*" in here_line
+    assert "here" in here_line.lower()
+
+
+def test_chart_screen_offers_view_full_chart(monkeypatch):
+    world = _world_with_seed(146)
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_chart(vr.Palette(truecolor=False), world)
+
+    assert "[V]" in buf.getvalue()
+
+
+def test_chart_screen_v_key_opens_the_galaxy_map(monkeypatch):
+    world = _world_with_seed(147)
+    keys = iter(["V", " ", "Q"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_chart(vr.Palette(truecolor=False), world)
+
+    assert "Charted Systems" in buf.getvalue()

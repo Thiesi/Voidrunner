@@ -731,6 +731,28 @@ def generate_landmark(seed: int, galaxy: list[GalaxySystem]) -> dict:
     return {"system_id": system_id, **flavor}
 
 
+# A purely positional grouping of the galaxy's own 100x50 coordinate
+# grid (see `generate_galaxy`'s own `rng.randint(0, 99), rng.randint(0,
+# 49)`) into a small number of named sectors, for a more readable chart
+# once a career has explored more than a handful of systems. No RNG
+# involved at all -- unlike `generate_landmark`, this needs none, so it
+# can never even theoretically interact with `generate_galaxy`'s own
+# seed-determinism invariant -- and stays perfectly stable for a given
+# galaxy without needing to be stored anywhere.
+SECTOR_COLS = 3
+SECTOR_ROWS = 2
+SECTOR_NAMES = [
+    "Coreward Verge", "Auroral Span", "Farrider's Edge",
+    "Hollow Reach", "The Long Dark", "Outer Fringe",
+]  # row-major over the SECTOR_ROWS x SECTOR_COLS grid below
+
+
+def sector_for(system: GalaxySystem) -> str:
+    col = min(SECTOR_COLS - 1, system.x * SECTOR_COLS // 100)
+    row = min(SECTOR_ROWS - 1, system.y * SECTOR_ROWS // 50)
+    return SECTOR_NAMES[row * SECTOR_COLS + col]
+
+
 def bfs_hops(by_id: dict[int, GalaxySystem], start_id: int) -> dict[int, int]:
     dist = {start_id: 0}
     q = collections.deque([start_id])
@@ -1786,6 +1808,7 @@ def screen_chart(p: Palette, world: World) -> str | None:
         if scan_available:
             out_line(f"  {p.gold}[S]{RESET}can for distant contacts")
         out_line(f"  {p.gold}[G]{RESET}o to a charted system by name")
+        out_line(f"  {p.gold}[V]{RESET}iew full chart by sector")
         out(f"{p.muted}Jump to which, or [Q] back? {RESET}")
         key = read_key().upper()
         out_line(key)
@@ -1796,6 +1819,9 @@ def screen_chart(p: Palette, world: World) -> str | None:
             continue
         if key == "G":
             _screen_auto_route(p, world)
+            continue
+        if key == "V":
+            screen_galaxy_map(p, world)
             continue
         idx = LETTERS.index(key) if key in LETTERS else -1
         if idx < 0 or idx >= len(options):
@@ -1821,6 +1847,32 @@ def _do_scan(p: Palette, world: World) -> None:
     out_line(f"{p.correct}Sensor contact! {world.by_id[target].name} is now on your chart.{RESET}")
     for msg in check_mission_completions(world, just_discovered=target):
         out_line(f"{p.gold}{msg}{RESET}")
+
+
+def screen_galaxy_map(p: Palette, world: World) -> None:
+    """Every discovered system, grouped by named sector -- the "readable
+    chart at scale" the star chart's own short direct-neighbor list
+    can't provide once a career has charted more than a handful of
+    systems. Read-only: jumping still happens via the star chart's own
+    neighbor list or the [G]o to auto-route, not here."""
+    hops = bfs_hops(world.by_id, world.save.current_system)
+    out_line()
+    out_line(f"{p.accent}{BOLD}Charted Systems{RESET}")
+    by_sector: dict[str, list[GalaxySystem]] = {}
+    for system in world.galaxy:
+        if system.discovered:
+            by_sector.setdefault(sector_for(system), []).append(system)
+    if not by_sector:
+        out_line(f"{p.muted}Nothing charted yet.{RESET}")
+    for sector in sorted(by_sector):
+        out_line(f"{p.gold}{BOLD}{sector}{RESET}")
+        for system in sorted(by_sector[sector], key=lambda s: s.name):
+            marker = f"{p.accent}*{RESET}" if system.id == world.save.current_system else " "
+            hop = hops.get(system.id)
+            hop_label = "here" if hop == 0 else (f"{hop} jump(s)" if hop is not None else "unreachable")
+            out_line(f"{marker} {system.name:<18} {system.economy:<12} danger {system.danger}   "
+                      f"{p.muted}{hop_label}{RESET}")
+    pause(p)
 
 
 def _screen_auto_route(p: Palette, world: World) -> None:
