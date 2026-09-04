@@ -1511,17 +1511,10 @@ def _default_save_dir() -> Path:
     try:
         home = Path.home()
     except RuntimeError:
-        # `netbbs.doors.runtime.run_door` launches every door with its
-        # environment replaced outright -- only `NETBBS_DOOR_INFO`
-        # survives (see that module's own docstring) -- so `HOME`/
-        # `USERPROFILE` never reach this process either. POSIX's
-        # `Path.home()` falls back to the OS password database
-        # regardless of env vars and still resolves correctly; Windows
-        # has no such fallback and raises exactly this. A production
-        # Windows deployment (not NetBBS's primary NetBSD target) should
-        # set `VOIDRUNNER_SAVE_DIR` explicitly rather than rely on this
-        # -- functional, but not as durable a location as a real home
-        # directory would be.
+        # Standalone callers can still remove every platform home locator.
+        # NetBBS's runtime supplies one explicitly in its otherwise minimal
+        # child environment, so a launched door does not take this fallback
+        # merely because its scratch working directory is isolated.
         home = Path(tempfile.gettempdir())
     return home / ".netbbs" / "voidrunner_saves"
 
