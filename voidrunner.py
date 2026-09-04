@@ -73,6 +73,7 @@ import re
 import sys
 import tempfile
 import time
+import unicodedata
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,6 +81,8 @@ from pathlib import Path
 ESC = "\x1b"
 RESET = f"{ESC}[0m"
 BOLD = f"{ESC}[1m"
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
+_OUTPUT_WIDTH = 80
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +158,130 @@ def out(text: str = "") -> None:
 
 
 def out_line(text: str = "") -> None:
-    out(text + "\r\n")
+    out(_wrap_output(text, _OUTPUT_WIDTH) + "\r\n")
+
+
+def out_prompt(text: str) -> None:
+    """Write a prompt without relying on the terminal's soft wrapping."""
+    out(_wrap_output(text, max(1, _OUTPUT_WIDTH - 1)))
+
+
+def _wrap_output(text: str, width: int) -> str:
+    """ANSI-aware, display-column-bounded wrapping for this standalone door."""
+    text = text.replace("\t", " ")
+    atoms: list[tuple[str, str, int]] = []
+    pending_escape = ""
+    position = 0
+    for match in ANSI_ESCAPE_RE.finditer(text):
+        for ch in text[position : match.start()]:
+            atoms.append((pending_escape + ch, ch, _char_width(ch)))
+            pending_escape = ""
+        pending_escape += match.group(0)
+        position = match.end()
+    for ch in text[position:]:
+        atoms.append((pending_escape + ch, ch, _char_width(ch)))
+        pending_escape = ""
+    if not atoms:
+        return pending_escape
+
+    if (
+        width >= 2
+        and atoms[0][1] in ("│", "║")
+        and atoms[-1][1] == atoms[0][1]
+        and sum(atom_width for _, _, atom_width in atoms) > width
+    ):
+        left = atoms[0][0]
+        right = atoms[-1][0] + pending_escape
+        content = "".join(raw for raw, _, _ in atoms[1:-1]).rstrip()
+        rows = _wrap_output(content, width - 2).split("\r\n")
+        rendered: list[str] = []
+        active_style = ""
+        for row in rows:
+            continued = active_style + row if active_style else row
+            active_style = _active_sgr_after(row, active_style)
+            rendered.append(
+                f"{left}{continued}{' ' * max(0, width - 2 - _visible_width(continued))}{right}"
+            )
+        return "\r\n".join(rendered)
+
+    lines: list[str] = []
+    start = 0
+    while start < len(atoms):
+        used = 0
+        overflow = len(atoms)
+        for index in range(start, len(atoms)):
+            if used + atoms[index][2] > width:
+                overflow = index
+                break
+            used += atoms[index][2]
+        if overflow == len(atoms):
+            lines.append("".join(raw for raw, _, _ in atoms[start:]) + pending_escape)
+            pending_escape = ""
+            break
+
+        whitespace = overflow if atoms[overflow][1].isspace() else None
+        if whitespace is None:
+            whitespace = next(
+                (
+                    index
+                    for index in range(overflow - 1, start - 1, -1)
+                    if atoms[index][1].isspace()
+                ),
+                None,
+            )
+        whitespace_start = whitespace
+        if whitespace is not None:
+            while whitespace_start > start and atoms[whitespace_start - 1][1].isspace():
+                whitespace_start -= 1
+            if whitespace_start == start:
+                whitespace = None
+        if whitespace is None:
+            end = max(start + 1, overflow)
+            lines.append("".join(raw for raw, _, _ in atoms[start:end]))
+            start = end
+            continue
+
+        whitespace_end = whitespace
+        while whitespace_end < len(atoms) and atoms[whitespace_end][1].isspace():
+            whitespace_end += 1
+        boundary_escapes = "".join(
+            raw[: -len(ch)] if ch else raw
+            for raw, ch, _ in atoms[whitespace_start:whitespace_end]
+        )
+        lines.append(
+            "".join(raw for raw, _, _ in atoms[start:whitespace_start])
+            + boundary_escapes
+        )
+        start = whitespace_end
+
+    if pending_escape:
+        lines[-1] += pending_escape
+    return "\r\n".join(lines)
+
+
+def _char_width(ch: str) -> int:
+    if unicodedata.combining(ch):
+        return 0
+    if unicodedata.category(ch).startswith("C"):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def _visible_width(text: str) -> int:
+    return sum(_char_width(ch) for ch in ANSI_ESCAPE_RE.sub("", text))
+
+
+def _active_sgr_after(text: str, active: str) -> str:
+    for match in ANSI_ESCAPE_RE.finditer(text):
+        sequence = match.group(0)
+        if not (sequence.startswith(f"{ESC}[") and sequence.endswith("m")):
+            continue
+        params = sequence[2:-1].split(";") if sequence[2:-1] else ["0"]
+        if "0" in params:
+            active = ""
+        if any(param and param != "0" for param in params):
+            active += sequence
+    return active
 
 
 def read_key() -> str:
@@ -202,7 +328,7 @@ def read_line_raw(max_len: int = 20, allowed=str.isdigit) -> str:
 
 
 def confirm(prompt: str, p: Palette) -> bool:
-    out(f"{p.muted}{prompt} [Y/N] {RESET}")
+    out_prompt(f"{p.muted}{prompt} [Y/N] {RESET}")
     while True:
         key = read_key().upper()
         if key == "Y":
@@ -214,7 +340,7 @@ def confirm(prompt: str, p: Palette) -> bool:
 
 
 def pause(p: Palette, msg: str = "Press any key to continue...") -> None:
-    out(f"{p.muted}{msg}{RESET}")
+    out_prompt(f"{p.muted}{msg}{RESET}")
     read_key()
     out_line()
 
@@ -1695,7 +1821,15 @@ def _vis_len(text: str) -> int:
     return len(_ANSI_RE.sub("", text))
 
 
-def _box_title(p: "Palette", text: str, width: int = 77, border_color: str | None = None) -> str:
+def _box_inner_width() -> int:
+    return max(1, min(77, _OUTPUT_WIDTH - 2))
+
+
+def _box_outer_width() -> int:
+    return _box_inner_width() + 2
+
+
+def _box_title(p: "Palette", text: str, width: int | None = None, border_color: str | None = None) -> str:
     """A `╭── {text} ───...───╮` title border sized so its right corner
     always lands on the same column as every other row in the same box
     (see the module-wide 77-visible-column interior convention) --
@@ -1704,18 +1838,21 @@ def _box_title(p: "Palette", text: str, width: int = 77, border_color: str | Non
     original, hand-typed approach) drifts out of alignment with the
     box's other rows for any name that isn't exactly the length the
     dashes were originally counted for."""
+    width = _box_inner_width() if width is None else min(width, _box_inner_width())
     head = f"── {text} "
     dashes = "─" * max(1, width - _vis_len(head))
     col = border_color if border_color is not None else p.accent
     return f"{col}{BOLD}╭{head}{dashes}╮{RESET}"
 
 
-def _box_divider(p: "Palette", width: int = 77, border_color: str | None = None) -> str:
+def _box_divider(p: "Palette", width: int | None = None, border_color: str | None = None) -> str:
+    width = _box_inner_width() if width is None else min(width, _box_inner_width())
     col = border_color if border_color is not None else p.accent
     return f"{col}├{'─' * width}┤{RESET}"
 
 
-def _box_bottom(p: "Palette", width: int = 77, border_color: str | None = None) -> str:
+def _box_bottom(p: "Palette", width: int | None = None, border_color: str | None = None) -> str:
+    width = _box_inner_width() if width is None else min(width, _box_inner_width())
     col = border_color if border_color is not None else p.accent
     return f"{col}╰{'─' * width}╯{RESET}"
 
@@ -1755,26 +1892,34 @@ def draw_status_bar(p: Palette, world: World) -> None:
     )
     cap = cargo_capacity(ship)
     used = sum(world.save.cargo.values())
-    w = 79
+    w = _box_outer_width()
 
     line1 = (
         f"{p.accent}{BOLD}{world.here.station_name}{RESET} "
         f"{p.muted}({world.here.economy} │ Sector: {sector_for(world.here)}){RESET}  {danger_badge}"
     )
-    line2 = (
-        f"  {p.gold}{BOLD}{pilot.credits:,} cr{RESET}  │  "
-        f"{p.accent}Hull{RESET} {_gauge_bar(ship.hull_hp, hull_hp_max(ship), 8, p)} {ship.hull_hp}/{hull_hp_max(ship)}  │  "
-        f"{p.accent}Fuel{RESET} {_gauge_bar(ship.fuel, fuel_capacity(ship), 8, p)} {ship.fuel}/{fuel_capacity(ship)}  │  "
-        f"{p.accent}Hold{RESET} {_gauge_bar(used, cap, 6, p)} {used}/{cap}  │  "
-        f"{p.muted}Day {world.save.turn}{RESET}"
-    )
     out_line(line1)
-    out_line(line2)
+    fields = [
+        f"{p.gold}{BOLD}{pilot.credits:,} cr{RESET}",
+        f"{p.accent}Hull{RESET} {_gauge_bar(ship.hull_hp, hull_hp_max(ship), 8, p)} {ship.hull_hp}/{hull_hp_max(ship)}",
+        f"{p.accent}Fuel{RESET} {_gauge_bar(ship.fuel, fuel_capacity(ship), 8, p)} {ship.fuel}/{fuel_capacity(ship)}",
+        f"{p.accent}Hold{RESET} {_gauge_bar(used, cap, 6, p)} {used}/{cap}",
+        f"{p.muted}Day {world.save.turn}{RESET}",
+    ]
+    row = "  "
+    for field in fields:
+        candidate = field if row == "  " else f"{row}  │  {field}"
+        if row != "  " and _visible_width(candidate) > w:
+            out_line(row)
+            row = f"  {field}"
+        else:
+            row = f"  {field}" if row == "  " else candidate
+    out_line(row)
     out_line(f"{p.muted}{'─' * w}{RESET}")
 
 
 def screen_title(p: Palette, info: dict) -> None:
-    inner_w = 77
+    inner_w = _box_inner_width()
     tagline = "[ a NetBBS door game ]"
     top_dashes = max(1, inner_w - len(tagline) - 2)
     top_border = (
@@ -1825,7 +1970,7 @@ def create_career(p: Palette, info: dict) -> str:
     pad_len = max(0, 77 - _vis_len(welcome))
     out_line(f"{p.accent}│{RESET}{welcome}{' ' * pad_len}{p.accent}│{RESET}")
     out_line(_box_bottom(p))
-    out(f"  {p.muted}Pilot callsign [{info['handle']}]: {RESET}")
+    out_prompt(f"  {p.muted}Pilot callsign [{info['handle']}]: {RESET}")
     entered = read_line_raw(max_len=16, allowed=lambda c: c.isalnum() or c == " ").strip()
     callsign = entered or info["handle"]
     out_line()
@@ -1884,8 +2029,10 @@ def screen_station_menu(p: Palette, world: World) -> str:
             pad_len = max(0, 77 - _vis_len(row))
             out_line(f"{p.accent}│{RESET}{row}{' ' * pad_len}{p.accent}│{RESET}")
     out_line(_box_bottom(p))
-    out(f"  {p.gold}Command Deck{RESET} {p.muted}> {RESET}")
-    return read_key().upper()
+    out_prompt(f"  {p.gold}Command Deck{RESET} {p.muted}> {RESET}")
+    choice = read_key().upper()
+    out_line(choice)
+    return choice
 
 
 def landmark_available_here(world: World) -> bool:
@@ -1959,7 +2106,7 @@ def screen_market(p: Palette, world: World) -> None:
         used = sum(world.save.cargo.values())
         hold_bar = _gauge_bar(used, cap, 10, p)
         out_line(f"  {p.accent}Cargo Hold:{RESET} {hold_bar} {used}/{cap} units   │   {p.gold}[X]{RESET} Futures Exchange")
-        out(f"  {p.muted}Trade which [A-{LETTERS[len(rows)-1]}], or [Q] back? {RESET}")
+        out_prompt(f"  {p.muted}Trade which [A-{LETTERS[len(rows)-1]}], or [Q] back? {RESET}")
         key = read_key().upper()
         out_line(key)
         if key == "Q":
@@ -2006,7 +2153,7 @@ def screen_futures(p: Palette, world: World, goods: list[str]) -> None:
             pad_len = max(0, 77 - _vis_len(f_row))
             out_line(f"{p.accent}│{RESET}{f_row}{' ' * pad_len}{p.accent}│{RESET}")
         out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
-        out(f"  {p.muted}Buy forward contract for which, or [Q] back? {RESET}")
+        out_prompt(f"  {p.muted}Buy forward contract for which, or [Q] back? {RESET}")
         key = read_key().upper()
         out_line(key)
         if key == "Q":
@@ -2024,13 +2171,13 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> None:
     if max_qty <= 0:
         out_line(f"{p.wrong}Can't afford even one unit at {unit_price}cr.{RESET}")
         return
-    out(f"{p.muted}{label} -- {unit_price}cr/unit locked. Quantity (max {max_qty}, Enter to cancel): {RESET}")
+    out_prompt(f"{p.muted}{label} -- {unit_price}cr/unit locked. Quantity (max {max_qty}, Enter to cancel): {RESET}")
     raw = read_line_raw(max_len=5)
     qty = int(raw) if raw.isdigit() else 0
     qty = min(qty, max_qty)
     if qty <= 0:
         return
-    out(f"{p.muted}Delivery in how many turns -- "
+    out_prompt(f"{p.muted}Delivery in how many turns -- "
         f"{'/'.join(f'[{d}]' for d in FUTURES_DURATIONS)}? {RESET}")
     raw_duration = read_line_raw(max_len=3)
     duration = int(raw_duration) if raw_duration.isdigit() else 0
@@ -2048,7 +2195,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
     buy = price_for(world, world.here.id, commodity)
     sell = round(buy * SELL_SPREAD)
     out_line(f"{p.accent}{label}{RESET} -- Buy {buy}cr  Sell {sell}cr")
-    out(f"{p.muted}[B]uy [S]ell [Q]cancel: {RESET}")
+    out_prompt(f"{p.muted}[B]uy [S]ell [Q]cancel: {RESET}")
     action = read_key().upper()
     out_line(action)
     if action == "B":
@@ -2061,7 +2208,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
         if max_qty <= 0:
             out_line(f"{p.wrong}No room or no credits.{RESET}")
             return
-        out(f"{p.muted}Quantity (max {max_qty}, Enter to cancel): {RESET}")
+        out_prompt(f"{p.muted}Quantity (max {max_qty}, Enter to cancel): {RESET}")
         raw = read_line_raw(max_len=5)
         qty = int(raw) if raw.isdigit() else 0
         qty = min(qty, max_qty)
@@ -2079,7 +2226,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
         if have <= 0:
             out_line(f"{p.wrong}You have none to sell.{RESET}")
             return
-        out(f"{p.muted}Quantity (have {have}, Enter to cancel): {RESET}")
+        out_prompt(f"{p.muted}Quantity (have {have}, Enter to cancel): {RESET}")
         raw = read_line_raw(max_len=5)
         qty = int(raw) if raw.isdigit() else 0
         qty = min(qty, have)
@@ -2136,7 +2283,7 @@ def screen_shipyard(p: Palette, world: World) -> None:
 
         out_line(_box_bottom(p))
         out_line(f"  {p.accent}Fuel:{RESET} {ship.fuel}/{fuel_capacity(ship)} (6 cr/unit)  │  {p.accent}Hull:{RESET} {ship.hull_hp}/{hull_hp_max(ship)} (4 cr/HP)")
-        out(f"  {p.gold}[U]{RESET}pgrade  {p.gold}[R]{RESET}efuel  {p.gold}[P]{RESET} Repair hull  "
+        out_prompt(f"  {p.gold}[U]{RESET}pgrade  {p.gold}[R]{RESET}efuel  {p.gold}[P]{RESET} Repair hull  "
             f"{p.gold}[K] Crew{RESET}  {p.gold}[Q]{RESET} Return: ")
         action = read_key().upper()
         out_line(action)
@@ -2147,7 +2294,7 @@ def screen_shipyard(p: Palette, world: World) -> None:
             _hull_refit_screen(p, world, target_class, cost)
             continue
         if action == "U":
-            out(f"  {p.muted}Which upgrade [A-{LETTERS[len(keys)-1]}]? {RESET}")
+            out_prompt(f"  {p.muted}Which upgrade [A-{LETTERS[len(keys)-1]}]? {RESET}")
             key_choice = read_key().upper()
             out_line(key_choice)
             if key_choice not in LETTERS[: len(keys)]:
@@ -2183,7 +2330,7 @@ def screen_crew(p: Palette, world: World) -> None:
             pad_len = max(0, 77 - _vis_len(row_str))
             out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
         out_line(_box_bottom(p))
-        out(f"  {p.muted}Hire/dismiss which [A-{LETTERS[len(keys)-1]}], or [Q] back? {RESET}")
+        out_prompt(f"  {p.muted}Hire/dismiss which [A-{LETTERS[len(keys)-1]}], or [Q] back? {RESET}")
         key = read_key().upper()
         out_line(key)
         if key == "Q":
@@ -2242,7 +2389,7 @@ def _refuel(p: Palette, world: World) -> None:
     if max_qty <= 0:
         out_line(f"{p.wrong}Not enough credits to buy fuel (6cr/unit).{RESET}")
         return
-    out(f"{p.muted}Fuel to buy (max {max_qty}, 6cr/unit): {RESET}")
+    out_prompt(f"{p.muted}Fuel to buy (max {max_qty}, 6cr/unit): {RESET}")
     raw = read_line_raw(max_len=4)
     qty = int(raw) if raw.isdigit() else 0
     qty = min(qty, max_qty)
@@ -2331,7 +2478,7 @@ def screen_missions(p: Palette, world: World) -> None:
             out_line(f"{p.muted}Active missions:{RESET}")
             for m in world.save.active_missions:
                 out_line(f"  {p.muted}- {m.description} (+{m.reward}cr){RESET}")
-        out(f"  {p.muted}Accept which, or [Q] back? {RESET}")
+        out_prompt(f"  {p.muted}Accept which, or [Q] back? {RESET}")
         key = read_key().upper()
         out_line(key)
         if key == "Q":
@@ -2432,7 +2579,7 @@ def screen_status(p: Palette, world: World) -> None:
             out_line(f"  {p.muted}- {entry}{RESET}")
 
     if rank_for(pilot.credits) == RANKS[-1][1]:
-        out(f"{p.muted}[R]etire and start a new career, or any other key to continue... {RESET}")
+        out_prompt(f"{p.muted}[R]etire and start a new career, or any other key to continue... {RESET}")
         key = read_key().upper()
         out_line(key)
         if key == "R":
@@ -2525,7 +2672,7 @@ def screen_chart(p: Palette, world: World) -> str | None:
         actions.append(f"{p.gold}[G]{RESET}o to system by name")
         actions.append(f"{p.gold}[V]{RESET}iew full chart by sector")
         out_line(f"  {'   '.join(actions)}")
-        out(f"  {p.muted}Jump to which, or [Q] back? {RESET}")
+        out_prompt(f"  {p.muted}Jump to which, or [Q] back? {RESET}")
         key = read_key().upper()
         out_line(key)
         if key == "Q":
@@ -2612,7 +2759,7 @@ def _screen_auto_route(p: Palette, world: World) -> None:
     destroyed and towed back to Freeport mid-route) -- never force-
     marches the player through a route they can no longer see the cost
     of one hop ahead."""
-    out(f"  {p.muted}Go to (system name, Enter to cancel): {RESET}")
+    out_prompt(f"  {p.muted}Go to (system name, Enter to cancel): {RESET}")
     typed = read_line_raw(max_len=20, allowed=lambda c: c.isalnum() or c in " '").strip()
     if not typed:
         return
@@ -2636,7 +2783,7 @@ def _screen_auto_route(p: Palette, world: World) -> None:
         shown = candidates[:len(pick_letters)]
         for i, s in enumerate(shown):
             out_line(f"  {p.gold}[{pick_letters[i]}]{RESET} {s.name}")
-        out(f"  {p.muted}Which one, or [Q] cancel? {RESET}")
+        out_prompt(f"  {p.muted}Which one, or [Q] cancel? {RESET}")
         key = read_key().upper()
         out_line(key)
         if key == "Q":
@@ -2718,7 +2865,7 @@ def _encounter_derelict(p: Palette, world: World) -> None:
     optional-encounter convention already in this file (bribe, evade)
     where the safe choice alone is never punished."""
     out_line(f"{p.muted}Sensors pick up a derelict hulk drifting nearby.{RESET}")
-    out(f"{p.muted}[B]oard for salvage or [I]gnore and continue? {RESET}")
+    out_prompt(f"{p.muted}[B]oard for salvage or [I]gnore and continue? {RESET}")
     action = read_key().upper()
     out_line(action)
     if action != "B":
@@ -2739,7 +2886,7 @@ def _encounter_distress_call(p: Palette, world: World) -> None:
     for a credit reward and Concord standing; ignoring is free, same
     "declining costs nothing" convention as `_encounter_derelict`."""
     out_line(f"{p.muted}A garbled distress signal reaches your comms.{RESET}")
-    out(f"{p.muted}[H]elp (costs fuel) or [I]gnore and continue? {RESET}")
+    out_prompt(f"{p.muted}[H]elp (costs fuel) or [I]gnore and continue? {RESET}")
     action = read_key().upper()
     out_line(action)
     if action != "H":
@@ -2963,7 +3110,7 @@ def screen_combat(p: Palette, world: World, pirate: Pirate) -> str:
             f"{p.accent}Your hull{RESET} {hull_bar} {ship.hull_hp}/{hull_hp_max(ship)}"
         )
         can_bribe = world.save.pilot.credits >= bribe_cost(pirate)
-        out(f"{p.muted}[F]ight [E]vade [D]ump&evade" + (" [B]ribe" if can_bribe else "") + " [Q]uick status: "
+        out_prompt(f"{p.muted}[F]ight [E]vade [D]ump&evade" + (" [B]ribe" if can_bribe else "") + " [Q]uick status: "
             f"{RESET}")
         action = read_key().upper()
         out_line(action)
@@ -3053,7 +3200,7 @@ def screen_notoriety_patrol(p: Palette, world: World) -> None:
             f"{p.accent}Your hull{RESET} {hull_bar} {ship.hull_hp}/{hull_hp_max(ship)}"
         )
         can_surrender = world.save.pilot.credits >= fine
-        out(f"{p.muted}[F]ight [E]vade" + (f" [S]urrender & pay {fine}cr" if can_surrender else "") +
+        out_prompt(f"{p.muted}[F]ight [E]vade" + (f" [S]urrender & pay {fine}cr" if can_surrender else "") +
             f" [Q]uick status: {RESET}")
         action = read_key().upper()
         out_line(action)
@@ -3111,7 +3258,7 @@ def screen_customs(p: Palette, world: World) -> None:
     out_line(f"{p.wrong}│{RESET}{scan_line}{' ' * max(0, 77 - _vis_len(scan_line))}{p.wrong}│{RESET}")
     out_line(_box_bottom(p, border_color=p.wrong))
     value = sum(q * COMMODITIES[c]["base"] for c, q in world.save.cargo.items() if not COMMODITIES[c]["legal"])
-    out(f"  {p.muted}[S]urrender contraband [B]ribe the inspector: {RESET}")
+    out_prompt(f"  {p.muted}[S]urrender contraband [B]ribe the inspector: {RESET}")
     action = read_key().upper()
     out_line(action)
     if action == "B":
@@ -3141,8 +3288,14 @@ def screen_customs(p: Palette, world: World) -> None:
 
 
 def main() -> int:
+    global _OUTPUT_WIDTH
+
     sys.stdout.reconfigure(encoding="utf-8")
     info = _load_door_info()
+    try:
+        _OUTPUT_WIDTH = max(1, int(info.get("terminal_width", 80)))
+    except (TypeError, ValueError):
+        _OUTPUT_WIDTH = 80
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
     save_dir = _default_save_dir()
     # Real NetBBS launches always carry a real positive user_id from the

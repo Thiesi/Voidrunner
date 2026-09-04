@@ -2615,8 +2615,10 @@ def test_screen_status_shows_active_economy_event(monkeypatch):
     with contextlib.redirect_stdout(buf):
         vr.screen_status(vr.Palette(truecolor=False), world)
 
-    assert "Economy event" in buf.getvalue()
-    assert "4 turn(s) left" in buf.getvalue()
+    visible = vr._ANSI_RE.sub("", buf.getvalue())
+    normalized = " ".join(visible.replace("│", " ").split())
+    assert "Economy event" in normalized
+    assert "4 turn(s) left" in normalized
 
 
 def test_retiring_resets_active_economy_event():
