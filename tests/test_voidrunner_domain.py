@@ -1919,13 +1919,8 @@ def test_new_system_charted_announcement_prints_before_escort_completion(monkeyp
     assert text.index("New system charted") < text.index("Convoy delivered safely")
 
 
-def test_random_encounter_pirate_tier_still_uses_origin_system_danger(monkeypatch):
-    """Guards the exact regression the "New system charted" reordering
-    above had to avoid: generate_pirate's own tier defaults to
-    `world.here.danger` (deliberately the *origin* system, not the
-    destination -- see generate_pirate_squadron's own docstring), which
-    only stays correct as long as `world.save.current_system` isn't
-    flipped to the destination before the encounter resolves."""
+def test_random_encounter_uses_destination_threat_before_arrival(monkeypatch):
+    """Use the advertised destination danger without moving the pilot early."""
     world = _world_with_seed(26)
     origin = world.here
     origin.danger = 3
@@ -1939,8 +1934,9 @@ def test_random_encounter_pirate_tier_still_uses_origin_system_danger(monkeypatc
     captured_tiers = []
     real_generate_pirate = vr.generate_pirate
 
-    def spy_generate_pirate(w, tier=None):
-        pirate = real_generate_pirate(w, tier=tier)
+    def spy_generate_pirate(w, tier=None, *, danger=None):
+        assert w.here.id == origin.id
+        pirate = real_generate_pirate(w, tier=tier, danger=danger)
         captured_tiers.append(pirate.tier)
         return pirate
 
@@ -1951,7 +1947,7 @@ def test_random_encounter_pirate_tier_still_uses_origin_system_danger(monkeypatc
         vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
 
     assert captured_tiers
-    assert captured_tiers[0] == origin.danger  # not dest.danger (0)
+    assert captured_tiers[0] == dest.danger == 0
 
 
 def test_escaping_a_bounty_fight_leaves_it_active_to_retry_later(monkeypatch):
@@ -2462,7 +2458,7 @@ def test_notoriety_patrol_win_raises_notoriety_further_and_flips_reputation(monk
         patrol.hp = 0
         return 999, 0, ["one-shot kill"]
 
-    monkeypatch.setattr(vr, "fight_round", _one_shot_kill)
+    monkeypatch.setattr(vr, "tactical_round", lambda w, p, t, a: _one_shot_kill(w, p))
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_notoriety_patrol(vr.Palette(truecolor=False), world)
 
@@ -2480,7 +2476,7 @@ def test_notoriety_patrol_loss_wipes_notoriety_via_destroy_ship(monkeypatch):
         world.save.ship.hull_hp = 0
         return 0, 999, ["one-shot loss"]
 
-    monkeypatch.setattr(vr, "fight_round", _one_shot_loss)
+    monkeypatch.setattr(vr, "tactical_round", lambda w, p, t, a: _one_shot_loss(w, p))
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_notoriety_patrol(vr.Palette(truecolor=False), world)
 
@@ -3264,7 +3260,7 @@ def test_first_kill_records_a_highlight_but_not_the_second(monkeypatch):
         target.hp = 0
         return (0, 0, [])
 
-    monkeypatch.setattr(vr, "fight_round", win_the_fight)
+    monkeypatch.setattr(vr, "tactical_round", lambda w, p, t, a: win_the_fight(w, p))
     monkeypatch.setattr(vr, "read_key", lambda: "F")
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -5647,6 +5643,7 @@ def test_failed_atomic_replace_preserves_previous_save_and_removes_own_temp(tmp_
         ("ignore_derelict", 26, "?I", "leave the derelict"),
         ("ignore_distress", 8, "?I", "continue past the distress"),
         ("bounty", 0, "F", "Bounty complete!"),
+        ("bounty_brace", 0, "GFFG", "Braced;"),
         ("bounty_loss", 0, "F", "Bounty failed"),
         ("bounty_escape", 0, "E", "escape"),
         ("bounty_dump", 0, "D", "dump cargo"),
@@ -5656,7 +5653,7 @@ def test_failed_atomic_replace_preserves_previous_save_and_removes_own_temp(tmp_
         ("patrol_win", 9, "F", "Concord will not forget"),
         ("patrol_loss", 9, "F", "Freeport Anchorage"),
         ("patrol_surrender", 9, "S", "Notoriety cleared"),
-        ("patrol_evade", 9, "E", "break contact and escape"),
+        ("patrol_evade", 9, "EEEEEEEE", "break contact and escape"),
         ("customs_surrender", 4, "FS", "surrender 2 units"),
         ("customs_bribe", 4, "FB", "changes hands quietly"),
     ],
@@ -5833,7 +5830,8 @@ def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkey
         vr.screen_travel(vr.Palette(False), resumed, 0)
     assert resumed.save.to_dict() == expected.save.to_dict()
     assert resumed.save.pending_travel is None
-    assert resumed.save.current_system == 0
+    assert resumed.save.current_system == destination
+    assert resumed.save.pilot.kills == 1
     assert not resumed.save.active_missions
 
 
@@ -8392,6 +8390,206 @@ def test_customs_result_checkpoint_and_replay_do_not_repeat_effects(tmp_path, de
     assert replay.save.to_dict() == before and replay.event_rng.getstate() == rng
 
 
+
+def _world_with_pending_fight(*, tactics=None):
+    world = _world_with_seed(42)
+    destination = sorted(world.here.connections)[0]
+    mission = vr.Mission(1, "bounty", "Intercept raider", 500, 0, destination, pirate_tier=2)
+    world.save.active_missions = [mission]
+    pirate = vr.Pirate("Legacy raider", 2, 50, 50)
+    combat = {"pirate": vr.dataclasses.asdict(pirate), "outcome": None, "lines": []}
+    if tactics is not None: combat["tactics"] = tactics
+    world.save.turn = 1
+    world.save.pending_travel = {"version": 1, "origin": 0, "destination": destination,
+        "was_discovered": True, "destroyed": False, "phase": "primary", "primary": "bounty",
+        "bounty": mission.to_dict(), "escorts": [], "escort_index": 0, "encounter": {"combat": combat}}
+    return world, pirate
+
+
+def test_legacy_pending_fight_keeps_original_rules_and_random_sequence(tmp_path, monkeypatch):
+    import copy
+    world, pirate = _world_with_pending_fight()
+    world.event_rng.seed(91)
+    vr.persist(world, tmp_path, 77)
+    save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert "tactics" not in save.pending_travel["encounter"]["combat"]
+    resumed = vr.World(save)
+    expected = copy.deepcopy(resumed)
+    expected_pirate = copy.deepcopy(pirate)
+    vr.fight_round(expected, expected_pirate)
+    keys = iter(["G", "F"])
+    def choose():
+        try: return next(keys)
+        except StopIteration: raise EOFError
+    monkeypatch.setattr(vr, "read_key", choose)
+    monkeypatch.setattr(vr, "tactical_round", lambda *args: pytest.fail("Legacy fight changed rules"))
+    with contextlib.redirect_stdout(io.StringIO()), pytest.raises(EOFError):
+        vr.screen_combat(vr.Palette(False), resumed, pirate)
+    state = resumed.save.pending_travel["encounter"]["combat"]
+    assert "tactics" not in state
+    assert state["pirate"]["hp"] == expected_pirate.hp
+    assert resumed.save.ship.hull_hp == expected.save.ship.hull_hp
+    assert resumed.event_rng.getstate() == expected.event_rng.getstate()
+
+
+@pytest.mark.parametrize("field,value", [("version", 2), ("version", True), ("profile", "unknown"),
+    ("profile", []), ("step", -1), ("step", 3), ("step", True), ("brace_ready", None), ("extra_rule", 1)])
+def test_invalid_tactical_metadata_preserves_saved_career(tmp_path, field, value):
+    import json
+    tactics = {"version": 1, "profile": "Raider", "step": 0, "brace_ready": True}
+    tactics[field] = value
+    world, _ = _world_with_pending_fight(tactics=tactics)
+    path = tmp_path / "77.json"
+    path.write_text(json.dumps(world.save.to_dict()), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(vr.ResumeError): vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == before
+
+
+def test_null_tactics_is_not_treated_as_a_legacy_fight(tmp_path):
+    import json
+    world, _ = _world_with_pending_fight()
+    document = world.save.to_dict()
+    document["pending_travel"]["encounter"]["combat"]["tactics"] = None
+    path = tmp_path / "77.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(vr.ResumeError): vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == before
+
+
+def test_tactical_brace_trades_firepower_for_damage_and_requires_fire_to_recharge():
+    import copy
+    original = _world_with_seed(42)
+    original.event_rng.seed(31)
+    original.save.ship.hull_hp = 60
+    fighters = [copy.deepcopy(original), copy.deepcopy(original)]
+    enemies = [vr.Pirate("Test", 2, 50, 50), vr.Pirate("Test", 2, 50, 50)]
+    states = [{"version": 1, "profile": "Raider", "step": 1, "brace_ready": True} for _ in range(2)]
+    fired = vr.tactical_round(fighters[0], enemies[0], states[0], "F")
+    braced = vr.tactical_round(fighters[1], enemies[1], states[1], "G")
+    assert 0 < braced[0] < fired[0] and 0 < braced[1] < fired[1]
+    assert states[0]["brace_ready"] and not states[1]["brace_ready"]
+    before = (copy.deepcopy(fighters[1].save.to_dict()), copy.deepcopy(states[1]), enemies[1].hp, fighters[1].event_rng.getstate())
+    with pytest.raises(ValueError): vr.tactical_round(fighters[1], enemies[1], states[1], "G")
+    assert before == (fighters[1].save.to_dict(), states[1], enemies[1].hp, fighters[1].event_rng.getstate())
+    vr.tactical_round(fighters[1], enemies[1], states[1], "F")
+    assert states[1]["brace_ready"]
+
+
+@pytest.mark.parametrize("profile", list(vr.TACTICAL_PROFILES))
+@pytest.mark.parametrize("step", [0, 1, 2])
+@pytest.mark.parametrize("action", ["F", "G"])
+def test_tactical_intent_displayed_damage_range_matches_resolution(monkeypatch, profile, step, action):
+    import re
+    world = _world_with_seed(42)
+    world.save.ship.shield_tier = 1
+    pirate = vr.Pirate("Probe", 2, 200, 200)
+    tactics = {"version": 1, "profile": profile, "step": step, "brace_ready": True}
+    lines = vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics, details=True)
+    label = next(line for line in lines if (line.startswith("[G]") if action == "G" else " intent: " in line))
+    low, high = map(int, re.search(r"incoming (\d+)-(\d+)", label).groups())
+    monkeypatch.setattr(world.event_rng, "randint", lambda lo, hi: hi)
+    _, received, _ = vr.tactical_round(world, pirate, tactics, action)
+    assert received == high and low <= high
+    assert tactics["step"] == (step + 1) % 3
+
+
+@pytest.mark.parametrize("action", ["E", "B"])
+def test_failed_tactical_disengagement_uses_and_advances_visible_intent(monkeypatch, action):
+    tactics = {"version": 1, "profile": "Raider", "step": 1, "brace_ready": True}
+    world, pirate = _world_with_pending_fight(tactics=tactics)
+    before = world.save.ship.hull_hp
+    monkeypatch.setattr(world.event_rng, "random", lambda: 0.99)
+    monkeypatch.setattr(world.event_rng, "randint", lambda lo, hi: hi)
+    keys = iter([action])
+    def choose():
+        try: return next(keys)
+        except StopIteration: raise EOFError
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(io.StringIO()), pytest.raises(EOFError):
+        vr.screen_combat(vr.Palette(False), world, pirate)
+    assert world.save.ship.hull_hp == before - vr._tactical_incoming_damage(world.save.ship, 2, "volley", 9)
+    assert tactics["step"] == 2 and tactics["brace_ready"]
+
+
+def test_tactical_brace_checkpoint_survives_real_kill_and_invalid_repeat(tmp_path):
+    world = _world_with_seed(42)
+    world.event_rng.seed(0)
+    destination = sorted(world.here.connections)[0]
+    world.save.active_missions = [vr.Mission(1, "bounty", "Intercept raider", 500, 0, destination, pirate_tier=2)]
+    world.checkpoint(); vr.persist(world, tmp_path, 77)
+    with _door_stopped_at(tmp_path, b"CAG", b"Braced;"):
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        combat = saved.pending_travel["encounter"]["combat"]
+        assert combat["tactics"]["version"] == 1 and not combat["tactics"]["brace_ready"]
+        assert combat["tactics"]["step"] == 1 and 0 < combat["pirate"]["hp"] < combat["pirate"]["hp_max"]
+    before = (tmp_path / "77.json").read_bytes()
+    with _door_stopped_at(tmp_path, b"GQ", b"Tactical Systems:"):
+        assert (tmp_path / "77.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("build,tier,waves", [("starter", 2, 1), ("carrier", 4, 2)])
+def test_tactical_seeded_probes_keep_fights_short_and_upgrade_threat_meaningful(build, tier, waves):
+    import copy
+    template = _world_with_seed(42)
+    if build == "carrier":
+        ship = template.save.ship
+        ship.hull_class = "Carrier"; ship.hull_tier = 4; ship.weapon_tier = 4; ship.shield_tier = 3
+        ship.has_gunner = True; ship.hull_hp = vr.hull_hp_max(ship)
+    results = {}
+    for profile in vr.TACTICAL_PROFILES:
+        for strategy in ("legacy", "fire", "brace_volley"):
+            wins = 0; rounds = []; damage = []
+            for seed in range(64):
+                world = copy.deepcopy(template); world.event_rng.seed(seed)
+                start = world.save.ship.hull_hp; count = 0
+                for wave in range(waves):
+                    pirate = vr.Pirate("Probe", tier, 20 + tier * 15, 20 + tier * 15)
+                    tactics = {"version": 1, "profile": profile, "step": 0, "brace_ready": True}
+                    while pirate.hp > 0 and world.save.ship.hull_hp > 0:
+                        assert count < 12
+                        if strategy == "legacy": vr.fight_round(world, pirate)
+                        else:
+                            action = "G" if strategy == "brace_volley" and vr.tactical_intent(tactics) == "volley" and tactics["brace_ready"] else "F"
+                            vr.tactical_round(world, pirate, tactics, action)
+                        count += 1
+                    if world.save.ship.hull_hp <= 0: break
+                wins += world.save.ship.hull_hp > 0; rounds.append(count); damage.append(start - world.save.ship.hull_hp)
+            results[profile, strategy] = (wins, max(rounds), sum(damage))
+        old, fire, guarded = (results[profile, strategy] for strategy in ("legacy", "fire", "brace_volley"))
+        assert fire[1] <= 8 and guarded[1] <= 8
+        if build == "starter":
+            assert old[0] == 0 and fire[0] >= 32 and guarded[0] >= fire[0]
+        else:
+            assert fire[0] == 64 and fire[2] > old[2] * 2
+    if build == "carrier":
+        assert results["Raider", "brace_volley"][2] < results["Raider", "fire"][2]
+        assert results["Skirmisher", "fire"][2] < results["Skirmisher", "brace_volley"][2]
+
+
+@pytest.mark.parametrize("danger", [0, 1, 2, 3, 4, 5])
+def test_raider_tiers_follow_destination_danger_and_preserve_rng_draw_order(danger):
+    import copy
+    world = _world_with_seed(42)
+    world.here.danger = max(0, 4 - danger)
+    destination = next(s for s in world.galaxy if s.id != world.here.id)
+    destination.danger = danger
+    for seed in range(32):
+        world.event_rng.seed(seed)
+        expected = copy.deepcopy(world.event_rng)
+        count = 2 if danger >= vr.SQUADRON_MIN_DANGER and expected.random() < vr.SQUADRON_CHANCE else 1
+        expected_ships = []
+        for _ in range(count):
+            tier = max(0, min(4, danger + expected.randint(-1, 1)))
+            expected_ships.append((tier, expected.choice(vr.PIRATE_NAMES)))
+        pirates = vr.generate_pirate_squadron(world, destination)
+        assert [(p.tier, p.name) for p in pirates] == expected_ships
+        assert world.event_rng.getstate() == expected.getstate()
+
+
+
+
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
 def test_review_combat_info_keeps_exchange_before_tactical_heading(monkeypatch, width, height):
     world = _world_with_seed(42); pirate = vr.Pirate("Raider", 0, 50, 50)
@@ -8435,14 +8633,30 @@ def test_review_combat_kill_terms_name_both_factions_and_notoriety(patrol):
 
 
 
-def test_dump_preview_matches_actual_post_disposal_escape_boundary(monkeypatch):
+@pytest.mark.parametrize("name,roll,label", [("Hollow Fang", 0.695, "70%"), ("Rust Wraith", 0.595, "60%")])
+def test_dump_preview_matches_actual_post_disposal_escape_boundary(monkeypatch, name, roll, label):
     world = _world_with_seed(42); world.save.cargo = {"food": 1}
-    pirate = vr.Pirate("Raider", 0, 50, 50)
-    line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False) if row.startswith("[D]"))
+    pirate = vr.Pirate(name, 0, 50, 50)
+    # The actual new fight uses this opponent's initial intent, including Harry.
+    line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate)) if row.startswith("[D]"))
     monkeypatch.setattr(vr, "read_key", lambda: "D")
-    monkeypatch.setattr(world.event_rng, "random", lambda: 0.695)
+    monkeypatch.setattr(world.event_rng, "random", lambda: roll)
     with contextlib.redirect_stdout(io.StringIO()): assert vr.screen_combat(vr.Palette(False), world, pirate) == "escaped"
-    assert not world.save.cargo and "70%" in line
+    assert not world.save.cargo and label in line
+
+
+@pytest.mark.parametrize("cargo", [0, 1])
+def test_tactical_dump_terms_include_harry_escape_penalty(cargo):
+    import copy
+    world = _world_with_seed(42); world.save.cargo = {"food": cargo}
+    pirate = vr.Pirate("Rust Wraith", 2, 50, 50)
+    tactics = {"version": 1, "profile": "Skirmisher", "step": 0, "brace_ready": True}
+    line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics) if row.startswith("[D]"))
+    after = copy.deepcopy(world)
+    if cargo: vr._dispose_cargo(after, "food", 1)
+    expected = vr.combat_evade_chance(after, pirate, dumped_cargo=bool(cargo), tactics=tactics)
+    assert expected < vr.evade_chance(after, pirate, dumped_cargo=bool(cargo))
+    assert f"{expected:.0%}" in line
 
 
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])

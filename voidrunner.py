@@ -998,6 +998,17 @@ def _validate_combat_mission_snapshot(data: dict, kind: str) -> None:
             raise ValueError("invalid mission quantity or deadline")
 
 
+def _validate_tactics(value: dict) -> None:
+    if not isinstance(value, dict): raise ValueError("invalid tactical state")
+    _reject_unknown_save_fields(value, {"version", "profile", "step", "brace_ready"}, "tactical combat")
+    if type(value.get("version")) is not int: raise ValueError("invalid tactical version")
+    if value["version"] != 1: raise UnsupportedSave("This fight uses an unsupported tactical ruleset.")
+    if (type(value.get("profile")) is not str or value["profile"] not in TACTICAL_PROFILES
+            or type(value.get("step")) is not int or not 0 <= value["step"] < 3
+            or type(value.get("brace_ready")) is not bool):
+        raise ValueError("invalid tactical state")
+
+
 def _load_pending_travel(value: dict | None) -> dict | None:
     if value is None:
         return None
@@ -1047,7 +1058,9 @@ def _load_pending_travel(value: dict | None) -> dict | None:
                 pirates.append(state[key])
         if "combat" in state:
             combat = state["combat"]
-            _reject_unknown_save_fields(combat, {"pirate", "outcome", "lines"}, "combat")
+            _reject_unknown_save_fields(combat, {"pirate", "outcome", "lines", "tactics"}, "combat")
+            if "tactics" in combat:
+                _validate_tactics(combat["tactics"])
             pirates.append(combat["pirate"])
             if (combat["outcome"] not in (None, "won", "escaped", "destroyed")
                     or not isinstance(combat["lines"], list)
@@ -2439,9 +2452,10 @@ class Pirate:
     hp_max: int
 
 
-def generate_pirate(world: World, tier: int | None = None) -> Pirate:
+def generate_pirate(world: World, tier: int | None = None, *, danger: int | None = None) -> Pirate:
     rng = world.event_rng
-    t = tier if tier is not None else max(0, min(4, world.here.danger + rng.randint(-1, 1)))
+    danger = world.here.danger if danger is None else danger
+    t = tier if tier is not None else max(0, min(4, danger + rng.randint(-1, 1)))
     hp = 20 + t * 15
     return Pirate(name=rng.choice(PIRATE_NAMES), tier=t, hp=hp, hp_max=hp)
 
@@ -2460,20 +2474,14 @@ SQUADRON_SIZE = 2
 
 
 def generate_pirate_squadron(world: World, dest: GalaxySystem) -> list[Pirate]:
-    """One ship most of the time; two at the highest danger tiers, with
-    `SQUADRON_CHANCE` still deciding whether this particular encounter
-    actually is one. Ships fight in sequence (the caller runs
-    `screen_combat` once per ship, itself completely unmodified) with no
-    auto-heal between them -- a squadron is meaningfully scarier because
-    damage from the first ship carries into the fight against the
-    second, not because the underlying combat math changes at all. Uses
-    `dest.danger` for the spawn decision, matching `_resolve_random_
-    travel_encounter`'s own "does anything happen at all" roll -- each
-    individual ship's own tier still comes from `generate_pirate`'s
-    existing (unrelated, origin-based) tier logic, unchanged."""
+    """Destination danger controls both squadron probability and each ship's tier.
+
+    Preserve draw ordering (squadron decision, then tier/name per ship). Already
+    stored opponents retain their stats; ships fight sequentially without healing.
+    """
     if dest.danger >= SQUADRON_MIN_DANGER and world.event_rng.random() < SQUADRON_CHANCE:
-        return [generate_pirate(world) for _ in range(SQUADRON_SIZE)]
-    return [generate_pirate(world)]
+        return [generate_pirate(world, danger=dest.danger) for _ in range(SQUADRON_SIZE)]
+    return [generate_pirate(world, danger=dest.danger)]
 
 
 def generate_concord_patrol(world: World) -> Pirate:
@@ -2495,6 +2503,69 @@ def cargo_load_fraction(world: World, *, cargo_units: int | None = None) -> floa
     total = sum(world.save.cargo.values()) if cargo_units is None else cargo_units
     cap = cargo_capacity(world.save.ship)
     return 0.0 if cap == 0 else min(1.0, total / cap)
+
+
+TACTICAL_PROFILES = {
+    "Raider": ("attack", "volley", "recover"),
+    "Bulwark": ("cover", "volley", "recover"),
+    "Skirmisher": ("harry", "attack", "volley"),
+}
+# Outgoing/incoming percentages; the displayed intent uses this same calculation.
+TACTICAL_INTENTS = {"attack": (100, 100), "volley": (100, 160),
+                    "recover": (125, 35), "cover": (65, 65), "harry": (80, 75)}
+TACTICAL_THREAT_BONUS = (0, 3, 6, 20, 55)
+
+
+def new_tactics(pirate: Pirate) -> dict:
+    profile = list(TACTICAL_PROFILES)[sum(map(ord, pirate.name)) % len(TACTICAL_PROFILES)]
+    return {"version": 1, "profile": profile, "step": 0, "brace_ready": True}
+
+
+def tactical_intent(tactics: dict) -> str:
+    return TACTICAL_PROFILES[tactics["profile"]][tactics["step"]]
+
+
+def _tactical_incoming_damage(ship: Ship, tier: int, intent: str, roll: int, *, braced: bool = False) -> int:
+    raw = roll + TACTICAL_THREAT_BONUS[tier]
+    damage = max(1, (raw * TACTICAL_INTENTS[intent][1] + 99) // 100 - ship.shield_tier * 3)
+    return (damage + 3) // 4 if braced else damage
+
+
+def tactical_retaliation(world: World, pirate: Pirate, tactics: dict, *, braced: bool = False) -> tuple[int, list[str]]:
+    intent = tactical_intent(tactics)
+    damage = _tactical_incoming_damage(world.save.ship, pirate.tier, intent, world.event_rng.randint(4, 9), braced=braced)
+    world.save.ship.hull_hp = max(0, world.save.ship.hull_hp - damage)
+    tactics["step"] = (tactics["step"] + 1) % 3
+    return damage, [f"The {pirate.name} uses {intent} and hits you for {damage} damage."]
+
+
+def tactical_round(world: World, pirate: Pirate, tactics: dict, action: str) -> tuple[int, int, list[str]]:
+    if action not in ("F", "G") or (action == "G" and not tactics["brace_ready"]):
+        raise ValueError("Fire to recharge Brace before using it again.")
+    if pirate.hp <= 0 or world.save.ship.hull_hp <= 0:
+        raise ValueError("This exchange is already over.")
+    ship = world.save.ship
+    intent = tactical_intent(tactics)
+    raw = world.event_rng.randint(9, 14) + ship.weapon_tier * 4 + (3 if ship.has_gunner else 0)
+    damage = max(1, raw * TACTICAL_INTENTS[intent][0] // 100)
+    if action == "G": damage = max(1, damage * 55 // 100)
+    pirate.hp = max(0, pirate.hp - damage)
+    tactics["brace_ready"] = action == "F"
+    lines = [f"You hit the {pirate.name} for {damage} damage." + (" Braced; fire to recharge." if action == "G" else "")]
+    if pirate.hp > 0:
+        received, retaliation = tactical_retaliation(world, pirate, tactics, braced=action == "G")
+        lines += retaliation
+    else:
+        received = 0
+        tactics["step"] = (tactics["step"] + 1) % 3
+        lines.append(f"The {pirate.name} is destroyed!")
+    return damage, received, lines
+
+
+def combat_evade_chance(world: World, pirate: Pirate, *, dumped_cargo: bool, tactics: dict | None = None, cargo_units: int | None = None) -> float:
+    chance = evade_chance(world, pirate, dumped_cargo=dumped_cargo, cargo_units=cargo_units)
+    if tactics is not None and tactical_intent(tactics) == "harry": chance = max(0.05, chance - 0.10)
+    return chance
 
 
 def fight_round(world: World, pirate: Pirate) -> tuple[int, int, list[str]]:
@@ -5775,7 +5846,7 @@ def screen_notoriety_patrol(p: Palette, world: World) -> None:
     _screen_combat_session(p, world, patrol, patrol=True)
 
 
-def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, patrol: bool, details: bool = False) -> list[str]:
+def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, patrol: bool, details: bool = False, tactics: dict | None = None) -> list[str]:
     """Read-only combat terms; no random draw or persisted presentation state."""
     ship, pilot = world.save.ship, world.save.pilot
     used = sum(world.save.cargo.values())
@@ -5790,17 +5861,29 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         f"Your hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}.",
         f"Cargo {used}/{cargo_capacity(ship)} used; Day {world.save.turn}.",
     ]
+    if tactics is not None:
+        intent = tactical_intent(tactics)
+        low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll) for roll in (4, 9))
+        lines.append(f"{tactics['profile']} intent: {intent.upper()}; incoming {low}-{high} damage if it survives or you fail to disengage.")
+        if tactics["brace_ready"]:
+            low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, braced=True) for roll in (4, 9))
+            lines.append(f"[G] Brace: reduced shot (55%); incoming {low}-{high}. Fire recharges Brace.")
+        else: lines.append("Brace recharging: fire once before using G again.")
+        if details:
+            lines.append("Pattern: " + " > ".join(TACTICAL_PROFILES[tactics["profile"]]) + ".")
+            lines.append("Cover/harry reduce your shot; recovery exposes the enemy. Harry lowers escape chance by 10 percentage points, minimum 5%.")
+    else: lines.append("Original fight rules (no Brace).")
     if ship.hull_hp * 3 <= hull_hp_max(ship): lines.append("LOW HULL: one third of maximum hull or less.")
     lines += [
         "[F] Fight: fire once; a surviving enemy returns fire.",
-        f"[E] Evade: about {evade_chance(world, pirate, dumped_cargo=False):.0%} success; failure draws enemy fire.",
+        f"[E] Evade: about {combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics):.0%} success; failure draws enemy fire.",
     ]
     if patrol:
         cost = notoriety_fine_cost(pilot.notoriety)
         lines.append((f"[S] Surrender: pay {cost}cr, clear notoriety, Concord +2 and escape. " if pilot.credits >= cost else f"Surrender requires {cost}cr. ") +
                      ("Available." if pilot.credits >= cost else "UNAFFORDABLE; surrender unavailable."))
     else:
-        chance = evade_chance(world, pirate, dumped_cargo=bool(used), cargo_units=max(0, used - 1))
+        chance = combat_evade_chance(world, pirate, dumped_cargo=bool(used), tactics=tactics, cargo_units=max(0, used - 1))
         lines.append(f"[D] Dump & evade: about {chance:.0%} success; " +
                      ("lose one unit of a random held commodity; failure draws fire."
                       if used else "hold empty; same chance as Evade."))
@@ -5830,7 +5913,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
     combat = encounter.get("combat")
     if combat is None:
         combat = encounter["combat"] = {
-            "pirate": dataclasses.asdict(pirate), "outcome": None, "lines": [],
+            "pirate": dataclasses.asdict(pirate), "outcome": None, "lines": [], "tactics": new_tactics(pirate),
         }
         world.checkpoint()
     else:
@@ -5838,15 +5921,17 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         if combat["outcome"] is not None:
             for line in combat["lines"]: out_line(f"  {line}")
             return combat["outcome"]
+    tactics = combat.get("tactics")  # Absence preserves an interrupted legacy fight.
     ship = world.save.ship
     fine = notoriety_fine_cost(world.save.pilot.notoriety)
     page, details = 0, False
     while True:
         can_pay = world.save.pilot.credits >= (fine if patrol else bribe_cost(pirate))
         actions = "F/E/S" if patrol and can_pay else "F/E" if patrol else "F/E/D/B" if can_pay else "F/E/D"
+        if tactics is not None and tactics["brace_ready"]: actions = actions.replace("F/", "F/G/")
         action, page, count = _draw_service_page(
             p, f"Combat {world.save.pilot.credits:,}cr",
-            combat_display_lines(world, pirate, combat["lines"], patrol=patrol, details=details),
+            combat_display_lines(world, pirate, combat["lines"], patrol=patrol, details=details, tactics=tactics),
             f"[{actions}]Act [Q]Info [< >]Page: ", page,
         )
         if action == ">":
@@ -5860,8 +5945,9 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             continue
         lines = []
         outcome = None
-        if action == "F":
-            _, _, lines = fight_round(world, pirate)
+        if action == "F" or (action == "G" and tactics is not None and tactics["brace_ready"]):
+            if tactics is None: _, _, lines = fight_round(world, pirate)
+            else: _, _, lines = tactical_round(world, pirate, tactics, action)
             if pirate.hp <= 0:
                 if world.save.pilot.kills == 0:
                     label = "Concord patrol vessel " if patrol else ""
@@ -5888,15 +5974,19 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
                 _dispose_cargo(world, commodity, 1)
                 dumped = True
                 lines.append("You dump cargo to lighten the ship.")
-            if world.event_rng.random() < evade_chance(world, pirate, dumped_cargo=dumped):
+            if world.event_rng.random() < combat_evade_chance(world, pirate, dumped_cargo=dumped, tactics=tactics):
                 lines.append("You break contact and escape.")
                 outcome = "escaped"
             else:
                 lines.append("Evasion failed -- they're still on you.")
-                raw = world.event_rng.randint(4, 9) + pirate.tier * 4
-                dmg = max(1, raw - ship.shield_tier * 3)
-                ship.hull_hp = max(0, ship.hull_hp - dmg)
-                lines.append(f"The {pirate.name} hits you for {dmg} damage.")
+                if tactics is None:
+                    raw = world.event_rng.randint(4, 9) + pirate.tier * 4
+                    dmg = max(1, raw - ship.shield_tier * 3)
+                    ship.hull_hp = max(0, ship.hull_hp - dmg)
+                    lines.append(f"The {pirate.name} hits you for {dmg} damage.")
+                else:
+                    _, retaliation = tactical_retaliation(world, pirate, tactics)
+                    lines += retaliation
         elif action == "B" and not patrol and can_pay:
             cost = bribe_cost(pirate)
             if world.event_rng.random() < bribe_chance(world, pirate):
@@ -5906,10 +5996,14 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
                 outcome = "escaped"
             else:
                 lines.append("They refuse the bribe and press the attack!")
-                raw = world.event_rng.randint(4, 9) + pirate.tier * 4
-                dmg = max(1, raw - ship.shield_tier * 3)
-                ship.hull_hp = max(0, ship.hull_hp - dmg)
-                lines.append(f"The {pirate.name} hits you for {dmg} damage.")
+                if tactics is None:
+                    raw = world.event_rng.randint(4, 9) + pirate.tier * 4
+                    dmg = max(1, raw - ship.shield_tier * 3)
+                    ship.hull_hp = max(0, ship.hull_hp - dmg)
+                    lines.append(f"The {pirate.name} hits you for {dmg} damage.")
+                else:
+                    _, retaliation = tactical_retaliation(world, pirate, tactics)
+                    lines += retaliation
         elif action == "S" and patrol and can_pay:
             world.save.pilot.credits -= fine
             world.save.pilot.notoriety = 0
