@@ -24,6 +24,8 @@ import random
 import sys
 from pathlib import Path
 
+import pytest
+
 _VOIDRUNNER_PATH = (
     Path(__file__).resolve().parent.parent / "src" / "netbbs" / "doors" / "bundled" / "voidrunner.py"
 )
@@ -3250,4 +3252,239 @@ def test_status_bar_separator_is_79_columns():
     rule_line = [line for line in stripped if line.startswith("─") and set(line) == {"─"}]
     assert len(rule_line) == 1
     assert len(rule_line[0]) == 79
+
+
+# Issue #310: exercise the real executable and kill it while nested menus
+# still own input. Save-on-menu-exit and graceful-EOF tests miss this boundary.
+@pytest.mark.parametrize(
+    "commands,ack,field,expected",
+    [
+        (b"MAB1\r", b"Bought 1x Food", "cargo.food", 1),
+        (b"YAY", b"Cargo Bay Expansion upgraded", "ship.cargo_tier", 1),
+        (b"YKAY", b"Gunner hired", "ship.has_gunner", True),
+        (b"YR2\r", b"Refueled 2 units", "ship.fuel", 22),
+        (b"YPY", b"Hull repaired", "ship.hull_hp", 60),
+        (b"MXA1\r5\rY", b"Futures contract: 1x Food", "active_futures", "nonempty"),
+        (b"BA", b"Accepted:", "active_missions", "nonempty"),
+        (b"DY", b"Jettisoned 1 units", "cargo", {}),
+        (b"PY", b"Commission accepted", "pilot.has_concord_commission", True),
+        (b"WY", b"Welcome to the family", "pilot.has_blackwake_made", True),
+    ],
+)
+def test_acknowledged_station_action_survives_forced_termination(
+    tmp_path, commands, ack, field, expected,
+):
+    import json
+    import os
+    import subprocess
+    import threading
+
+    world = _world_with_seed(42)
+    world.save.pilot.credits = 20_000
+    world.save.pilot.highest_rank_seen = 2
+    world.save.ship.fuel = 20
+    world.save.ship.hull_hp = 50
+    world.save.pilot.reputation = {f: 75 for f in vr.FACTIONS}
+    if commands == b"DY":
+        world.save.cargo = {"weapons": 1}
+    vr.write_save(tmp_path, 77, world.save)
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    env = dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info))
+    proc = subprocess.Popen(
+        [sys.executable, str(_VOIDRUNNER_PATH)], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+    )
+    reached = threading.Event()
+    output = bytearray()
+
+    def read_until_ack():
+        while len(output) < 128_000:
+            byte = proc.stdout.read(1)
+            if not byte:
+                return
+            output.extend(byte)
+            if ack in output:
+                reached.set()
+                return
+
+    reader = threading.Thread(target=read_until_ack)
+    reader.start()
+    try:
+        proc.stdin.write(commands)
+        proc.stdin.flush()
+        assert reached.wait(10), bytes(output).decode("utf-8", errors="replace")
+        # Deliberately no menu-exit input, EOF or graceful quit.
+        proc.kill()
+        proc.wait(timeout=5)
+        saved = json.loads((tmp_path / "77.json").read_text(encoding="utf-8"))
+        value = saved
+        for part in field.split("."):
+            value = value[part]
+        if expected == "nonempty":
+            assert value
+        else:
+            assert value == expected
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        reader.join(timeout=5)
+        assert not reader.is_alive()
+        proc.stdin.close()
+        proc.stdout.close()
+        proc.stderr.close()
+
+
+def test_failed_station_checkpoint_never_announces_purchase(monkeypatch):
+    world = _world_with_seed(42)
+
+    def fail_save(current):
+        raise OSError("disk full")
+
+    world._checkpoint = fail_save
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: "1")
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output), pytest.raises(vr.SaveError):
+        vr._trade_commodity(vr.Palette(False), world, "food")
+    assert "Bought" not in output.getvalue()
+
+
+def test_save_failure_stops_main_without_success_or_more_actions(tmp_path, monkeypatch):
+    world = _world_with_seed(42)
+    original_persist = vr.persist
+    attempts = []
+
+    def fail_second_save(current, directory, user_id):
+        attempts.append(current.save.to_dict())
+        if len(attempts) == 2:
+            raise OSError("disk full")
+        original_persist(current, directory, user_id)
+
+    class Terminal(io.StringIO):
+        def reconfigure(self, **kwargs):
+            pass
+
+    output = Terminal()
+    keys = iter(["M", "A", "B", " ", "Q"])
+    with monkeypatch.context() as patch:
+        patch.setattr(vr.sys, "stdout", output)
+        patch.setattr(vr, "_load_door_info", lambda: {"handle": "Tester", "user_id": 77})
+        patch.setattr(vr, "_default_save_dir", lambda: tmp_path)
+        patch.setattr(vr, "load_or_create_save", lambda *args: (world.save, False, None))
+        patch.setattr(vr, "persist", fail_second_save)
+        patch.setattr(vr, "read_key", lambda: next(keys))
+        patch.setattr(vr, "read_line_raw", lambda **kwargs: "1")
+        assert vr.main() == 1
+    assert "Save failed" in output.getvalue()
+    assert "Bought" not in output.getvalue()
+    assert next(keys) == "Q"  # only the error acknowledgement was consumed
+    assert len(attempts) == 2  # no EOF retry writes an unacknowledged action
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert saved.cargo == {}
+    assert saved.pilot.credits == 1200
+
+
+def test_cancelled_career_does_not_create_save(tmp_path):
+    import os
+    import subprocess
+
+    env = dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path))
+    env.pop("NETBBS_DOOR_INFO", None)
+    result = subprocess.run(
+        [sys.executable, str(_VOIDRUNNER_PATH)], input=b"NewPilot\rN",
+        capture_output=True, env=env, timeout=10,
+    )
+    assert result.returncode == 0
+    assert b"Career launch cancelled" in result.stdout
+    assert not list(tmp_path.glob("*.json"))
+
+
+def test_invalid_customs_input_waits_without_mutating_cargo(monkeypatch):
+    world = _world_with_seed(42)
+    world.save.cargo = {"weapons": 2}
+    before = world.save.to_dict()
+    keys = iter(["?", "\r", "S"])
+
+    def choose():
+        assert world.save.to_dict() == before
+        return next(keys)
+
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_customs(vr.Palette(False), world)
+    assert world.save.cargo == {}
+
+
+def test_scan_checkpoint_contains_discovery_and_mission_reward(tmp_path, monkeypatch):
+    world = _world_with_seed(42)
+    world.save.ship.scanner_tier = 1
+    target = next(sid for sid, hops in vr.bfs_hops(world.by_id, 0).items()
+                  if hops <= 3 and not world.by_id[sid].discovered)
+    world.save.active_missions = [vr.Mission(1, "scan", "Survey", 500, 0, target)]
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    monkeypatch.setattr(world.event_rng, "choice", lambda choices: target)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._do_scan(vr.Palette(False), world)
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert target in saved.discovered
+    assert saved.pilot.credits == 1700
+    assert saved.active_missions == []
+
+
+def test_auto_route_checkpoints_each_completed_hop_before_next_hop(tmp_path, monkeypatch):
+    world = _world_with_seed(42)
+    for system in world.galaxy:
+        system.discovered = True
+    target = next(sid for sid, hops in vr.bfs_hops(world.by_id, 0).items() if hops == 3)
+    path = vr.bfs_path(world.by_id, 0, target)
+    world.save.ship.fuel = 100
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    vr.persist(world, tmp_path, 77)
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: world.by_id[target].name)
+    monkeypatch.setattr(vr, "confirm", lambda *args: True)
+    visited = []
+
+    def travel(p, current, dest):
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert saved.current_system == (visited[-1] if visited else 0)
+        current.save.current_system = dest
+        current.save.turn += 1
+        visited.append(dest)
+
+    monkeypatch.setattr(vr, "screen_travel", travel)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._screen_auto_route(vr.Palette(False), world)
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert visited == path
+    assert saved.current_system == target
+    assert saved.turn == 3
+
+
+def test_retirement_keeps_checkpoint_binding(tmp_path):
+    world = vr.World(vr._new_career("Retiring"),
+                     checkpoint=lambda current: vr.persist(current, tmp_path, 77))
+    world.reset(vr.retire_pilot(world.save))
+    world.checkpoint()
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Retiring")
+    assert saved.pilot.retirements == 1
+
+
+def test_failed_atomic_replace_preserves_previous_save_and_removes_own_temp(tmp_path, monkeypatch):
+    import os
+
+    save = vr._new_career("Tester")
+    vr.write_save(tmp_path, 77, save)
+    previous = (tmp_path / "77.json").read_bytes()
+    save.pilot.credits += 100
+
+    def fail_replace(source, destination):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(OSError):
+        vr.write_save(tmp_path, 77, save)
+    assert (tmp_path / "77.json").read_bytes() == previous
+    assert not list(tmp_path.glob("*.tmp"))
 

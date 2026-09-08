@@ -17,11 +17,13 @@ and deletes its scratch working directory after every session (see
 entirely itself. This door keeps one JSON save file per caller, keyed by
 the drop-file's stable numeric `user_id` (never the handle, which can
 change), under `VOIDRUNNER_SAVE_DIR` if set, else `~/.netbbs/
-voidrunner_saves/`. State is written after every state-changing action
-(atomically, via a temp file + `os.replace`), not just on explicit quit
--- a door can be killed at any moment (caller disconnect, wall-clock
-timeout) with no graceful-shutdown guarantee, so "save on quit only"
-would lose real progress.
+voidrunner_saves/`. Completed station actions commit before their success
+message, including actions inside nested menus. Each completed auto-route
+hop also commits without requiring the player to leave the chart. Writes
+use a flushed private temporary file plus `os.replace`: a door can be
+killed at any moment without a graceful-shutdown guarantee. Interrupted
+encounters still need resumable state (issue #310); the current travel
+loop commits on returning rather than after individual combat decisions.
 
 The default save location is deliberately *not* relative to this
 script's own path: this module now ships as real installed package data
@@ -65,6 +67,7 @@ threaded into the middle of its existing call sequence.
 from __future__ import annotations
 
 import collections
+import contextlib
 import dataclasses
 import json
 import os
@@ -75,6 +78,7 @@ import tempfile
 import time
 import unicodedata
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -754,8 +758,22 @@ class World:
     takes a `World` and mutates it in place, returning narrative lines --
     see this module's own docstring for why that boundary matters."""
 
-    def __init__(self, save: SaveData):
+    def __init__(self, save: SaveData, *, checkpoint: Callable[[World], None] | None = None):
+        self._checkpoint = checkpoint
         self.reset(save)
+
+    def checkpoint(self) -> None:
+        """Commit a completed action before acknowledging it to the caller.
+
+        The executable binds storage; domain-only worlds need no filesystem.
+        A failed commit stops the UI rather than acknowledging unsaved progress.
+        Resetting a career preserves this binding.
+        """
+        if self._checkpoint is not None:
+            try:
+                self._checkpoint(self)
+            except OSError as exc:
+                raise SaveError("The completed action could not be saved.") from exc
 
     def reset(self, save: SaveData) -> None:
         """Re-derives every galaxy-shaped attribute from `save` in
@@ -1433,6 +1451,7 @@ def screen_concord_commission(p: Palette, world: World) -> None:
     world.save.pilot.credits += CONCORD_COMMISSION_BONUS_CREDITS
     world.save.pilot.note("Accepted a Concord privateer commission.")
     world.save.pilot.highlight("Commissioned as a Concord privateer -- bounty/escort rewards enhanced for life.")
+    world.checkpoint()
     out_line(f"{p.correct}Commission accepted. Bounty and escort rewards are enhanced from here on.{RESET}")
 
 
@@ -1454,6 +1473,7 @@ def screen_blackwake_made(p: Palette, world: World) -> None:
     world.save.pilot.credits += BLACKWAKE_MADE_BONUS_CREDITS
     world.save.pilot.note("Made a full member of the Blackwake Cartel.")
     world.save.pilot.highlight("Made a full member of the Blackwake Cartel -- customs risk reduced for life.")
+    world.checkpoint()
     out_line(f"{p.correct}Welcome to the family. Customs checks are less likely to find you now.{RESET}")
 
 
@@ -1624,6 +1644,10 @@ def check_rank_up(world: World) -> str | None:
 SCHEMA_VERSION = 1
 
 
+class SaveError(OSError):
+    """A gameplay checkpoint failed; no further actions may be accepted."""
+
+
 def _default_save_dir() -> Path:
     override = os.environ.get("VOIDRUNNER_SAVE_DIR")
     if override:
@@ -1730,9 +1754,24 @@ def load_or_create_save(save_dir: Path, user_id: int, handle: str) -> tuple[Save
 def write_save(save_dir: Path, user_id: int, save: SaveData) -> None:
     save_dir.mkdir(parents=True, exist_ok=True)
     path = _save_path(save_dir, user_id)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(save.to_dict()), encoding="utf-8")
-    os.replace(tmp, path)
+    # Each writer owns its temporary file. Per-pilot concurrency and shared
+    # leaderboard transactions remain separate concerns from atomic replacement.
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=save_dir,
+            prefix=f".{user_id}-", suffix=".tmp", delete=False,
+        ) as handle:
+            tmp = Path(handle.name)
+            json.dump(save.to_dict(), handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp is not None:
+            # Cleanup must not mask a failed write or atomic replacement.
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
 
 
 # Cross-save Hall of Fame: a single shared leaderboard file living
@@ -1963,7 +2002,7 @@ def screen_title(p: Palette, info: dict) -> None:
     out_line()
 
 
-def create_career(p: Palette, info: dict) -> str:
+def create_career(p: Palette, info: dict) -> str | None:
     out_line()
     out_line(_box_title(p, "Pilot Commission Registration"))
     welcome = f"  {p.gold}Welcome to the void, pilot.{RESET} No career dossier found for {info['handle']}."
@@ -1974,12 +2013,12 @@ def create_career(p: Palette, info: dict) -> str:
     entered = read_line_raw(max_len=16, allowed=lambda c: c.isalnum() or c == " ").strip()
     callsign = entered or info["handle"]
     out_line()
-    out_line(f"{p.muted}  Starting deployment: Freeport Anchorage (Orion Sector){RESET}")
+    out_line(f"{p.muted}  Starting deployment: Freeport Anchorage{RESET}")
     out_line(f"{p.muted}  Vessel: Battered Shuttle  │  Starting Bank: 1,200 cr  │  Cargo: Empty Hold{RESET}")
     if confirm(f"Launch {callsign}'s career?", p):
         return callsign
-    out_line(f"{p.muted}Understood -- sticking with {info['handle']}.{RESET}")
-    return info["handle"]
+    out_line(f"{p.muted}Career launch cancelled. No career was saved.{RESET}")
+    return None
 
 
 def screen_station_menu(p: Palette, world: World) -> str:
@@ -1990,14 +2029,20 @@ def screen_station_menu(p: Palette, world: World) -> str:
         # state (a refuel/repair that spent the last credits, a jump
         # that burned the last fuel with no encounter) in one place.
         out_line()
-        out_line(f"{p.wrong}{rescue_stranded_pilot(world)}{RESET}")
+        rescued = rescue_stranded_pilot(world)
+        world.checkpoint()
+        out_line(f"{p.wrong}{rescued}{RESET}")
         pause(p)
     promoted = check_rank_up(world)
     if promoted:
+        world.checkpoint()
         out_line()
         out_line(f"{p.gold}{BOLD}★ ★ ★ Promoted to {promoted}! ★ ★ ★{RESET}")
         pause(p)
-    for msg in check_mission_completions(world):
+    completed = check_mission_completions(world)
+    if completed:
+        world.checkpoint()
+    for msg in completed:
         out_line(f"{p.gold}{msg}{RESET}")
     out_line()
     draw_status_bar(p, world)
@@ -2048,7 +2093,9 @@ def screen_dump_contraband(p: Palette, world: World) -> None:
     out_line(f"{p.wrong}This forfeits {listing} for good -- no sale, no refund.{RESET}")
     if not confirm("Dump it all now?", p):
         return
-    out_line(f"{p.muted}{dump_all_contraband(world)}{RESET}")
+    result = dump_all_contraband(world)
+    world.checkpoint()
+    out_line(f"{p.muted}{result}{RESET}")
 
 
 def screen_landmark(p: Palette, world: World) -> None:
@@ -2060,6 +2107,7 @@ def screen_landmark(p: Palette, world: World) -> None:
     world.save.pilot.credits += landmark["reward_credits"]
     world.save.pilot.note(f"Investigated {landmark['label']} (+{landmark['reward_credits']}cr)")
     world.save.pilot.highlight(f"Investigated {landmark['label']} (+{landmark['reward_credits']}cr).")
+    world.checkpoint()
     out_line(f"{p.gold}Salvage recovered: +{landmark['reward_credits']}cr{RESET}")
     pause(p)
 
@@ -2187,7 +2235,9 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> None:
     total = unit_price * qty
     if not confirm(f"Lock in {qty}x {label} for {total}cr, delivered in {duration} turns?", p):
         return
-    out_line(f"{p.correct}{buy_futures_contract(world, commodity, qty, duration)}{RESET}")
+    result = buy_futures_contract(world, commodity, qty, duration)
+    world.checkpoint()
+    out_line(f"{p.correct}{result}{RESET}")
 
 
 def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
@@ -2218,9 +2268,10 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
         world.save.pilot.credits -= cost
         world.save.cargo[commodity] = world.save.cargo.get(commodity, 0) + qty
         _nudge_drift(world, world.here.id, commodity, min(0.05, qty * 0.01))
-        out_line(f"{p.correct}Bought {qty}x {label} for {cost}cr.{RESET}")
         if not COMMODITIES[commodity]["legal"]:
             adjust_reputation(world, FACTION_BLACKWAKE, 1)
+        world.checkpoint()
+        out_line(f"{p.correct}Bought {qty}x {label} for {cost}cr.{RESET}")
     elif action == "S":
         have = world.save.cargo.get(commodity, 0)
         if have <= 0:
@@ -2238,9 +2289,10 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
         if world.save.cargo[commodity] <= 0:
             del world.save.cargo[commodity]
         _nudge_drift(world, world.here.id, commodity, -min(0.05, qty * 0.01))
-        out_line(f"{p.correct}Sold {qty}x {label} for {proceeds}cr.{RESET}")
         if not COMMODITIES[commodity]["legal"]:
             adjust_reputation(world, FACTION_BLACKWAKE, 1)
+        world.checkpoint()
+        out_line(f"{p.correct}Sold {qty}x {label} for {proceeds}cr.{RESET}")
 
 
 def screen_shipyard(p: Palette, world: World) -> None:
@@ -2292,6 +2344,9 @@ def screen_shipyard(p: Palette, world: World) -> None:
         if action in refit_keys:
             target_class, cost = refit_options[refit_keys.index(action)]
             _hull_refit_screen(p, world, target_class, cost)
+            continue
+        if action in LETTERS[:len(keys)]:
+            _buy_upgrade(p, world, keys[LETTERS.index(action)])
             continue
         if action == "U":
             out_prompt(f"  {p.muted}Which upgrade [A-{LETTERS[len(keys)-1]}]? {RESET}")
@@ -2347,6 +2402,7 @@ def _toggle_crew(p: Palette, world: World, role: str) -> None:
     if getattr(ship, f"has_{role}"):
         if confirm(f"Dismiss your {info['label']}?", p):
             setattr(ship, f"has_{role}", False)
+            world.checkpoint()
             out_line(f"{p.muted}{info['label']} dismissed.{RESET}")
         return
     if world.save.pilot.credits < info["hire_cost"]:
@@ -2357,6 +2413,7 @@ def _toggle_crew(p: Palette, world: World, role: str) -> None:
         return
     world.save.pilot.credits -= info["hire_cost"]
     setattr(ship, f"has_{role}", True)
+    world.checkpoint()
     out_line(f"{p.correct}{info['label']} hired.{RESET}")
 
 
@@ -2375,6 +2432,7 @@ def _buy_upgrade(p: Palette, world: World, key: str) -> None:
         return
     world.save.pilot.credits -= cost
     setattr(ship, f"{key}_tier", tier + 1)
+    world.checkpoint()
     out_line(f"{p.correct}{u['label']} upgraded to tier {tier + 1}.{RESET}")
 
 
@@ -2398,6 +2456,7 @@ def _refuel(p: Palette, world: World) -> None:
     cost = qty * 6
     world.save.pilot.credits -= cost
     ship.fuel += qty
+    world.checkpoint()
     out_line(f"{p.correct}Refueled {qty} units for {cost}cr.{RESET}")
 
 
@@ -2419,6 +2478,7 @@ def _repair(p: Palette, world: World) -> None:
         return
     world.save.pilot.credits -= cost
     ship.hull_hp += missing
+    world.checkpoint()
     out_line(f"{p.correct}Hull repaired to {ship.hull_hp}/{hull_hp_max(ship)}.{RESET}")
 
 
@@ -2441,6 +2501,7 @@ def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -
     ship.hull_hp = hull_hp_max(ship)
     world.save.pilot.note(f"Commissioned a {target_class}-class hull refit.")
     world.save.pilot.highlight(f"Commissioned a {target_class}-class hull refit.")
+    world.checkpoint()
     out_line(f"{p.gold}{BOLD}Your {previous_class} is towed into drydock and emerges a {target_class}.{RESET}")
     out_line(f"{p.gold}Cargo, hull, and fuel capacity all jump considerably.{RESET}")
 
@@ -2488,6 +2549,7 @@ def screen_missions(p: Palette, world: World) -> None:
             continue
         mission = board.pop(idx)
         accept_mission(world, mission)
+        world.checkpoint()
         out_line(f"{p.correct}Accepted: {mission.description}{RESET}")
 
 
@@ -2585,6 +2647,7 @@ def screen_status(p: Palette, world: World) -> None:
         if key == "R":
             if confirm("This ends your current career for good and begins a new one. Retire?", p):
                 world.reset(retire_pilot(world.save))
+                world.checkpoint()
                 out_line()
                 out_line(f"{p.accent}{BOLD}A new career begins.{RESET}")
         return
@@ -2707,8 +2770,10 @@ def _do_scan(p: Palette, world: World) -> None:
     target = world.event_rng.choice(candidates)
     world.by_id[target].discovered = True
     world.sync_discovered()
+    completed = check_mission_completions(world, just_discovered=target)
+    world.checkpoint()
     out_line(f"{p.correct}Sensor contact! {world.by_id[target].name} is now on your chart.{RESET}")
-    for msg in check_mission_completions(world, just_discovered=target):
+    for msg in completed:
         out_line(f"{p.gold}{msg}{RESET}")
 
 
@@ -2814,6 +2879,9 @@ def _screen_auto_route(p: Palette, world: World) -> None:
                       f"({cost} needed, have {world.save.ship.fuel}).{RESET}")
             return
         screen_travel(p, world, hop_id)
+        # Each completed hop survives even while the chart remains open.
+        # Resuming an interrupted encounter requires its own persisted state.
+        world.checkpoint()
         if world.save.current_system != hop_id:
             out_line(f"{p.wrong}Route interrupted.{RESET}")
             return
@@ -3258,9 +3326,13 @@ def screen_customs(p: Palette, world: World) -> None:
     out_line(f"{p.wrong}│{RESET}{scan_line}{' ' * max(0, 77 - _vis_len(scan_line))}{p.wrong}│{RESET}")
     out_line(_box_bottom(p, border_color=p.wrong))
     value = sum(q * COMMODITIES[c]["base"] for c, q in world.save.cargo.items() if not COMMODITIES[c]["legal"])
-    out_prompt(f"  {p.muted}[S]urrender contraband [B]ribe the inspector: {RESET}")
-    action = read_key().upper()
-    out_line(action)
+    while True:
+        out_prompt(f"  {p.muted}[S]urrender contraband [B]ribe the inspector: {RESET}")
+        action = read_key().upper()
+        out_line(action)
+        if action in ("S", "B"):
+            break
+        out_line(f"{p.muted}Choose S or B. No cargo has been surrendered.{RESET}")
     if action == "B":
         cost = 100 + value // 2
         if world.save.pilot.credits >= cost and world.event_rng.random() < 0.6:
@@ -3306,17 +3378,21 @@ def main() -> int:
     # career file on every standalone run.
     user_id = int(info.get("user_id", 0)) or zlib.crc32(info["handle"].encode())
 
+    world = None
     try:
         screen_title(p, info)
         save, is_new, notice = load_or_create_save(save_dir, user_id, info["handle"])
         if notice:
             out_line(f"{p.wrong}{notice}{RESET}")
         if is_new:
-            save.pilot.handle = create_career(p, info)
+            callsign = create_career(p, info)
+            if callsign is None:
+                return 0
+            save.pilot.handle = callsign
         else:
             out_line(f"{p.muted}Welcome back, {save.pilot.handle}. Day {save.turn}.{RESET}")
-        world = World(save)
-        persist(world, save_dir, user_id)
+        world = World(save, checkpoint=lambda current: persist(current, save_dir, user_id))
+        world.checkpoint()
 
         while True:
             choice = screen_station_menu(p, world)
@@ -3343,17 +3419,26 @@ def main() -> int:
             elif choice == "W" and blackwake_made_available(world):
                 screen_blackwake_made(p, world)
             elif choice == "Q":
+                world.checkpoint()
                 out_line(f"{p.muted}Docking clamps engaged. Fly safe, {world.save.pilot.handle}.{RESET}")
-                persist(world, save_dir, user_id)
                 return 0
             else:
                 continue
-            persist(world, save_dir, user_id)
+            world.checkpoint()
+    except SaveError:
+        out_line(f"{p.wrong}Save failed. Play has stopped to protect your last saved career. "
+                 f"Please contact your SysOp before playing again.{RESET}")
+        try:
+            pause(p)
+        except EOFError:
+            pass
+        return 1
     except EOFError:
         try:
-            persist(world, save_dir, user_id)  # type: ignore[possibly-undefined]
-        except Exception:
-            pass
+            if world is not None:
+                world.checkpoint()
+        except SaveError:
+            return 1
         return 0
     finally:
         out(RESET)
