@@ -22,8 +22,9 @@ message, including actions inside nested menus. Each completed auto-route
 hop also commits without requiring the player to leave the chart. Writes
 use a flushed private temporary file plus `os.replace`: a door can be
 killed at any moment without a graceful-shutdown guarantee. Interrupted
-encounters still need resumable state (issue #310); the current travel
-loop commits on returning rather than after individual combat decisions.
+journeys resume before station access, with the same opponent HP, random
+state, and pending mission resolution. Each combat decision commits its
+complete effects before narration; consumed rewards are never replayed.
 
 The default save location is deliberately *not* relative to this
 script's own path: this module now ships as real installed package data
@@ -686,6 +687,95 @@ class FuturesContract:
         return cls(**{f.name: d[f.name] for f in dataclasses.fields(cls) if f.name in d})
 
 
+class ResumeError(Exception):
+    """An interrupted career must be preserved, never reset automatically."""
+
+
+def _validate_combat_mission_snapshot(data: dict, kind: str) -> None:
+    """Validate every value a resumed fight, payout, or removal consumes."""
+    if not isinstance(data, dict):
+        raise ValueError("invalid mission snapshot")
+    mission = Mission.from_dict(data)
+    if (mission.kind != kind or not isinstance(mission.description, str)
+            or type(mission.id) is not int or mission.id < 1
+            or type(mission.reward) is not int or mission.reward < 0):
+        raise ValueError("invalid mission identity or reward")
+    for system in (mission.origin_system, mission.target_system):
+        if type(system) is not int or not 0 <= system < GALAXY_SYSTEM_COUNT:
+            raise ValueError("invalid mission system")
+    if mission.pirate_tier is not None and (
+            type(mission.pirate_tier) is not int or not 0 <= mission.pirate_tier <= 4):
+        raise ValueError("invalid mission pirate tier")
+    if mission.commodity is not None and (
+            not isinstance(mission.commodity, str) or mission.commodity not in COMMODITIES):
+        raise ValueError("invalid mission commodity")
+    for number in (mission.quantity, mission.deadline_turn):
+        if number is not None and (type(number) is not int or number < 0):
+            raise ValueError("invalid mission quantity or deadline")
+
+
+def _load_pending_travel(value: dict | None) -> dict | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1:
+        raise ResumeError("This interrupted journey uses an unsupported format.")
+    try:
+        if any(type(value[key]) is not int for key in ("origin", "destination", "escort_index")):
+            raise ValueError("invalid journey position")
+        if (value["phase"] not in ("primary", "escorts", "arrival", "customs")
+                or value["primary"] not in ("bounty", "patrol", "random")
+                or not isinstance(value["encounter"], dict)
+                or not isinstance(value["escorts"], list)
+                or not isinstance(value["destroyed"], bool)
+                or not isinstance(value["was_discovered"], bool)
+                or not 0 <= value["escort_index"] <= len(value["escorts"])
+                or not 0 <= value["origin"] < GALAXY_SYSTEM_COUNT
+                or not 0 <= value["destination"] < GALAXY_SYSTEM_COUNT):
+            raise ValueError("invalid journey")
+        for mission in value["escorts"]:
+            _validate_combat_mission_snapshot(mission, "escort")
+        if value["primary"] == "bounty":
+            _validate_combat_mission_snapshot(value["bounty"], "bounty")
+        state = value["encounter"]
+        if value["phase"] == "customs" and not isinstance(state["inspect"], bool):
+            raise ValueError("invalid inspection")
+        if "done" in state and not isinstance(state["done"], bool):
+            raise ValueError("invalid completion")
+        if "kind" in state and state["kind"] not in ("none", "pirate", "derelict", "distress", "tip"):
+            raise ValueError("invalid encounter")
+        pirates = []
+        if "pirates" in state:
+            if not isinstance(state["pirates"], list) or not 1 <= len(state["pirates"]) <= SQUADRON_SIZE:
+                raise ValueError("invalid squadron")
+            if type(state["index"]) is not int or not 0 <= state["index"] <= len(state["pirates"]):
+                raise ValueError("invalid squadron position")
+            pirates.extend(state["pirates"])
+        elif state.get("kind") == "pirate":
+            raise ValueError("missing squadron")
+        for key in ("pirate", "ambush"):
+            if key in state:
+                pirates.append(state[key])
+        if "combat" in state:
+            combat = state["combat"]
+            pirates.append(combat["pirate"])
+            if (combat["outcome"] not in (None, "won", "escaped", "destroyed")
+                    or not isinstance(combat["lines"], list)
+                    or not all(isinstance(line, str) for line in combat["lines"])):
+                raise ValueError("invalid combat")
+        for data in pirates:
+            pirate = Pirate(**data)
+            if (any(type(data[key]) is not int for key in ("tier", "hp", "hp_max"))
+                    or not isinstance(pirate.name, str) or not 0 <= pirate.tier <= 4
+                    or not 0 <= pirate.hp <= pirate.hp_max or pirate.hp_max <= 0):
+                raise ValueError("invalid opponent")
+        if "result" in state and (not isinstance(state["result"], list)
+                                  or not all(isinstance(line, str) for line in state["result"])):
+            raise ValueError("invalid encounter result")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ResumeError("The interrupted journey cannot be read.") from exc
+    return value
+
+
 @dataclass
 class SaveData:
     schema_version: int
@@ -711,6 +801,10 @@ class SaveData:
     # .get() below -- no SCHEMA_VERSION bump needed.
     active_futures: list[FuturesContract] = field(default_factory=list)
     next_futures_id: int = 1
+    # Additive state: old careers start docked, with a fresh event RNG.
+    # The galaxy generator has its own independent, unchanged RNG.
+    pending_travel: dict | None = None
+    event_rng_state: list | tuple | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -729,6 +823,8 @@ class SaveData:
             "active_event": self.active_event,
             "active_futures": [f.to_dict() for f in self.active_futures],
             "next_futures_id": self.next_futures_id,
+            "pending_travel": self.pending_travel,
+            "event_rng_state": self.event_rng_state,
         }
 
     @classmethod
@@ -749,6 +845,8 @@ class SaveData:
             active_event=d.get("active_event"),
             active_futures=[FuturesContract.from_dict(f) for f in d.get("active_futures", [])],
             next_futures_id=d.get("next_futures_id", 1),
+            pending_travel=_load_pending_travel(d.get("pending_travel")),
+            event_rng_state=d.get("event_rng_state"),
         )
 
 
@@ -769,6 +867,10 @@ class World:
         A failed commit stops the UI rather than acknowledging unsaved progress.
         Resetting a career preserves this binding.
         """
+        self.sync_discovered()
+        self.save.event_rng_state = self.event_rng.getstate()
+        if self.save.pending_travel is not None:
+            self.save.pending_travel["destroyed"] = self.ship_destroyed_this_hop
         if self._checkpoint is not None:
             try:
                 self._checkpoint(self)
@@ -792,14 +894,17 @@ class World:
                 self.by_id[sid].discovered = True
         self.landmark: dict = generate_landmark(save.seed, self.galaxy)
         self.event_rng = random.Random()
-        # Transient, per-hop signal -- never persisted, reset at the top
-        # of every screen_travel call. Set by destroy_ship so that
-        # function's own many nested call sites (bounty combat, squadron
-        # fights, a derelict's hidden ambush, escort waves, a Concord
-        # Patrol fight) don't each need their own plumbing back to the
-        # travel loop just to answer "did the ship get destroyed and
-        # towed home mid-transit" -- see screen_travel's own use of it.
-        self.ship_destroyed_this_hop = False
+        if save.event_rng_state is not None:
+            try:
+                version, state, gaussian = save.event_rng_state
+                self.event_rng.setstate((version, tuple(state), gaussian))
+            except (ValueError, TypeError, OverflowError) as exc:
+                raise ResumeError("The saved random state cannot be restored.") from exc
+        elif save.pending_travel is not None:
+            raise ResumeError("The interrupted journey has no saved random state.")
+        self.ship_destroyed_this_hop = bool(
+            save.pending_travel and save.pending_travel["destroyed"]
+        )
 
     @property
     def here(self) -> GalaxySystem:
@@ -1841,6 +1946,7 @@ def update_hall_of_fame(save_dir: Path, user_id: int, save: SaveData) -> None:
 
 def persist(world: World, save_dir: Path, user_id: int) -> None:
     world.sync_discovered()
+    world.save.event_rng_state = world.event_rng.getstate()
     write_save(save_dir, user_id, world.save)
     update_hall_of_fame(save_dir, user_id, world.save)
 
@@ -2879,85 +2985,111 @@ def _screen_auto_route(p: Palette, world: World) -> None:
                       f"({cost} needed, have {world.save.ship.fuel}).{RESET}")
             return
         screen_travel(p, world, hop_id)
-        # Each completed hop survives even while the chart remains open.
-        # Resuming an interrupted encounter requires its own persisted state.
+        # A restart finishes the saved hop, then returns control to the pilot;
+        # the remaining auto-route is intentionally not resumed unattended.
         world.checkpoint()
         if world.save.current_system != hop_id:
             out_line(f"{p.wrong}Route interrupted.{RESET}")
             return
 
 
+def _travel_encounter(world: World) -> dict:
+    """One bounded encounter slot; standalone domain/UI calls need no journey."""
+    travel = world.save.pending_travel
+    return travel["encounter"] if travel is not None else {}
+
+
+def _encounter_result(p: Palette, world: World, state: dict, lines: list[str]) -> None:
+    """Commit both effects and completion before revealing their result."""
+    state.update(done=True, result=lines)
+    world.checkpoint()
+    for line in lines:
+        out_line(f"{p.gold}{line}{RESET}")
+
+
 def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySystem) -> None:
-    """Only reached when no bounty target is waiting at `dest`
-    (`screen_travel`'s own bounty branch takes unconditional priority
-    and never calls this). Rolls once for whether anything happens at
-    all -- the same `0.08 + danger*0.05` chance that used to gate a
-    single pirate check directly, unchanged, so overall encounter
-    frequency/difficulty is unaffected -- then, only if so, rolls a
-    second time for *what kind*, via `TRAVEL_ENCOUNTER_WEIGHTS`. This is
-    what actually diversifies travel, not a higher overall chance of
-    something happening."""
-    if world.event_rng.random() >= 0.08 + dest.danger * 0.05:
+    state = _travel_encounter(world)
+    if state.get("done"):
+        for line in state.get("result", []):
+            out_line(f"{p.gold}{line}{RESET}")
         return
-    kind = world.event_rng.choices(
-        list(TRAVEL_ENCOUNTER_WEIGHTS), weights=list(TRAVEL_ENCOUNTER_WEIGHTS.values())
-    )[0]
+    if "kind" not in state:
+        kind = "none"
+        if world.event_rng.random() < 0.08 + dest.danger * 0.05:
+            kind = world.event_rng.choices(
+                list(TRAVEL_ENCOUNTER_WEIGHTS), weights=list(TRAVEL_ENCOUNTER_WEIGHTS.values())
+            )[0]
+        state["kind"] = kind
+        if kind == "pirate":
+            state["pirates"] = [dataclasses.asdict(ship) for ship in generate_pirate_squadron(world, dest)]
+            state["index"] = 0
+        world.checkpoint()
+    kind = state["kind"]
     if kind == "pirate":
-        pirates = generate_pirate_squadron(world, dest)
+        pirates = state["pirates"]
         if len(pirates) > 1:
             out_line(f"{p.wrong}Raider squadron contact: {len(pirates)} ships incoming!{RESET}")
-        else:
-            out_line(f"{p.wrong}Raider contact: the {pirates[0].name}!{RESET}")
-        for i, pirate in enumerate(pirates):
-            if i > 0:
-                out_line(f"{p.wrong}The next raider closes in -- the {pirate.name} engages!{RESET}")
-            # Only a genuine kill lets the fight continue to the next
-            # ship -- an evade/bribe ("escaped") or a destroyed ship
-            # ends the whole encounter, not just this one ship. Bribing
-            # or evading pirate #1 and then being ambushed by pirate #2
-            # anyway would read as a bait-and-switch, not a squadron.
-            if screen_combat(p, world, pirate) != "won":
-                break
+        while state["index"] < len(pirates):
+            pirate = Pirate(**pirates[state["index"]])
+            out_line(f"{p.wrong}Raider contact: the {pirate.name}!{RESET}")
+            outcome = screen_combat(p, world, pirate)
+            state["index"] += 1
+            state.pop("combat", None)
+            if outcome != "won":
+                state["index"] = len(pirates)
+            world.checkpoint()
+        _encounter_result(p, world, state, [])
     elif kind == "derelict":
         _encounter_derelict(p, world)
     elif kind == "distress":
         _encounter_distress_call(p, world)
     elif kind == "tip":
         _encounter_market_tip(p, world, dest)
+    else:
+        _encounter_result(p, world, state, [])
 
 
 def _encounter_derelict(p: Palette, world: World) -> None:
-    """A passive salvage opportunity, not a fight -- boarding is a real
-    risk/reward choice (a genuine haul most of the time, a hidden
-    ambush occasionally); declining is free, matching every other
-    optional-encounter convention already in this file (bribe, evade)
-    where the safe choice alone is never punished."""
-    out_line(f"{p.muted}Sensors pick up a derelict hulk drifting nearby.{RESET}")
-    out_prompt(f"{p.muted}[B]oard for salvage or [I]gnore and continue? {RESET}")
-    action = read_key().upper()
-    out_line(action)
-    if action != "B":
+    state = _travel_encounter(world)
+    if state.get("done"):
         return
-    if world.event_rng.random() < 0.70:
-        reward = world.event_rng.randint(60, 100 + max(0, world.here.danger) * 120)
-        world.save.pilot.credits += reward
-        world.save.pilot.note(f"Salvaged a derelict hulk (+{reward}cr).")
-        out_line(f"{p.correct}Salvage recovered: {reward}cr.{RESET}")
-    else:
-        out_line(f"{p.wrong}The wreck's defenses weren't as dead as they looked!{RESET}")
-        pirate = generate_pirate(world)
-        screen_combat(p, world, pirate)
+    if "ambush" not in state:
+        out_line(f"{p.muted}Sensors pick up a derelict hulk drifting nearby.{RESET}")
+        while True:
+            out_prompt(f"{p.muted}[B]oard for salvage or [I]gnore and continue? {RESET}")
+            action = read_key().upper()
+            out_line(action)
+            if action in ("B", "I"):
+                break
+        if action == "I":
+            _encounter_result(p, world, state, ["You leave the derelict behind."])
+            return
+        if world.event_rng.random() < 0.70:
+            reward = world.event_rng.randint(60, 100 + max(0, world.here.danger) * 120)
+            world.save.pilot.credits += reward
+            world.save.pilot.note(f"Salvaged a derelict hulk (+{reward}cr).")
+            _encounter_result(p, world, state, [f"Salvage recovered: {reward}cr."])
+            return
+        state["ambush"] = dataclasses.asdict(generate_pirate(world))
+        world.checkpoint()
+    out_line(f"{p.wrong}The wreck's defenses weren't as dead as they looked!{RESET}")
+    screen_combat(p, world, Pirate(**state["ambush"]))
+    _encounter_result(p, world, state, [])
 
 
 def _encounter_distress_call(p: Palette, world: World) -> None:
-    """Helping costs a few fuel units (diverting off the direct route)
-    for a credit reward and Concord standing; ignoring is free, same
-    "declining costs nothing" convention as `_encounter_derelict`."""
+    state = _travel_encounter(world)
+    if state.get("done"):
+        return
     out_line(f"{p.muted}A garbled distress signal reaches your comms.{RESET}")
-    out_prompt(f"{p.muted}[H]elp (costs fuel) or [I]gnore and continue? {RESET}")
-    action = read_key().upper()
-    out_line(action)
-    if action != "H":
+    while True:
+        out_prompt(f"{p.muted}[H]elp (costs fuel) or [I]gnore and continue? {RESET}")
+        action = read_key().upper()
+        out_line(action)
+        if action in ("H", "I"):
+            break
+    if action == "I":
+        _encounter_result(p, world, state, ["You continue past the distress signal."])
         return
     fuel_cost = min(world.save.ship.fuel, world.event_rng.randint(2, 4))
     world.save.ship.fuel -= fuel_cost
@@ -2965,8 +3097,10 @@ def _encounter_distress_call(p: Palette, world: World) -> None:
     world.save.pilot.credits += reward
     adjust_reputation(world, FACTION_CONCORD, 3)
     world.save.pilot.note(f"Answered a distress call (+{reward}cr, Concord standing up).")
-    out_line(f"{p.correct}You divert to help -- {fuel_cost} fuel spent. Grateful survivors "
-              f"pay {reward}cr, and Concord takes note.{RESET}")
+    _encounter_result(p, world, state, [
+        f"You divert to help -- {fuel_cost} fuel spent. Grateful survivors "
+        f"pay {reward}cr, and Concord takes note.",
+    ])
 
 
 def _encounter_market_tip(p: Palette, world: World, dest: GalaxySystem) -> None:
@@ -2974,37 +3108,43 @@ def _encounter_market_tip(p: Palette, world: World, dest: GalaxySystem) -> None:
     (`price_for`) at a nearby, already-discovered system. No new state,
     no choice to make, and no `random.Random` calls that could affect
     anything but which system/commodity the tip names."""
+    state = _travel_encounter(world)
     hops = bfs_hops(world.by_id, dest.id)
     candidates = [sid for sid, h in hops.items() if 1 <= h <= 4 and world.by_id[sid].discovered]
     if not candidates:
-        out_line(f"{p.muted}You intercept a garbled data burst -- nothing usable in it.{RESET}")
+        _encounter_result(p, world, state, ["You intercept a garbled data burst -- nothing usable in it."])
         return
     sid = world.event_rng.choice(candidates)
     system = world.by_id[sid]
     commodity = world.event_rng.choice(list(COMMODITIES))
     price = price_for(world, sid, commodity)
     label = COMMODITIES[commodity]["label"]
-    out_line(f"{p.muted}You intercept a trader's data burst: "
-              f"{label} is going for {price}cr at {system.name}.{RESET}")
+    _encounter_result(p, world, state, [
+        f"You intercept a trader's data burst: {label} is going for {price}cr at {system.name}.",
+    ])
 
 
 def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
-    """Runs once per hop, after `screen_travel`'s own bounty/patrol/
-    random-encounter chain above -- an escort contract means a scripted
-    pirate wave finds the convoy on *every* leg of the trip, unlike an
-    ordinary encounter's own probabilistic roll, since the whole point
-    of the mission is guaranteed danger across several jumps. Evading
-    (or being bribed away from) the fight fails the contract exactly
-    like losing it does -- the convoy is left to the raiders either
-    way -- only a genuine win lets it continue, and pays out the moment
-    it reaches its destination. Iterates a snapshot of the list since
-    a completed or failed mission removes itself from `active_missions`
-    mid-loop."""
+    """Resolve each contract once per hop, including after a saved combat win.
+
+    Full mission snapshots avoid confusing legacy contracts that share an ID.
+    Advancing the index and awarding/failing a contract are one checkpoint.
+    """
+    travel = world.save.pending_travel
+    missions = (travel["escorts"] if travel is not None else
+                [m.to_dict() for m in world.save.active_missions if m.kind == "escort"])
+    index = travel["escort_index"] if travel is not None else 0
     dest = world.by_id[dest_id]
-    for mission in [m for m in world.save.active_missions if m.kind == "escort"]:
-        pirate = generate_pirate(world, tier=mission.pirate_tier)
+    while index < len(missions):
+        mission = Mission.from_dict(missions[index])
+        state = _travel_encounter(world)
+        if "pirate" not in state:
+            state["pirate"] = dataclasses.asdict(generate_pirate(world, tier=mission.pirate_tier))
+            world.checkpoint()
+        pirate = Pirate(**state["pirate"])
         out_line(f"{p.wrong}Raiders ambush the convoy you're escorting -- the {pirate.name} closes in.{RESET}")
         outcome = screen_combat(p, world, pirate)
+        lines = []
         if outcome == "won":
             if dest_id == mission.target_system:
                 world.save.active_missions.remove(mission)
@@ -3015,308 +3155,296 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
                 world.save.pilot.missions_completed += 1
                 world.save.pilot.note(f"Escort complete: {mission.description} (+{reward}cr)")
                 world.save.pilot.highlight(f"Escorted a convoy safely to {dest.name}.")
-                out_line(f"{p.gold}Convoy delivered safely! +{reward}cr{RESET}")
+                lines.append(f"Convoy delivered safely! +{reward}cr")
             else:
-                out_line(f"{p.correct}The convoy presses on.{RESET}")
+                lines.append("The convoy presses on.")
         else:
             world.save.active_missions.remove(mission)
             world.save.pilot.note(f"Escort failed: {mission.description}")
-            if outcome == "escaped":
-                out_line(f"{p.wrong}You disengage -- the convoy is left defenseless. Escort contract failed.{RESET}")
-            else:
-                out_line(f"{p.wrong}Escort contract failed -- the convoy was lost.{RESET}")
-            if world.ship_destroyed_this_hop:
-                # A second (or third) escort contract's own wave must
-                # not also fire against a pilot who was just destroyed
-                # and towed back to Freeport by *this* mission's fight --
-                # they're no longer actually en route to anywhere.
-                break
+            lines.append("You disengage -- the convoy is left defenseless. Escort contract failed."
+                         if outcome == "escaped" else "Escort contract failed -- the convoy was lost.")
+        index += 1
+        if travel is not None:
+            travel["escort_index"] = index
+            travel["encounter"] = {}
+        world.checkpoint()
+        for line in lines:
+            out_line(f"{p.gold}{line}{RESET}")
+        if world.ship_destroyed_this_hop:
+            break
+
+
+def _resolve_bounty(p: Palette, world: World, travel: dict) -> None:
+    bounty = Mission.from_dict(travel["bounty"])
+    state = _travel_encounter(world)
+    if "pirate" not in state:
+        state["pirate"] = dataclasses.asdict(generate_pirate(world, tier=bounty.pirate_tier))
+        world.checkpoint()
+    pirate = Pirate(**state["pirate"])
+    out_line(f"{p.wrong}Your bounty target, the {pirate.name}, is waiting.{RESET}")
+    outcome = screen_combat(p, world, pirate)
+    lines = []
+    if outcome == "won":
+        world.save.active_missions.remove(bounty)
+        reward = bounty_reward_for(world, bounty.reward)
+        world.save.pilot.credits += reward
+        if world.save.pilot.missions_completed == 0:
+            world.save.pilot.highlight(f"First mission complete: {bounty.description}.")
+        world.save.pilot.missions_completed += 1
+        world.save.pilot.note(f"Bounty complete: {bounty.description} (+{reward}cr)")
+        lines.append(f"Bounty complete! +{reward}cr")
+        if world.event_rng.random() < WRONG_BOUNTY_KILL_CHANCE:
+            world.save.pilot.notoriety += NOTORIETY_PER_WRONG_BOUNTY_KILL
+            adjust_reputation(world, FACTION_CONCORD, -3)
+            world.save.pilot.note("Concord inquiry: that bounty kill was mistaken identity -- notoriety rises.")
+            lines.append("Later, a Concord inquiry flags an irregularity: that 'raider' matches an "
+                         "informant's registered ship. Notoriety rises.")
+    elif outcome == "destroyed":
+        world.save.active_missions.remove(bounty)
+        world.save.pilot.note(f"Bounty failed: {bounty.description}")
+        lines.append(f"Bounty failed -- the {pirate.name} was too much this time.")
+    # A cached terminal combat result remains until its parent commits rewards
+    # and advances phase. A restart in between cannot repeat loot or the fight.
+    travel["phase"] = "escorts"
+    travel["encounter"] = {}
+    world.checkpoint()
+    for line in lines:
+        out_line(f"{p.gold}{line}{RESET}")
 
 
 def screen_travel(p: Palette, world: World, dest_id: int) -> None:
-    origin = world.here
+    """Finish one durable hop. A pending hop always wins over a new request.
+
+    Departure, primary encounter, escort waves, docking, and customs each
+    advance monotonically. Effects and their phase/index commit together;
+    combat keeps its own terminal result until its parent consumes it.
+    """
+    travel = world.save.pending_travel
+    if travel is None:
+        origin = world.here
+        dest = world.by_id[dest_id]
+        world.save.ship.fuel -= fuel_cost_for_jump(origin, dest, world.save.ship)
+        world.save.turn += 1
+        world.ship_destroyed_this_hop = False
+        lines = [f"Jumping to {'the unknown' if not dest.discovered else dest.name}..."]
+        tick_price_reversion(world)
+        event_msg = tick_economy_event(world)
+        if event_msg:
+            lines.append(event_msg)
+        lines.extend(pay_crew_wages(world))
+        lines.extend(settle_futures_contracts(world))
+        was_discovered = dest.discovered
+        dest.discovered = True
+        if not was_discovered:
+            lines.append(f"New system charted: {dest.name}.")
+        bounty = next((m for m in world.save.active_missions
+                       if m.kind == "bounty" and m.target_system == dest_id), None)
+        primary = "bounty" if bounty is not None else (
+            "patrol" if world.event_rng.random() < notoriety_patrol_chance(world.save.pilot.notoriety)
+            else "random"
+        )
+        travel = world.save.pending_travel = {
+            "version": 1, "origin": origin.id, "destination": dest_id,
+            "was_discovered": was_discovered, "destroyed": False,
+            "phase": "primary", "primary": primary,
+            "bounty": bounty.to_dict() if bounty is not None else None,
+            "escorts": [m.to_dict() for m in world.save.active_missions if m.kind == "escort"],
+            "escort_index": 0, "encounter": {},
+        }
+        world.checkpoint()
+        for line in lines:
+            out_line(f"{p.gold}{line}{RESET}")
+    dest_id = travel["destination"]
     dest = world.by_id[dest_id]
-    cost = fuel_cost_for_jump(origin, dest, world.save.ship)
-    world.save.ship.fuel -= cost
-    world.save.turn += 1
-    world.ship_destroyed_this_hop = False
-    # "Jumping to..." prints before any of this turn's other news --
-    # otherwise the player sees economy/crew/futures narration for a
-    # trip they haven't been told they're taking yet.
-    out_line(f"{p.muted}Jumping to {'the unknown' if not dest.discovered else dest.name}...{RESET}")
-    tick_price_reversion(world)
-    event_msg = tick_economy_event(world)
-    if event_msg:
-        out_line(f"{p.gold}{event_msg}{RESET}")
-    for msg in pay_crew_wages(world):
-        out_line(f"{p.wrong}{msg}{RESET}")
-    for msg in settle_futures_contracts(world):
-        out_line(f"{p.gold}{msg}{RESET}")
-
-    # Announced here, before any mission resolution below, so every
-    # kind of mission completion this hop -- bounty/escort (resolved
-    # inline in this same function) as much as delivery/scan (resolved
-    # afterward via check_mission_completions) -- reads consistently as
-    # "you arrived, then this happened," not sometimes before and
-    # sometimes after the arrival announcement. `dest.discovered` is set
-    # right here too (charting a system's coordinates is the nav
-    # computer's job the moment you're close enough for something there
-    # to intercept you, independent of whether you then survive to
-    # actually dock) -- but deliberately *not* `current_system` itself:
-    # `generate_pirate`'s own tier logic reads `world.here.danger` (the
-    # *origin* system, unrelated and intentional, see
-    # generate_pirate_squadron's own docstring), which would silently
-    # start using the destination's danger instead if `current_system`
-    # flipped over before the encounter below runs.
-    was_discovered = dest.discovered
-    dest.discovered = True
-    if not was_discovered:
-        out_line(f"{p.gold}New system charted: {dest.name}.{RESET}")
-
-    bounty = next((m for m in world.save.active_missions
-                    if m.kind == "bounty" and m.target_system == dest_id), None)
-    if bounty is not None:
-        pirate = generate_pirate(world, tier=bounty.pirate_tier)
-        out_line(f"{p.wrong}Your bounty target, the {pirate.name}, is waiting.{RESET}")
-        outcome = screen_combat(p, world, pirate)
-        if outcome == "won":
-            world.save.active_missions.remove(bounty)
-            reward = bounty_reward_for(world, bounty.reward)
-            world.save.pilot.credits += reward
-            if world.save.pilot.missions_completed == 0:
-                world.save.pilot.highlight(f"First mission complete: {bounty.description}.")
-            world.save.pilot.missions_completed += 1
-            world.save.pilot.note(f"Bounty complete: {bounty.description} (+{reward}cr)")
-            out_line(f"{p.gold}Bounty complete! +{reward}cr{RESET}")
-            # A flat, tier-independent chance the kill turns out to have
-            # been mistaken identity -- discovered only after the fact,
-            # since a bounty target always *looks* like a legitimate
-            # raider going in (there is no way for the player to have
-            # known beforehand, matching the "not a difficulty setting"
-            # philosophy the rest of this file's own consequence design
-            # already follows).
-            if world.event_rng.random() < WRONG_BOUNTY_KILL_CHANCE:
-                world.save.pilot.notoriety += NOTORIETY_PER_WRONG_BOUNTY_KILL
-                adjust_reputation(world, FACTION_CONCORD, -3)
-                world.save.pilot.note("Concord inquiry: that bounty kill was mistaken identity -- notoriety rises.")
-                out_line(f"{p.wrong}Later, a Concord inquiry flags an irregularity: that 'raider' matches an "
-                          f"informant's registered ship. Notoriety rises.{RESET}")
-        elif outcome == "destroyed":
-            # Losing must also clear the bounty -- otherwise it stays
-            # active forever and re-triggers this same guaranteed fight
-            # on every future visit to this system (see screen_combat's
-            # own docstring for the real playtest that found this).
-            world.save.active_missions.remove(bounty)
-            world.save.pilot.note(f"Bounty failed: {bounty.description}")
-            out_line(f"{p.wrong}Bounty failed -- the {pirate.name} was too much this time.{RESET}")
-        # outcome == "escaped": left active on purpose -- a deliberate
-        # retreat to come back stronger later isn't a failure.
-    elif world.event_rng.random() < notoriety_patrol_chance(world.save.pilot.notoriety):
-        # Same unconditional-priority slot as a bounty target -- checked
-        # before the ordinary random-encounter roll, not folded into
-        # TRAVEL_ENCOUNTER_WEIGHTS's own slice, since a wanted pilot
-        # should face a meaningfully higher (and continuously scaling)
-        # interception chance than one more flavor-encounter option
-        # would give it. `notoriety_patrol_chance` is 0.0 at notoriety 0,
-        # so an unwanted pilot never reaches this branch at all.
-        screen_notoriety_patrol(p, world)
-    else:
-        _resolve_random_travel_encounter(p, world, dest)
-
-    # Skipped once the bounty/patrol/random-encounter branch above has
-    # already destroyed the ship -- otherwise a second, unrelated
-    # combat (an escort wave) would fire in the very same hop against a
-    # pilot who was just blown up and towed back to Freeport, as if
-    # they were still en route to dest_id.
-    if not world.ship_destroyed_this_hop:
-        _resolve_escort_missions(p, world, dest_id)
-
-    # A mid-hop ship loss already relocated the pilot to Freeport
-    # (destroy_ship's own tow-home, flagged via ship_destroyed_this_hop
-    # since none of the four call paths that can trigger it -- bounty
-    # combat, a squadron fight, a derelict's hidden ambush, a Concord
-    # Patrol -- otherwise surface that fact back up to this loop). Every
-    # effect below requires *actually being at* dest_id -- completing a
-    # delivery, a customs inspection -- so all of it is skipped rather
-    # than silently overwriting destroy_ship's own current_system with
-    # the very system the pilot was just towed away from, contradicting
-    # its own "you wake up at Freeport Anchorage" narration.
-    world.sync_discovered()  # unconditional -- dest.discovered was already set above regardless
-    if not world.ship_destroyed_this_hop:
-        world.save.current_system = dest_id
-        for msg in check_mission_completions(world, just_discovered=None if was_discovered else dest_id):
-            out_line(f"{p.gold}{msg}{RESET}")
-
-        if (world.save.cargo and any(not COMMODITIES[c]["legal"] for c in world.save.cargo)
-                and dest.economy != "Haven"):
-            chance = customs_check_chance(dest)
-            if world.save.pilot.has_blackwake_made:
-                chance *= (1 - BLACKWAKE_MADE_CUSTOMS_REDUCTION)
-            if world.event_rng.random() < chance:
-                screen_customs(p, world)
+    if travel["phase"] == "primary":
+        if travel["primary"] == "bounty":
+            _resolve_bounty(p, world, travel)
+        else:
+            if travel["primary"] == "patrol":
+                screen_notoriety_patrol(p, world)
+            else:
+                _resolve_random_travel_encounter(p, world, dest)
+            travel["phase"] = "escorts"
+            travel["encounter"] = {}
+            world.checkpoint()
+    if travel["phase"] == "escorts":
+        # If an escort fight destroyed the ship, its cached result still needs
+        # consuming (contract failure). If a prior encounter did, skip escorts.
+        if not world.ship_destroyed_this_hop or travel["encounter"].get("combat"):
+            _resolve_escort_missions(p, world, dest_id)
+        travel["phase"] = "arrival"
+        travel["encounter"] = {}
+        world.checkpoint()
+    if travel["phase"] == "arrival":
+        lines = []
+        inspect = False
+        if not world.ship_destroyed_this_hop:
+            world.save.current_system = dest_id
+            lines = check_mission_completions(
+                world, just_discovered=None if travel["was_discovered"] else dest_id,
+            )
+            if has_contraband(world) and dest.economy != "Haven":
+                chance = customs_check_chance(dest)
+                if world.save.pilot.has_blackwake_made:
+                    chance *= (1 - BLACKWAKE_MADE_CUSTOMS_REDUCTION)
+                inspect = world.event_rng.random() < chance
+        travel["phase"] = "customs"
+        travel["encounter"] = {"inspect": inspect}
+        world.checkpoint()
+        for line in lines:
+            out_line(f"{p.gold}{line}{RESET}")
+    if travel["encounter"].get("inspect"):
+        screen_customs(p, world)
+    world.save.pending_travel = None
+    world.checkpoint()
     out_line()
 
 
 def screen_combat(p: Palette, world: World, pirate: Pirate) -> str:
-    """Returns "won" (pirate destroyed), "escaped" (evaded or bribed
-    away, ship intact), or "destroyed" (the player's own ship was lost)
-    -- a bounty's own caller needs to tell all three apart: "won"
-    completes it, "escaped" leaves it active to retry later (a real
-    tactical retreat-and-come-back-stronger choice), and "destroyed"
-    must also clear it, or a bounty the player has already lost respawns
-    as a mandatory, unwinnable-at-current-gear ambush on every future
-    visit to that system forever (dogfood-caught: a real playtest got
-    stuck fighting the same tier-2 bounty target to the death four times
-    in a row, since nothing ever removed it)."""
+    """Return won/escaped/destroyed; preserve a terminal result until consumed."""
+    return _screen_combat_session(p, world, pirate, patrol=False)
+
+
+def screen_notoriety_patrol(p: Palette, world: World) -> None:
+    state = _travel_encounter(world)
+    if "pirate" not in state:
+        state["pirate"] = dataclasses.asdict(generate_concord_patrol(world))
+        world.checkpoint()
+    patrol = Pirate(**state["pirate"])
+    out_line(f"{p.wrong}A Concord patrol vessel, the {patrol.name}, intercepts you -- "
+              f"your transponder flags as wanted.{RESET}")
+    _screen_combat_session(p, world, patrol, patrol=True)
+
+
+def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: bool) -> str:
+    """Commit each decision's full effects and opponent HP before narration.
+
+    Patrols share turn handling but retain their separate law-enforcement
+    consequences: no salvage, hostile Concord reputation, and surrender fines.
+    Only the last exchange is retained, so a long fight cannot grow the save.
+    """
+    encounter = _travel_encounter(world)
+    combat = encounter.get("combat")
+    if combat is None:
+        combat = encounter["combat"] = {
+            "pirate": dataclasses.asdict(pirate), "outcome": None, "lines": [],
+        }
+        world.checkpoint()
+    else:
+        pirate = Pirate(**combat["pirate"])
+        for line in combat["lines"]:
+            out_line(f"  {line}")
+        if combat["outcome"] is not None:
+            return combat["outcome"]
     ship = world.save.ship
+    fine = notoriety_fine_cost(world.save.pilot.notoriety)
     while True:
         pirate_bar = _gauge_bar(pirate.hp, pirate.hp_max, 8, p)
         hull_bar = _gauge_bar(ship.hull_hp, hull_hp_max(ship), 8, p)
         out_line(
             f"  {p.wrong}{BOLD}{pirate.name}{RESET} (tier {pirate.tier})  "
-            f"HP {pirate_bar} {pirate.hp}/{pirate.hp_max}   │   "
+            f"HP {pirate_bar} {pirate.hp}/{pirate.hp_max}   |   "
             f"{p.accent}Your hull{RESET} {hull_bar} {ship.hull_hp}/{hull_hp_max(ship)}"
         )
-        can_bribe = world.save.pilot.credits >= bribe_cost(pirate)
-        out_prompt(f"{p.muted}[F]ight [E]vade [D]ump&evade" + (" [B]ribe" if can_bribe else "") + " [Q]uick status: "
-            f"{RESET}")
+        can_pay = world.save.pilot.credits >= (fine if patrol else bribe_cost(pirate))
+        actions = "[F]ight [E]vade"
+        if patrol:
+            if can_pay:
+                actions += f" [S]urrender & pay {fine}cr"
+        else:
+            actions += " [D]ump&evade"
+            if can_pay:
+                actions += " [B]ribe"
+        out_prompt(f"{p.muted}{actions} [Q]uick status: {RESET}")
         action = read_key().upper()
         out_line(action)
+        lines = []
+        outcome = None
+        if action == "Q":
+            out_line(
+                f"  {p.accent}Tactical Systems:{RESET} Hull {ship.hull_hp}/{hull_hp_max(ship)} | "
+                f"Shields Tier {ship.shield_tier} (-{ship.shield_tier * 3} dmg) | "
+                f"Weapons Tier {ship.weapon_tier} (+{ship.weapon_tier * 4} dmg) | "
+                f"Bank {world.save.pilot.credits:,} cr | Notoriety {world.save.pilot.notoriety}"
+            )
+            continue
         if action == "F":
             _, _, lines = fight_round(world, pirate)
-            for line in lines:
-                out_line(f"  {line}")
             if pirate.hp <= 0:
-                loot = 40 + pirate.tier * 60
-                world.save.pilot.credits += loot
                 if world.save.pilot.kills == 0:
-                    world.save.pilot.highlight(f"First kill: destroyed the {pirate.name}.")
+                    label = "Concord patrol vessel " if patrol else ""
+                    world.save.pilot.highlight(f"First kill: destroyed the {label}{pirate.name}.")
                 world.save.pilot.kills += 1
-                adjust_reputation(world, FACTION_CONCORD, 2)
-                adjust_reputation(world, FACTION_BLACKWAKE, -1)
-                out_line(f"{p.correct}Salvage recovered: {loot}cr.{RESET}")
-                return "won"
-            if ship.hull_hp <= 0:
-                out_line(f"{p.wrong}{destroy_ship(world)}{RESET}")
-                return "destroyed"
-        elif action in ("E", "D"):
+                if patrol:
+                    world.save.pilot.notoriety += 3
+                    adjust_reputation(world, FACTION_CONCORD, -10)
+                    adjust_reputation(world, FACTION_BLACKWAKE, 3)
+                    world.save.pilot.note("Destroyed a Concord patrol vessel -- notoriety rises further.")
+                    lines.append(f"The {pirate.name} is destroyed -- Concord will not forget this.")
+                else:
+                    loot = 40 + pirate.tier * 60
+                    world.save.pilot.credits += loot
+                    adjust_reputation(world, FACTION_CONCORD, 2)
+                    adjust_reputation(world, FACTION_BLACKWAKE, -1)
+                    lines.append(f"Salvage recovered: {loot}cr.")
+                outcome = "won"
+        elif action == "E" or (action == "D" and not patrol):
             dumped = False
             if action == "D" and world.save.cargo:
-                commodity = world.event_rng.choice(list(world.save.cargo.keys()))
+                commodity = world.event_rng.choice(list(world.save.cargo))
                 world.save.cargo[commodity] -= 1
                 if world.save.cargo[commodity] <= 0:
                     del world.save.cargo[commodity]
                 dumped = True
-                out_line(f"{p.muted}You dump cargo to lighten the ship.{RESET}")
+                lines.append("You dump cargo to lighten the ship.")
             if world.event_rng.random() < evade_chance(world, pirate, dumped_cargo=dumped):
-                out_line(f"{p.correct}You break contact and escape.{RESET}")
-                return "escaped"
-            out_line(f"{p.wrong}Evasion failed -- they're still on you.{RESET}")
-            raw = world.event_rng.randint(4, 9) + pirate.tier * 4
-            dmg = max(1, raw - ship.shield_tier * 3)
-            ship.hull_hp = max(0, ship.hull_hp - dmg)
-            out_line(f"  The {pirate.name} hits you for {dmg} damage.")
-            if ship.hull_hp <= 0:
-                out_line(f"{p.wrong}{destroy_ship(world)}{RESET}")
-                return "destroyed"
-        elif action == "B" and can_bribe:
+                lines.append("You break contact and escape.")
+                outcome = "escaped"
+            else:
+                lines.append("Evasion failed -- they're still on you.")
+                raw = world.event_rng.randint(4, 9) + pirate.tier * 4
+                dmg = max(1, raw - ship.shield_tier * 3)
+                ship.hull_hp = max(0, ship.hull_hp - dmg)
+                lines.append(f"The {pirate.name} hits you for {dmg} damage.")
+        elif action == "B" and not patrol and can_pay:
             cost = bribe_cost(pirate)
             if world.event_rng.random() < bribe_chance(world, pirate):
                 world.save.pilot.credits -= cost
                 adjust_reputation(world, FACTION_BLACKWAKE, 2)
-                out_line(f"{p.correct}The {pirate.name} takes {cost}cr and peels off.{RESET}")
-                return "escaped"
-            out_line(f"{p.wrong}They refuse the bribe and press the attack!{RESET}")
-            raw = world.event_rng.randint(4, 9) + pirate.tier * 4
-            dmg = max(1, raw - ship.shield_tier * 3)
-            ship.hull_hp = max(0, ship.hull_hp - dmg)
-            out_line(f"  The {pirate.name} hits you for {dmg} damage.")
-            if ship.hull_hp <= 0:
-                out_line(f"{p.wrong}{destroy_ship(world)}{RESET}")
-                return "destroyed"
-        elif action == "Q":
-            out_line(
-                f"  {p.accent}Tactical Systems:{RESET} Hull {_gauge_bar(ship.hull_hp, hull_hp_max(ship), 8, p)} "
-                f"{ship.hull_hp}/{hull_hp_max(ship)} │ Shields Tier {ship.shield_tier} (-{ship.shield_tier * 3} dmg) │ "
-                f"Weapons Tier {ship.weapon_tier} (+{ship.weapon_tier * 4} dmg) │ Bank {world.save.pilot.credits:,} cr"
-            )
-
-
-def screen_notoriety_patrol(p: Palette, world: World) -> None:
-    """A Concord Patrol intercepting a wanted pilot -- structurally
-    similar to `screen_combat`'s own fight/evade loop (built on the same
-    `fight_round`/`evade_chance` pure functions), but a deliberately
-    separate function rather than a reuse of `screen_combat` itself:
-    this is law enforcement, not pirates, and the consequences genuinely
-    differ. `screen_combat`'s own "won" branch pays salvage loot and
-    *raises* Concord standing -- exactly backward here, where winning
-    means a wanted pilot just killed a Concord officer. `[S]urrender`
-    replaces `[B]ribe` as the peaceful resolution, and is the *only* way
-    notoriety ever goes back down outside of `destroy_ship`'s own
-    unconditional wipe -- there is no passive decay."""
-    ship = world.save.ship
-    patrol = generate_concord_patrol(world)
-    fine = notoriety_fine_cost(world.save.pilot.notoriety)
-    out_line(f"{p.wrong}A Concord patrol vessel, the {patrol.name}, intercepts you -- "
-              f"your transponder flags as wanted.{RESET}")
-    while True:
-        patrol_bar = _gauge_bar(patrol.hp, patrol.hp_max, 8, p)
-        hull_bar = _gauge_bar(ship.hull_hp, hull_hp_max(ship), 8, p)
-        out_line(
-            f"  {p.wrong}{BOLD}{patrol.name}{RESET} (tier {patrol.tier})  "
-            f"HP {patrol_bar} {patrol.hp}/{patrol.hp_max}   │   "
-            f"{p.accent}Your hull{RESET} {hull_bar} {ship.hull_hp}/{hull_hp_max(ship)}"
-        )
-        can_surrender = world.save.pilot.credits >= fine
-        out_prompt(f"{p.muted}[F]ight [E]vade" + (f" [S]urrender & pay {fine}cr" if can_surrender else "") +
-            f" [Q]uick status: {RESET}")
-        action = read_key().upper()
-        out_line(action)
-        if action == "F":
-            _, _, lines = fight_round(world, patrol)
-            for line in lines:
-                out_line(f"  {line}")
-            if patrol.hp <= 0:
-                if world.save.pilot.kills == 0:
-                    world.save.pilot.highlight(f"First kill: destroyed the Concord patrol vessel {patrol.name}.")
-                world.save.pilot.kills += 1
-                world.save.pilot.notoriety += 3
-                adjust_reputation(world, FACTION_CONCORD, -10)
-                adjust_reputation(world, FACTION_BLACKWAKE, 3)
-                world.save.pilot.note("Destroyed a Concord patrol vessel -- notoriety rises further.")
-                out_line(f"{p.wrong}The {patrol.name} is destroyed -- Concord will not forget this.{RESET}")
-                return
-            if ship.hull_hp <= 0:
-                out_line(f"{p.wrong}{destroy_ship(world)}{RESET}")
-                return
-        elif action == "E":
-            if world.event_rng.random() < evade_chance(world, patrol, dumped_cargo=False):
-                out_line(f"{p.correct}You break contact and escape.{RESET}")
-                return
-            out_line(f"{p.wrong}Evasion failed -- they're still on you.{RESET}")
-            raw = world.event_rng.randint(4, 9) + patrol.tier * 4
-            dmg = max(1, raw - ship.shield_tier * 3)
-            ship.hull_hp = max(0, ship.hull_hp - dmg)
-            out_line(f"  The {patrol.name} hits you for {dmg} damage.")
-            if ship.hull_hp <= 0:
-                out_line(f"{p.wrong}{destroy_ship(world)}{RESET}")
-                return
-        elif action == "S" and can_surrender:
+                lines.append(f"The {pirate.name} takes {cost}cr and peels off.")
+                outcome = "escaped"
+            else:
+                lines.append("They refuse the bribe and press the attack!")
+                raw = world.event_rng.randint(4, 9) + pirate.tier * 4
+                dmg = max(1, raw - ship.shield_tier * 3)
+                ship.hull_hp = max(0, ship.hull_hp - dmg)
+                lines.append(f"The {pirate.name} hits you for {dmg} damage.")
+        elif action == "S" and patrol and can_pay:
             world.save.pilot.credits -= fine
             world.save.pilot.notoriety = 0
             adjust_reputation(world, FACTION_CONCORD, 2)
             world.save.pilot.note(f"Paid a {fine}cr fine to Concord -- notoriety cleared.")
-            out_line(f"{p.correct}You power down and pay the {fine}cr fine. Notoriety cleared.{RESET}")
-            return
-        elif action == "Q":
-            out_line(
-                f"  {p.accent}Tactical Systems:{RESET} Hull {_gauge_bar(ship.hull_hp, hull_hp_max(ship), 8, p)} "
-                f"{ship.hull_hp}/{hull_hp_max(ship)} │ Shields Tier {ship.shield_tier} (-{ship.shield_tier * 3} dmg) │ "
-                f"Weapons Tier {ship.weapon_tier} (+{ship.weapon_tier * 4} dmg) │ Notoriety {world.save.pilot.notoriety}"
-            )
+            lines.append(f"You power down and pay the {fine}cr fine. Notoriety cleared.")
+            outcome = "escaped"
+        else:
+            continue
+        if ship.hull_hp <= 0 and outcome != "won":
+            lines.append(destroy_ship(world))
+            outcome = "destroyed"
+        combat.update(pirate=dataclasses.asdict(pirate), outcome=outcome, lines=lines)
+        world.checkpoint()
+        for line in lines:
+            out_line(f"  {line}")
+        if outcome is not None:
+            return outcome
 
 
 def screen_customs(p: Palette, world: World) -> None:
+    state = _travel_encounter(world)
+    if state.get("done"):
+        for line in state.get("result", []):
+            out_line(f"{p.gold}{line}{RESET}")
+        return
     contraband_qty = sum(q for c, q in world.save.cargo.items() if not COMMODITIES[c]["legal"])
     out_line()
     out_line(_box_title(p, "CONCORD CUSTOMS INSPECTION CHECKPOINT", border_color=p.wrong))
@@ -3337,7 +3465,7 @@ def screen_customs(p: Palette, world: World) -> None:
         cost = 100 + value // 2
         if world.save.pilot.credits >= cost and world.event_rng.random() < 0.6:
             world.save.pilot.credits -= cost
-            out_line(f"{p.correct}{cost}cr changes hands quietly. Move along.{RESET}")
+            _encounter_result(p, world, state, [f"{cost}cr changes hands quietly. Move along."])
             return
         fine = 150 + value
         world.save.pilot.credits = max(0, world.save.pilot.credits - fine)
@@ -3351,12 +3479,12 @@ def screen_customs(p: Palette, world: World) -> None:
         # bonus" outcome (see the +1 just below), not a wanted-status
         # event on top of that.
         world.save.pilot.notoriety += NOTORIETY_PER_CUSTOMS_BUST
-        out_line(f"{p.wrong}Bribe refused -- contraband confiscated and a {fine}cr fine levied.{RESET}")
+        _encounter_result(p, world, state, [f"Bribe refused -- contraband confiscated and a {fine}cr fine levied."])
         return
     for c in CONTRABAND_COMMODITIES:
         world.save.cargo.pop(c, None)
     adjust_reputation(world, FACTION_CONCORD, 1)
-    out_line(f"{p.muted}You surrender {contraband_qty} units without a fight.{RESET}")
+    _encounter_result(p, world, state, [f"You surrender {contraband_qty} units without a fight."])
 
 
 def main() -> int:
@@ -3393,6 +3521,10 @@ def main() -> int:
             out_line(f"{p.muted}Welcome back, {save.pilot.handle}. Day {save.turn}.{RESET}")
         world = World(save, checkpoint=lambda current: persist(current, save_dir, user_id))
         world.checkpoint()
+        if world.save.pending_travel is not None:
+            out_line(f"{p.gold}Resuming your interrupted journey. Station access follows its resolution.{RESET}")
+            screen_travel(p, world, world.save.pending_travel["destination"])
+            pause(p)
 
         while True:
             choice = screen_station_menu(p, world)
@@ -3425,6 +3557,14 @@ def main() -> int:
             else:
                 continue
             world.checkpoint()
+    except ResumeError as exc:
+        out_line(f"{p.wrong}{exc} Play has stopped; your saved career is unchanged. "
+                 f"Please contact your SysOp.{RESET}")
+        try:
+            pause(p)
+        except EOFError:
+            pass
+        return 1
     except SaveError:
         out_line(f"{p.wrong}Save failed. Play has stopped to protect your last saved career. "
                  f"Please contact your SysOp before playing again.{RESET}")

@@ -3488,3 +3488,330 @@ def test_failed_atomic_replace_preserves_previous_save_and_removes_own_temp(tmp_
     assert (tmp_path / "77.json").read_bytes() == previous
     assert not list(tmp_path.glob("*.tmp"))
 
+
+
+# Every recorded checkpoint must be a valid restart boundary, including the
+# gap between a combat's terminal result and its parent's mission payout.
+@pytest.mark.parametrize(
+    "scenario,seed,keys,evidence",
+    [
+        ("quiet", 0, "F", "Jumping to"),
+        ("pirate", 2, "F", "Raider contact"),
+        ("squadron", 45, "F", "squadron contact: 2"),
+        ("salvage", 26, "B", "Salvaged a derelict"),
+        ("ambush", 160, "B", "weren't as dead"),
+        ("distress", 8, "H", "Grateful survivors"),
+        ("tip", 9, "F", "trader's data burst"),
+        ("ignore_derelict", 26, "?I", "leave the derelict"),
+        ("ignore_distress", 8, "?I", "continue past the distress"),
+        ("bounty", 0, "F", "Bounty complete!"),
+        ("bounty_loss", 0, "F", "Bounty failed"),
+        ("bounty_escape", 0, "E", "escape"),
+        ("bounty_dump", 0, "D", "dump cargo"),
+        ("bounty_bribe", 0, "B", "peels off"),
+        ("escorts", 0, "F", "Convoy delivered safely"),
+        ("escort_loss", 0, "F", "Escort contract failed"),
+        ("patrol_win", 9, "F", "Concord will not forget"),
+        ("patrol_loss", 9, "F", "Freeport Anchorage"),
+        ("patrol_surrender", 9, "S", "Notoriety cleared"),
+        ("patrol_evade", 9, "E", "break contact and escape"),
+        ("customs_surrender", 4, "FS", "surrender 2 units"),
+        ("customs_bribe", 4, "FB", "changes hands quietly"),
+    ],
+)
+def test_every_travel_checkpoint_resumes_to_the_same_career(
+    tmp_path, monkeypatch, scenario, seed, keys, evidence,
+):
+    import json
+
+    world = _world_with_seed(42)
+    world.event_rng.seed(seed)
+    world.save.ship.hull_class = "Carrier"
+    world.save.ship.hull_hp = vr.hull_hp_max(world.save.ship)
+    world.save.ship.fuel = vr.fuel_capacity(world.save.ship)
+    world.save.ship.weapon_tier = 3
+    world.save.ship.shield_tier = 3
+    world.save.pilot.credits = 10_000
+    dest_id = next(s.id for s in world.galaxy if s.danger >= 4)
+    if scenario.startswith("bounty") or scenario.startswith("customs"):
+        if scenario.startswith("customs"):
+            world.save.current_system = world.here.connections[0]
+            dest_id = 0
+            world.save.ship.weapon_tier = 4
+        world.save.active_missions = [
+            vr.Mission(1, "bounty", "Test bounty", 500, world.save.current_system,
+                       dest_id, pirate_tier=0 if scenario.startswith("customs") else 2),
+        ]
+    if scenario in ("bounty_dump", "customs_surrender", "customs_bribe"):
+        world.save.cargo = {"weapons": 2}
+    if scenario in ("escorts", "escort_loss"):
+        # Deliberately shared legacy IDs: snapshots must distinguish the jobs.
+        world.save.active_missions = [
+            vr.Mission(7, "escort", "Convoy A", 500, 0, dest_id, pirate_tier=2),
+            vr.Mission(7, "escort", "Convoy B", 600, 0, dest_id, pirate_tier=1),
+        ]
+    if scenario.startswith("patrol"):
+        world.save.pilot.notoriety = 20
+    if scenario.endswith("loss"):
+        world.save.ship.hull_hp = 1
+        world.save.ship.weapon_tier = 0
+        world.save.ship.shield_tier = 0
+    # Exercise departure costs/settlement and arrival delivery in the same hop.
+    world.save.ship.has_navigator = True
+    world.save.active_futures = [vr.FuturesContract(1, "food", 2, 40, world.save.turn + 1)]
+    world.save.active_missions.append(
+        vr.Mission(8, "delivery", "Food delivery", 200, world.save.current_system,
+                   dest_id, commodity="food", quantity=2, deadline_turn=world.save.turn + 5)
+    )
+    snapshots = []
+    position = 0
+
+    def choose():
+        nonlocal position
+        choice = keys[position] if position < len(keys) else "F"
+        position += 1
+        assert position < 100, "scenario failed to terminate"
+        return choice
+
+    def record(current):
+        snapshots.append((json.loads(json.dumps(current.save.to_dict())), position))
+
+    monkeypatch.setattr(vr, "read_key", choose)
+    world._checkpoint = record
+    world.checkpoint()
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        vr.screen_travel(vr.Palette(False), world, dest_id)
+    expected = json.loads(json.dumps(world.save.to_dict()))
+    assert evidence in output.getvalue() + " ".join(world.save.pilot.log)
+    assert expected["pending_travel"] is None
+    assert len(snapshots) >= 5
+    for saved, next_key in snapshots:
+        if saved["pending_travel"] is None and saved["turn"] == expected["turn"]:
+            continue  # this hop has already completed
+        vr.write_save(tmp_path, 77, vr.SaveData.from_dict(saved))
+        loaded, is_new, notice = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert not is_new and notice is None
+        resumed = vr.World(loaded)
+        position = next_key
+        with contextlib.redirect_stdout(io.StringIO()):
+            vr.screen_travel(vr.Palette(False), resumed, dest_id)
+        actual = json.loads(json.dumps(resumed.save.to_dict()))
+        assert actual == expected, (scenario, saved["pending_travel"], next_key)
+
+
+@contextlib.contextmanager
+def _door_stopped_at(tmp_path, commands: bytes, acknowledgement: bytes):
+    """Run the shipped script, then force-kill while stdin is still open."""
+    import json
+    import os
+    import subprocess
+    import threading
+
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    env = dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info))
+    proc = subprocess.Popen(
+        [sys.executable, str(_VOIDRUNNER_PATH)], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+    )
+    reached = threading.Event()
+    output = bytearray()
+
+    def read_output():
+        while len(output) < 128_000:
+            byte = proc.stdout.read(1)
+            if not byte:
+                return
+            output.extend(byte)
+            if acknowledgement in output:
+                reached.set()
+                return
+
+    reader = threading.Thread(target=read_output)
+    reader.start()
+    try:
+        proc.stdin.write(commands)
+        proc.stdin.flush()
+        assert reached.wait(10), bytes(output).decode("utf-8", errors="replace")
+        proc.kill()
+        proc.wait(timeout=5)
+        yield bytes(output)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        reader.join(timeout=5)
+        assert not reader.is_alive()
+        proc.stdin.close()
+        proc.stdout.close()
+        proc.stderr.close()
+
+
+def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkeypatch):
+    import json
+
+    world = _world_with_seed(42)
+    world.event_rng.seed(0)
+    destination = sorted(world.here.connections)[0]
+    world.save.active_missions = [
+        vr.Mission(1, "bounty", "Intercept raider", 500, 0, destination, pirate_tier=2),
+    ]
+    vr.persist(world, tmp_path, 77)
+    initial = json.loads((tmp_path / "77.json").read_text(encoding="utf-8"))
+    with _door_stopped_at(tmp_path, b"CAF", b" damage."):
+        saved = json.loads((tmp_path / "77.json").read_text(encoding="utf-8"))
+    assert saved["turn"] == initial["turn"] + 1
+    combat = saved["pending_travel"]["encounter"]["combat"]
+    assert 0 < combat["pirate"]["hp"] < combat["pirate"]["hp_max"]
+    assert 0 < saved["ship"]["hull_hp"] < initial["ship"]["hull_hp"]
+    assert saved["ship"]["fuel"] < initial["ship"]["fuel"]
+
+    # A fresh executable must resume the opponent, not reveal a station menu.
+    with _door_stopped_at(tmp_path, b"Q", b"Tactical Systems:") as output:
+        assert b"Resuming your interrupted journey" in output
+        assert b"Freeport Anchorage" not in output
+        assert json.loads((tmp_path / "77.json").read_text(encoding="utf-8")) == saved
+
+    # The entire career, including RNG position and bounty failure, matches an
+    # uninterrupted fight. Use a different requested destination on resume to
+    # prove a saved journey cannot be redirected around its encounter.
+    expected = vr.World(vr.SaveData.from_dict(initial))
+    resumed = vr.World(vr.SaveData.from_dict(saved))
+    monkeypatch.setattr(vr, "read_key", lambda: "F")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(False), expected, destination)
+        vr.screen_travel(vr.Palette(False), resumed, 0)
+    assert resumed.save.to_dict() == expected.save.to_dict()
+    assert resumed.save.pending_travel is None
+    assert resumed.save.current_system == 0
+    assert not resumed.save.active_missions
+
+
+def test_failed_combat_save_does_not_acknowledge_damage_or_retry(tmp_path, monkeypatch):
+    import json
+
+    world = _world_with_seed(42)
+    destination = world.here.connections[0]
+    world.save.active_missions = [vr.Mission(1, "bounty", "Raider", 500, 0, destination, pirate_tier=2)]
+    reads = 0
+
+    def checkpoint(current):
+        if current.save.ship.hull_hp < 60:
+            raise OSError("disk full")
+        vr.persist(current, tmp_path, 77)
+
+    def choose():
+        nonlocal reads
+        reads += 1
+        return "F"
+
+    world._checkpoint = checkpoint
+    monkeypatch.setattr(vr, "read_key", choose)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output), pytest.raises(vr.SaveError):
+        vr.screen_travel(vr.Palette(False), world, destination)
+    assert reads == 1
+    assert " damage." not in output.getvalue()
+    saved = json.loads((tmp_path / "77.json").read_text(encoding="utf-8"))
+    assert saved["ship"]["hull_hp"] == 60
+    combat = saved["pending_travel"]["encounter"]["combat"]
+    assert combat["pirate"]["hp"] == combat["pirate"]["hp_max"]
+
+
+@pytest.mark.parametrize("broken", ["future_version", "missing_fields", "rng"])
+def test_unreadable_resume_state_stops_without_replacing_career(tmp_path, broken):
+    import json
+    import os
+    import subprocess
+
+    world = _world_with_seed(42)
+    data = world.save.to_dict()
+    if broken == "rng":
+        data["event_rng_state"] = [3, [1, 2], None]
+    else:
+        data["pending_travel"] = {"version": 999 if broken == "future_version" else 1}
+    path = tmp_path / "77.json"
+    original = json.dumps(data).encode("utf-8")
+    path.write_bytes(original)
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(_VOIDRUNNER_PATH)], input=b" ", capture_output=True,
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)),
+        timeout=10,
+    )
+    assert result.returncode == 1
+    assert "your saved career is unchanged" in " ".join(
+        vr._ANSI_RE.sub("", result.stdout.decode("utf-8")).split()
+    )
+    assert not result.stderr
+    assert path.read_bytes() == original
+    assert not list(tmp_path.glob("*.corrupt-*"))
+
+
+def test_legacy_save_gains_resume_fields_without_regenerating_galaxy():
+    data = _world_with_seed(42).save.to_dict()
+    data.pop("pending_travel")
+    data.pop("event_rng_state")
+    original = vr.generate_galaxy(data["seed"])
+    world = vr.World(vr.SaveData.from_dict(data))
+    assert world.save.pending_travel is None
+    assert world.galaxy == original
+    world.checkpoint()
+    restored = vr.World(vr.SaveData.from_dict(world.save.to_dict()))
+    assert restored.event_rng.random() == world.event_rng.random()
+
+
+@pytest.mark.parametrize("kind", ["bounty", "escort"])
+@pytest.mark.parametrize("field,value", [
+    ("pirate_tier", "2"), ("pirate_tier", 5), ("pirate_tier", True),
+    ("reward", "500"), ("reward", -1), ("id", False), ("id", 0),
+    ("origin_system", -1), ("target_system", vr.GALAXY_SYSTEM_COUNT),
+    ("target_system", "1"), ("description", []), ("quantity", "2"),
+    ("deadline_turn", -1), ("commodity", []), ("commodity", "unknown"),
+])
+def test_malformed_resume_mission_uses_recovery_error(kind, field, value):
+    mission = vr.Mission(1, kind, "Test contract", 500, 0, 1, pirate_tier=2).to_dict()
+    mission[field] = value
+    travel = {
+        "version": 1, "origin": 0, "destination": 1, "was_discovered": True,
+        "destroyed": False, "phase": "primary", "primary": "bounty" if kind == "bounty" else "random",
+        "bounty": mission if kind == "bounty" else None,
+        "escorts": [mission] if kind == "escort" else [], "escort_index": 0, "encounter": {},
+    }
+    data = _world_with_seed(42).save.to_dict()
+    data["pending_travel"] = travel
+    with pytest.raises(vr.ResumeError, match="cannot be read"):
+        vr.SaveData.from_dict(data)
+
+
+@pytest.mark.parametrize("kind", ["bounty", "escort"])
+def test_real_door_preserves_bad_resume_mission_and_shows_recovery(tmp_path, kind):
+    import json
+    import os
+    import subprocess
+
+    world = _world_with_seed(42)
+    mission = vr.Mission(1, kind, "Test contract", 500, 0, 1, pirate_tier=2).to_dict()
+    mission["pirate_tier"] = "2"
+    world.save.pending_travel = {
+        "version": 1, "origin": 0, "destination": 1, "was_discovered": True,
+        "destroyed": False, "phase": "primary", "primary": "bounty" if kind == "bounty" else "random",
+        "bounty": mission if kind == "bounty" else None,
+        "escorts": [mission] if kind == "escort" else [], "escort_index": 0, "encounter": {},
+    }
+    vr.persist(world, tmp_path, 77)
+    path = tmp_path / "77.json"
+    original = path.read_bytes()
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(_VOIDRUNNER_PATH)], input=b" ", capture_output=True,
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10,
+    )
+    assert result.returncode == 1
+    output = " ".join(vr._ANSI_RE.sub("", result.stdout.decode("utf-8")).split())
+    assert "your saved career is unchanged" in output
+    assert not result.stderr
+    assert path.read_bytes() == original
