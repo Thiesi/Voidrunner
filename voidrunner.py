@@ -886,6 +886,7 @@ class World:
         an existing `World` object's identity, only its contents -- a
         retiring pilot's `world` variable stays the same object, just
         pointed at a fresh galaxy/save underneath."""
+        _validate_pending_travel_consistency(save)
         self.save = save
         self.galaxy: list[GalaxySystem] = generate_galaxy(save.seed)
         self.by_id: dict[int, GalaxySystem] = {s.id: s for s in self.galaxy}
@@ -912,6 +913,38 @@ class World:
 
     def sync_discovered(self) -> None:
         self.save.discovered = [s.id for s in self.galaxy if s.discovered]
+
+
+def _validate_pending_travel_consistency(save: SaveData) -> None:
+    """Reject contradictory checkpoints before startup can rewrite the save."""
+    travel = save.pending_travel
+    if travel is None:
+        return
+    try:
+        combat = travel["encounter"].get("combat")
+        if combat is not None:
+            outcome = combat["outcome"]
+            if (combat["pirate"]["hp"] == 0) != (outcome == "won"):
+                raise ValueError("opponent damage contradicts outcome")
+            if travel["destroyed"] != (outcome == "destroyed"):
+                raise ValueError("destruction contradicts outcome")
+        expected_system = 0 if travel["destroyed"] else (
+            travel["destination"] if travel["phase"] == "customs" else travel["origin"]
+        )
+        if save.current_system != expected_system:
+            raise ValueError("position contradicts journey phase")
+        pending = []
+        if travel["phase"] == "primary" and travel["primary"] == "bounty":
+            pending.append(Mission.from_dict(travel["bounty"]))
+        if travel["phase"] in ("primary", "escorts"):
+            pending.extend(Mission.from_dict(m) for m in travel["escorts"][travel["escort_index"]:])
+        # Consume a copy as a multiset: legacy contracts can share both IDs and
+        # identical terms. A single active job cannot satisfy two pending jobs.
+        active = list(save.active_missions)
+        for mission in pending:
+            active.remove(mission)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ResumeError("The interrupted journey conflicts with the saved career.") from exc
 
 
 # ---------------------------------------------------------------------------

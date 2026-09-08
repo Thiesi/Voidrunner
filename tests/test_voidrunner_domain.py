@@ -3815,3 +3815,64 @@ def test_real_door_preserves_bad_resume_mission_and_shows_recovery(tmp_path, kin
     assert "your saved career is unchanged" in output
     assert not result.stderr
     assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("fault", [
+    "missing_bounty", "missing_escort", "duplicate_escort", "won_with_hp",
+    "alive_without_hp", "escaped_without_hp", "destroyed_flag", "wrong_position",
+])
+def test_inconsistent_resume_stops_before_rewriting_save(tmp_path, fault):
+    import json
+    import os
+    import subprocess
+
+    world = _world_with_seed(42)
+    mission = vr.Mission(1, "bounty", "Test contract", 500, 0, 1, pirate_tier=2)
+    world.save.active_missions = [mission]
+    travel = {
+        "version": 1, "origin": 0, "destination": 1, "was_discovered": True,
+        "destroyed": False, "phase": "primary", "primary": "bounty",
+        "bounty": mission.to_dict(), "escorts": [], "escort_index": 0,
+        "encounter": {"combat": {
+            "pirate": {"name": "Raider", "tier": 2, "hp": 0, "hp_max": 50},
+            "outcome": "won", "lines": [],
+        }},
+    }
+    combat = travel["encounter"]["combat"]
+    if fault == "missing_bounty":
+        world.save.active_missions = []
+    elif fault in ("missing_escort", "duplicate_escort"):
+        mission.kind = "escort"
+        travel["phase"] = "escorts"
+        travel["primary"] = "random"
+        travel["escorts"] = [mission.to_dict()]
+        if fault == "missing_escort":
+            world.save.active_missions = []
+        else:
+            travel["escorts"].append(mission.to_dict())
+    elif fault == "won_with_hp":
+        combat["pirate"]["hp"] = 10
+    elif fault == "alive_without_hp":
+        combat["outcome"] = None
+    elif fault == "escaped_without_hp":
+        combat["outcome"] = "escaped"
+    elif fault == "destroyed_flag":
+        combat["outcome"] = "destroyed"
+        combat["pirate"]["hp"] = 10
+    elif fault == "wrong_position":
+        world.save.current_system = 1
+    world.save.pending_travel = travel
+    vr.persist(world, tmp_path, 77)
+    path = tmp_path / "77.json"
+    original = path.read_bytes()
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(_VOIDRUNNER_PATH)], input=b" ", capture_output=True,
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10,
+    )
+    assert result.returncode == 1
+    output = " ".join(vr._ANSI_RE.sub("", result.stdout.decode("utf-8")).split())
+    assert "your saved career is unchanged" in output
+    assert not result.stderr
+    assert path.read_bytes() == original
