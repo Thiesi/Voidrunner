@@ -1018,6 +1018,14 @@ def _validate_warrant(value: dict) -> None:
         raise ValueError("invalid bounty identification")
 
 
+def _validate_formation(value: dict) -> None:
+    if not isinstance(value, dict): raise ValueError("invalid squadron formation")
+    _reject_unknown_save_fields(value, {"version", "engaged"}, "squadron formation")
+    if type(value.get("version")) is not int: raise ValueError("invalid formation version")
+    if value["version"] != 1: raise UnsupportedSave("This squadron uses unsupported formation rules.")
+    if type(value.get("engaged")) is not bool: raise ValueError("invalid formation engagement")
+
+
 def _load_pending_travel(value: dict | None) -> dict | None:
     if value is None:
         return None
@@ -1046,8 +1054,9 @@ def _load_pending_travel(value: dict | None) -> dict | None:
             _validate_combat_mission_snapshot(value["bounty"], "bounty")
         state = value["encounter"]
         _reject_unknown_save_fields(state, {"inspect", "done", "kind", "pirates", "index", "pirate", "ambush",
-                                           "combat", "result", "warrant"}, "encounter")
+                                           "combat", "result", "warrant", "formation"}, "encounter")
         if "warrant" in state: _validate_warrant(state["warrant"])
+        if "formation" in state: _validate_formation(state["formation"])
         if value["phase"] == "customs" and not isinstance(state["inspect"], bool):
             raise ValueError("invalid inspection")
         if "done" in state and not isinstance(state["done"], bool):
@@ -1523,6 +1532,23 @@ def _validate_pending_travel_consistency(save: SaveData) -> None:
     try:
         combat = travel["encounter"].get("combat")
         warrant = travel["encounter"].get("warrant")
+        state = travel["encounter"]
+        formation = state.get("formation")
+        if formation is not None:
+            if (travel["phase"] != "primary" or travel["primary"] != "random"
+                    or state.get("kind") != "pirate" or len(state.get("pirates", [])) != 2):
+                raise ValueError("formation outside a two-raider encounter")
+            if not formation["engaged"] and state["index"] != 0:
+                raise ValueError("squadron advanced before engagement")
+            if combat is not None:
+                if "tactics" not in combat or state["index"] >= 2:
+                    raise ValueError("invalid formation combat")
+                source = state["pirates"][state["index"]]
+                if any(combat["pirate"][key] != source[key] for key in ("name", "tier", "hp_max")):
+                    raise ValueError("formation target mismatch")
+                if not formation["engaged"] and (combat["outcome"] is not None or combat["pirate"]["hp"] != source["hp"]
+                                                  or combat["tactics"] != new_tactics(Pirate(**source))):
+                    raise ValueError("formation acted before engagement")
         if warrant is not None:
             if travel["phase"] != "primary" or travel["primary"] != "bounty":
                 raise ValueError("identification outside a bounty interception")
@@ -2543,15 +2569,50 @@ def tactical_intent(tactics: dict) -> str:
     return TACTICAL_PROFILES[tactics["profile"]][tactics["step"]]
 
 
-def _tactical_incoming_damage(ship: Ship, tier: int, intent: str, roll: int, *, braced: bool = False) -> int:
+def squadron_cover(world: World) -> int:
+    state = _travel_encounter(world)
+    if state.get("formation") is None or state.get("index") != 0: return 0
+    return 2 + state["pirates"][1]["tier"] * 2
+
+
+def switch_squadron_target(world: World) -> str:
+    state = _travel_encounter(world)
+    if state.get("formation") is None or state["formation"]["engaged"] or state.get("index") != 0:
+        raise ValueError("Target selection is closed after engagement.")
+    combat = state.get("combat")
+    if combat is None or combat["outcome"] is not None:
+        raise ValueError("No active target to switch.")
+    state["pirates"][0], state["pirates"][1] = state["pirates"][1], state["pirates"][0]
+    pirate = Pirate(**state["pirates"][0])
+    message = f"Target selected: {pirate.name}, tier {pirate.tier}."
+    combat.update(pirate=dataclasses.asdict(pirate), tactics=new_tactics(pirate), lines=[message])
+    return message
+
+
+def squadron_terms(world: World) -> list[str]:
+    state = _travel_encounter(world)
+    if state.get("formation") is None: return []
+    if state["index"] != 0: return ["One raider remains: covering fire has ended. No repairs between foes."]
+    target, wing = state["pirates"]
+    lines = [f"Squadron: +{squadron_cover(world)} cover; target {target['name']} (T{target['tier']}).",
+             "Cover adds to incoming damage before Brace.",
+             f"Partner: {wing['name']}, tier {wing['tier']}, HP {wing['hp']}/{wing['hp_max']}; {new_tactics(Pirate(**wing))['profile']} pattern.",
+             "Destroy the target to prevent this return volley and end covering fire. Brace reduces combined damage.",
+             "Escape or an accepted bribe breaks contact with both raiders."]
+    if not state["formation"]["engaged"]: lines.append("[T] Target: swap who you fight first; no turn or fuel cost. Selection closes after engaging.")
+    return lines
+
+
+def _tactical_incoming_damage(ship: Ship, tier: int, intent: str, roll: int, *, braced: bool = False, cover: int = 0) -> int:
     raw = roll + TACTICAL_THREAT_BONUS[tier]
     damage = max(1, (raw * TACTICAL_INTENTS[intent][1] + 99) // 100 - ship.shield_tier * 3)
+    damage += cover
     return (damage + 3) // 4 if braced else damage
 
 
 def tactical_retaliation(world: World, pirate: Pirate, tactics: dict, *, braced: bool = False) -> tuple[int, list[str]]:
     intent = tactical_intent(tactics)
-    damage = _tactical_incoming_damage(world.save.ship, pirate.tier, intent, world.event_rng.randint(4, 9), braced=braced)
+    damage = _tactical_incoming_damage(world.save.ship, pirate.tier, intent, world.event_rng.randint(4, 9), braced=braced, cover=squadron_cover(world))
     world.save.ship.hull_hp = max(0, world.save.ship.hull_hp - damage)
     tactics["step"] = (tactics["step"] + 1) % 3
     return damage, [f"The {pirate.name} uses {intent} and hits you for {damage} damage."]
@@ -5544,6 +5605,8 @@ def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySyste
         if kind == "pirate":
             state["pirates"] = [dataclasses.asdict(ship) for ship in generate_pirate_squadron(world, dest)]
             state["index"] = 0
+            if len(state["pirates"]) == 2:
+                state["formation"] = {"version": 1, "engaged": False}
         world.checkpoint()
     kind = state["kind"]
     if kind == "pirate":
@@ -5554,6 +5617,7 @@ def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySyste
             pirate = Pirate(**pirates[state["index"]])
             out_line(f"{p.wrong}Raider contact: the {pirate.name}!{RESET}")
             outcome = screen_combat(p, world, pirate)
+            if "formation" in state: state["formation"]["engaged"] = True
             state["index"] += 1
             state.pop("combat", None)
             if outcome != "won":
@@ -5945,6 +6009,7 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
             lines.extend(_wrap_output(_mission_plain(message), max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
     if details: lines.append("Tactical Systems:")
     if warrant is not None: lines += bounty_identification_lines(world, warrant)
+    lines += squadron_terms(world)
     lines += [
         f"{pirate.name} (tier {pirate.tier}): HP {pirate.hp}/{pirate.hp_max}.",
         f"Your hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}.",
@@ -5952,10 +6017,10 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     ]
     if tactics is not None:
         intent = tactical_intent(tactics)
-        low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll) for roll in (4, 9))
+        low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, cover=squadron_cover(world)) for roll in (4, 9))
         lines.append(f"{tactics['profile']} intent: {intent.upper()}; incoming {low}-{high} damage if it survives or you fail to disengage.")
         if tactics["brace_ready"]:
-            low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, braced=True) for roll in (4, 9))
+            low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, braced=True, cover=squadron_cover(world)) for roll in (4, 9))
             lines.append(f"[G] Brace: reduced shot (55%); incoming {low}-{high}. Fire recharges Brace.")
         else: lines.append("Brace recharging: fire once before using G again.")
         if details:
@@ -6008,6 +6073,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             for line in combat["lines"]: out_line(f"  {line}")
             return combat["outcome"]
     warrant = encounter.get("warrant")
+    formation = encounter.get("formation")
     tactics = combat.get("tactics")  # Absence preserves an interrupted legacy fight.
     ship = world.save.ship
     fine = notoriety_fine_cost(world.save.pilot.notoriety)
@@ -6020,6 +6086,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             if not warrant["checked"] and world.save.ship.fuel >= 1: actions += "/V"
             if warrant["checked"] and not warrant["matches"]: actions += "/R"
             actions += "/W"
+        if formation is not None and not formation["engaged"]: actions += "/T"
         action, page, count = _draw_service_page(
             p, f"Combat {world.save.pilot.credits:,}cr",
             combat_display_lines(world, pirate, combat["lines"], patrol=patrol, details=details, tactics=tactics, warrant=warrant),
@@ -6034,6 +6101,13 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         if action == "Q":
             details, page = not details, 0
             continue
+        if action == "T" and formation is not None and not formation["engaged"]:
+            switch_squadron_target(world)
+            world.checkpoint()
+            pirate = Pirate(**combat["pirate"])
+            tactics = combat["tactics"]
+            page = 0
+            continue
         if action == "V" and warrant is not None and not warrant["engaged"] and not warrant["checked"] and world.save.ship.fuel >= 1:
             combat["lines"] = [verify_bounty_identity(world, warrant)]
             world.checkpoint()
@@ -6044,6 +6118,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         engaging = (action in ("F", "E") or (action == "G" and tactics is not None and tactics["brace_ready"])
                     or (action == "D" and not patrol) or (action == "B" and not patrol and can_pay))
         if warrant is not None and engaging: warrant["engaged"] = True
+        if formation is not None and engaging: formation["engaged"] = True
         if action == "W" and warrant is not None and not warrant["engaged"]:
             lines, outcome = ["You withdraw before engaging; the bounty remains active."], "escaped"
         elif action == "R" and warrant is not None and warrant["checked"] and not warrant["matches"] and not warrant["engaged"]:

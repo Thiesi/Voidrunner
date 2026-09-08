@@ -5638,6 +5638,7 @@ def test_failed_atomic_replace_preserves_previous_save_and_removes_own_temp(tmp_
         ("quiet", 0, "F", "Jumping to"),
         ("pirate", 2, "F", "Raider contact"),
         ("squadron", 45, "F", "squadron contact: 2"),
+        ("squadron_switch", 45, "T", "Target selected"),
         ("salvage", 26, "B", "Salvaged a derelict"),
         ("ambush", 160, "B", "weren't as dead"),
         ("distress", 8, "H", "Grateful survivors"),
@@ -8861,6 +8862,156 @@ def test_real_exploration_decision_is_durable_before_result(tmp_path, kind, key,
             assert credits + 60 <= saved.pilot.credits <= credits + 180
             assert saved.pilot.reputation[vr.FACTION_CONCORD] == 3
         else: assert saved.ship.fuel == fuel and saved.pilot.credits == credits
+
+
+
+def _world_with_coordinated_squadron(*, engaged=False):
+    world = _world_with_exploration_choice("pirate")
+    pirates = [vr.Pirate("Hollow Fang", 4, 80, 80), vr.Pirate("Rust Wraith", 2, 50, 50)]
+    world.save.pending_travel["encounter"] = {"kind": "pirate", "pirates": [vr.dataclasses.asdict(p) for p in pirates],
+        "index": 0, "formation": {"version": 1, "engaged": engaged}, "combat": {
+            "pirate": vr.dataclasses.asdict(pirates[0]), "outcome": None, "lines": [], "tactics": vr.new_tactics(pirates[0])}}
+    return world, pirates
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_squadron_terms_fit_and_show_cover_before_first_choice(monkeypatch, width, height):
+    import copy, re
+    world, pirates = _world_with_coordinated_squadron()
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    output = io.StringIO(); frames = []
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert len(frame.splitlines()) <= height
+        assert all(vr._visible_width(line) <= width for line in frame.splitlines())
+        assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+        if len(frames) == 1:
+            assert "+6" in frame and "Hollow Fang" in " ".join(frame.split())
+        page, count = map(int, re.search(r"Combat.*?(\d+)/(\d+)", frame, re.S).groups())
+        if page == count: raise EOFError
+        return ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output), pytest.raises(EOFError): vr.screen_combat(vr.Palette(False), world, pirates[0])
+    text = " ".join(" ".join(frames).split())
+    assert "[T] Target" in text and "Rust Wraith" in text and "both raiders" in text
+
+
+def test_switching_squadron_target_preserves_resources_rng_and_round_state():
+    import copy
+    world, pirates = _world_with_coordinated_squadron()
+    ship, pilot, rng = copy.deepcopy(world.save.ship), copy.deepcopy(world.save.pilot), world.event_rng.getstate()
+    assert vr.squadron_cover(world) == 6
+    vr.switch_squadron_target(world)
+    state = world.save.pending_travel["encounter"]
+    assert state["combat"]["pirate"]["name"] == pirates[1].name
+    assert state["combat"]["tactics"] == vr.new_tactics(pirates[1])
+    assert vr.squadron_cover(world) == 10
+    assert world.save.ship == ship and world.save.pilot == pilot and world.event_rng.getstate() == rng
+    vr.SaveData.from_dict(world.save.to_dict())
+    vr.switch_squadron_target(world)
+    assert state["combat"]["pirate"]["name"] == pirates[0].name
+
+
+@pytest.mark.parametrize("braced", [False, True])
+@pytest.mark.parametrize("intent", list(vr.TACTICAL_INTENTS))
+def test_squadron_cover_matches_disclosed_combined_damage(monkeypatch, braced, intent):
+    world, pirates = _world_with_coordinated_squadron(engaged=True)
+    world.save.ship.shield_tier = 4
+    tactics = next({"version": 1, "profile": p, "step": steps.index(intent), "brace_ready": True}
+                  for p, steps in vr.TACTICAL_PROFILES.items() if intent in steps)
+    for roll in (4, 9):
+        world.save.ship.hull_hp = 400
+        monkeypatch.setattr(world.event_rng, "randint", lambda low, high: roll)
+        expected = vr._tactical_incoming_damage(world.save.ship, pirates[0].tier, intent, roll, braced=braced, cover=6)
+        base = vr._tactical_incoming_damage(world.save.ship, pirates[0].tier, intent, roll)
+        assert expected == ((base + 6 + 3) // 4 if braced else base + 6)
+        actual, _ = vr.tactical_retaliation(world, pirates[0], dict(tactics), braced=braced)
+        assert actual == expected and world.save.ship.hull_hp == 400 - actual
+
+
+def test_squadron_cover_ends_after_first_raider_and_legacy_pairs_keep_original_rules():
+    world, _ = _world_with_coordinated_squadron(engaged=True)
+    state = world.save.pending_travel["encounter"]
+    assert vr.squadron_cover(world) == 6
+    state["index"] = 1
+    assert vr.squadron_cover(world) == 0 and "covering fire has ended" in " ".join(vr.squadron_terms(world))
+    state["index"] = 0; state.pop("formation")
+    assert vr.squadron_cover(world) == 0 and not vr.squadron_terms(world)
+
+
+@pytest.mark.parametrize("fault", ["version", "bool_version", "engaged", "extra", "null", "position", "kind", "target", "damage", "step"])
+def test_invalid_squadron_formation_preserves_original_save(tmp_path, fault):
+    import json
+    world, _ = _world_with_coordinated_squadron()
+    state = world.save.pending_travel["encounter"]; formation = state["formation"]
+    if fault == "version": formation["version"] = 2
+    elif fault == "bool_version": formation["version"] = True
+    elif fault == "engaged": formation["engaged"] = 1
+    elif fault == "extra": formation["extra"] = True
+    elif fault == "null": state["formation"] = None
+    elif fault == "position": state["index"] = 1
+    elif fault == "kind": state["kind"] = "derelict"
+    elif fault == "target": state["combat"]["pirate"]["name"] = "Wrong target"
+    elif fault == "damage": state["combat"]["pirate"]["hp"] -= 1
+    else: state["combat"]["tactics"]["step"] = 1
+    path = tmp_path / "77.json"; path.write_text(json.dumps(world.save.to_dict()), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(vr.ResumeError): vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == before
+
+
+def test_target_selection_closes_after_engagement_without_effects(monkeypatch):
+    import copy
+    world, pirates = _world_with_coordinated_squadron()
+    keys = iter(["F", "T"]); before = None
+    def choose():
+        nonlocal before
+        if world.save.pending_travel["encounter"]["formation"]["engaged"]:
+            if before is None: before = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+            assert (world.save.to_dict(), world.event_rng.getstate()) == before
+        try: return next(keys)
+        except StopIteration: raise EOFError
+    monkeypatch.setattr(vr, "read_key", choose)
+    world.save.ship.hull_class = "Carrier"
+    world.save.ship.hull_hp = vr.hull_hp_max(world.save.ship)
+    with contextlib.redirect_stdout(io.StringIO()), pytest.raises(EOFError): vr.screen_combat(vr.Palette(False), world, pirates[0])
+    with pytest.raises(ValueError): vr.switch_squadron_target(world)
+
+
+def test_target_switch_survives_real_disconnect_before_acknowledgement(tmp_path):
+    world, pirates = _world_with_coordinated_squadron(); vr.persist(world, tmp_path, 77)
+    rng = world.event_rng.getstate()
+    with _door_stopped_at(tmp_path, b"T", b"Target selected"):
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        state = saved.pending_travel["encounter"]
+        assert state["pirates"][0]["name"] == pirates[1].name
+        assert state["combat"]["pirate"]["name"] == pirates[1].name
+        assert not state["formation"]["engaged"]
+        assert vr.World(saved).event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("lead,prefer_switch", [("Hollow Fang", False), ("Grimwire", True)])
+def test_squadron_target_order_has_profile_dependent_tradeoffs(monkeypatch, lead, prefer_switch):
+    damage = []
+    for switch in (False, True):
+        total = 0
+        for seed in range(32):
+            world, _ = _world_with_coordinated_squadron(); world.event_rng.seed(seed)
+            state = world.save.pending_travel["encounter"]
+            state["pirates"][0]["name"] = lead
+            state["combat"]["pirate"] = dict(state["pirates"][0])
+            state["combat"]["tactics"] = vr.new_tactics(vr.Pirate(**state["pirates"][0]))
+            world.save.ship.hull_class = "Carrier"; world.save.ship.hull_hp = 400
+            world.save.ship.weapon_tier = 3; world.save.ship.shield_tier = 3
+            keys = iter(["T"] if switch else [])
+            monkeypatch.setattr(vr, "read_key", lambda: next(keys, "F"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                vr._resolve_random_travel_encounter(vr.Palette(False), world, world.by_id[world.save.pending_travel["destination"]])
+            assert world.save.pilot.kills == 2
+            total += 400 - world.save.ship.hull_hp
+        damage.append(total)
+    assert (damage[1] < damage[0]) == prefer_switch
 
 
 
