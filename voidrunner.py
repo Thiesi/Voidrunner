@@ -1045,6 +1045,22 @@ def _load_pending_travel(value: dict | None) -> dict | None:
 
 
 @dataclass
+class TradingLedger:
+    since_day: int | None = None
+    sales_revenue: int = 0
+    sales_cost: int = 0
+    uncosted_sales: int = 0
+    delivery_revenue: int = 0
+    delivery_cost: int = 0
+    uncosted_deliveries: int = 0
+    cargo_loss_cost: int = 0
+    uncosted_losses: int = 0
+    fuel_spend: int = 0
+    wages: int = 0
+    cancelled_fees: int = 0
+
+
+@dataclass
 class SaveData:
     schema_version: int
     seed: int
@@ -1079,6 +1095,10 @@ class SaveData:
     contraband_trade_milestones: int = 0
     best_credits: int = 0
     galaxy_version: int = 1
+    # Each known FIFO lot is [remaining quantity, remaining total paid cost].
+    # Any hold quantity without a lot is older cargo of unknown acquisition cost.
+    cargo_basis: dict[str, list[list[int]]] = field(default_factory=dict)
+    trading_ledger: TradingLedger = field(default_factory=TradingLedger)
 
     def to_dict(self) -> dict:
         return {
@@ -1105,6 +1125,8 @@ class SaveData:
             "contraband_trade_balance": self.contraband_trade_balance,
             "contraband_trade_milestones": self.contraband_trade_milestones,
             "best_credits": self.best_credits,
+            "cargo_basis": self.cargo_basis,
+            "trading_ledger": dataclasses.asdict(self.trading_ledger),
         }
 
     @classmethod
@@ -1137,6 +1159,8 @@ class SaveData:
             best_credits=_load_trade_total(d.get("best_credits", 0), nonnegative=True, label="credit high-water mark"),
             contraband_trade_balance=_load_trade_total(d.get("contraband_trade_balance", 0)),
             contraband_trade_milestones=_load_trade_total(d.get("contraband_trade_milestones", 0), nonnegative=True),
+            cargo_basis={c: [list(lot) for lot in lots] for c, lots in d.get("cargo_basis", {}).items()},
+            trading_ledger=TradingLedger(**d.get("trading_ledger", {})),
         )
 
 
@@ -1215,6 +1239,25 @@ def _validate_save_document(data: dict) -> None:
     for value in cargo.values():
         integer(value, "cargo quantity")
     require(sum(cargo.values()) <= cargo_capacity(vessel), "cargo capacity")
+    basis = data.get("cargo_basis", {})
+    require(isinstance(basis, dict) and set(basis) <= set(cargo), "cargo acquisition costs")
+    for commodity, lots in basis.items():
+        require(isinstance(lots, list) and 0 < len(lots) <= cargo[commodity], "cargo lots")
+        for lot in lots:
+            require(isinstance(lot, list) and len(lot) == 2, "cargo lot")
+            integer(lot[0], "costed quantity", minimum=1)
+            integer(lot[1], "acquisition cost")
+        require(sum(lot[0] for lot in lots) <= cargo[commodity], "costed cargo quantity")
+    ledger = data.get("trading_ledger", {})
+    record(ledger, TradingLedger, "trading ledger")
+    for key, value in ledger.items():
+        if key == "since_day":
+            if value is not None:
+                integer(value, "ledger start day", maximum=data["turn"])
+        else:
+            integer(value, "ledger " + key)
+    if basis or any(value for key, value in ledger.items() if key != "since_day"):
+        require(ledger.get("since_day") is not None, "ledger start day")
     discovered = data["discovered"]
     require(isinstance(discovered, list) and len(discovered) <= GALAXY_SYSTEM_COUNT, "chart")
     for sid in discovered:
@@ -1703,6 +1746,97 @@ class TradeError(ValueError):
     """Rejected economy actions leave the career unchanged."""
 
 
+def _ledger(world: World) -> TradingLedger:
+    ledger = world.save.trading_ledger
+    if ledger.since_day is None:
+        ledger.since_day = world.save.turn
+    return ledger
+
+
+def _acquire_cargo(world: World, commodity: str, quantity: int, cost: int) -> None:
+    """Add purchased goods and their exact basis in the same action."""
+    _ledger(world)
+    lots = world.save.cargo_basis.setdefault(commodity, [])
+    lots.append([quantity, cost])
+    world.save.cargo[commodity] = world.save.cargo.get(commodity, 0) + quantity
+
+
+def _dispose_cargo(world: World, commodity: str, quantity: int, *,
+                   proceeds: int = 0, kind: str = "loss") -> tuple[int, int]:
+    """Consume unknown legacy stock first, then FIFO lots; return cost/unknown units."""
+    if quantity == 0:
+        if world.save.cargo.get(commodity) == 0:
+            world.save.cargo.pop(commodity)
+        return 0, 0
+    have = world.save.cargo[commodity]
+    lots = world.save.cargo_basis.get(commodity, [])
+    unknown = min(quantity, have - sum(lot[0] for lot in lots))
+    remaining = quantity - unknown
+    cost = 0
+    while remaining:
+        lot = lots[0]
+        taken = min(remaining, lot[0])
+        allocated = lot[1] * taken // lot[0]
+        cost += allocated
+        lot[0] -= taken
+        lot[1] -= allocated
+        remaining -= taken
+        if lot[0] == 0:
+            lots.pop(0)
+    if not lots:
+        world.save.cargo_basis.pop(commodity, None)
+    if quantity == have:
+        del world.save.cargo[commodity]
+    else:
+        world.save.cargo[commodity] = have - quantity
+    ledger = _ledger(world)
+    unknown_receipts = proceeds * unknown // quantity
+    if kind == "sale":
+        ledger.sales_revenue += proceeds - unknown_receipts
+        ledger.sales_cost += cost
+        ledger.uncosted_sales += unknown_receipts
+    elif kind == "delivery":
+        ledger.delivery_revenue += proceeds - unknown_receipts
+        ledger.delivery_cost += cost
+        ledger.uncosted_deliveries += unknown_receipts
+    else:
+        ledger.cargo_loss_cost += cost
+        ledger.uncosted_losses += unknown
+    return cost, unknown
+
+
+def trade_cargo(world: World, commodity: str, quantity: int, *, buying: bool) -> str:
+    """Validate a market command before changing credits, cargo, basis or prices."""
+    if world.save.pending_travel is not None:
+        raise TradeError("Finish the journey before trading.")
+    if (not isinstance(commodity, str) or commodity not in COMMODITIES
+            or type(quantity) is not int or quantity < 1 or type(buying) is not bool):
+        raise TradeError("Choose a valid commodity and positive whole quantity.")
+    unit = price_for(world, world.here.id, commodity)
+    label = COMMODITIES[commodity]["label"]
+    if buying:
+        if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
+            raise TradeError("Station authorities prohibit the open purchase of contraband.")
+        if sum(world.save.cargo.values()) + quantity > cargo_capacity(world.save.ship):
+            raise TradeError("Not enough cargo space.")
+        total = quantity * unit
+        if total > world.save.pilot.credits:
+            raise TradeError(f"Need {total}cr for this purchase.")
+        world.save.pilot.credits -= total
+        _acquire_cargo(world, commodity, quantity, total)
+        _nudge_drift(world, world.here.id, commodity, min(0.05, quantity * 0.01))
+        record_contraband_trade(world, commodity, -total)
+        return f"Bought {quantity}x {label} for {total}cr."
+    if quantity > world.save.cargo.get(commodity, 0):
+        raise TradeError("You do not have that much cargo.")
+    total = quantity * round(unit * SELL_SPREAD)
+    world.save.pilot.credits += total
+    _dispose_cargo(world, commodity, quantity, proceeds=total, kind="sale")
+    _nudge_drift(world, world.here.id, commodity, -min(0.05, quantity * 0.01))
+    record_contraband_trade(world, commodity, total)
+    return f"Sold {quantity}x {label} for {total}cr."
+
+
 def futures_quote(world: World, commodity: str, quantity: int) -> tuple[int, int]:
     if commodity not in COMMODITIES or type(quantity) is not int or quantity < 1:
         raise TradeError("Choose a valid commodity and positive whole quantity.")
@@ -1751,6 +1885,7 @@ def cancel_futures_contract(world: World, contract_id: int) -> str:
     world.save.pilot.credits += contract.principal
     record_contraband_trade(world, contract.commodity, contract.principal)
     fee = contract.locked_price - contract.principal
+    _ledger(world).cancelled_fees += fee
     msg = f"Order cancelled: {contract.principal}cr refunded; {fee}cr brokerage fee retained."
     world.save.pilot.note(msg)
     return msg
@@ -1774,7 +1909,7 @@ def settle_futures_contracts(world: World, *, legacy_only: bool = False) -> list
             world.save.pilot.credits += contract.locked_price
             msg = f"Legacy futures: no cargo room -- refunded {contract.locked_price}cr under original terms."
         else:
-            world.save.cargo[contract.commodity] = world.save.cargo.get(contract.commodity, 0) + contract.quantity
+            _acquire_cargo(world, contract.commodity, contract.quantity, contract.locked_price)
             msg = f"Futures contract settled: {contract.quantity}x {label} delivered to your hold."
         world.save.pilot.note(msg)
         messages.append(msg)
@@ -2021,9 +2156,7 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
         if m.kind == "delivery" and world.save.current_system == m.target_system:
             have = world.save.cargo.get(m.commodity, 0)
             if have >= m.quantity:
-                world.save.cargo[m.commodity] = have - m.quantity
-                if world.save.cargo[m.commodity] <= 0:
-                    del world.save.cargo[m.commodity]
+                _dispose_cargo(world, m.commodity, m.quantity, proceeds=m.reward, kind="delivery")
                 done = True
         elif m.kind == "scan" and just_discovered == m.target_system:
             done = True
@@ -2272,7 +2405,8 @@ def destroy_ship(world: World) -> str:
     easier to explain than a patrol-specific special case, and reads
     fine narratively either way: word doesn't travel from a wreck."""
     lost_cargo = sum(world.save.cargo.values())
-    world.save.cargo.clear()
+    for commodity, quantity in list(world.save.cargo.items()):
+        _dispose_cargo(world, commodity, quantity)
     penalty = min(world.save.pilot.credits, 200 + world.save.ship.hull_tier * 50)
     world.save.pilot.credits -= penalty
     world.save.ship.hull_hp = hull_hp_max(world.save.ship)
@@ -2303,7 +2437,7 @@ def dump_all_contraband(world: World) -> str:
     dumping needs no market at all, since nothing is being sold."""
     dumped = {c: q for c, q in world.save.cargo.items() if not COMMODITIES[c]["legal"]}
     for c in dumped:
-        del world.save.cargo[c]
+        _dispose_cargo(world, c, dumped[c])
     total = sum(dumped.values())
     msg = f"Jettisoned {total} units of contraband before a customs risk."
     world.save.pilot.note(msg)
@@ -2375,6 +2509,7 @@ def pay_crew_wages(world: World) -> list[str]:
         wage = info["wage"]
         if world.save.pilot.credits >= wage:
             world.save.pilot.credits -= wage
+            _ledger(world).wages += wage
         else:
             setattr(ship, f"has_{role}", False)
             msg = f"Your {info['label']} resigns -- you can't cover their wages."
@@ -3027,7 +3162,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
     menu_rows = [
         f"   {p.gold}[M]{RESET} Commodity Market     {p.gold}[Y]{RESET} Engineering Yard     {p.gold}[B]{RESET} Mission Board",
         f"   {p.gold}[C]{RESET} Navigation Chart     {p.gold}[S]{RESET} Pilot Status         {p.gold}[H]{RESET} Hall of Fame",
-        f"   {p.gold}[G]{RESET} Pilot Guide          {p.gold}[Q]{RESET} Disembark & Save",
+        f"   {p.gold}[G]{RESET} Pilot Guide          {p.gold}[T]{RESET} Trading Ledger       {p.gold}[Q]{RESET} Disembark & Save",
     ]
     for row in menu_rows:
         pad_len = max(0, 77 - _vis_len(row))
@@ -3256,11 +3391,65 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> None:
                 return
 
 
+def trading_ledger_lines(world: World) -> list[str]:
+    ledger = world.save.trading_ledger
+    lines = [
+        "[B]ack returns to the deck. This ledger is read-only.",
+        f"Credits available: {world.save.pilot.credits:,}cr.",
+        (f"Recorded activity since day {ledger.since_day}; today is day {world.save.turn}."
+         if ledger.since_day is not None else "No activity recorded yet. Earlier career costs are unknown."),
+        f"Market sales with known cost: receipts {ledger.sales_revenue:,}cr - cargo {ledger.sales_cost:,}cr = margin {ledger.sales_revenue - ledger.sales_cost:+,}cr.",
+        f"Sales with unknown cargo cost: {ledger.uncosted_sales:,}cr receipts; profit unknown.",
+        f"Deliveries with known cost: payment {ledger.delivery_revenue:,}cr - cargo {ledger.delivery_cost:,}cr = margin {ledger.delivery_revenue - ledger.delivery_cost:+,}cr.",
+        f"Deliveries with unknown cargo cost: {ledger.uncosted_deliveries:,}cr receipts; profit unknown.",
+        "Mixed delivery payments are divided by cargo quantity. Margins exclude operating costs and other career income or spending.",
+        f"Cargo lost or surrendered: {ledger.cargo_loss_cost:,}cr recorded cost, plus {ledger.uncosted_losses} units of unknown cost.",
+        f"Fuel purchases: {ledger.fuel_spend:,}cr. Crew wages paid: {ledger.wages:,}cr. Cancelled-order fees: {ledger.cancelled_fees:,}cr.",
+        "These totals begin when recorded, exclude earlier activity, repairs, fines and crew hiring, and are not total career profit.",
+        "HOLD - older unknown cargo is consumed first, then recorded purchases in order. Futures costs include brokerage.",
+    ]
+    for commodity, quantity in world.save.cargo.items():
+        lots = world.save.cargo_basis.get(commodity, [])
+        known = sum(lot[0] for lot in lots)
+        cost = sum(lot[1] for lot in lots)
+        lines.append(f"{COMMODITIES[commodity]['label']}: {quantity} units; {known} costed at {cost:,}cr total; {quantity - known} with unknown cost.")
+    if not world.save.cargo:
+        lines.append("Hold empty.")
+    wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
+    lines.extend([
+        f"TRAVEL - tank {world.save.ship.fuel}/{fuel_capacity(world.save.ship)} units. Replacement fuel costs 6cr/unit; current crew wages {wage}cr/jump.",
+        f"LOCAL MARKET - {world.here.name}, {world.here.economy}.",
+        "Produces: " + ", ".join(COMMODITIES[c]["label"] for c in ECONOMY_PRODUCES[world.here.economy]) + ".",
+        "Demands: " + ", ".join(COMMODITIES[c]["label"] for c in ECONOMY_DEMANDS[world.here.economy]) + ".",
+    ])
+    return lines
+
+
+def screen_trading_ledger(p: Palette, world: World) -> None:
+    pages = _mission_text_pages(trading_ledger_lines(world), overhead=5)
+    page = 0
+    while True:
+        out_line()
+        out_line(f"Trading Ledger {page + 1}/{len(pages)}")
+        for line in pages[page]:
+            out_line(line)
+        out_prompt("[N]ext [P]rev [B]ack: ")
+        action = read_command()
+        out_line(action)
+        if action in ("B", "Q"):
+            return
+        if action == "N":
+            page = min(page + 1, len(pages) - 1)
+        elif action == "P":
+            page = max(0, page - 1)
+
+
 def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
     label = COMMODITIES[commodity]["label"]
     buy = price_for(world, world.here.id, commodity)
     sell = round(buy * SELL_SPREAD)
     out_line(f"{p.accent}{label}{RESET} -- Buy {buy}cr  Sell {sell}cr")
+    out_line(f"Credits: {world.save.pilot.credits}cr. Each unit bought costs {buy}cr; each sold returns {sell}cr.")
     out_prompt(f"{p.muted}[B]uy [S]ell [Q]cancel: {RESET}")
     action = read_command()
     out_line(action)
@@ -3280,13 +3469,10 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
         qty = min(qty, max_qty)
         if qty <= 0:
             return
-        cost = qty * buy
-        world.save.pilot.credits -= cost
-        world.save.cargo[commodity] = world.save.cargo.get(commodity, 0) + qty
-        _nudge_drift(world, world.here.id, commodity, min(0.05, qty * 0.01))
-        record_contraband_trade(world, commodity, -cost)
+        result = trade_cargo(world, commodity, qty, buying=True)
         world.checkpoint()
-        out_line(f"{p.correct}Bought {qty}x {label} for {cost}cr.{RESET}")
+        out_line(f"{p.correct}{result}{RESET}")
+        out_line(f"Credits remaining: {world.save.pilot.credits}cr. Cost recorded in [T] Trading Ledger.")
     elif action == "S":
         have = world.save.cargo.get(commodity, 0)
         if have <= 0:
@@ -3298,15 +3484,11 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
         qty = min(qty, have)
         if qty <= 0:
             return
-        proceeds = qty * sell
-        world.save.pilot.credits += proceeds
-        world.save.cargo[commodity] -= qty
-        if world.save.cargo[commodity] <= 0:
-            del world.save.cargo[commodity]
-        _nudge_drift(world, world.here.id, commodity, -min(0.05, qty * 0.01))
-        record_contraband_trade(world, commodity, proceeds)
+        result = trade_cargo(world, commodity, qty, buying=False)
         world.checkpoint()
-        out_line(f"{p.correct}Sold {qty}x {label} for {proceeds}cr.{RESET}")
+        out_line(f"{p.correct}{result}{RESET}")
+        out_line(f"Credits now: {world.save.pilot.credits}cr. Margin recorded in [T] Trading Ledger.")
+
 
 
 def screen_shipyard(p: Palette, world: World) -> None:
@@ -3469,6 +3651,7 @@ def _refuel(p: Palette, world: World) -> None:
         return
     cost = qty * 6
     world.save.pilot.credits -= cost
+    _ledger(world).fuel_spend += cost
     ship.fuel += qty
     world.checkpoint()
     out_line(f"{p.correct}Refueled {qty} units for {cost}cr.{RESET}")
@@ -4651,11 +4834,10 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
                 outcome = "won"
         elif action == "E" or (action == "D" and not patrol):
             dumped = False
-            if action == "D" and world.save.cargo:
-                commodity = world.event_rng.choice(list(world.save.cargo))
-                world.save.cargo[commodity] -= 1
-                if world.save.cargo[commodity] <= 0:
-                    del world.save.cargo[commodity]
+            available_cargo = [c for c, quantity in world.save.cargo.items() if quantity > 0]
+            if action == "D" and available_cargo:
+                commodity = world.event_rng.choice(available_cargo)
+                _dispose_cargo(world, commodity, 1)
                 dumped = True
                 lines.append("You dump cargo to lighten the ship.")
             if world.event_rng.random() < evade_chance(world, pirate, dumped_cargo=dumped):
@@ -4731,7 +4913,7 @@ def screen_customs(p: Palette, world: World) -> None:
         fine = 150 + value
         world.save.pilot.credits = max(0, world.save.pilot.credits - fine)
         for c in CONTRABAND_COMMODITIES:
-            world.save.cargo.pop(c, None)
+            _dispose_cargo(world, c, world.save.cargo.get(c, 0))
         adjust_reputation(world, FACTION_CONCORD, -5)
         # Notoriety only rises here, not on the cooperative "surrender
         # outright" path below -- a caught, refused bribe is a repeat-
@@ -4743,7 +4925,7 @@ def screen_customs(p: Palette, world: World) -> None:
         _encounter_result(p, world, state, [f"Bribe refused -- contraband confiscated and a {fine}cr fine levied."])
         return
     for c in CONTRABAND_COMMODITIES:
-        world.save.cargo.pop(c, None)
+        _dispose_cargo(world, c, world.save.cargo.get(c, 0))
     adjust_reputation(world, FACTION_CONCORD, 1)
     _encounter_result(p, world, state, [f"You surrender {contraband_qty} units without a fight."])
 
@@ -4885,6 +5067,9 @@ def main() -> int:
 
         while True:
             choice = screen_station_menu(p, world)
+            if choice == "T":
+                screen_trading_ledger(p, world)
+                continue
             if choice == "M":
                 screen_market(p, world)
             elif choice == "Y":

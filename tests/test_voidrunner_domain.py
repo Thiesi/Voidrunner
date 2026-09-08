@@ -78,6 +78,259 @@ except vr['PilotBusy']:
     assert acquired.stdout.strip() == b"acquired" and path.read_bytes() == b""
 
 
+def test_trading_ledger_preserves_fifo_costs_and_unknown_legacy_stock(tmp_path):
+    import json
+    world = _world_with_seed(42)
+    world.save.cargo = {"food": 2}
+    legacy = world.save.to_dict()
+    legacy.pop("cargo_basis")
+    legacy.pop("trading_ledger")
+    world = vr.World(vr.SaveData.from_dict(legacy))
+    first_cost = 3 * vr.price_for(world, 0, "food")
+    vr.trade_cargo(world, "food", 3, buying=True)
+    second_cost = 2 * vr.price_for(world, 0, "food")
+    vr.trade_cargo(world, "food", 2, buying=True)
+    vr.persist(world, tmp_path, 77)
+    save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    world = vr.World(save)
+    unit = round(vr.price_for(world, 0, "food") * vr.SELL_SPREAD)
+    vr.trade_cargo(world, "food", 3, buying=False)
+    ledger = world.save.trading_ledger
+    assert ledger.uncosted_sales == 2 * unit
+    assert ledger.sales_revenue == unit and ledger.sales_cost == first_cost // 3
+    assert world.save.cargo_basis["food"] == [[2, first_cost * 2 // 3], [2, second_cost]]
+    vr.trade_cargo(world, "food", 4, buying=False)
+    assert ledger.sales_cost == first_cost + second_cost
+    assert not world.save.cargo_basis and not world.save.cargo
+    assert vr.SaveData.from_dict(json.loads(json.dumps(world.save.to_dict()))).trading_ledger == ledger
+
+
+def test_trading_ledger_partial_legacy_futures_keeps_exact_paid_remainder():
+    world = _world_with_seed(42)
+    world.save.active_futures = [vr.FuturesContract(id=1, commodity="food", quantity=3,
+                                                   locked_price=100, settle_turn=0)]
+    vr.settle_futures_contracts(world)
+    for expected in (33, 66, 100):
+        vr.trade_cargo(world, "food", 1, buying=False)
+        assert world.save.trading_ledger.sales_cost == expected
+    assert not world.save.cargo_basis
+
+
+def test_trading_ledger_futures_basis_includes_fee_once_and_cancel_keeps_no_cargo():
+    world = _world_with_seed(42)
+    principal, fee = vr.futures_quote(world, "food", 3)
+    vr.buy_futures_contract(world, "food", 3, 5)
+    world.save.turn = 5
+    vr.settle_futures_contracts(world)
+    assert world.save.cargo_basis == {"food": [[3, principal + fee]]}
+    assert vr.settle_futures_contracts(world) == []
+    vr.buy_futures_contract(world, "food", 1, 5)
+    order = world.save.active_futures[0]
+    vr.cancel_futures_contract(world, order.id)
+    assert world.save.trading_ledger.cancelled_fees == order.locked_price - order.principal
+    assert world.save.cargo == {"food": 3}
+
+
+def test_trading_ledger_delivery_allocates_mixed_receipts_and_consumes_basis_once():
+    world = _world_with_seed(42)
+    world.save.cargo = {"food": 1}
+    cost = 2 * vr.price_for(world, 0, "food")
+    vr.trade_cargo(world, "food", 2, buying=True)
+    world.save.active_missions = [vr.Mission(id=1, kind="delivery", description="Mixed load",
+        reward=100, origin_system=0, target_system=0, commodity="food", quantity=3)]
+    vr.check_mission_completions(world)
+    ledger = world.save.trading_ledger
+    assert (ledger.delivery_revenue, ledger.uncosted_deliveries, ledger.delivery_cost) == (67, 33, cost)
+    assert ledger.sales_cost == ledger.sales_revenue == 0
+    assert not world.save.cargo and not world.save.cargo_basis
+    assert vr.check_mission_completions(world) == []
+    assert ledger.delivery_revenue == 67
+
+
+@pytest.mark.parametrize("loss", ["dump", "destroy", "customs", "refused_bribe"])
+def test_trading_ledger_records_real_loss_paths(monkeypatch, loss):
+    world = _world_with_seed(42)
+    world.save.current_system = next(s.id for s in world.galaxy if s.economy == "Haven")
+    world.save.cargo = {"weapons": 1}
+    cost = 2 * vr.price_for(world, world.here.id, "weapons")
+    vr.trade_cargo(world, "weapons", 2, buying=True)
+    if loss == "dump":
+        vr.dump_all_contraband(world)
+    elif loss == "destroy":
+        vr.destroy_ship(world)
+    else:
+        monkeypatch.setattr(vr, "read_key", lambda: "S" if loss == "customs" else "B")
+        monkeypatch.setattr(world.event_rng, "random", lambda: 0.99)
+        monkeypatch.setattr(vr, "pause", lambda p: None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            vr.screen_customs(vr.Palette(False), world)
+    ledger = world.save.trading_ledger
+    assert ledger.cargo_loss_cost == cost and ledger.uncosted_losses == 1
+    assert not world.save.cargo and not world.save.cargo_basis
+    assert ledger.sales_revenue == ledger.delivery_revenue == 0
+
+
+def test_trading_ledger_counts_paid_wages_and_fuel_only(monkeypatch):
+    world = _world_with_seed(42)
+    world.save.ship.has_engineer = world.save.ship.has_gunner = True
+    world.save.pilot.credits = 2
+    vr.pay_crew_wages(world)
+    assert world.save.trading_ledger.wages == 2
+    assert not world.save.ship.has_gunner and world.save.ship.has_engineer
+    world.save.pilot.credits = 100
+    world.save.ship.fuel -= 3
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: "3")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._refuel(vr.Palette(False), world)
+    assert world.save.trading_ledger.fuel_spend == 18 and world.save.pilot.credits == 82
+
+
+@pytest.mark.parametrize("fault", ["quantity", "boolean", "commodity", "pending", "space", "credits", "absent", "illegal"])
+def test_trading_ledger_rejected_commands_are_atomic(fault):
+    import copy
+    world = _world_with_seed(42)
+    commodity, quantity, buying = "food", 1, True
+    if fault == "quantity": quantity = 0
+    elif fault == "boolean": quantity = True
+    elif fault == "commodity": commodity = "invalid"
+    elif fault == "pending": world.save.pending_travel = {}
+    elif fault == "space": quantity = vr.cargo_capacity(world.save.ship) + 1
+    elif fault == "credits": world.save.pilot.credits = 0
+    elif fault == "absent": buying = False
+    elif fault == "illegal": commodity = "weapons"
+    before = copy.deepcopy(world.save.to_dict())
+    with pytest.raises(vr.TradeError):
+        vr.trade_cargo(world, commodity, quantity, buying=buying)
+    assert world.save.to_dict() == before
+
+
+@pytest.mark.parametrize("field,value", [
+    ("cargo_basis", {"food": [[0, 3]]}), ("cargo_basis", {"food": [[4, 3]]}),
+    ("cargo_basis", {"food": [[1, -3]]}), ("cargo_basis", {"food": [[True, 3]]}),
+    ("cargo_basis", {"food": []}), ("cargo_basis", {"food": [[1, 3, 4]]}),
+    ("trading_ledger", {"since_day": 1}), ("trading_ledger", {"since_day": None, "wages": 1}),
+    ("trading_ledger", {"since_day": 0, "wages": -1}), ("trading_ledger", {"since_day": 0, "wages": True}),
+    ("trading_ledger", {"since_day": 0, "future_stat": 1}),
+])
+def test_trading_ledger_rejects_malformed_storage_without_overwriting(tmp_path, field, value):
+    import copy
+    import json
+    world = _world_with_seed(42)
+    vr.trade_cargo(world, "food", 3, buying=True)
+    vr.persist(world, tmp_path, 77)
+    original = (tmp_path / "77.json").read_bytes()
+    data = copy.deepcopy(world.save.to_dict())
+    data[field] = value
+    with pytest.raises(vr.ResumeError):
+        vr.SaveData.from_dict(data)
+    assert (tmp_path / "77.json").read_bytes() == original
+    # The disk loading boundary also preserves the exact malformed bytes.
+    malformed = json.dumps(data).encode()
+    (tmp_path / "77.json").write_bytes(malformed)
+    with pytest.raises(vr.ResumeError):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert (tmp_path / "77.json").read_bytes() == malformed
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_trading_ledger_pages_fit_and_do_not_write(monkeypatch, width, height):
+    import copy
+    world = _world_with_seed(42)
+    vr.trade_cargo(world, "food", 3, buying=True)
+    before = copy.deepcopy(world.save.to_dict())
+    rng = world.event_rng.getstate()
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    count = len(vr._mission_text_pages(vr.trading_ledger_lines(world), overhead=5))
+    output = io.StringIO()
+    pages = []
+
+    def choose():
+        pages.append(output.getvalue())
+        output.seek(0)
+        output.truncate(0)
+        assert world.save.to_dict() == before
+        return "B" if len(pages) == count else "N"
+
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output):
+        vr.screen_trading_ledger(vr.Palette(False), world)
+    assert world.event_rng.getstate() == rng
+    for page in pages:
+        assert len(page.splitlines()) <= height
+        assert all(vr._visible_width(row) <= width for row in page.splitlines())
+
+
+def test_trading_ledger_real_purchases_and_sales_survive_kill_without_duplicate_margin(tmp_path):
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    cost = 3 * vr.price_for(world, 0, "food")
+    key = vr.LETTERS[vr.LEGAL_COMMODITIES.index("food")].encode()
+    with _door_stopped_at(tmp_path, b"M" + key + b"B3\n", b"Bought 3x"):
+        bought, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert bought.cargo_basis == {"food": [[3, cost]]}
+    unit = round(vr.price_for(vr.World(bought), 0, "food") * vr.SELL_SPREAD)
+    with _door_stopped_at(tmp_path, b"M" + key + b"S2\n", b"Sold 2x"):
+        sold, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert sold.cargo_basis == {"food": [[1, cost // 3]]}
+        assert (sold.trading_ledger.sales_cost, sold.trading_ledger.sales_revenue) == (cost * 2 // 3, 2 * unit)
+    with _door_stopped_at(tmp_path, b"T", b"Trading Ledger 1/"):
+        viewed, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert viewed.trading_ledger == sold.trading_ledger
+
+
+@pytest.mark.parametrize("commands", [b"TBQ", b"T"])
+def test_trading_ledger_real_back_and_eof_preserve_career(tmp_path, commands):
+    import json
+    import os
+    import subprocess
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    original = (tmp_path / "77.json").read_bytes()
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+    assert result.returncode == 0 and not result.stderr
+    assert b"Trading Ledger 1/" in result.stdout
+    assert (tmp_path / "77.json").read_bytes() == original
+
+
+def test_trading_ledger_retirement_starts_a_fresh_record():
+    world = _world_with_seed(42)
+    vr.trade_cargo(world, "food", 2, buying=True)
+    vr.trade_cargo(world, "food", 1, buying=False)
+    fresh = vr.retire_pilot(world.save)
+    assert not fresh.cargo_basis and fresh.trading_ledger == vr.TradingLedger()
+
+
+def test_trading_ledger_zero_legacy_quantities_do_not_block_cargo_cleanup():
+    world = _world_with_seed(42)
+    world.save.cargo = {"weapons": 0}
+    vr.dump_all_contraband(world)
+    assert not world.save.cargo and world.save.trading_ledger.since_day is None
+
+
+@pytest.mark.parametrize("quantity", [0, 1])
+def test_trading_ledger_combat_dump_accounts_only_for_real_cargo(monkeypatch, quantity):
+    world = _world_with_seed(42)
+    cost = vr.price_for(world, 0, "food") if quantity else 0
+    if quantity:
+        vr.trade_cargo(world, "food", 1, buying=True)
+    else:
+        world.save.cargo = {"food": 0}  # Valid older saves can retain zero entries.
+    pirate = vr.generate_pirate(world, tier=1)
+    monkeypatch.setattr(vr, "read_key", lambda: "D")
+    monkeypatch.setattr(world.event_rng, "random", lambda: 0)
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert vr.screen_combat(vr.Palette(False), world, pirate) == "escaped"
+    assert world.save.trading_ledger.cargo_loss_cost == cost
+    assert world.save.trading_ledger.uncosted_losses == 0
+    assert not world.save.cargo_basis
+
+
 # -- galaxy generation -------------------------------------------------
 
 
@@ -5741,18 +5994,22 @@ def test_real_first_flight_survives_kills_through_acceptance_purchase_delivery_a
     with _door_stopped_at(tmp_path, b"M" + market_key + b"B3\n", b"Bought 3x"):
         bought, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert bought.cargo[offer.commodity] == 3 and bought.pilot.credits == 1200 - cargo_cost
+        assert bought.cargo_basis == {offer.commodity: [[3, cargo_cost]]}
     jump_key = vr.CHART_CONNECTION_LETTERS[sorted(world.here.connections).index(offer.target_system)].encode()
     with _door_stopped_at(tmp_path, b"C" + jump_key, b"Mission complete: First Flight:"):
         delivered, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert delivered.flags["opening_assignment_completed"]
         assert delivered.pilot.credits == 1200 - cargo_cost + offer.reward
         assert delivered.turn == 1 and not delivered.active_missions
+        assert not delivered.cargo_basis
+        assert (delivered.trading_ledger.delivery_cost, delivered.trading_ledger.delivery_revenue) == (cargo_cost, offer.reward)
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"QQ", capture_output=True,
                             env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path),
                                      NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")), timeout=10)
     assert result.returncode == 0 and not result.stderr
     resumed, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert resumed.pending_travel is None and resumed.pilot.credits == delivered.pilot.credits
+    assert resumed.trading_ledger == delivered.trading_ledger
     with _door_stopped_at(tmp_path, b"YAY", b"Cargo Bay Expansion upgraded to tier 1"):
         upgraded, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert upgraded.ship.cargo_tier == 1 and upgraded.pilot.credits == resumed.pilot.credits - 800
