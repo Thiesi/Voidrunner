@@ -8041,3 +8041,141 @@ def test_cockpit_settlement_results_stay_inside_height_budget(monkeypatch, width
         content.append(re.search(r"\d+/\d+\r\n(.*?)\r\n\[<\]", plain, re.S).group(1))
     text = " ".join(" ".join(content).split())
     for message in settled: assert text.count(message) == 1
+
+
+@pytest.mark.parametrize("style", list(vr.DISPLAY_STYLES))
+def test_display_preference_roundtrip_restart_and_retirement(tmp_path, style):
+    world = _world_with_seed(42)
+    world.save.display_style = style
+    vr.persist(world, tmp_path, 77)
+    saved, is_new, notice = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not is_new and notice is None and saved.display_style == style
+    assert vr.retire_pilot(saved).display_style == style
+    legacy = saved.to_dict()
+    legacy.pop("display_style")
+    vr._validate_save_document(legacy)
+    assert vr.SaveData.from_dict(legacy).display_style == "auto"
+
+
+@pytest.mark.parametrize("style", [None, True, [], {}, "unknown"])
+def test_invalid_display_preference_preserves_career(tmp_path, style):
+    import json
+    document = _world_with_seed(42).save.to_dict()
+    document["display_style"] = style
+    path = tmp_path / "77.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(vr.ResumeError):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("style", list(vr.DISPLAY_STYLES))
+@pytest.mark.parametrize("truecolor", [True, False])
+def test_display_output_color_and_art_keep_unicode_letters(monkeypatch, style, truecolor):
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    p = vr.Palette(truecolor)
+    artwork = "".join(map(chr, vr._ASCII_ART_TRANSLATION))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.out(p.accent + artwork + " Caf\u00e9 \u754c " + vr.BOLD + "LOW FUEL" + vr.RESET)
+    text = output.getvalue()
+    assert "Caf\u00e9 \u754c" in text and "LOW FUEL" in text
+    assert vr._visible_width(text) == vr._visible_width(artwork + " Caf\u00e9 \u754c LOW FUEL")
+    if style in ("mono", "plain"):
+        assert "\x1b" not in text
+    elif style == "basic":
+        assert "\x1b[" in text and "38;" not in text
+    else:
+        assert ("38;2;" if truecolor else "38;5;") in text
+    if style == "plain":
+        assert text.startswith(artwork.translate(vr._ASCII_ART_TRANSLATION))
+        assert artwork.translate(vr._ASCII_ART_TRANSLATION).isascii()
+    else:
+        assert artwork in text
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_display_options_paging_and_back_write_nothing(monkeypatch, width, height):
+    import re
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    world = _world_with_seed(42)
+    before = world.save.to_dict()
+    world._checkpoint = lambda current: pytest.fail("Browsing saved a preference")
+    output = io.StringIO()
+    frames = []
+    def choose():
+        frame = output.getvalue()
+        output.seek(0); output.truncate(0)
+        frames.append(frame)
+        assert len(frame.splitlines()) <= height
+        assert all(vr._visible_width(line) <= width for line in frame.splitlines())
+        assert "[B]Back:" in " ".join(frame.split())
+        page, count = map(int, re.search(r"(\d+)/(\d+)", frame).groups())
+        return "B" if page == count else ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output):
+        vr.screen_display_options(vr.Palette(False), world)
+    combined = " ".join(" ".join(frames).split())
+    for word in ("Full palette", "16-color", "Monochrome", "Plain", "UTF-8"):
+        assert word in combined
+    assert world.save.to_dict() == before
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_display_selection_saves_before_applying_and_acknowledging(monkeypatch, fail):
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
+    world = _world_with_seed(42)
+    keys = iter(["4", "4", "B"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    output = io.StringIO()
+    saves = []
+    def checkpoint(current):
+        assert vr._OUTPUT_STYLE == "auto"
+        assert "Display saved:" not in output.getvalue()
+        assert current.save.display_style == "plain"
+        saves.append(current.save.display_style)
+        if fail: raise vr.SaveError()
+    world._checkpoint = checkpoint
+    with contextlib.redirect_stdout(output):
+        if fail:
+            with pytest.raises(vr.SaveError): vr.screen_display_options(vr.Palette(False), world)
+        else:
+            vr.screen_display_options(vr.Palette(False), world)
+    assert saves == ["plain"]
+    if fail:
+        assert vr._OUTPUT_STYLE == "auto" and "Display saved:" not in output.getvalue()
+    else:
+        assert vr._OUTPUT_STYLE == "plain"
+        assert "Display saved:" in output.getvalue() and "Already using:" in output.getvalue()
+
+
+def test_plain_display_keeps_utf8_input_and_wide_backspace(monkeypatch):
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "plain")
+    _use_decoded_input(monkeypatch, "Caf\u00e9\u754c\x7f\r".encode("utf-8"))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr.read_line_raw(20, allowed=str.isalnum) == "Caf\u00e9"
+    assert "Caf\u00e9\u754c" in output.getvalue()
+    assert "\b \b\b \b" in output.getvalue()
+
+
+@pytest.mark.parametrize("style,key", [("auto", b"1"), ("basic", b"2"), ("mono", b"3"), ("plain", b"4")])
+def test_real_display_saved_before_ack_and_applied_from_restart_title(tmp_path, style, key):
+    import os, subprocess
+    world = _world_with_seed(42)
+    world.save.display_style = "basic" if style == "auto" else "auto"
+    vr.persist(world, tmp_path, 77)
+    with _door_stopped_at(tmp_path, b"O" + key, b"Display saved:"):
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert saved.display_style == style
+    before = (tmp_path / "77.json").read_bytes()
+    for commands in (b"O", b"OBQ", b"O" + key + b"BQ"):
+        result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands,
+            capture_output=True, timeout=10, env=dict(os.environ,
+                VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")))
+        assert result.returncode == 0 and not result.stderr
+        assert b"Display Options" in result.stdout
+        assert (tmp_path / "77.json").read_bytes() == before
+        if style in ("mono", "plain"): assert b"\x1b" not in result.stdout
+        if style == "basic": assert b"38;" not in result.stdout
+        if style == "plain": assert result.stdout.isascii()

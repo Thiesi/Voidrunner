@@ -93,6 +93,14 @@ BOLD = f"{ESC}[1m"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
 _OUTPUT_WIDTH = 80
 _OUTPUT_HEIGHT = 24
+_OUTPUT_STYLE = "auto"
+DISPLAY_STYLES = {"auto": "Full palette", "basic": "16-color", "mono": "Monochrome", "plain": "Plain / ASCII artwork"}
+_ASCII_ART_TRANSLATION = str.maketrans({
+    **{chr(code): "|" for code in (0x2502, 0x2551)},
+    **{chr(code): "+" for code in (0x251C, 0x2524, 0x2554, 0x2557, 0x255A, 0x255D, 0x2560, 0x2563, 0x256D, 0x256E, 0x256F, 0x2570)},
+    **{chr(code): "#" for code in (0x2580, 0x2584, 0x2588, 0x25A0)},
+    chr(0x2500): "-", chr(0x2550): "=", chr(0x2591): ".", chr(0x2605): "*",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +139,11 @@ class Palette:
         self._truecolor = truecolor
 
     def _sgr(self, rgb: tuple[int, int, int], idx256: int) -> str:
+        if _OUTPUT_STYLE in ("mono", "plain"):
+            return ""
+        if _OUTPUT_STYLE == "basic":
+            color = {205: 95, 51: 96, 46: 92, 203: 91, 244: 37, 220: 93}.get(idx256, 37)
+            return f"{ESC}[{color}m"
         if self._truecolor:
             r, g, b = rgb
             return f"{ESC}[38;2;{r};{g};{b}m"
@@ -161,7 +174,18 @@ class Palette:
         return self._sgr((255, 200, 60), 220)
 
 
+def apply_display_style(style: str) -> None:
+    global _OUTPUT_STYLE
+    if type(style) is not str or style not in DISPLAY_STYLES:
+        raise ValueError("Unknown display style.")
+    _OUTPUT_STYLE = style
+
+
 def out(text: str = "") -> None:
+    if _OUTPUT_STYLE in ("mono", "plain"):
+        text = ANSI_ESCAPE_RE.sub("", text)
+    if _OUTPUT_STYLE == "plain":
+        text = text.translate(_ASCII_ART_TRANSLATION)
     sys.stdout.write(text)
     sys.stdout.flush()
 
@@ -1095,6 +1119,7 @@ class SaveData:
     contraband_trade_milestones: int = 0
     best_credits: int = 0
     galaxy_version: int = 1
+    display_style: str = "auto"
     # Each known FIFO lot is [remaining quantity, remaining total paid cost].
     # Any hold quantity without a lot is older cargo of unknown acquisition cost.
     cargo_basis: dict[str, list[list[int]]] = field(default_factory=dict)
@@ -1106,6 +1131,7 @@ class SaveData:
         return {
             "schema_version": self.schema_version,
             "galaxy_version": self.galaxy_version,
+            "display_style": self.display_style,
             "seed": self.seed,
             "pilot": self.pilot.to_dict(),
             "ship": self.ship.to_dict(),
@@ -1142,6 +1168,7 @@ class SaveData:
         return cls(
             schema_version=d["schema_version"],
             galaxy_version=d.get("galaxy_version", 1),
+            display_style=d.get("display_style", "auto"),
             seed=d["seed"],
             pilot=Pilot.from_dict(d["pilot"]),
             ship=Ship.from_dict(d["ship"]),
@@ -1207,6 +1234,8 @@ def _validate_save_document(data: dict) -> None:
     for key, expected in (("schema_version", SCHEMA_VERSION), ("galaxy_version", 1)):
         if type(data.get(key, expected)) is not int or data.get(key, expected) != expected:
             raise UnsupportedSave("This career uses an unsupported save or galaxy version.")
+    style = data.get("display_style", "auto")
+    require(type(style) is str and style in DISPLAY_STYLES, "display style")
     integer(data["seed"], "galaxy seed", minimum=-(2**63))
     system(data["current_system"], "current system")
     integer(data["turn"], "day")
@@ -2847,9 +2876,11 @@ def retire_pilot(old_save: SaveData) -> SaveData:
     cumulative starting-credit bonus are the *only* things that survive
     the reset, the "legacy" this feature is actually about; everything
     else restarting is what makes it a real new run rather than the same
-    character continuing under a different name."""
+    character continuing under a different name. The display preference also
+    survives as presentation configuration, separate from gameplay progress."""
     retirements = old_save.pilot.retirements + 1
     new_save = _new_career(old_save.pilot.handle)
+    new_save.display_style = old_save.display_style
     new_save.best_credits = max(old_save.best_credits, old_save.pilot.credits)
     new_save.pilot.retirements = retirements
     new_save.pilot.credits += retirements * RETIREMENT_STARTING_CREDITS_BONUS
@@ -3375,7 +3406,7 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
         lines.append(f"Tracked {kind}: {mission_bearing(world, mission)}; {deadline}. [C] Chart, then [R] contract route.")
     actions = ["[M] Commodity Market", "[Y] Engineering Yard", "[B] Mission Board",
                "[C] Navigation Chart", "[S] Pilot Status", "[H] Hall of Fame",
-               "[G] Pilot Guide", "[T] Trading Ledger", "[Q] Disembark & Save"]
+               "[G] Pilot Guide", "[T] Trading Ledger", "[O] Display Options", "[Q] Disembark & Save"]
     if landmark_available_here(world): actions.append(f"[L] {world.landmark['label']}")
     if concord_commission_available(world): actions.append("[P] Privateer Commission")
     if blackwake_made_available(world): actions.append("[W] Welcome to the Wake")
@@ -3428,8 +3459,41 @@ def screen_station_menu(p: Palette, world: World) -> str:
         if choice == ">": page = min(page + 1, count - 1)
         elif choice == "<": page = max(0, page - 1)
         elif choice == "X": expanded, page = not expanded, 0
-        elif choice in "MYBCSHGTQLDPW" and len(choice) == 1:
+        elif choice in "MYBCSHGTQLDPWO" and len(choice) == 1:
             return choice
+
+
+def select_display_style(world: World, style: str) -> bool:
+    if type(style) is not str or style not in DISPLAY_STYLES:
+        raise ValueError("Unknown display style.")
+    changed = world.save.display_style != style
+    world.save.display_style = style
+    return changed
+
+
+def screen_display_options(p: Palette, world: World) -> None:
+    page, result = 0, None
+    styles = list(DISPLAY_STYLES)
+    while True:
+        lines = [f"Current: {DISPLAY_STYLES[world.save.display_style]}.",
+                 "Choose a preset to apply and save it. Back keeps the current preference.",
+                 "[1] Full palette: use the terminal's existing color depth.",
+                 "[2] 16-color: basic ANSI colors and Unicode artwork.",
+                 "[3] Monochrome: Unicode artwork without ANSI styling.",
+                 "[4] Plain: ASCII artwork without ANSI styling. Unicode letters and text input stay UTF-8.",
+                 "Sample: Hull 30/60; Fuel 8/24; Cargo 12/24 used. LOW FUEL / DANGER labels do not need color."]
+        if result: lines.insert(0, result)
+        key, page, count = _draw_service_page(p, "Display Options", lines, "[1-4]Set [<]Prev [>]Next [B]Back: ", page)
+        if key in ("B", "Q"): return
+        if key == ">": page = min(page + 1, count - 1)
+        elif key == "<": page = max(0, page - 1)
+        elif len(key) == 1 and "1" <= key <= "4":
+            style = styles[int(key) - 1]
+            changed = select_display_style(world, style)
+            if changed: world.checkpoint()
+            apply_display_style(style)
+            label = "Display saved" if changed else "Already using"
+            result, page = f"{label}: {DISPLAY_STYLES[style]}.", 0
 
 
 def landmark_available_here(world: World) -> bool:
@@ -5957,7 +6021,8 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
 
 
 def main() -> int:
-    global _OUTPUT_WIDTH, _OUTPUT_HEIGHT
+    global _OUTPUT_WIDTH, _OUTPUT_HEIGHT, _OUTPUT_STYLE
+    _OUTPUT_STYLE = "auto"
 
     sys.stdout.reconfigure(encoding="utf-8")
     info = _load_door_info()
@@ -5986,15 +6051,17 @@ def main() -> int:
             lease.enter_context(pilot_session(save_dir, user_id))
         except OSError as exc:
             raise SaveError from exc
-        screen_title(p, info)
         try:
             save, is_new, notice = load_or_create_save(save_dir, user_id, info["handle"])
         except ResumeError as exc:
+            screen_title(p, info)
             recovery = screen_save_recovery(p, save_dir, user_id, exc)
             save = recovery.save
             if save is None:
                 return recovery.exit_code
             is_new, notice = False, None
+        apply_display_style(save.display_style)
+        screen_title(p, info)
         if notice:
             out_line(f"{p.wrong}{notice}{RESET}")
         if is_new:
@@ -6018,6 +6085,9 @@ def main() -> int:
 
         while True:
             choice = screen_station_menu(p, world)
+            if choice == "O":
+                screen_display_options(p, world)
+                continue
             if choice == "T":
                 screen_trading_ledger(p, world)
                 continue
@@ -6088,6 +6158,7 @@ def main() -> int:
     finally:
         lease.close()
         out(RESET)
+        _OUTPUT_STYLE = "auto"
 
 
 if __name__ == "__main__":
