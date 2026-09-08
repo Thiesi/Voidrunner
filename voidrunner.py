@@ -5930,52 +5930,74 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             return outcome
 
 
+def customs_quote(world: World) -> tuple[int, int, int]:
+    cargo = world.save.cargo
+    quantity = sum(q for c, q in cargo.items() if not COMMODITIES[c]["legal"])
+    value = sum(q * COMMODITIES[c]["base"] for c, q in cargo.items() if not COMMODITIES[c]["legal"])
+    return quantity, 100 + value // 2, 150 + value
+
+
+def customs_display_lines(world: World) -> list[str]:
+    quantity, cost, fine = customs_quote(world)
+    credits = world.save.pilot.credits
+    return [
+        f"Concord customs detects {quantity} units of unauthorized contraband.",
+        "[S] Surrender: lose all contraband, pay no fine. Concord standing improves by 1 up to its limit; notoriety stays unchanged.",
+        ("[B] Bribe: " if credits >= cost else "Bribe unavailable: ") +
+        f"offer {cost}cr; 60% acceptance. Pay only if accepted, keep all cargo, and leave standing/notoriety unchanged.",
+        f"If refused: all contraband is confiscated. Fine {fine}cr, capped at your credits ({min(credits, fine)}cr now); no debt.",
+        f"Refusal lowers Concord standing by 5 down to its limit and adds {NOTORIETY_PER_CUSTOMS_BUST} notoriety.",
+    ]
+
+
+def resolve_customs(world: World, action: str) -> list[str]:
+    """Validate before RNG/effects; the caller checkpoints completion and result."""
+    quantity, cost, fine = customs_quote(world)
+    if action not in ("S", "B"):
+        raise ValueError("Choose a displayed action. No cargo has been surrendered.")
+    if action == "B":
+        if world.save.pilot.credits < cost:
+            raise ValueError(f"Insufficient credits: bribe requires {cost}cr. No cargo or credits changed.")
+        if world.event_rng.random() < 0.6:
+            world.save.pilot.credits -= cost
+            return [f"{cost}cr changes hands quietly. Move along."]
+        paid = min(world.save.pilot.credits, fine)
+        world.save.pilot.credits -= paid
+        for c in CONTRABAND_COMMODITIES:
+            _dispose_cargo(world, c, world.save.cargo.get(c, 0))
+        adjust_reputation(world, FACTION_CONCORD, -5)
+        world.save.pilot.notoriety += NOTORIETY_PER_CUSTOMS_BUST
+        return [f"Bribe refused -- contraband confiscated; {paid}cr collected against a {fine}cr fine. No debt remains."]
+    for c in CONTRABAND_COMMODITIES:
+        _dispose_cargo(world, c, world.save.cargo.get(c, 0))
+    adjust_reputation(world, FACTION_CONCORD, 1)
+    return [f"You surrender {quantity} units without a fight."]
+
+
 def screen_customs(p: Palette, world: World) -> None:
     state = _travel_encounter(world)
     if state.get("done"):
         for line in state.get("result", []):
             out_line(f"{p.gold}{line}{RESET}")
         return
-    contraband_qty = sum(q for c, q in world.save.cargo.items() if not COMMODITIES[c]["legal"])
-    out_line()
-    out_line(_box_title(p, "CONCORD CUSTOMS INSPECTION CHECKPOINT", border_color=p.wrong))
-    hail_line = f"  {p.wrong}Concord customs hails you for a cargo inspection.{RESET}"
-    out_line(f"{p.wrong}│{RESET}{hail_line}{' ' * max(0, 77 - _vis_len(hail_line))}{p.wrong}│{RESET}")
-    scan_line = f"  {p.muted}Scanners detect {contraband_qty} units of unauthorized contraband in your cargo hold.{RESET}"
-    out_line(f"{p.wrong}│{RESET}{scan_line}{' ' * max(0, 77 - _vis_len(scan_line))}{p.wrong}│{RESET}")
-    out_line(_box_bottom(p, border_color=p.wrong))
-    value = sum(q * COMMODITIES[c]["base"] for c, q in world.save.cargo.items() if not COMMODITIES[c]["legal"])
+    page, result = 0, None
     while True:
-        out_prompt(f"  {p.muted}[S]urrender contraband [B]ribe the inspector: {RESET}")
-        action = read_command()
-        out_line(action)
-        if action in ("S", "B"):
-            break
-        out_line(f"{p.muted}Choose S or B. No cargo has been surrendered.{RESET}")
-    if action == "B":
-        cost = 100 + value // 2
-        if world.save.pilot.credits >= cost and world.event_rng.random() < 0.6:
-            world.save.pilot.credits -= cost
-            _encounter_result(p, world, state, [f"{cost}cr changes hands quietly. Move along."])
+        lines = customs_display_lines(world)
+        if result: lines.insert(0, result)
+        can_pay = world.save.pilot.credits >= customs_quote(world)[1]
+        footer = "[S]Surrender [B]Bribe [<>]Page: " if can_pay else "[S]Surrender [<>]Page: "
+        action, page, count = _draw_service_page(p, f"Customs {world.save.pilot.credits:,}cr", lines, footer, page)
+        if action == ">": page = min(page + 1, count - 1)
+        elif action == "<": page = max(0, page - 1)
+        else:
+            try:
+                outcome = resolve_customs(world, action)
+            except ValueError as exc:
+                result, page = str(exc), 0
+                continue
+            _encounter_result(p, world, state, outcome)
             return
-        fine = 150 + value
-        world.save.pilot.credits = max(0, world.save.pilot.credits - fine)
-        for c in CONTRABAND_COMMODITIES:
-            _dispose_cargo(world, c, world.save.cargo.get(c, 0))
-        adjust_reputation(world, FACTION_CONCORD, -5)
-        # Notoriety only rises here, not on the cooperative "surrender
-        # outright" path below -- a caught, refused bribe is a repeat-
-        # offender bust; volunteering the contraband before a fight ever
-        # starts is already the game's own "played fair, small rep
-        # bonus" outcome (see the +1 just below), not a wanted-status
-        # event on top of that.
-        world.save.pilot.notoriety += NOTORIETY_PER_CUSTOMS_BUST
-        _encounter_result(p, world, state, [f"Bribe refused -- contraband confiscated and a {fine}cr fine levied."])
-        return
-    for c in CONTRABAND_COMMODITIES:
-        _dispose_cargo(world, c, world.save.cargo.get(c, 0))
-    adjust_reputation(world, FACTION_CONCORD, 1)
-    _encounter_result(p, world, state, [f"You surrender {contraband_qty} units without a fight."])
+
 
 
 @dataclass(frozen=True)

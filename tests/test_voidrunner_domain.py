@@ -2313,7 +2313,8 @@ def test_pilot_save_round_trip_defaults_notoriety_for_old_saves_without_it():
 def test_customs_bribe_refused_raises_notoriety(monkeypatch):
     world = _world_with_seed(71)
     world.save.cargo["narcotics"] = 5
-    world.save.pilot.credits = 0  # can't afford the bribe cost -> refused path
+    world.save.pilot.credits = 10_000
+    monkeypatch.setattr(world.event_rng, "random", lambda: 0.99)  # affordable but refused
     vr.read_key = lambda: "B"
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -5221,7 +5222,7 @@ def test_screen_hall_of_fame_records_are_complete_and_width_safe(monkeypatch):
     assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
 
-def test_screen_customs_rows_fit_the_box_for_a_large_contraband_stash(monkeypatch):
+def test_screen_customs_large_contraband_stash_has_complete_width_safe_terms(monkeypatch):
     world = _world_with_seed(308)
     world.save.cargo = {"weapons": 20, "narcotics": 15}
     world.save.pilot.credits = 50_000
@@ -5229,7 +5230,9 @@ def test_screen_customs_rows_fit_the_box_for_a_large_contraband_stash(monkeypatc
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_customs(vr.Palette(truecolor=False), world)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_customs")
+    text = " ".join(vr._ANSI_RE.sub("", buf.getvalue()).split())
+    assert "35 units" in text and "60% acceptance" in text and "no debt" in text
+    assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
 
 # The box-border checks above only pin the *right edge* of each row -- they
@@ -8255,6 +8258,138 @@ def test_combat_telemetry_unaffordable_actions_have_terms_without_hotkeys(patrol
     assert "UNAFFORDABLE" in text
     assert str(vr.notoriety_fine_cost(0) if patrol else vr.bribe_cost(pirate)) + "cr" in text
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+
+def test_unaffordable_customs_bribe_is_harmless_and_keeps_inspection_pending(monkeypatch):
+    import copy
+    world = _world_with_seed(42)
+    world.save.cargo = {"weapons": 2, "food": 1}
+    world.save.pilot.credits = 0
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    calls = []
+    def choose():
+        if not calls:
+            calls.append(1)
+            return "B"
+        assert world.save.to_dict() == before
+        assert world.event_rng.getstate() == rng
+        raise EOFError
+    monkeypatch.setattr(vr, "read_key", choose)
+    world._checkpoint = lambda current: pytest.fail("Unaffordable bribe checkpointed")
+    with contextlib.redirect_stdout(io.StringIO()) as output, pytest.raises(EOFError):
+        vr.screen_customs(vr.Palette(False), world)
+    assert "Insufficient credits" in output.getvalue()
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("credits", [0, 10_000])
+@pytest.mark.parametrize("style", ["auto", "plain"])
+def test_customs_pages_keep_complete_terms_without_mutation(monkeypatch, width, height, credits, style):
+    import copy, re
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    world = _world_with_seed(42)
+    world.save.cargo = {"weapons": 2, "food": 1}
+    world.save.pilot.credits = credits
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    frames, content = [], []
+    output = io.StringIO()
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0)
+        frames.append(frame)
+        assert len(frame.splitlines()) <= height
+        assert all(vr._visible_width(line) <= width for line in frame.splitlines())
+        assert "[S]Surrender" in frame and "[<>]Page:" in frame
+        if not credits: assert "[B]" not in frame
+        plain = vr._ANSI_RE.sub("", frame)
+        content.append(re.search(r"\d+/\d+\r\n(.*?)\r\n\[S\]Surrender", plain, re.S).group(1))
+        assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+        page, count = map(int, re.search(r"Customs.*?(\d+)/(\d+)", frame, re.S).groups())
+        if page == count: raise EOFError
+        return ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    world._checkpoint = lambda current: pytest.fail("Browsing customs checkpointed")
+    with contextlib.redirect_stdout(output), pytest.raises(EOFError):
+        vr.screen_customs(vr.Palette(False), world)
+    text = " ".join(" ".join(content).split())
+    for phrase in ("2 units", "pay no fine", "60% acceptance", "Pay only if accepted", "If refused:", "no debt", "notoriety"):
+        assert phrase in text
+
+
+@pytest.mark.parametrize("action", ["?", "", "Q", "b", None])
+def test_customs_invalid_domain_decision_has_no_effects(action):
+    import copy
+    world = _world_with_seed(42)
+    world.save.cargo = {"weapons": 2}
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    with pytest.raises(ValueError): vr.resolve_customs(world, action)
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+def _world_waiting_at_customs():
+    world = _world_with_seed(42)
+    destination = next(i for i in world.here.connections if world.by_id[i].economy != "Haven")
+    world.save.current_system = destination
+    world.by_id[destination].discovered = True
+    world.save.turn = 1
+    world.save.cargo = {"weapons": 2, "food": 1}
+    world.save.pending_travel = {"version": 1, "origin": 0, "destination": destination,
+        "was_discovered": False, "destroyed": False, "phase": "customs", "primary": "random",
+        "bounty": None, "escorts": [], "escort_index": 0, "encounter": {"inspect": True}}
+    return world
+
+
+@pytest.mark.parametrize("commands,credits", [(b">", 10_000), (b"B>", 0), (b"?<>", 0)])
+def test_real_customs_browsing_and_rejected_bribe_preserve_pending_save(tmp_path, commands, credits):
+    import json, os, subprocess
+    world = _world_waiting_at_customs()
+    world.save.pilot.credits = credits
+    world.save.pilot.highest_rank_seen = len(vr.RANKS) - 1
+    vr.persist(world, tmp_path, 77)
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert saved.pending_travel["phase"] == "customs"
+    before = (tmp_path / "77.json").read_bytes()
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 40, "terminal_height": 12}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands,
+        capture_output=True, timeout=10, env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)))
+    assert result.returncode == 0 and not result.stderr
+    assert b"Resuming your interrupted journey" in result.stdout and b"Customs" in result.stdout
+    assert b"Command Deck" not in result.stdout
+    if b"B" in commands: assert b"Insufficient credits" in result.stdout
+    assert (tmp_path / "77.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("decision", ["surrender", "accepted", "refused"])
+def test_customs_result_checkpoint_and_replay_do_not_repeat_effects(tmp_path, decision):
+    world = _world_waiting_at_customs()
+    cost = vr.customs_quote(world)[1]
+    world.save.pilot.credits = cost
+    world.event_rng.seed(0 if decision == "refused" else 1)
+    vr.persist(world, tmp_path, 77)
+    marker = b"You surrender" if decision == "surrender" else b"changes hands quietly" if decision == "accepted" else b"Bribe refused"
+    command = b">S" if decision == "surrender" else b">B"
+    with _door_stopped_at(tmp_path, command, marker):
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert saved.pending_travel["encounter"]["done"]
+        assert saved.cargo["food"] == 1
+        assert saved.pilot.credits == (cost if decision == "surrender" else 0)
+        if decision == "accepted": assert saved.cargo["weapons"] == 2
+        else:
+            assert "weapons" not in saved.cargo
+            assert saved.trading_ledger.uncosted_losses == 2
+        if decision == "refused":
+            assert saved.pilot.notoriety == vr.NOTORIETY_PER_CUSTOMS_BUST
+            assert f"{cost}cr collected" in saved.pending_travel["encounter"]["result"][0]
+    replay = vr.World(saved)
+    before, rng = replay.save.to_dict(), replay.event_rng.getstate()
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_customs(vr.Palette(False), replay)
+    assert marker.decode() in output.getvalue()
+    assert replay.save.to_dict() == before and replay.event_rng.getstate() == rng
 
 
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
