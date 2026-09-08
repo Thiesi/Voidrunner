@@ -3683,7 +3683,7 @@ def test_screen_hall_of_fame_marks_the_current_pilot(tmp_path, monkeypatch):
     text = buf.getvalue()
     assert "Me" in text and "Someone Else" in text
     me_line = next(line for line in text.splitlines() if "Me" in line and "Someone" not in line)
-    assert "*" in me_line
+    assert "[YOU]" in me_line
 
 
 # -- named sectors ---------------------------------------------------------
@@ -4947,7 +4947,55 @@ def test_chart_retained_scan_result_is_checkpointed_before_disconnect(tmp_path):
         assert len(set(saved.discovered)-before)==1 and saved.turn==0
 
 
-def test_screen_hall_of_fame_rows_fit_the_box_at_max_field_widths(monkeypatch):
+@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+def test_score_pages_retain_all_twenty_pilots_and_fields_without_reloading(tmp_path,monkeypatch,width,height):
+    import json,re
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    records=[{"user_id":i,"handle":f"Pilot-{i:02}","best_credits":1_000_000-i,"rank":vr.RANKS[-1][1],"kills":100+i,"missions_completed":200+i,"retirements":i} for i in range(1,26)]
+    path=tmp_path/"leaderboard.json";path.write_text(json.dumps(records),encoding="utf-8");original_bytes=path.read_bytes()
+    world=_world_with_seed(42);before=world.save.to_dict()
+    output=io.StringIO();frames=[];loads=[];builds=[]
+    original_load=vr.load_hall_of_fame;original_pages=vr._service_pages
+    def load(directory):loads.append(directory);return original_load(directory)
+    def pages(*args):builds.append(1);return original_pages(*args)
+    monkeypatch.setattr(vr,"load_hall_of_fame",load);monkeypatch.setattr(vr,"_service_pages",pages)
+    def choose():
+        frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0);frames.append(frame)
+        assert len(frame.splitlines())<=height
+        assert all(vr._visible_width(line)<=width for line in frame.splitlines())
+        assert "[B]Back:" in " ".join(frame.split())
+        page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
+        return "B" if page==count else "N"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_hall_of_fame(vr.Palette(False),world,tmp_path,20)
+    text=" ".join(" ".join(frames).split())
+    for i in range(1,21):
+        assert text.count(f"Pilot-{i:02}")==1
+        assert f"{1_000_000-i:,}cr" in text
+        assert str(100+i) in text and str(200+i) in text
+    assert "Pilot-21" not in text and text.count("[YOU]")==2
+    assert len(loads)==len(builds)==1
+    assert path.read_bytes()==original_bytes and world.save.to_dict()==before
+
+
+@pytest.mark.parametrize("commands",[b"HNPNBQ",b"HN",b"H"])
+def test_real_score_paging_back_and_eof_preserve_career_and_scores(tmp_path,commands):
+    import json,os,subprocess
+    world=_world_with_seed(42)
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
+    for uid in range(1,26):
+        save=vr._new_career(f"Pilot-{uid:02}");save.pilot.credits=uid*1000
+        vr.update_hall_of_fame(tmp_path,uid,save)
+    paths=[tmp_path/"77.json",*(tmp_path/"scores").glob("*.json")]
+    before={path:path.read_bytes() for path in paths}
+    info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+    assert result.returncode==0 and not result.stderr and b"Hall of Fame" in result.stdout
+    assert {path:path.read_bytes() for path in paths}==before
+
+
+def test_screen_hall_of_fame_records_are_complete_and_width_safe(monkeypatch):
     world = _world_with_seed(307)
     import json
     import tempfile
@@ -4959,11 +5007,15 @@ def test_screen_hall_of_fame_rows_fit_the_box_at_max_field_widths(monkeypatch):
     }]
     save_dir = Path(tempfile.mkdtemp())
     (save_dir / "leaderboard.json").write_text(json.dumps(entries), encoding="utf-8")
-    monkeypatch.setattr(vr, "read_key", lambda: "X")
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_hall_of_fame(vr.Palette(truecolor=False), world, save_dir, 1)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_hall_of_fame")
+    text = " ".join(vr._ANSI_RE.sub("", buf.getvalue()).split())
+    assert "SixteenCharHandl" in text and "999,999cr" in text
+    assert "[YOU]" in text and "raiders defeated 120" in text
+    assert "missions 88" in text and "retirements 3" in text
+    assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
 
 def test_screen_customs_rows_fit_the_box_for_a_large_contraband_stash(monkeypatch):

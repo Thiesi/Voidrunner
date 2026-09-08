@@ -4923,30 +4923,28 @@ def screen_status(p: Palette, world: World) -> None:
             result, page, cache = "Retirement cancelled; current career retained.", 0, {}
 
 
+def hall_of_fame_lines(entries: list[dict], user_id: int) -> list[str]:
+    if not entries:
+        return ["No pilots recorded yet -- be the first."]
+    lines = [f"Top {len(entries)} pilots by best recorded credits. [YOU] marks your pilot when listed."]
+    for position, entry in enumerate(entries, 1):
+        marker = " [YOU]" if entry.get("user_id") == user_id else ""
+        lines.append(f"#{position}{marker} {entry.get('handle', '?')}: {entry.get('rank', '?')}. "
+                     f"Best credits {entry.get('best_credits', 0):,}cr; raiders defeated {entry.get('kills', 0)}; "
+                     f"missions {entry.get('missions_completed', 0)}; retirements {entry.get('retirements', 0)}.")
+    return lines
+
+
 def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) -> None:
     entries = load_hall_of_fame(save_dir)
-    out_line()
-    out_line(_box_title(p, "Interstellar Pilot Hall of Fame"))
-    if not entries:
-        empty_line = f"  {p.muted}No pilots recorded yet -- be the first.{RESET}"
-        out_line(f"{p.accent}│{RESET}{empty_line}{' ' * max(0, 77 - _vis_len(empty_line))}{p.accent}│{RESET}")
-        out_line(_box_bottom(p))
-    else:
-        header = f" {p.gold}RK  PILOT CALLSIGN   RANK TITLE                 CREDITS  KILLS  MISSIONS RET{RESET}"
-        out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
-        out_line(_box_divider(p))
-        for i, e in enumerate(entries, start=1):
-            marker = f"{p.gold}*{RESET}" if e.get("user_id") == user_id else " "
-            col = p.gold if e.get("user_id") == user_id else (p.accent if i <= 3 else p.muted)
-            row_str = (
-                f" {marker}{col}{i:>2}.{RESET} {e.get('handle', '?'):<16} "
-                f"{e.get('rank', '?'):<22} {e.get('best_credits', 0):>8,}cr "
-                f"{e.get('kills', 0):>6} {e.get('missions_completed', 0):>8} {e.get('retirements', 0):>4}"
-            )
-            pad_len = max(0, 77 - _vis_len(row_str))
-            out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
-        out_line(_box_bottom(p))
-    pause(p)
+    title, footer = "Hall of Fame", "[N]Next [P]Prev [B]Back: "
+    pages = _service_pages(hall_of_fame_lines(entries, user_id), title, footer)
+    page = 0
+    while True:
+        key, page, count = _draw_service_page(p, title, [], footer, page, pages=pages)
+        if key in ("B", "Q", " "): return
+        if key in ("N", ">"): page = min(page + 1, count - 1)
+        elif key in ("P", "<"): page = max(0, page - 1)
 
 
 # [S]can, [G]o to, [V]iew are fixed control keys on this same prompt,
