@@ -2551,10 +2551,10 @@ class PilotBusy(Exception):
 
 
 @contextlib.contextmanager
-def pilot_session(save_dir: Path, user_id: int):
+def _file_lease(path: Path, *, wait: float = 0):
     """Hold a stable OS lock; never unlink its inode while another opener exists."""
-    save_dir.mkdir(parents=True, exist_ok=True)
-    with (save_dir / f".{user_id}.lock").open("a+b") as handle:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
         if os.name == "nt":
             import msvcrt
 
@@ -2567,14 +2567,51 @@ def pilot_session(save_dir: Path, user_id: int):
             import fcntl
 
             acquire = lambda: fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        try:
-            acquire()
-        except OSError as exc:
-            if exc.errno in (errno.EACCES, errno.EAGAIN):
-                raise PilotBusy from exc
-            raise
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                acquire()
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise PilotBusy from exc
+                time.sleep(0.02)
         # Closing the descriptor releases the lock on every exit, including a
         # killed process. Keep the file itself: unlinking it could split owners.
+        yield
+
+
+@contextlib.contextmanager
+def _maintenance_gate(save_dir: Path):
+    # Restore preserves this directory and its lock inodes, switching only data.
+    # Existing service-owned directories need no write access to their parent.
+    with _file_lease(save_dir / ".maintenance.lock", wait=1):
+        yield
+
+
+@contextlib.contextmanager
+def pilot_session(save_dir: Path, user_id: int):
+    save_dir = save_dir.resolve()
+    with contextlib.ExitStack() as lease:
+        with _maintenance_gate(save_dir):
+            lease.enter_context(_file_lease(save_dir / f".{user_id}.lock"))
+        yield
+
+
+@contextlib.contextmanager
+def maintenance_session(save_dir: Path):
+    """Exclude new launches and refuse maintenance while any pilot is active."""
+    save_dir = save_dir.resolve()
+    with _maintenance_gate(save_dir):
+        # Probe every stable session lock while the gate prevents new owners.
+        # The gate prevents new owners, so each probe can close immediately.
+        # Permanent pilot files must not consume one descriptor per past caller.
+        for path in save_dir.glob(".*.lock"):
+            if re.fullmatch(r"\.[0-9]+\.lock", path.name):
+                with _file_lease(path):
+                    pass
         yield
 
 
@@ -4705,8 +4742,8 @@ def main() -> int:
                 continue
             world.checkpoint()
     except PilotBusy:
-        out_line(f"{p.gold}This pilot already has an active Voidrunner session. "
-                 f"Return to it or close it before launching again.{RESET}")
+        out_line(f"{p.gold}This pilot already has an active Voidrunner session, or save maintenance is in progress. "
+                 f"Close that session or wait for maintenance to finish, then try again.{RESET}")
         try:
             pause(p)
         except EOFError:
