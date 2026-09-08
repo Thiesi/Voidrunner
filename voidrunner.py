@@ -3724,39 +3724,61 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
 
 def _pick_trade_field(title: str, options: list[tuple[object, str]]) -> object | None:
     footer = "[1-9] Select [N]ext [P]rev [B]ack: "
-    budget = len(_trade_pages(["row"] * _OUTPUT_HEIGHT, title, footer)[0])
-    pages = [([], [])]
-    for value, label in options:
-        choice = None
-        for row in _wrap_output(_mission_plain(label), max(1, _OUTPUT_WIDTH - 5)).split("\r\n"):
-            rows, choices = pages[-1]
-            if len(rows) >= budget or (choice is None and len(choices) >= 9):
-                pages.append(([], []))
-                rows, choices = pages[-1]
-                choice = None
-            if choice is None:
-                choices.append(value)
-                choice = len(choices)
-            rows.append(f"[{choice}] {row}")
-    page = 0
+    wrapped_options = [(value, _mission_plain(label), _wrap_output(_mission_plain(label), max(1, _OUTPUT_WIDTH - 5)).split("\r\n"))
+                       for value, label in options]
+    maximum_pages = max(1, sum(len(rows) for _, _, rows in wrapped_options) + len(options))
+    def budget(heading, controls):
+        width = max(1, _OUTPUT_WIDTH - 1)
+        overhead = len(_wrap_output(f"{heading} {maximum_pages}/{maximum_pages}", width).split("\r\n"))
+        overhead += len(_wrap_output(controls, width).split("\r\n")) + 3
+        return max(1, _OUTPUT_HEIGHT - overhead)
+    capacity = budget(title, footer)
+    def ordinary_page():
+        return {"title": title, "footer": footer, "rows": [], "choices": [], "required": ()}
+    pages = [ordinary_page()]
+    for ordinal, (value, label, wrapped) in enumerate(wrapped_options, 1):
+        if len(wrapped) > capacity:
+            # One logical choice, with a short heading and a complete label.
+            # Only its final part is selectable, after every part was viewed.
+            if not pages[-1]["rows"]: pages.pop()
+            heading = f"Choice {ordinal}"
+            select_footer = "[1]Pick [N/P] [B]Back: "
+            more_footer = "[N]More [P]Prev [B]Back: "
+            size = min(budget(heading, select_footer), budget(heading, more_footer))
+            rows = _wrap_output(label, max(1, _OUTPUT_WIDTH - 1)).split("\r\n")
+            chunks = [rows[i:i + size] for i in range(0, len(rows), size)]
+            first = len(pages)
+            required = tuple(range(first, first + len(chunks)))
+            for part, chunk in enumerate(chunks):
+                final = part == len(chunks) - 1
+                pages.append({"title": heading, "footer": select_footer if final else more_footer,
+                              "rows": chunk, "choices": [value] if final else [], "required": required})
+            pages.append(ordinary_page())
+            continue
+        current = pages[-1]
+        if current["rows"] and (len(current["rows"]) + len(wrapped) > capacity or len(current["choices"]) == 9):
+            pages.append(ordinary_page()); current = pages[-1]
+        current["choices"].append(value)
+        choice = len(current["choices"])
+        current["rows"].extend(f"[{choice}] {row}" for row in wrapped)
+    if len(pages) > 1 and not pages[-1]["rows"]: pages.pop()
+    if not options: pages[0]["rows"] = ["No observed destinations yet."]
+    page, seen = 0, set()
     while True:
-        out_line()
-        out_line(f"{title} {page + 1}/{len(pages)}")
-        for row in pages[page][0]:
-            out_line(row)
-        if not options:
-            out_line("No observed destinations yet.")
-        out_prompt(footer)
-        key = read_command()
-        out_line(key)
-        if key == "B":
-            return None
-        if key == "N":
-            page = min(page + 1, len(pages) - 1)
-        elif key == "P":
-            page = max(0, page - 1)
-        elif len(key) == 1 and "1" <= key <= "9" and int(key) <= len(pages[page][1]):
-            return pages[page][1][int(key) - 1]
+        current = pages[page]
+        out_line(); out_line(f"{current['title']} {page + 1}/{len(pages)}")
+        for row in current["rows"]: out_line(row)
+        seen.add(page)
+        out_prompt(current["footer"]); key = read_command(); out_line(key)
+        if key == "B": return None
+        if key == "N": page = min(page + 1, len(pages) - 1)
+        elif key == "P": page = max(0, page - 1)
+        elif len(key) == 1 and "1" <= key <= "9" and int(key) <= len(current["choices"]):
+            unseen = [part for part in current["required"] if part not in seen]
+            if unseen:
+                page = unseen[0]
+            else:
+                return current["choices"][int(key) - 1]
 
 
 def edit_door_draft(*, title: str, initial: dict, fields: list[tuple],
@@ -4352,6 +4374,8 @@ def mission_bearing(world: World, mission: Mission) -> str:
     target = world.by_id[mission.target_system]
     path = mission_route(world, mission)
     location = f"{target.name} ({target.x},{target.y})"
+    if mission.kind == "scan" and target.discovered:
+        return f"{location}: already charted; survey blocked"
     if not path:
         return f"{location}: at this station"
     first = world.by_id[path[0]]
@@ -4396,7 +4420,9 @@ def mission_details(world: World, mission: Mission) -> list[str]:
         if missing > free:
             lines.append("WARNING: make cargo space or upgrade before procuring the full load.")
     elif mission.kind == "scan":
-        lines.append("Survey: chart this target by arriving or discovering it with your scanner. No cargo required.")
+        if target.discovered:
+            lines.append("BLOCKED SURVEY: target already charted. Revisiting cannot complete it; abandon an active contract to free its slot.")
+        lines.append("Survey: newly chart this target by arriving or discovering it with your scanner. No cargo required.")
         lines.append("Accepting or tracking the bearing does not chart the system.")
     elif mission.kind == "bounty":
         lines.append(f"Combat: intercept a tier {mission.pirate_tier} raider at the target. Escape leaves the bounty active; destruction fails it.")
@@ -4555,6 +4581,8 @@ def prepare_mission_jump(world: World, mission_id: int) -> int:
     mission = next((m for m in world.save.active_missions if m.id == mission_id), None)
     if mission is None or mission_expired(world, mission):
         raise MissionError("This contract is no longer active.")
+    if mission.kind == "scan" and world.by_id[mission.target_system].discovered:
+        raise MissionError("Survey target already charted; revisiting cannot complete it. Abandon it from contract details.")
     path = mission_route(world, mission)
     if not path:
         raise MissionError("Already at the contract destination. Check its remaining objective.")
@@ -4572,6 +4600,9 @@ def mission_navigation_lines(world: World, mission: Mission, *, active: bool) ->
     lines = [f"{mission.description}", f"Target: {target.name} ({target.x},{target.y}).",
              "Contract bearings do not chart destinations. Uncharted danger remains unknown."]
     live = active and any(m.id == mission.id for m in world.save.active_missions) and not mission_expired(world, mission)
+    if mission.kind == "scan" and target.discovered:
+        lines.append("BLOCKED SURVEY: target already charted. Revisiting cannot complete it; no completion day. An active contract can be abandoned from its details to free the slot.")
+        return [_mission_plain(line) for line in lines]
     if live:
         lines.append("Jump next tracks this contract and flies one leg. Review the next step after each outcome.")
     else:
@@ -4598,6 +4629,15 @@ def mission_navigation_lines(world: World, mission: Mission, *, active: bool) ->
         lines.append("Accepting this escort adds a fight on EVERY jump, including detours, until completion or failure.")
     if mission.kind == "scan":
         lines.append("Survey: arrival or scanner discovery can complete the objective; viewing this route cannot.")
+    lines += navigation_budget_lines(world, path, public_target=target.id)
+    if mission.deadline_turn is not None:
+        timing = "within deadline" if world.save.turn + len(path) <= mission.deadline_turn else "MISSES deadline by travel"
+        lines.append(f"Deadline day {mission.deadline_turn} inclusive: {timing}.")
+    return [_mission_plain(line) for line in lines]
+
+
+def navigation_budget_lines(world: World, path: list[int], *, public_target: int | None = None) -> list[str]:
+    """Pure budget for a chosen path; never observes or charts intermediate systems."""
     wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
     tank = world.save.ship.fuel
     total_fuel = 0
@@ -4612,22 +4652,19 @@ def mission_navigation_lines(world: World, mission: Mission, *, active: bool) ->
             feasible = False
             legs.append(f"Leg {index} exceeds tank capacity: {burn} fuel needed; upgrade or find a different route.")
         elif tank < burn:
-            name = previous.name if previous.discovered or previous.id == target.id else f"uncharted station ({previous.x},{previous.y})"
+            name = previous.name if previous.discovered or previous.id == public_target else f"uncharted station ({previous.x},{previous.y})"
             legs.append(f"Before leg {index}, refuel {burn - tank} units at {name} for {(burn - tank) * 6}cr. Refuelling is manual.")
             tank = burn
-        name = station.name if station.discovered or sid == target.id else f"Uncharted ({station.x},{station.y})"
+        name = station.name if station.discovered or sid == public_target else f"Uncharted ({station.x},{station.y})"
         danger = str(station.danger) if station.discovered else "unknown"
         legs.append(f"Leg {index}: {name}; {burn} fuel, {wage}cr wages; danger {danger}.")
         tank = max(0, tank - burn)
         previous = station
     fuel_cash = max(0, total_fuel - world.save.ship.fuel) * 6
     cash = fuel_cash + wage * len(path)
-    lines += [f"Route: {len(path)} jumps, {total_fuel} fuel; {world.save.ship.fuel} aboard.",
+    lines = [f"Route: {len(path)} jumps, {total_fuel} fuel; {world.save.ship.fuel} aboard.",
               f"Additional fuel cash {fuel_cash}cr; wages {wage * len(path)}cr; travel cash {cash}cr of {world.save.pilot.credits}cr available.",
               f"Arrival day {world.save.turn + len(path)} if uninterrupted; today {world.save.turn}."]
-    if mission.deadline_turn is not None:
-        timing = "within deadline" if world.save.turn + len(path) <= mission.deadline_turn else "MISSES deadline by travel"
-        lines.append(f"Deadline day {mission.deadline_turn} inclusive: {timing}.")
     if cash > world.save.pilot.credits:
         lines.append("CASH WARNING: the full travel budget is not covered; crew may leave if wages cannot be paid.")
     if not feasible:
@@ -4642,7 +4679,7 @@ def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, act
     while True:
         if pages is None:
             live = active and any(m.id == mission.id for m in world.save.active_missions) and not mission_expired(world, mission)
-            footer = ("[J]ump next " if live and mission_route(world, mission) else "") + "[N]ext [P]rev [B]ack: "
+            footer = ("[J]ump next " if live and not (mission.kind == "scan" and world.by_id[mission.target_system].discovered) and mission_route(world, mission) else "") + "[N]ext [P]rev [B]ack: "
             lines = ([mission.description, "Contract is no longer active. Return to the board or career log."]
                      if active and not live else mission_navigation_lines(world, mission, active=active))
             if result:
@@ -4983,7 +5020,7 @@ def screen_chart(p: Palette, world: World) -> int | None:
             actions.append(f"{p.gold}[S]{RESET}can distant contacts")
         if mission is not None:
             actions.append(f"{p.gold}[R]{RESET}oute for tracked contract")
-        actions.append(f"{p.gold}[G]{RESET}o to system by name")
+        actions.append(f"{p.gold}[G]{RESET}eneral route planner")
         actions.append(f"{p.gold}[V]{RESET}iew full chart by sector")
         out_line(f"  {'   '.join(actions)}")
         out_prompt(f"  {p.muted}Jump to which, or [Q] back? {RESET}")
@@ -5063,82 +5100,144 @@ def screen_galaxy_map(p: Palette, world: World) -> None:
     pause(p)
 
 
-def _screen_auto_route(p: Palette, world: World) -> None:
-    """"[G]o to" from the star chart: type a (partial) system name
-    instead of jumping one connection at a time. Only matches already-
-    discovered systems -- an uncharted system's name isn't known to the
-    player to type in the first place -- but the shortest path found
-    can still pass *through* undiscovered systems along the way, same
-    as a manual one-hop jump onto an uncharted neighbor already can.
+def prepare_route_jump(world: World, destination: int) -> int:
+    """Validate a named destination and one leg without changing career state."""
+    if type(destination) is not int or destination not in world.by_id or not world.by_id[destination].discovered:
+        raise MissionError("Choose a charted destination first.")
+    if world.save.pending_travel is not None:
+        raise MissionError("Finish the interrupted journey first.")
+    path = bfs_path(world.by_id, world.here.id, destination)
+    if not path:
+        raise MissionError("Already at the selected destination.")
+    burn = fuel_cost_for_jump(world.here, world.by_id[path[0]], world.save.ship)
+    if world.save.ship.fuel < burn:
+        raise MissionError(f"Not enough fuel for the next leg ({burn} needed, {world.save.ship.fuel} aboard). Refuel at the yard.")
+    return path[0]
 
-    Executes every hop via the ordinary `screen_travel`, completely
-    unmodified, so combat, customs, and travel encounters all still
-    trigger exactly as they would one hop at a time. Stops early if a
-    hop can't be afforded or diverts the plan (e.g. the ship is
-    destroyed and towed back to Freeport mid-route) -- never force-
-    marches the player through a route they can no longer see the cost
-    of one hop ahead."""
-    out_prompt(f"  {p.muted}Go to (system name, Enter to cancel): {RESET}")
-    typed = read_line_raw(max_len=20, allowed=lambda c: c.isalnum() or c in " '").strip()
-    if not typed:
-        return
-    here_id = world.save.current_system
-    candidates = [s for s in world.galaxy
-                  if s.discovered and s.id != here_id and typed.lower() in s.name.lower()]
-    if not candidates:
-        out_line(f"{p.wrong}No charted system matches '{typed}'.{RESET}")
-        return
-    if len(candidates) == 1:
-        target = candidates[0]
-    else:
-        # Dogfood-caught: a short, common substring (a single vowel,
-        # say) can match 30+ of the 48 galaxy systems at once -- with
-        # plain `LETTERS`, that many matches reaches "Q" as a real row
-        # letter (the 17th), making it ambiguous with this same
-        # prompt's own "[Q] cancel". Reuses the same reserved-letters
-        # pattern as the chart screen's own CHART_RESERVED_LETTERS fix.
-        pick_letters = [c for c in LETTERS if c != "Q"]
-        out_line(f"{p.muted}Multiple matches:{RESET}")
-        shown = candidates[:len(pick_letters)]
-        for i, s in enumerate(shown):
-            out_line(f"  {p.gold}[{pick_letters[i]}]{RESET} {s.name}")
-        out_prompt(f"  {p.muted}Which one, or [Q] cancel? {RESET}")
+
+def route_mission_implications(world: World, path: list[int]) -> list[str]:
+    lines = []
+    if not world.save.active_missions:
+        return ["No active contract deadlines."]
+    lines.append("Contract timing assumes successful travel, unchanged bounty queues and ready delivery cargo. Earlier failures, expiry and scanner use can change it.")
+    end = path[-1] if path else world.here.id
+    estimates = []
+    arrivals_by_target = {}
+    for index, sid in enumerate(path, 1):
+        arrivals_by_target.setdefault(sid, []).append(index)
+    bounty_counts, onward_lengths = {}, {}
+    for mission in world.save.active_missions:
+        target = mission.target_system
+        arrivals = arrivals_by_target.get(target, [])
+        if mission.kind == "scan" and world.by_id[mission.target_system].discovered:
+            estimates.append((mission, None))
+            continue
+        if mission.kind == "bounty":
+            needed = bounty_counts.get(target, 0) + 1
+            if not mission_expired(world, mission):
+                bounty_counts[target] = needed
+            if len(arrivals) >= needed:
+                jumps = arrivals[needed - 1]
+            else:
+                remaining = needed - len(arrivals)
+                if target not in onward_lengths:
+                    onward_lengths[target] = len(bfs_path(world.by_id, end, target))
+                onward = onward_lengths[target]
+                jumps = len(path) + onward + 2 * (remaining - (1 if onward else 0))
+        elif arrivals:
+            jumps = arrivals[0]
+        else:
+            if target not in onward_lengths:
+                onward_lengths[target] = len(bfs_path(world.by_id, end, target))
+            jumps = len(path) + onward_lengths[target]
+        day = world.save.turn + jumps
+        estimates.append((mission, day))
+    # Allocate a copy of the hold in predicted arrival order. Jobs resolving on
+    # the same arrival follow active-mission order, just like actual completion.
+    remaining = dict(world.save.cargo)
+    ready = {}
+    for index, (mission, day) in sorted(((i, estimate) for i, estimate in enumerate(estimates) if estimate[0].kind == "delivery"), key=lambda item: (item[1][1], item[0])):
+        available = remaining.get(mission.commodity, 0)
+        ready[index] = available >= mission.quantity
+        if ready[index] and (mission.deadline_turn is None or day <= mission.deadline_turn):
+            remaining[mission.commodity] = available - mission.quantity
+    lines.append("Cargo is allocated by estimated arrival, then active-contract order. Late contracts consume none; missing cargo leaves completion day unknown.")
+    for index, (mission, day) in enumerate(estimates):
+        if day is None:
+            lines.append(f"Contract #{mission.id}: BLOCKED SURVEY - target already charted; no completion day. Revisiting cannot complete it. Abandon it from contract details to free the slot.")
+            continue
+        timing = "no deadline" if mission.deadline_turn is None else f"deadline {mission.deadline_turn} inclusive; " + ("travel within deadline" if day <= mission.deadline_turn else "TRAVEL ESTIMATE LATE")
+        suffix = ""
+        label = "objective day"
+        if mission.kind == "delivery" and not ready[index]:
+            label = "arrival day"
+            suffix = " Missing delivery cargo after earlier allocations; procurement required, completion day unknown."
+        lines.append(f"Contract #{mission.id}: {label} {day} by this route then onward; {timing}.{suffix}")
+    return lines
+
+
+def navigation_route_lines(world: World, destination: int | None) -> list[str]:
+    if destination is None:
+        return ["Choose a charted destination to preview its route.",
+                "Destination selection is read-only. Jump next flies one leg; Back leaves the plan.",
+                "For an uncharted contract target, use Route in its details or the tracked chart."]
+    target = world.by_id[destination]
+    path = bfs_path(world.by_id, world.here.id, destination)
+    lines = [f"Destination: {target.name} ({target.x},{target.y}). Shortest route by jumps.",
+             "Jump next flies one leg. Review after each outcome, change destination, or Back to refuel."]
+    if not path:
+        lines.append("Arrived at the selected destination.")
+    escorts = sum(m.kind == "escort" and not mission_expired(world, m) for m in world.save.active_missions)
+    if escorts:
+        lines.append(f"Active escorts: {escorts} fight(s) on EVERY jump, including detours.")
+    lines += navigation_budget_lines(world, path)
+    lines += route_mission_implications(world, path)
+    return lines
+
+
+def _screen_auto_route(p: Palette, world: World, *, destination: int | None = None) -> None:
+    """Screen-first route planner; each deliberate command flies one ordinary hop."""
+    page, result, pages = 0, None, None
+    while True:
+        if pages is None:
+            path = bfs_path(world.by_id, world.here.id, destination) if destination is not None else []
+            footer = ("[J]ump next " if path else "") + "[D]estination [N]ext [P]rev [B]ack: "
+            lines = navigation_route_lines(world, destination)
+            if result:
+                lines.insert(0, result)
+            pages = _trade_pages(lines, "Route Planner", footer)
+        page = min(page, len(pages) - 1)
+        out_line()
+        out_line(f"Route Planner {page + 1}/{len(pages)}")
+        for line in pages[page]:
+            out_line(line)
+        out_prompt(footer)
         key = read_command()
         out_line(key)
-        if key == "Q":
+        if key in ("B", "Q"):
             return
-        idx = pick_letters.index(key) if key in pick_letters else -1
-        if idx < 0 or idx >= len(shown):
-            return
-        target = shown[idx]
-
-    path = bfs_path(world.by_id, here_id, target.id)
-    total_fuel = 0
-    cur = world.by_id[here_id]
-    for hop_id in path:
-        total_fuel += fuel_cost_for_jump(cur, world.by_id[hop_id], world.save.ship)
-        cur = world.by_id[hop_id]
-    out_line(f"{p.muted}Route to {target.name}: {len(path)} jump(s), {total_fuel} fuel total.{RESET}")
-    if world.save.ship.fuel < total_fuel:
-        out_line(f"{p.wrong}Not enough fuel for the full route "
-                  f"({total_fuel} needed, have {world.save.ship.fuel}).{RESET}")
-        return
-    if not confirm("Engage auto-route?", p):
-        return
-
-    for hop_id in path:
-        cost = fuel_cost_for_jump(world.here, world.by_id[hop_id], world.save.ship)
-        if world.save.ship.fuel < cost:
-            out_line(f"{p.wrong}Route interrupted -- not enough fuel to continue "
-                      f"({cost} needed, have {world.save.ship.fuel}).{RESET}")
-            return
-        screen_travel(p, world, hop_id)
-        # A restart finishes the saved hop, then returns control to the pilot;
-        # the remaining auto-route is intentionally not resumed unattended.
-        world.checkpoint()
-        if world.save.current_system != hop_id:
-            out_line(f"{p.wrong}Route interrupted.{RESET}")
-            return
+        if key == "N":
+            page = min(page + 1, len(pages) - 1)
+        elif key == "P":
+            page = max(0, page - 1)
+        elif key == "D":
+            choices = sorted(((station.id, station.name) for station in world.galaxy
+                              if station.discovered and station.id != world.here.id), key=lambda item: item[1])
+            selected = _pick_trade_field("Charted Destination", choices)
+            if selected is not None:
+                destination, result, page, pages = selected, None, 0, None
+        elif key == "J":
+            try:
+                hop = prepare_route_jump(world, destination)
+            except MissionError as exc:
+                result, page, pages = str(exc), 0, None
+                continue
+            screen_travel(p, world, hop)
+            world.checkpoint()
+            result = f"Last hop: arrived at {world.here.name}. Review before another jump."
+            if world.here.id != hop:
+                result = f"Travel diverted to {world.here.name}; route recalculated."
+            page, pages = 0, None
 
 
 def _travel_encounter(world: World) -> dict:
