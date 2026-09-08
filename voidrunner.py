@@ -1370,13 +1370,23 @@ def _validate_save_document(data: dict) -> None:
     if event is not None:
         event_fields = {"economy", "commodity", "direction", "turns_remaining", "description"}
         require(isinstance(event, dict), "economy event")
-        if set(event) - event_fields:
+        if set(event) - (event_fields | {"system_ids"}):
             raise UnsupportedSave("The saved economy event contains unsupported fields.")
-        require(set(event) == event_fields, "economy event")
+        require(event_fields <= set(event), "economy event")
         require(event["economy"] in ECONOMIES and event["commodity"] in COMMODITIES and
                 event["direction"] in ("boom", "crash"), "economy event")
         integer(event["turns_remaining"], "event duration", minimum=1, maximum=ECONOMY_EVENT_MAX_TURNS)
         text(event["description"], "economy news")
+        if "system_ids" in event:
+            ids = event["system_ids"]
+            require(isinstance(ids, list) and 1 <= len(ids) <= 3, "event region")
+            for sid in ids:
+                system(sid, "event station")
+            require(len(set(ids)) == len(ids), "event region")
+            galaxy = generate_galaxy(data["seed"])
+            by_id = {station.id: station for station in galaxy}
+            hops = bfs_hops(by_id, ids[0])
+            require(all(by_id[sid].economy == event["economy"] and hops[sid] <= 2 for sid in ids), "event region")
 
 
 class World:
@@ -1872,6 +1882,23 @@ ECONOMY_EVENT_CRASH_LEVEL = 0.7
 ECONOMY_EVENT_BOOM_LEVEL = 1.3
 
 
+def economy_event_system_ids(world: World, event: dict) -> list[int]:
+    """Legacy events remain economy-wide; regional IDs are persisted explicitly."""
+    if "system_ids" in event:
+        return list(event["system_ids"])
+    return [system.id for system in world.galaxy if system.economy == event["economy"]]
+
+
+def _regional_economy_ids(world: World, economy: str, commodity: str, direction: str) -> list[int]:
+    candidates = [s.id for s in world.galaxy if s.economy == economy]
+    if not candidates:
+        return []
+    key = f"regional:{world.save.seed}:{world.save.turn}:{economy}:{commodity}:{direction}"
+    anchor = candidates[zlib.crc32(key.encode("utf-8")) % len(candidates)]
+    hops = bfs_hops(world.by_id, anchor)
+    return sorted((sid for sid in candidates if hops[sid] <= 2), key=lambda sid: (hops[sid], sid))[:3]
+
+
 def tick_economy_event(world: World) -> str | None:
     """Called once per turn, right after `tick_price_reversion` -- ages
     and ends an already-active event, or (only when none is active)
@@ -1882,10 +1909,9 @@ def tick_economy_event(world: World) -> str | None:
     event = world.save.active_event
     if event is not None:
         level = ECONOMY_EVENT_CRASH_LEVEL if event["direction"] == "crash" else ECONOMY_EVENT_BOOM_LEVEL
-        for system in world.galaxy:
-            if system.economy == event["economy"]:
-                table = world.save.market_drift.setdefault(system.id, {})
-                table[event["commodity"]] = level
+        for sid in economy_event_system_ids(world, event):
+            table = world.save.market_drift.setdefault(sid, {})
+            table[event["commodity"]] = level
         event["turns_remaining"] -= 1
         if event["turns_remaining"] <= 0:
             world.save.active_event = None
@@ -1901,18 +1927,23 @@ def tick_economy_event(world: World) -> str | None:
     commodity = world.event_rng.choice(commodities)
     direction = world.event_rng.choice(["crash", "boom"])
     turns = world.event_rng.randint(ECONOMY_EVENT_MIN_TURNS, ECONOMY_EVENT_MAX_TURNS)
+    ids = _regional_economy_ids(world, economy, commodity, direction)
+    if not ids:
+        # Keep the event lifecycle and RNG schedule when an industry is absent.
+        economy = world.here.economy
+        commodity = sorted(set(ECONOMY_PRODUCES[economy]) | set(ECONOMY_DEMANDS[economy]))[0]
+        ids = _regional_economy_ids(world, economy, commodity, direction)
     label = COMMODITIES[commodity]["label"]
     verb = "crash" if direction == "crash" else "spike"
-    description = f"{label} prices {verb} across every {economy} system"
+    description = f"{label} prices {verb} near {world.by_id[ids[0]].name} ({len(ids)} {economy} stations)"
     world.save.active_event = {
         "economy": economy, "commodity": commodity, "direction": direction,
-        "turns_remaining": turns, "description": description,
+        "turns_remaining": turns, "description": description, "system_ids": ids,
     }
     level = ECONOMY_EVENT_CRASH_LEVEL if direction == "crash" else ECONOMY_EVENT_BOOM_LEVEL
-    for system in world.galaxy:
-        if system.economy == economy:
-            table = world.save.market_drift.setdefault(system.id, {})
-            table[commodity] = level
+    for sid in ids:
+        table = world.save.market_drift.setdefault(sid, {})
+        table[commodity] = level
     return f"Galaxy news: {description} (roughly {turns} turns)."
 
 
@@ -3432,9 +3463,10 @@ def screen_market(p: Palette, world: World) -> None:
             if not COMMODITIES[commodity]["legal"]:
                 tag = f"{p.wrong}Illegal{RESET}"
             event = world.save.active_event
-            if event and event["commodity"] == commodity and event["economy"] == system.economy:
-                tag = (f"{p.wrong}[CRASH]{RESET}" if event["direction"] == "crash"
-                        else f"{p.correct}[BOOM]{RESET}")
+            if event and event["commodity"] == commodity and system.id in economy_event_system_ids(world, event):
+                event_tag = (f"{p.wrong}[CRASH]{RESET}" if event["direction"] == "crash"
+                             else f"{p.correct}[BOOM]{RESET}")
+                tag = (tag + " " + event_tag).strip()
             if not tag:
                 tag = f"{p.muted}Normal{RESET}"
 
@@ -3807,10 +3839,11 @@ def _edit_trade_route(world: World, initial: dict) -> dict | None:
     return edit_door_draft(title="Route Draft", initial=initial, fields=fields, apply=apply, error_type=TradeError)
 
 
-def screen_trade_route(p: Palette, world: World) -> None:
+def screen_trade_route(p: Palette, world: World, *, initial: dict | None = None) -> None:
     destinations = sorted((sid for sid in world.save.market_memory if sid != world.here.id), key=lambda sid: world.by_id[sid].name)
-    parameters = {"destination": destinations[0] if destinations else None,
-                  "commodity": "food", "quantity": 1, "use_hold": False}
+    parameters = dict(initial) if initial is not None else {
+        "destination": destinations[0] if destinations else None,
+        "commodity": "food", "quantity": 1, "use_hold": False}
     page = 0
     footer = "[E]dit draft [N]ext [P]rev [B]ack: "
     while True:
@@ -3855,8 +3888,98 @@ def screen_remembered_markets(p: Palette, world: World) -> None:
             page = max(0, page - 1)
 
 
+def trade_opportunities(world: World) -> list[dict]:
+    """Rank bounded, cash-covered outbound candidates from observed sale prices."""
+    room = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
+    if room <= 0 or world.save.pending_travel is not None:
+        return []
+    candidates = []
+    for sid, observed in world.save.market_memory.items():
+        if sid == world.here.id:
+            continue
+        for commodity, memory in observed.items():
+            if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
+                continue
+            try:
+                unit_quote = trade_route_quote(world, sid, commodity, 1)
+                budget = world.save.pilot.credits - unit_quote["fuel_cash"] - unit_quote["wages"]
+                unit = price_for(world, world.here.id, commodity)
+                quantity = min(room, market_depth_quote(world, world.here.id, commodity)["stock"],
+                               max(0, budget // unit), memory.get("demand", room))
+                if quantity <= 0:
+                    continue
+                quote = trade_route_quote(world, sid, commodity, quantity)
+            except TradeError:
+                continue
+            if quote["feasible"] and quote["margin"] is not None and quote["margin"] > 0:
+                candidates.append(quote)
+    candidates.sort(key=lambda q: (-q["margin"] / len(q["legs"]), -q["margin"], q["destination"], q["commodity"]))
+    return candidates[:6]
+
+
+def economy_opportunity_lines(world: World, candidates: list[dict]) -> list[str]:
+    lines = ["PUBLIC ECONOMY BULLETIN"]
+    event = world.save.active_event
+    if event is None:
+        lines.append("No active disruption reported. Ordinary price differences still create trade leads.")
+    else:
+        lines.append(_mission_plain(f"{event['description']}. {event['turns_remaining']} jumps of event time remain."))
+        commodity = COMMODITIES[event["commodity"]]["label"]
+        lines.append(f"Lead: {'bring' if event['direction'] == 'boom' else 'investigate buying'} {commodity}. Prices and availability still need checking.")
+        if not COMMODITIES[event["commodity"]]["legal"]:
+            lines.append("ILLEGAL CARGO: customs can confiscate this commodity outside Havens.")
+        for sid in economy_event_system_ids(world, event):
+            station = world.by_id[sid]
+            path = bfs_path(world.by_id, world.here.id, sid)
+            threat = str(station.danger) if station.discovered else "unknown"
+            timing = "event ends by arrival if uninterrupted" if len(path) >= event["turns_remaining"] else "reachable before event ends if uninterrupted"
+            lines.append(f"{station.name} ({station.x},{station.y}), {len(path)} jumps; danger {threat}; {timing}.")
+            if path:
+                first = world.by_id[path[0]]
+                bearing = first.name if first.discovered else f"uncharted connection at ({first.x},{first.y})"
+                lines.append(f"First bearing: {bearing}. Public news does not chart its destinations.")
+    lines += ["TRADE CANDIDATES - remembered prices, outbound margin only; return travel is excluded.",
+              "Ranked by estimated margin per jump. Quotes can be stale; encounters, repairs and market changes can erase a margin."]
+    if not candidates:
+        lines.append("No positive quoted candidate fits current stock, hold space, cash, observed demand and delivery commitments. Visit markets or use the route draft for other plans.")
+    for index, quote in enumerate(candidates, 1):
+        station = world.by_id[quote["destination"]]
+        cargo = COMMODITIES[quote["commodity"]]
+        capacity = "capacity unobserved" if quote["observed_demand"] is None else f"observed demand {quote['observed_demand']}"
+        lines.append(f"[{index}] {quote['quantity']} {cargo['label']} to {station.name}: {quote['margin']:+,}cr estimate, {len(quote['legs'])} jumps.")
+        lines.append(f"Buy {quote['procurement']}cr; additional fuel {quote['fuel_cash']}cr; wages {quote['wages']}cr. Quote day {quote['observed_day']}; {capacity}.")
+        if not cargo["legal"]:
+            lines.append("ILLEGAL CARGO: customs risk; quoted margin excludes confiscation and fines.")
+    return lines
+
+
+def screen_economy_opportunities(p: Palette, world: World) -> None:
+    candidates = trade_opportunities(world)
+    footer = "[1-6] Route [N]ext [P]rev [B]ack: "
+    pages = _trade_pages(economy_opportunity_lines(world, candidates), "Opportunities", footer)
+    page = 0
+    while True:
+        out_line()
+        out_line(f"Opportunities {page + 1}/{len(pages)}")
+        for line in pages[page]:
+            out_line(line)
+        out_prompt(footer)
+        key = read_command()
+        out_line(key)
+        if key == "B":
+            return
+        if key == "N":
+            page = min(page + 1, len(pages) - 1)
+        elif key == "P":
+            page = max(0, page - 1)
+        elif len(key) == 1 and "1" <= key <= "6" and int(key) <= len(candidates):
+            quote = candidates[int(key) - 1]
+            initial = {key: quote[key] for key in ("destination", "commodity", "quantity", "use_hold")}
+            screen_trade_route(p, world, initial=initial)
+
+
 def screen_trading_ledger(p: Palette, world: World) -> None:
-    footer = "[M]arkets [R]oute [N]ext [P]rev [B]ack: "
+    footer = "[M]arkets [R]oute [O]pportunities [N]ext [P]rev [B]ack: "
     pages = _trade_pages(trading_ledger_lines(world), "Trading Ledger", footer)
     page = 0
     while True:
@@ -3877,6 +4000,8 @@ def screen_trading_ledger(p: Palette, world: World) -> None:
             screen_remembered_markets(p, world)
         elif action == "R":
             screen_trade_route(p, world)
+        elif action == "O":
+            screen_economy_opportunities(p, world)
 
 
 def _trade_commodity(p: Palette, world: World, commodity: str) -> None:

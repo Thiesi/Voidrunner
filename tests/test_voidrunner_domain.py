@@ -962,6 +962,224 @@ def test_market_depth_remembered_quantities_respect_each_station_ceiling(tmp_pat
     assert (tmp_path / "77.json").read_bytes() == raw
 
 
+def _world_with_trade_opportunities():
+    world = _world_with_seed(42)
+    world.save.ship.hull_class = "Carrier"; world.save.pilot.credits = 100000
+    for system in world.galaxy:
+        system.discovered = True; world.save.current_system = system.id
+        vr.remember_local_market(world)
+    world.save.current_system = 0; world.sync_discovered()
+    return world
+
+
+def test_trade_opportunities_are_bounded_affordable_and_use_no_live_remote_quotes(monkeypatch):
+    import copy
+    world = _world_with_trade_opportunities(); before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
+    original = vr.price_for
+    def local_only(current, sid, commodity):
+        assert sid == current.here.id
+        return original(current, sid, commodity)
+    monkeypatch.setattr(vr, "price_for", local_only)
+    candidates = vr.trade_opportunities(world)
+    assert len(candidates) == 6
+    scores = [quote["margin"] / len(quote["legs"]) for quote in candidates]
+    assert scores == sorted(scores, reverse=True)
+    assert all(quote["cash_needed"] <= world.save.pilot.credits and quote["feasible"] and quote["margin"] > 0 for quote in candidates)
+    assert all(quote["quantity"] <= world.save.market_memory[quote["destination"]][quote["commodity"]]["demand"] for quote in candidates)
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+    for sid in world.by_id:
+        if sid: world.save.market_drift[sid] = {c: 0.6 for c in vr.COMMODITIES}
+    assert vr.trade_opportunities(world) == candidates
+
+
+@pytest.mark.parametrize("constraint", ["empty_memory", "full_hold", "empty_stock", "no_cash", "no_demand"])
+def test_trade_opportunities_honor_missing_information_and_resource_limits(constraint):
+    world = _world_with_trade_opportunities()
+    if constraint == "empty_memory": world.save.market_memory.clear()
+    if constraint == "full_hold": world.save.cargo = {"food": vr.cargo_capacity(world.save.ship)}
+    if constraint == "empty_stock": world.save.market_depth[0] = {c: {"day": 0, "stock": 0, "demand": 0} for c in vr.COMMODITIES}
+    if constraint == "no_cash": world.save.pilot.credits = 0
+    if constraint == "no_demand":
+        for quotes in world.save.market_memory.values():
+            for quote in quotes.values(): quote["demand"] = 0
+    assert vr.trade_opportunities(world) == []
+
+
+def test_trade_opportunities_reserve_travel_cash_and_exclude_contract_consumption():
+    world = _world_with_trade_opportunities(); world.save.pilot.credits = 150; world.save.ship.fuel = 0
+    world.save.ship.has_gunner = True
+    candidates = vr.trade_opportunities(world)
+    assert candidates and all(q["cash_needed"] <= 150 and q["fuel_cash"] > 0 and q["wages"] > 0 for q in candidates)
+    first = candidates[0]
+    world.save.active_missions = [vr.Mission(id=1, kind="delivery", description="Committed cargo", reward=1,
+        origin_system=0, target_system=first["destination"], commodity=first["commodity"], quantity=1)]
+    assert all((q["destination"], q["commodity"]) != (first["destination"], first["commodity"]) for q in vr.trade_opportunities(world))
+
+
+def test_regional_economy_selects_local_bounded_regions_without_new_rng_calls():
+    import random
+    world = _world_with_seed(42); world.event_rng.seed(31)
+    expected = random.Random(31)
+    assert expected.random() < vr.ECONOMY_EVENT_CHANCE_PER_TURN
+    economy = expected.choice(vr.ECONOMIES)
+    expected.choice(sorted(set(vr.ECONOMY_PRODUCES[economy]) | set(vr.ECONOMY_DEMANDS[economy])))
+    expected.choice(["crash", "boom"]); expected.randint(vr.ECONOMY_EVENT_MIN_TURNS, vr.ECONOMY_EVENT_MAX_TURNS)
+    vr.tick_economy_event(world)
+    event = world.save.active_event; ids = event["system_ids"]
+    assert 1 <= len(ids) <= 3 and len(ids) == len(set(ids))
+    hops = vr.bfs_hops(world.by_id, ids[0])
+    assert all(world.by_id[sid].economy == event["economy"] and hops[sid] <= 2 for sid in ids)
+    assert world.event_rng.getstate() == expected.getstate()
+    assert set(world.save.market_drift) == set(ids)
+    assert world.save.market_depth == {} and world.save.market_memory == {}
+
+
+def test_regional_economy_saved_scope_survives_restart_and_legacy_scope_remains_wide(tmp_path):
+    world = _world_with_seed(42); world.event_rng.seed(31); vr.tick_economy_event(world)
+    ids = list(world.save.active_event["system_ids"]); vr.persist(world, tmp_path, 77)
+    restored = vr.World(vr.load_or_create_save(tmp_path, 77, "Tester")[0])
+    remaining = restored.save.active_event["turns_remaining"]; rng = restored.event_rng.getstate()
+    vr.tick_economy_event(restored)
+    assert restored.save.active_event["system_ids"] == ids and restored.save.active_event["turns_remaining"] == remaining - 1
+    assert restored.event_rng.getstate() == rng
+    legacy = dict(restored.save.active_event); del legacy["system_ids"]
+    restored.save.active_event = legacy; vr.tick_economy_event(restored)
+    assert set(vr.economy_event_system_ids(restored, legacy)) == {s.id for s in restored.galaxy if s.economy == legacy["economy"]}
+
+
+@pytest.mark.parametrize("ids", [[], [True], [99], [1, 1], [1, 2, 3, 4], "1", [0]])
+def test_regional_economy_rejects_invalid_saved_regions_without_rewriting(tmp_path, ids):
+    import json
+    world = _world_with_seed(42)
+    world.save.active_event = dict(economy="Agricultural", commodity="food", direction="boom", turns_remaining=3, description="News", system_ids=ids)
+    raw = json.dumps(world.save.to_dict()).encode(); (tmp_path / "77.json").write_bytes(raw)
+    with pytest.raises(vr.ResumeError): vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert (tmp_path / "77.json").read_bytes() == raw
+
+
+def test_regional_economy_bulletin_names_targets_without_charting_or_revealing_other_threats():
+    import copy
+    world = _world_with_seed(42)
+    anchor = next(s for s in world.galaxy if not s.discovered)
+    world.save.active_event = dict(economy=anchor.economy, commodity="food", direction="boom", turns_remaining=1,
+        description="Regional shortage", system_ids=[anchor.id])
+    before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
+    text = " ".join(vr.economy_opportunity_lines(world, []))
+    assert anchor.name in text and "danger unknown" in text and "event ends by arrival" in text
+    assert "Lead: bring Food" in text and not world.save.market_memory
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+def test_regional_economy_market_tags_only_affected_stations_and_preserves_legality(monkeypatch):
+    world = _world_with_seed(0)
+    havens = [s for s in world.galaxy if s.economy == "Haven"]
+    assert len(havens) > 1
+    world.save.active_event = dict(economy="Haven", commodity="weapons", direction="boom", turns_remaining=3,
+        description="Regional shortage", system_ids=[havens[0].id])
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    for index, station in enumerate(havens[:2]):
+        world.save.current_system = station.id
+        with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_market(vr.Palette(False), world)
+        text = output.getvalue()
+        assert "Illegal" in text and ("BOOM" in text) == (index == 0)
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_economy_opportunity_pages_reach_all_candidates_within_terminal_size(monkeypatch, width, height):
+    import copy, re
+    world = _world_with_trade_opportunities(); world.event_rng.seed(31); vr.tick_economy_event(world)
+    before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    output = io.StringIO(); frames = []
+    def choose():
+        frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
+        match = re.search(r"Opportunities (\d+)/(\d+)", " ".join(frame.split()))
+        assert match and len(frames) < 300
+        return "B" if match[1] == match[2] else "N"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): vr.screen_economy_opportunities(vr.Palette(False), world)
+    assert "[6]" in " ".join(frames)
+    assert all(len(frame.splitlines()) <= height for frame in frames)
+    assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+def test_trade_opportunity_selection_opens_the_matching_route_without_purchase(monkeypatch):
+    import copy
+    world = _world_with_trade_opportunities(); first = vr.trade_opportunities(world)[0]
+    before = copy.deepcopy(world.save.to_dict()); selected=[]
+    monkeypatch.setattr(vr, "screen_trade_route", lambda p, current, **kw: selected.append(kw["initial"]))
+    keys = iter("1B"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()): vr.screen_economy_opportunities(vr.Palette(False), world)
+    assert selected == [{key: first[key] for key in ("destination", "commodity", "quantity", "use_hold")}]
+    assert world.save.to_dict() == before
+
+
+@pytest.mark.parametrize("commands", [b"TOBBQ", b"TO", b"TO1BBBQ"])
+def test_real_economy_opportunity_back_eof_and_route_selection_leave_career_unchanged(tmp_path, commands):
+    import json, os, subprocess
+    world = _world_with_trade_opportunities()
+    world.save.pilot.credits = 2500
+    assert vr.trade_opportunities(world)
+    world.event_rng.seed(31); vr.tick_economy_event(world)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77); world.checkpoint()
+    original = (tmp_path / "77.json").read_bytes()
+    info = tmp_path / "door_info.json"; info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+    assert result.returncode == 0 and not result.stderr and b"Opportunities 1/" in result.stdout
+    if b"1" in commands: assert b"Trade Route 1/" in result.stdout
+    assert (tmp_path / "77.json").read_bytes() == original
+
+
+def test_real_regional_news_is_saved_before_announcement_and_survives_kill(tmp_path):
+    world = _world_with_seed(42); world.event_rng.seed(31)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77); world.checkpoint()
+    with _door_stopped_at(tmp_path, b"C" + vr.CHART_CONNECTION_LETTERS[0].encode(), b"Galaxy news:"):
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert saved.active_event and 1 <= len(saved.active_event["system_ids"]) <= 3
+        event = dict(saved.active_event)
+    restored = vr.World(vr.load_or_create_save(tmp_path, 77, "Tester")[0])
+    assert restored.save.active_event == event
+
+
+def test_regional_economy_absent_industry_falls_back_without_extra_random_choices(monkeypatch):
+    world = _world_with_seed(1)
+    assert not any(s.economy == "Haven" for s in world.galaxy)
+    choices = iter(["Haven", "narcotics", "boom"])
+    monkeypatch.setattr(world.event_rng, "random", lambda: 0)
+    monkeypatch.setattr(world.event_rng, "choice", lambda seq: next(choices))
+    monkeypatch.setattr(world.event_rng, "randint", lambda a, b: a)
+    assert vr.tick_economy_event(world)
+    event = world.save.active_event
+    assert event["economy"] == world.here.economy and event["system_ids"]
+    assert event["commodity"] in set(vr.ECONOMY_PRODUCES[event["economy"]]) | set(vr.ECONOMY_DEMANDS[event["economy"]])
+    with pytest.raises(StopIteration): next(choices)
+
+
+def test_regional_economy_rejects_distant_stations_even_with_matching_economy():
+    world = _world_with_seed(0)
+    pairs = [(a, b) for a in world.galaxy for b in world.galaxy
+             if a.economy == b.economy and vr.bfs_hops(world.by_id, a.id)[b.id] > 2]
+    assert pairs
+    a, b = pairs[0]
+    world.save.active_event = dict(economy=a.economy, commodity="food", direction="boom", turns_remaining=3,
+        description="News", system_ids=[a.id, b.id])
+    with pytest.raises(vr.ResumeError, match="event region"): vr.SaveData.from_dict(world.save.to_dict())
+
+
+def test_trade_opportunities_label_legacy_unobserved_demand_without_inventing_it():
+    import copy
+    world = _world_with_trade_opportunities()
+    for quotes in world.save.market_memory.values():
+        for quote in quotes.values(): quote.pop("stock"); quote.pop("demand")
+    before = copy.deepcopy(world.save.to_dict())
+    candidates = vr.trade_opportunities(world)
+    assert candidates and all(q["observed_demand"] is None for q in candidates)
+    assert "capacity unobserved" in " ".join(vr.economy_opportunity_lines(world, candidates))
+    assert world.save.to_dict() == before
+
+
 # -- galaxy generation -------------------------------------------------
 
 
@@ -3458,8 +3676,10 @@ def test_tick_economy_event_starts_one_and_applies_drift_immediately(monkeypatch
     assert msg is not None
     assert world.save.active_event is not None
     event = world.save.active_event
-    affected = [s for s in world.galaxy if s.economy == event["economy"]]
-    assert affected
+    affected = [world.by_id[sid] for sid in event["system_ids"]]
+    assert 1 <= len(affected) <= 3
+    assert all(system.economy == event["economy"] for system in affected)
+    assert set(world.save.market_drift) == set(event["system_ids"])
     for system in affected:
         assert world.save.market_drift[system.id][event["commodity"]] in (
             vr.ECONOMY_EVENT_CRASH_LEVEL, vr.ECONOMY_EVENT_BOOM_LEVEL)
