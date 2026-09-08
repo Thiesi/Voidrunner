@@ -49,6 +49,35 @@ def _load_voidrunner():
 vr = _load_voidrunner()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows byte-range lock initialization")
+def test_empty_windows_lease_reports_busy_without_writing_before_lock(tmp_path):
+    import msvcrt
+    import subprocess
+
+    path = tmp_path / "empty.lock"
+    path.write_bytes(b"")
+    script = """
+import runpy, sys
+from pathlib import Path
+vr = runpy.run_path(sys.argv[1])
+try:
+    with vr['_file_lease'](Path(sys.argv[2])):
+        print('acquired')
+except vr['PilotBusy']:
+    print('busy')
+"""
+    args = [sys.executable, "-c", script, str(_VOIDRUNNER_PATH), str(path)]
+    with path.open("r+b") as owner:
+        msvcrt.locking(owner.fileno(), msvcrt.LK_NBLCK, 1)
+        blocked = subprocess.run(args, capture_output=True, timeout=5)
+        assert blocked.returncode == 0 and not blocked.stderr
+        assert blocked.stdout.strip() == b"busy"
+    assert path.read_bytes() == b""
+    acquired = subprocess.run(args, capture_output=True, timeout=5)
+    assert acquired.returncode == 0 and not acquired.stderr
+    assert acquired.stdout.strip() == b"acquired" and path.read_bytes() == b""
+
+
 # -- galaxy generation -------------------------------------------------
 
 

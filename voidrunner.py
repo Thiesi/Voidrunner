@@ -2558,9 +2558,8 @@ def _file_lease(path: Path, *, wait: float = 0):
         if os.name == "nt":
             import msvcrt
 
-            if os.fstat(handle.fileno()).st_size == 0:
-                handle.write(b"0")
-                handle.flush()
+            # Windows permits a byte-range lock beyond EOF. Writing a dummy
+            # byte first races with another opener that already owns the lock.
             handle.seek(0)
             acquire = lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         else:
