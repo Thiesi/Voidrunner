@@ -1180,6 +1180,171 @@ def test_trade_opportunities_label_legacy_unobserved_demand_without_inventing_it
     assert world.save.to_dict() == before
 
 
+@pytest.mark.parametrize("active", [False, True])
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_mission_navigation_pages_preserve_chart_and_career(monkeypatch, active, width, height):
+    import copy, re
+    world, mission = _mission_details_world("scan")
+    if active: vr.accept_mission(world, mission)
+    for sid in vr.mission_route(world, mission): world.by_id[sid].discovered = False
+    before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
+    monkeypatch.setattr(world, "checkpoint", lambda: pytest.fail("Route view saved"))
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    output = io.StringIO(); frames=[]
+    def choose():
+        frame=output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
+        match=re.search(r"Contract Route #1 (\d+)/(\d+)", " ".join(frame.split()))
+        assert match and len(frames) < 200
+        return "B" if match[1] == match[2] else "N"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output): vr.screen_mission_navigation(vr.Palette(False),world,mission,active=active)
+    assert all(len(frame.splitlines()) <= height for frame in frames)
+    assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
+    text=" ".join(" ".join(frames).split())
+    assert world.by_id[mission.target_system].name in text and "danger unknown" in text
+    for sid in vr.mission_route(world,mission)[:-1]: assert world.by_id[sid].name not in text
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+    assert not world.by_id[mission.target_system].discovered
+
+
+@pytest.mark.parametrize("fault", ["inactive","expired","fuel","at_target","pending","boolean_id"])
+def test_mission_navigation_invalid_departure_changes_nothing(fault):
+    import copy
+    world,mission=_mission_details_world()
+    if fault != "inactive": vr.accept_mission(world,mission)
+    if fault == "expired": world.save.turn=mission.deadline_turn+1
+    if fault == "fuel": world.save.ship.fuel=0
+    if fault == "at_target": world.save.current_system=mission.target_system
+    if fault == "pending": world.save.pending_travel={"existing":True}
+    before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate()
+    with pytest.raises(vr.MissionError): vr.prepare_mission_jump(world,True if fault=="boolean_id" else mission.id)
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+
+
+def test_mission_navigation_posted_route_cannot_jump_or_accept(monkeypatch):
+    import copy
+    world,mission=_mission_details_world(); before=copy.deepcopy(world.save.to_dict())
+    keys=iter("JB"); monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    monkeypatch.setattr(vr,"screen_travel",lambda *args:pytest.fail("Posted route launched travel"))
+    with contextlib.redirect_stdout(io.StringIO()): vr.screen_mission_navigation(vr.Palette(False),world,mission,active=False)
+    assert world.save.to_dict()==before and world.save.tracked_mission_id is None
+
+
+@pytest.mark.parametrize("outcome", ["arrive","divert","fail"])
+def test_mission_navigation_tracks_before_one_hop_and_recalculates_after_it(monkeypatch,outcome):
+    world,mission=_mission_details_world(); vr.accept_mission(world,mission)
+    first=vr.mission_route(world,mission)[0]; calls=[]; checkpoints=[]
+    world._checkpoint=lambda current:checkpoints.append((current.save.turn,current.save.tracked_mission_id))
+    def travel(p,current,destination):
+        assert checkpoints[0]==(0,mission.id)
+        calls.append(destination); current.save.turn+=1
+        current.save.current_system=0 if outcome=="divert" else destination
+        if outcome=="fail": current.save.active_missions.clear()
+    monkeypatch.setattr(vr,"screen_travel",travel)
+    keys=iter("JJB" if outcome=="fail" else "JB"); monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_mission_navigation(vr.Palette(False),world,mission,active=True)
+    assert calls==[first] and world.save.turn==1
+    if outcome=="divert": assert "Travel diverted" in output.getvalue()
+    elif outcome=="fail": assert "no longer active" in output.getvalue() and world.save.tracked_mission_id is None
+    else: assert "Last hop: arrived" in output.getvalue() and world.save.tracked_mission_id==mission.id
+
+
+def test_mission_navigation_save_failure_stops_before_departure(monkeypatch):
+    world,mission=_mission_details_world(); vr.accept_mission(world,mission)
+    world._checkpoint=lambda current:(_ for _ in ()).throw(OSError("disk full"))
+    monkeypatch.setattr(vr,"read_key",lambda:"J")
+    monkeypatch.setattr(vr,"screen_travel",lambda *args:pytest.fail("Departed after save failure"))
+    with contextlib.redirect_stdout(io.StringIO()),pytest.raises(vr.SaveError):
+        vr.screen_mission_navigation(vr.Palette(False),world,mission,active=True)
+    assert world.save.turn==0 and world.save.pending_travel is None
+
+
+def test_mission_navigation_details_and_tracked_chart_open_same_contract(monkeypatch):
+    world,mission=_mission_details_world(); vr.accept_mission(world,mission); vr.track_mission(world,mission.id)
+    opened=[]; monkeypatch.setattr(vr,"screen_mission_navigation",lambda p,w,m,active:opened.append((m.id,active)))
+    keys=iter("RBRQ"); monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_mission_details(vr.Palette(False),world,mission,active=True)
+        vr.screen_chart(vr.Palette(False),world)
+    assert opened==[(mission.id,True),(mission.id,True)]
+    assert "R" not in vr.CHART_CONNECTION_LETTERS and "Q" not in vr.CHART_CONNECTION_LETTERS
+
+
+def test_mission_navigation_budget_includes_bounty_reentry_and_manual_refuelling():
+    world,mission=_mission_details_world("bounty"); vr.accept_mission(world,mission)
+    world.save.current_system=mission.target_system; world.save.ship.fuel=0; world.save.ship.has_gunner=True
+    world.save.turn=mission.deadline_turn-1
+    lines=vr.mission_navigation_lines(world,mission,active=True); text=" ".join(lines)
+    assert "Route: 2 jumps" in text and "wages 30cr" in text
+    assert "Refuelling is manual" in text and "MISSES deadline" in text
+    assert "leave/re-enter" in text
+
+
+def test_mission_navigation_procurement_and_posted_escort_obligations():
+    world, mission = _mission_details_world("delivery")
+    world.here.economy = "Industrial"
+    mission.commodity = "weapons"
+    text = " ".join(vr.mission_navigation_lines(world, mission, active=False))
+    assert "prohibits buying" in text and "spot stock" not in text
+    mission.kind = "escort"
+    text = " ".join(vr.mission_navigation_lines(world, mission, active=False))
+    assert "EVERY jump" in text and "including detours" in text
+
+
+def test_mission_navigation_large_legacy_queue_budgets_actual_page_number_width(monkeypatch):
+    world,mission=_mission_details_world("bounty")
+    world.save.active_missions=[vr.Mission(i,"bounty","Legacy bounty",500,0,mission.target_system,pirate_tier=1) for i in range(1,1002)]
+    mission=world.save.active_missions[-1]
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",20); monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",10)
+    title=f"Contract Route #{mission.id}"; footer="[J]ump next [N]ext [P]rev [B]ack: "
+    pages=vr._trade_pages(vr.mission_navigation_lines(world,mission,active=True),title,footer)
+    assert len(pages)>999
+    for index in (0,len(pages)-1):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            vr.out_line(); vr.out_line(f"{title} {index+1}/{len(pages)}")
+            for line in pages[index]: vr.out_line(line)
+            vr.out_prompt(footer)
+        assert len(output.getvalue().splitlines())<=10
+        assert all(vr._visible_width(line)<=20 for line in output.getvalue().splitlines())
+
+
+@pytest.mark.parametrize("active,commands", [(False,b"B1RBBBQ"),(False,b"B1R"),(True,b"CRBQQ"),(True,b"CR")])
+def test_real_mission_navigation_back_and_eof_preserve_career(tmp_path,active,commands):
+    import json,os,subprocess
+    world,mission=_mission_details_world("scan")
+    if active:
+        vr.accept_mission(world,mission); vr.track_mission(world,mission.id)
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77); world.checkpoint()
+    original=(tmp_path/"77.json").read_bytes()
+    info=tmp_path/"door_info.json"; info.write_text(json.dumps({"user_id":77,"handle":"Tester"}),encoding="utf-8")
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+    assert result.returncode==0 and not result.stderr and b"Contract Route #1" in result.stdout
+    assert (tmp_path/"77.json").read_bytes()==original
+    assert not vr.World(vr.load_or_create_save(tmp_path,77,"Tester")[0]).by_id[mission.target_system].discovered
+
+
+def test_real_mission_navigation_completes_delivery_once_before_retained_result(tmp_path):
+    import json,os,subprocess
+    world=_world_with_seed(42); world.event_rng.seed(0)
+    destination=sorted(world.here.connections)[0]
+    mission=vr.Mission(1,"delivery","Navigation delivery",500,0,destination,commodity="food",quantity=3)
+    world.save.active_missions=[mission]; world.save.tracked_mission_id=1; world.save.cargo={"food":3}
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77); world.checkpoint()
+    credits=world.save.pilot.credits
+    with _door_stopped_at(tmp_path,b"CRJ",b"Last hop: arrived"):
+        saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+        assert saved.current_system==destination and saved.turn==1 and saved.pending_travel is None
+        assert saved.pilot.credits==credits+500 and not saved.active_missions and not saved.cargo
+        assert saved.tracked_mission_id is None
+    info=tmp_path/"door_info.json"
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=b"Q",capture_output=True,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+    assert result.returncode==0 and not result.stderr
+    resumed,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert resumed.pilot.credits==saved.pilot.credits and resumed.turn==1
+
+
 # -- galaxy generation -------------------------------------------------
 
 
@@ -4783,7 +4948,8 @@ def _door_stopped_at(tmp_path, commands: bytes, acknowledgement: bytes):
         proc.stderr.close()
 
 
-def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkeypatch):
+@pytest.mark.parametrize("commands", [b"CAF", b"CRJF"])
+def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkeypatch, commands):
     import json
 
     world = _world_with_seed(42)
@@ -4792,10 +4958,12 @@ def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkey
     world.save.active_missions = [
         vr.Mission(1, "bounty", "Intercept raider", 500, 0, destination, pirate_tier=2),
     ]
+    if commands.startswith(b"CR"):
+        world.save.tracked_mission_id = 1
     world.checkpoint()  # Include the station preparation before real startup.
     vr.persist(world, tmp_path, 77)
     initial = json.loads((tmp_path / "77.json").read_text(encoding="utf-8"))
-    with _door_stopped_at(tmp_path, b"CAF", b" damage."):
+    with _door_stopped_at(tmp_path, commands, b" damage."):
         saved = json.loads((tmp_path / "77.json").read_text(encoding="utf-8"))
     assert saved["turn"] == initial["turn"] + 1
     combat = saved["pending_travel"]["encounter"]["combat"]
@@ -5582,7 +5750,7 @@ def test_full_contract_details_fit_each_page_and_retain_back(monkeypatch, width,
     with contextlib.redirect_stdout(output):
         vr.screen_mission_details(vr.Palette(False), world, mission, active=False)
     body_rows = [row for row in vr._ANSI_RE.sub("", output.getvalue()).split("\r\n")
-                 if not row.startswith(("Contract #", "[N]", "[B]", "[A]"))]
+                 if not row.startswith(("Contract #", "[R]", "[N]", "[P]", "[B]", "[A]"))]
     joined = " ".join(" ".join(body_rows).split())
     assert "EVERY jump" in joined and "including detours" in joined
     assert "no cargo space" in joined
