@@ -2107,7 +2107,7 @@ def test_update_hall_of_fame_caps_at_hall_of_fame_size(tmp_path):
 
     entries = vr.load_hall_of_fame(tmp_path)
     assert len(entries) == vr.HALL_OF_FAME_SIZE
-    # The lowest-credit pilots were the ones dropped, not the highest.
+    # The lowest-credit pilots are omitted from the view, but retained on disk.
     assert entries[-1]["best_credits"] == 5
 
 
@@ -4941,3 +4941,209 @@ def test_legacy_futures_keep_absent_pickup_metadata_across_checkpoints():
     data = original.to_dict()
     assert "origin_system" not in data and "principal" not in data
     assert vr.FuturesContract.from_dict(data).to_dict() == data
+
+
+@contextlib.contextmanager
+def _live_voidrunner(tmp_path, user_id=77, commands=b"", acknowledgement=b"Station Services"):
+    """Own a real door process until the test exits, draining its output."""
+    import json
+    import os
+    import subprocess
+    import threading
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    info = tmp_path / f"info-{user_id}.json"
+    info.write_text(json.dumps({"user_id": user_id, "handle": "Tester"}), encoding="utf-8")
+    env = dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info))
+    proc = subprocess.Popen([sys.executable, str(_VOIDRUNNER_PATH)], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    output = bytearray()
+    reached = threading.Event()
+
+    def drain():
+        while byte := proc.stdout.read(1):
+            if len(output) < 128_000:
+                output.extend(byte)
+                if acknowledgement in output:
+                    reached.set()
+
+    reader = threading.Thread(target=drain)
+    reader.start()
+    try:
+        proc.stdin.write(commands)
+        proc.stdin.flush()
+        assert reached.wait(10), output.decode("utf-8", errors="replace")
+        yield proc, env
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+        reader.join(timeout=5)
+        assert not reader.is_alive()
+        proc.stdin.close()
+        proc.stdout.close()
+        proc.stderr.close()
+
+
+@pytest.mark.parametrize("new_career", [False, True])
+def test_second_real_launch_cannot_load_or_replace_an_active_pilot(tmp_path, new_career):
+    import subprocess
+
+    if not new_career:
+        vr.write_save(tmp_path, 77, _world_with_seed(42).save)
+    ack = b"Pilot callsign" if new_career else b"Station Services"
+    with _live_voidrunner(tmp_path, acknowledgement=ack) as (_, env):
+        before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")}
+        result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"Q",
+                                capture_output=True, env=env, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert b"already has an active Voidrunner session" in result.stdout
+        assert b"Welcome back" not in result.stdout and b"Pilot callsign" not in result.stdout
+        assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")} == before
+
+
+@pytest.mark.parametrize("end", ["kill", "quit", "eof"])
+def test_pilot_lease_releases_and_acknowledged_trade_survives(tmp_path, end):
+    import subprocess
+
+    vr.write_save(tmp_path, 77, _world_with_seed(42).save)
+    with _live_voidrunner(tmp_path, commands=b"MAB1\r", acknowledgement=b"Bought 1x Food") as (proc, env):
+        if end == "kill":
+            proc.kill()
+        elif end == "quit":
+            proc.stdin.write(b"QQ")
+            proc.stdin.flush()
+        else:
+            proc.stdin.close()
+        proc.wait(timeout=5)
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"Q",
+                            capture_output=True, env=env, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert b"Welcome back" in result.stdout
+    assert b"already has" not in result.stdout
+    save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert save.cargo == {"food": 1}
+    assert (tmp_path / ".77.lock").exists()
+
+
+def test_independent_pilots_and_installations_can_play_concurrently(tmp_path):
+    first, second = tmp_path / "one", tmp_path / "two"
+    vr.write_save(first, 77, _world_with_seed(42).save)
+    vr.write_save(first, 88, _world_with_seed(43).save)
+    vr.write_save(second, 77, _world_with_seed(44).save)
+    with _live_voidrunner(first), _live_voidrunner(first, 88), _live_voidrunner(second):
+        assert {e["user_id"] for e in vr.load_hall_of_fame(first)} == {77, 88}
+        assert {e["user_id"] for e in vr.load_hall_of_fame(second)} == {77}
+
+
+def test_simultaneous_processes_retain_every_pilot_score(tmp_path):
+    import subprocess
+
+    script = """
+import runpy, sys
+from pathlib import Path
+vr = runpy.run_path(sys.argv[1])
+uid = int(sys.argv[3])
+directory = Path(sys.argv[2])
+print('ready', flush=True)
+sys.stdin.read(1)
+with vr['pilot_session'](directory, uid):
+    world = vr['World'](vr['_new_career']('Pilot' + str(uid)))
+    for count in range(12):
+        world.save.pilot.credits = uid * 1000 + count
+        vr['persist'](world, directory, uid)
+"""
+    processes = []
+    try:
+        for uid in range(1, 9):
+            processes.append(subprocess.Popen(
+                [sys.executable, "-c", script, str(_VOIDRUNNER_PATH), str(tmp_path), str(uid)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+        for proc in processes:
+            proc.stdin.write(b"x")
+            proc.stdin.flush()
+        for proc in processes:
+            _, errors = proc.communicate(timeout=15)
+            assert proc.returncode == 0, errors
+    finally:
+        for proc in processes:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                pipe.close()
+    entries = vr.load_hall_of_fame(tmp_path)
+    assert {e["user_id"]: e["best_credits"] for e in entries} == {uid: uid * 1000 + 11 for uid in range(1, 9)}
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_score_outside_top_twenty_retains_its_peak_on_return(tmp_path):
+    veteran = vr._new_career("Veteran")
+    veteran.pilot.credits = 9000
+    vr.update_hall_of_fame(tmp_path, 1, veteran)
+    for uid in range(2, 23):
+        save = vr._new_career(f"Pilot{uid}")
+        save.pilot.credits = 10_000 + uid
+        vr.update_hall_of_fame(tmp_path, uid, save)
+    assert all(e["user_id"] != 1 for e in vr.load_hall_of_fame(tmp_path))
+    veteran.pilot.credits = 100
+    vr.update_hall_of_fame(tmp_path, 1, veteran)
+    # Temporarily reduce only the display population, as in a restored subset.
+    retained = tmp_path / "subset"
+    retained.mkdir()
+    (retained / "scores").mkdir()
+    (retained / "scores" / "1.json").write_bytes((tmp_path / "scores" / "1.json").read_bytes())
+    assert vr.load_hall_of_fame(retained)[0]["best_credits"] == 9000
+
+
+def test_legacy_scores_are_preserved_and_new_counters_take_precedence(tmp_path):
+    import json
+
+    legacy = [{"user_id": 77, "handle": "Old", "best_credits": 9000, "kills": 2}]
+    path = tmp_path / "leaderboard.json"
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+    original = path.read_bytes()
+    world = _world_with_seed(42)
+    world.save.pilot.handle = "Renamed"
+    world.save.pilot.kills = 10
+    vr.persist(world, tmp_path, 77)
+    entry = vr.load_hall_of_fame(tmp_path)[0]
+    assert entry["best_credits"] == world.save.best_credits == 9000
+    assert entry["handle"] == "Renamed" and entry["kills"] == 10
+    assert path.read_bytes() == original
+
+
+def test_failed_score_write_is_repaired_from_saved_peak_after_spending_and_retirement(tmp_path, monkeypatch):
+    world = _world_with_seed(42)
+    world.save.pilot.credits = 12_000
+    replace = vr.os.replace
+
+    def fail_score(source, target):
+        if target.parent.name == "scores":
+            raise OSError("score directory temporarily unavailable")
+        return replace(source, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vr.os, "replace", fail_score)
+        vr.persist(world, tmp_path, 77)
+    loaded, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert loaded.best_credits == 12_000
+    assert vr.load_hall_of_fame(tmp_path) == []
+    loaded.pilot.credits = 10
+    retired = vr.retire_pilot(loaded)
+    vr.persist(vr.World(retired), tmp_path, 77)
+    assert vr.load_hall_of_fame(tmp_path)[0]["best_credits"] == 12_000
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+@pytest.mark.parametrize("malformed", [None, [], {"user_id": 77, "handle": [], "best_credits": 9},
+                                      {"user_id": 77, "handle": "Bad", "best_credits": "9"}])
+def test_malformed_score_entries_do_not_break_career_checkpoint(tmp_path, malformed):
+    import json
+
+    (tmp_path / "leaderboard.json").write_text(json.dumps([malformed]), encoding="utf-8")
+    (tmp_path / "scores").mkdir()
+    (tmp_path / "scores" / "77.json").write_text(json.dumps(malformed), encoding="utf-8")
+    world = _world_with_seed(42)
+    vr.persist(world, tmp_path, 77)
+    assert vr.load_hall_of_fame(tmp_path)[0]["best_credits"] == world.save.pilot.credits

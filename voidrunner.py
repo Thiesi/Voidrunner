@@ -11,7 +11,7 @@ numeric quantities and the callsign prompt, since NetBBS gives a door no
 line-editing help). Runnable completely standalone outside NetBBS too.
 Zero external dependencies -- stdlib only.
 
-**Persistence**: NetBBS's door sandbox gives a door no database access
+**Persistence**: The native door API provides no mediated database access
 and deletes its scratch working directory after every session (see
 `netbbs.doors.runtime`'s own docstring) -- a door manages any save data
 entirely itself. This door keeps one JSON save file per caller, keyed by
@@ -19,7 +19,8 @@ the drop-file's stable numeric `user_id` (never the handle, which can
 change), under `VOIDRUNNER_SAVE_DIR` if set, else `~/.netbbs/
 voidrunner_saves/`. Completed station actions commit before their success
 message, including actions inside nested menus. Each completed auto-route
-hop also commits without requiring the player to leave the chart. Writes
+hop also commits without requiring the player to leave the chart. One process
+holds the pilot session lock from load through its final checkpoint. Writes
 use a flushed private temporary file plus `os.replace`: a door can be
 killed at any moment without a graceful-shutdown guarantee. Interrupted
 journeys resume before station access, with the same opponent HP, random
@@ -34,14 +35,15 @@ package's own directory is routinely read-only and/or wiped clean on
 every upgrade, neither of which a save file can tolerate. A production
 node with an unusual layout should set `VOIDRUNNER_SAVE_DIR` explicitly
 rather than rely on the home-directory default holding for its own
-service account.
+service account. NetBBS forwards this explicit directory override; different
+installations sharing an OS account need distinct directories.
 
 **Architecture** (deliberate, for a reason beyond this door): the rules
 of the game -- galaxy generation, pricing, combat resolution, mission
 logic -- live in plain functions/dataclasses that only ever take a
 `World` and return a new one plus narrative text (the "domain layer"
-below); a small `load_or_create_save`/`write_save` pair is the only thing
-that touches a filesystem path (the "storage layer"); everything that
+below); the storage layer owns career files, session leases and score records.
+Everything that
 touches `sys.stdin`/`sys.stdout` is confined to the "UI layer" at the
 bottom. Today the storage layer is "read/write a local JSON file." If a
 future NetBBS revision ever grows a mediated way for a door to talk to a
@@ -52,7 +54,7 @@ by itself make Voidrunner multiplayer, and nothing here assumes it ever
 will be; it just avoids closing that door (see the design discussion in
 issue #172 -- doors are locked as single-player/session-scoped in v1,
 and this stays strictly inside that: one save, one player, no shared
-state, no networking).
+galaxy state, no networking). Independent score records provide a shared ranking.
 
 **Load-bearing invariant**: `generate_galaxy()` is a pure function of
 the save's `seed` -- only the seed is persisted, not the galaxy itself,
@@ -70,6 +72,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import dataclasses
+import errno
 import json
 import os
 import random
@@ -1053,6 +1056,7 @@ class SaveData:
     tracked_mission_id: int | None = None
     contraband_trade_balance: int = 0
     contraband_trade_milestones: int = 0
+    best_credits: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -1077,6 +1081,7 @@ class SaveData:
             "tracked_mission_id": self.tracked_mission_id,
             "contraband_trade_balance": self.contraband_trade_balance,
             "contraband_trade_milestones": self.contraband_trade_milestones,
+            "best_credits": self.best_credits,
         }
 
     @classmethod
@@ -1101,6 +1106,7 @@ class SaveData:
             event_rng_state=d.get("event_rng_state"),
             mission_boards=_load_mission_boards(d.get("mission_boards", {})),
             tracked_mission_id=_load_tracked_mission_id(d.get("tracked_mission_id")),
+            best_credits=_load_trade_total(d.get("best_credits", 0), nonnegative=True, label="credit high-water mark"),
             contraband_trade_balance=_load_trade_total(d.get("contraband_trade_balance", 0)),
             contraband_trade_milestones=_load_trade_total(d.get("contraband_trade_milestones", 0), nonnegative=True),
         )
@@ -1928,9 +1934,9 @@ def bribe_chance(world: World, pirate: Pirate) -> float:
 CONTRABAND_STANDING_STEP = 500
 
 
-def _load_trade_total(value, *, nonnegative=False) -> int:
+def _load_trade_total(value, *, nonnegative=False, label="contraband trading record") -> int:
     if type(value) is not int or (nonnegative and value < 0):
-        raise ResumeError("The saved contraband trading record cannot be read.")
+        raise ResumeError(f"The saved {label} cannot be read.")
     return value
 
 
@@ -2204,7 +2210,7 @@ class SaveError(OSError):
 def _default_save_dir() -> Path:
     override = os.environ.get("VOIDRUNNER_SAVE_DIR")
     if override:
-        return Path(override)
+        return Path(override).expanduser().resolve()
     # Not `Path(__file__).resolve().parent` -- this module ships as real
     # installed package data now (see this module's own docstring), and
     # an installed package's own directory is routinely read-only and/or
@@ -2266,6 +2272,7 @@ def retire_pilot(old_save: SaveData) -> SaveData:
     character continuing under a different name."""
     retirements = old_save.pilot.retirements + 1
     new_save = _new_career(old_save.pilot.handle)
+    new_save.best_credits = max(old_save.best_credits, old_save.pilot.credits)
     new_save.pilot.retirements = retirements
     new_save.pilot.credits += retirements * RETIREMENT_STARTING_CREDITS_BONUS
     new_save.pilot.note(f"Retired as a {RANKS[-1][1]} (retirement #{retirements}) -- a new career begins.")
@@ -2304,97 +2311,148 @@ def load_or_create_save(save_dir: Path, user_id: int, handle: str) -> tuple[Save
     return _new_career(handle), True, notice
 
 
-def write_save(save_dir: Path, user_id: int, save: SaveData) -> None:
+class PilotBusy(Exception):
+    """Another process owns this pilot's complete read/play/write session."""
+
+
+@contextlib.contextmanager
+def pilot_session(save_dir: Path, user_id: int):
+    """Hold a stable OS lock; never unlink its inode while another opener exists."""
     save_dir.mkdir(parents=True, exist_ok=True)
-    path = _save_path(save_dir, user_id)
-    # Each writer owns its temporary file. Per-pilot concurrency and shared
-    # leaderboard transactions remain separate concerns from atomic replacement.
+    with (save_dir / f".{user_id}.lock").open("a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            if os.fstat(handle.fileno()).st_size == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            acquire = lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            acquire = lambda: fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            acquire()
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                raise PilotBusy from exc
+            raise
+        # Closing the descriptor releases the lock on every exit, including a
+        # killed process. Keep the file itself: unlinking it could split owners.
+        yield
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=save_dir,
-            prefix=f".{user_id}-", suffix=".tmp", delete=False,
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=f".{path.stem}-", suffix=".tmp", delete=False,
         ) as handle:
             tmp = Path(handle.name)
-            json.dump(save.to_dict(), handle)
+            json.dump(data, handle)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
     finally:
         if tmp is not None:
-            # Cleanup must not mask a failed write or atomic replacement.
             with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
 
 
-# Cross-save Hall of Fame: a single shared leaderboard file living
-# alongside every individual `{user_id}.json` save in the same sandbox
-# directory -- no DB access needed, since the door's own save directory
-# is already a real per-door filesystem sandbox (see this module's own
-# docstring). "leaderboard.json" can never collide with a save file,
-# since every save file's own name is a bare integer user_id.
+def write_save(save_dir: Path, user_id: int, save: SaveData) -> None:
+    """Write under the caller's session lock; atomic replacement alone is not a lease."""
+    _write_json_atomic(_save_path(save_dir, user_id), save.to_dict())
+
+
 HALL_OF_FAME_SIZE = 20
 
 
-def _hall_of_fame_path(save_dir: Path) -> Path:
-    return save_dir / "leaderboard.json"
+def _score_entry(data, user_id: int | None = None) -> dict | None:
+    """Discard malformed flavor data before sorting or rendering it."""
+    if not isinstance(data, dict) or not isinstance(data.get("handle"), str):
+        return None
+    entry = {key: data.get(key, 0) for key in
+             ("user_id", "best_credits", "retirements", "kills", "missions_completed")}
+    if "user_id" not in data or any(type(value) is not int or value < 0 for value in entry.values()):
+        return None
+    if user_id is not None and entry["user_id"] != user_id:
+        return None
+    entry["handle"] = data["handle"]
+    entry["rank"] = rank_for(entry["best_credits"])
+    return entry
+
+
+def _read_score_json(path: Path, limit: int = 65536):
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(limit + 1)
+        if len(raw) <= limit:
+            return json.loads(raw)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _legacy_scores(save_dir: Path) -> dict[int, dict]:
+    data = _read_score_json(save_dir / "leaderboard.json", 2 * 1024 * 1024)
+    entries = {}
+    for item in data if isinstance(data, list) else []:
+        entry = _score_entry(item)
+        if entry is not None:
+            prior = entries.get(entry["user_id"])
+            if prior is None or entry["best_credits"] > prior["best_credits"]:
+                entries[entry["user_id"]] = entry
+    return entries
+
+
+def _pilot_score(save_dir: Path, user_id: int) -> dict | None:
+    return _score_entry(_read_score_json(save_dir / "scores" / f"{user_id}.json"), user_id)
 
 
 def load_hall_of_fame(save_dir: Path) -> list[dict]:
-    """Best-effort read of the shared leaderboard -- a missing or
-    corrupt file just means an empty leaderboard, never a hard failure.
-    This file is pure flavor for every individual save; nothing else in
-    the game may ever depend on its contents."""
-    path = _hall_of_fame_path(save_dir)
-    if not path.exists():
-        return []
+    """Display the top 20 without discarding any independent pilot record."""
+    entries = _legacy_scores(save_dir)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    return data if isinstance(data, list) else []
+        for path in (save_dir / "scores").glob("*.json"):
+            if not path.stem.isascii() or not path.stem.isdecimal():
+                continue
+            entry = _score_entry(_read_score_json(path), int(path.stem))
+            if entry is not None:
+                prior = entries.get(entry["user_id"])
+                if prior:
+                    entry["best_credits"] = max(entry["best_credits"], prior["best_credits"])
+                    entry["rank"] = rank_for(entry["best_credits"])
+                entries[entry["user_id"]] = entry
+    except OSError:
+        pass
+    return sorted(entries.values(), key=lambda e: (-e["best_credits"], e["user_id"]))[:HALL_OF_FAME_SIZE]
 
 
 def update_hall_of_fame(save_dir: Path, user_id: int, save: SaveData) -> None:
-    """Refreshes this pilot's entry on the shared leaderboard -- called
-    from `persist()`, so it happens automatically after every state-
-    changing action, the same cadence as `write_save` itself. Every
-    field except `best_credits` always reflects the pilot's current,
-    latest-known state (so retirements/kills/missions_completed never
-    go stale); `best_credits` alone only ever ratchets upward, since a
-    losing streak -- or a deliberate retirement's own credits reset --
-    shouldn't erase a prior high-water mark. Entirely best-effort and
-    additive: any failure here must never interrupt or corrupt the real
-    per-pilot save file written right next to it."""
+    """Under the pilot session lock, replace only this pilot's optional record."""
+    legacy = _legacy_scores(save_dir).get(user_id, {})
+    prior = _pilot_score(save_dir, user_id) or {}
+    pilot = save.pilot
+    best = max(save.best_credits, pilot.credits, prior.get("best_credits", 0), legacy.get("best_credits", 0))
+    entry = {"user_id": user_id, "handle": pilot.handle, "best_credits": best,
+             "rank": rank_for(best), "retirements": pilot.retirements,
+             "kills": pilot.kills, "missions_completed": pilot.missions_completed}
     try:
-        all_entries = load_hall_of_fame(save_dir)
-        prior_best = next((e.get("best_credits", 0) for e in all_entries if e.get("user_id") == user_id), 0)
-        entries = [e for e in all_entries if e.get("user_id") != user_id]
-        pilot = save.pilot
-        best_credits = max(pilot.credits, prior_best)
-        entries.append({
-            "user_id": user_id,
-            "handle": pilot.handle,
-            "best_credits": best_credits,
-            "rank": rank_for(best_credits),
-            "retirements": pilot.retirements,
-            "kills": pilot.kills,
-            "missions_completed": pilot.missions_completed,
-        })
-        entries.sort(key=lambda e: e.get("best_credits", 0), reverse=True)
-        entries = entries[:HALL_OF_FAME_SIZE]
-        save_dir.mkdir(parents=True, exist_ok=True)
-        path = _hall_of_fame_path(save_dir)
-        tmp = path.with_suffix(".hof.tmp")
-        tmp.write_text(json.dumps(entries), encoding="utf-8")
-        os.replace(tmp, path)
+        _write_json_atomic(save_dir / "scores" / f"{user_id}.json", entry)
     except OSError:
-        pass
+        pass  # A later checkpoint repairs this optional projection of the save.
 
 
 def persist(world: World, save_dir: Path, user_id: int) -> None:
     world.sync_discovered()
     world.save.event_rng_state = world.event_rng.getstate()
+    prior = _pilot_score(save_dir, user_id) or {}
+    legacy = _legacy_scores(save_dir).get(user_id, {})
+    world.save.best_credits = max(world.save.best_credits, world.save.pilot.credits,
+                                  prior.get("best_credits", 0), legacy.get("best_credits", 0))
     write_save(save_dir, user_id, world.save)
     update_hall_of_fame(save_dir, user_id, world.save)
 
@@ -4249,7 +4307,12 @@ def main() -> int:
     user_id = int(info.get("user_id", 0)) or zlib.crc32(info["handle"].encode())
 
     world = None
+    lease = contextlib.ExitStack()
     try:
+        try:
+            lease.enter_context(pilot_session(save_dir, user_id))
+        except OSError as exc:
+            raise SaveError from exc
         screen_title(p, info)
         save, is_new, notice = load_or_create_save(save_dir, user_id, info["handle"])
         if notice:
@@ -4300,6 +4363,14 @@ def main() -> int:
             else:
                 continue
             world.checkpoint()
+    except PilotBusy:
+        out_line(f"{p.gold}This pilot already has an active Voidrunner session. "
+                 f"Return to it or close it before launching again.{RESET}")
+        try:
+            pause(p)
+        except EOFError:
+            pass
+        return 0
     except ResumeError as exc:
         out_line(f"{p.wrong}{exc} Play has stopped; your saved career is unchanged. "
                  f"Please contact your SysOp.{RESET}")
@@ -4324,6 +4395,7 @@ def main() -> int:
             return 1
         return 0
     finally:
+        lease.close()
         out(RESET)
 
 
