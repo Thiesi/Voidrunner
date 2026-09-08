@@ -3118,7 +3118,7 @@ def test_screen_shipyard_effect_column_aligns_between_tiered_and_maxed_rows(monk
     assert len(effect_columns) == 1, f"effect column drifted between rows: {effect_columns}"
 
 
-def test_screen_missions_reward_column_aligns_across_reward_digit_widths(monkeypatch):
+def test_screen_missions_preserves_rewards_in_compact_entries(monkeypatch):
     world = _world_with_seed(310)
     world.save.pilot.credits = 5_000
     monkeypatch.setattr(
@@ -3134,10 +3134,10 @@ def test_screen_missions_reward_column_aligns_across_reward_digit_widths(monkeyp
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_missions(vr.Palette(truecolor=False), world)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_missions@mixed-rewards")
-    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n")]
-    reward_ends = {line.index("cr") for line in stripped if "cr" in line and "[" in line}
-    assert len(reward_ends) == 1, f"reward column drifted between rows: {reward_ends}"
+    output = buf.getvalue()
+    assert "+5cr" in output and "+123,456cr" in output
+    assert "[1]" in output and "[2]" in output
+    assert "Details" in output and "[B]ack" in output
 
 
 def test_screen_chart_danger_and_fuel_columns_align_between_safe_and_danger_rows(monkeypatch):
@@ -3217,7 +3217,7 @@ def test_screen_crew_and_galaxy_map_boxes_match_79_columns(monkeypatch):
     assert map_borders == {79}
 
 
-def test_empty_mission_board_renders_clean_notice_in_box(monkeypatch):
+def test_empty_mission_board_renders_clean_notice_and_back(monkeypatch):
     world = _world_with_seed(313)
     p = vr.Palette(truecolor=False)
     monkeypatch.setattr(vr, "posted_mission_offers", lambda w: [])
@@ -3227,7 +3227,7 @@ def test_empty_mission_board_renders_clean_notice_in_box(monkeypatch):
         vr.screen_missions(p, world)
     output = buf.getvalue()
     assert "No contracts currently available" in output
-    _assert_box_rows_match_border(output, "screen_missions@empty")
+    assert "[B]ack" in output
 
 
 def test_commission_and_cartel_screens_use_tactical_framing(monkeypatch):
@@ -3275,7 +3275,7 @@ def test_status_bar_separator_is_79_columns():
         (b"YR2\r", b"Refueled 2 units", "ship.fuel", 22),
         (b"YPY", b"Hull repaired", "ship.hull_hp", 60),
         (b"MXA1\r5\rY", b"Futures contract: 1x Food", "active_futures", "nonempty"),
-        (b"BA", b"Accepted:", "active_missions", "nonempty"),
+        (b"B1NNNNNNNNA", b"Accepted:", "active_missions", "nonempty"),
         (b"DY", b"Jettisoned 1 units", "cargo", {}),
         (b"PY", b"Commission accepted", "pilot.has_concord_commission", True),
         (b"WY", b"Welcome to the family", "pilot.has_blackwake_made", True),
@@ -4289,9 +4289,9 @@ def test_legacy_over_limit_career_keeps_every_contract():
 def test_real_board_reopen_and_kill_retains_posted_terms(tmp_path):
     world = _world_with_seed(42)
     vr.persist(world, tmp_path, 77)
-    with _door_stopped_at(tmp_path, b"B", b"Accept which"):
+    with _door_stopped_at(tmp_path, b"B", b"Details"):
         first, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
-    with _door_stopped_at(tmp_path, b"B", b"Accept which"):
+    with _door_stopped_at(tmp_path, b"B", b"Details"):
         reopened, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert first.mission_boards and reopened.mission_boards == first.mission_boards
     assert reopened.next_mission_id == first.next_mission_id
@@ -4378,3 +4378,315 @@ def test_board_preparation_does_not_advance_encounter_rng(seed):
     world.checkpoint()
     assert world.event_rng.getstate() == before
     assert vr.posted_mission_offers(world)
+
+
+
+def _mission_details_world(kind="delivery"):
+    world = _world_with_seed(42)
+    target = next(s.id for s in world.galaxy if not s.discovered)
+    mission = vr.Mission(1, kind, "Complete and unabridged contract objective", 500, 0, target,
+                         commodity="food" if kind == "delivery" else None,
+                         quantity=3 if kind == "delivery" else None, deadline_turn=10, pirate_tier=2)
+    world.save.mission_boards[0] = {"refresh_turn": 3, "offers": [mission.to_dict()]}
+    return world, mission
+
+
+def test_mission_preview_back_and_paging_are_read_only(monkeypatch):
+    import copy
+    world, mission = _mission_details_world()
+    before = copy.deepcopy(world.save.to_dict())
+    rng = world.event_rng.getstate()
+    keys = iter("1NPBB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(world, "checkpoint", lambda: pytest.fail("Preview saved"))
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        vr.screen_missions(vr.Palette(False), world)
+    assert mission.description in output.getvalue()
+    assert world.save.to_dict() == before
+    assert world.event_rng.getstate() == rng
+    assert not world.by_id[mission.target_system].discovered
+
+
+def test_acceptance_requires_last_details_page_and_checkpoints_before_ack(monkeypatch):
+    world, mission = _mission_details_world()
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 12)
+    pages = vr._mission_text_pages(vr.mission_details(world, mission))
+    assert len(pages) > 1
+    # Premature A is ignored. Only the final A commits, before acknowledgement.
+    keys = iter("A" + "N" * (len(pages) - 1) + "AK")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    output = io.StringIO()
+    commits = []
+    def commit(current):
+        assert "Accepted:" not in output.getvalue()
+        commits.append(current.save.to_dict())
+    world._checkpoint = commit
+    with contextlib.redirect_stdout(output):
+        vr.screen_mission_details(vr.Palette(False), world, mission, active=False)
+    assert len(commits) == 1
+    assert [m.id for m in world.save.active_missions] == [mission.id]
+    assert not world.save.mission_boards[0]["offers"]
+
+
+@pytest.mark.parametrize("width,height", [(40, 24), (80, 24), (40, 12), (20, 10)])
+def test_full_contract_details_fit_each_page_and_retain_back(monkeypatch, width, height):
+    world, mission = _mission_details_world("escort")
+    mission.description = "Very long objective " * 20
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    output = io.StringIO()
+    frames = []
+    offset = 0
+    count = len(vr._mission_text_pages(vr.mission_details(world, mission)))
+    def key():
+        nonlocal offset
+        frame = output.getvalue()[offset:]
+        offset = len(output.getvalue())
+        frames.append(frame)
+        rows = frame.split("\r\n")
+        assert len(rows) <= height
+        assert all(vr._visible_width(row) <= width for row in rows)
+        assert "[B]ack" in frame
+        return "N" if len(frames) < count else "B"
+    monkeypatch.setattr(vr, "read_key", key)
+    with contextlib.redirect_stdout(output):
+        vr.screen_mission_details(vr.Palette(False), world, mission, active=False)
+    body_rows = [row for row in vr._ANSI_RE.sub("", output.getvalue()).split("\r\n")
+                 if not row.startswith(("Contract #", "[N]", "[B]", "[A]"))]
+    joined = " ".join(" ".join(body_rows).split())
+    assert "EVERY jump" in joined and "including detours" in joined
+    assert "no cargo space" in joined
+    assert len(frames) == count
+
+
+def test_legacy_active_contract_list_is_paginated_and_selectable(monkeypatch):
+    world = _world_with_seed(42)
+    world.save.active_missions = [vr.Mission(i + 1, "scan", f"Survey {i}", 500, 0, 1) for i in range(30)]
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 24)
+    output = io.StringIO()
+    selected = []
+    def key():
+        return "N" if "Contracts 2/" not in output.getvalue() else "1" if not selected else "B"
+    monkeypatch.setattr(vr, "read_key", key)
+    monkeypatch.setattr(vr, "screen_mission_details", lambda p, w, m, active: selected.append((m.id, active)))
+    with contextlib.redirect_stdout(output):
+        vr.screen_missions(vr.Palette(False), world)
+    assert selected and selected[0][0] > 1 and selected[0][1]
+    assert "SURVEY" in output.getvalue()
+    assert "CARGO" not in output.getvalue()
+    assert len(world.save.active_missions) == 30
+
+
+@pytest.mark.parametrize("kind", ["delivery", "scan", "bounty", "escort"])
+def test_contract_terms_show_kind_obligations_and_cost_limits(kind):
+    world, mission = _mission_details_world(kind)
+    world.save.ship.has_navigator = True
+    world.save.cargo = {"food": 1}
+    lines = " ".join(vr.mission_details(world, mission))
+    assert "inclusive" in lines and "Target danger: uncharted" in lines
+    assert "Gross payout" in lines and "not total profit" in lines
+    assert "repairs" in lines and "wages" in lines
+    if kind == "delivery":
+        price = vr.price_for(world, 0, "food")
+        assert f"2 x {price} = {2 * price:,} cr" in lines
+        assert "Delivery consumes the cargo" in lines
+    elif kind == "scan":
+        assert "scanner" in lines and "does not chart" in lines
+    elif kind == "bounty":
+        assert "tier 2" in lines and "mistaken-identity" in lines
+    else:
+        assert "EVERY jump" in lines and "Other escort contracts" in lines
+
+
+@pytest.mark.parametrize("action", ["complete", "expire", "abandon"])
+def test_tracking_roundtrips_and_clears_with_contract_removal(tmp_path, action):
+    world, mission = _mission_details_world()
+    vr.accept_mission(world, mission)
+    vr.track_mission(world, mission.id)
+    world.checkpoint()
+    vr.persist(world, tmp_path, 77)
+    save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    world = vr.World(save)
+    assert vr.tracked_mission(world).id == mission.id
+    if action == "complete":
+        world.save.current_system = mission.target_system
+        world.save.cargo = {"food": 3}
+        vr.check_mission_completions(world)
+    elif action == "expire":
+        world.save.turn = 11
+        vr.expire_missions(world)
+    else:
+        vr.abandon_mission(world, mission.id)
+    assert vr.tracked_mission(world) is None
+    assert world.save.tracked_mission_id is None
+
+
+def test_abandonment_cancel_is_read_only_and_confirmed_action_keeps_cargo(monkeypatch):
+    import copy
+    world, mission = _mission_details_world()
+    vr.accept_mission(world, mission)
+    vr.track_mission(world, mission.id)
+    world.save.cargo = {"food": 3}
+    before = copy.deepcopy(world.save.to_dict())
+    keys = iter("DNB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_mission_details(vr.Palette(False), world, mission, active=True)
+    assert world.save.to_dict() == before
+    keys = iter("DYK")
+    commits = []
+    world._checkpoint = lambda current: commits.append(current.save.to_dict())
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_mission_details(vr.Palette(False), world, mission, active=True)
+    assert len(commits) == 1
+    assert world.save.cargo == {"food": 3}
+    assert world.save.pilot.credits == before["pilot"]["credits"]
+    assert not world.save.active_missions and world.save.tracked_mission_id is None
+    assert not world.save.mission_boards[0]["offers"]
+
+
+def test_real_tracking_action_survives_termination_and_is_visible_on_return(tmp_path):
+    world, mission = _mission_details_world("scan")
+    vr.accept_mission(world, mission)
+    world.checkpoint()
+    vr.persist(world, tmp_path, 77)
+    choice = len(vr.posted_mission_offers(world)) + 1
+    with _door_stopped_at(tmp_path, f"B{choice}T".encode(), b"Tracking updated."):
+        save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert save.tracked_mission_id == mission.id
+    with _door_stopped_at(tmp_path, b"", b"Tracked") as output:
+        assert b"Tracked" in output
+
+
+def test_tracking_and_abandonment_reject_pending_travel():
+    world, mission = _mission_details_world()
+    vr.accept_mission(world, mission)
+    world.save.pending_travel = {"phase": "primary"}
+    with pytest.raises(vr.MissionError, match="interrupted journey"):
+        vr.track_mission(world, mission.id)
+    with pytest.raises(vr.MissionError, match="interrupted journey"):
+        vr.abandon_mission(world, mission.id)
+    assert world.save.active_missions == [mission]
+
+
+@pytest.mark.parametrize("keys,ack", [("T", "Tracking updated"), ("DY", "Abandoned:")])
+def test_contract_management_save_failure_precedes_acknowledgement(monkeypatch, keys, ack):
+    world, mission = _mission_details_world()
+    vr.accept_mission(world, mission)
+    commands = iter(keys)
+    monkeypatch.setattr(vr, "read_key", lambda: next(commands))
+    def fail(current):
+        raise OSError("disk full")
+    world._checkpoint = fail
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output), pytest.raises(vr.SaveError):
+        vr.screen_mission_details(vr.Palette(False), world, mission, active=True)
+    assert ack not in output.getvalue()
+
+
+@pytest.mark.parametrize("discovered", [False, True])
+def test_tracked_chart_hint_identifies_the_actual_destination_key(monkeypatch, discovered):
+    world, mission = _mission_details_world("scan")
+    vr.accept_mission(world, mission)
+    vr.track_mission(world, mission.id)
+    first = vr.mission_route(world, mission)[0]
+    world.by_id[first].discovered = discovered
+    world.save.ship.fuel = 100
+    key = vr.CHART_CONNECTION_LETTERS[sorted(world.here.connections).index(first)]
+    monkeypatch.setattr(vr, "read_key", lambda: key)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        dest = vr.screen_chart(vr.Palette(False), world)
+    assert dest == first
+    assert f"Tracked route: [{key}]" in output.getvalue()
+    assert world.by_id[first].discovered is discovered
+
+
+def test_bounty_retry_requires_reentry_and_budgets_two_jumps():
+    world, mission = _mission_details_world("bounty")
+    vr.accept_mission(world, mission)
+    world.save.current_system = mission.target_system
+    world.save.turn = mission.deadline_turn - 1
+    world.save.ship.has_navigator = True
+    world.save.ship.fuel = 0
+    route = vr.mission_route(world, mission)
+    assert len(route) == 2 and route[-1] == mission.target_system
+    lines = " ".join(vr.mission_details(world, mission))
+    assert "jump back" in lines and "both jumps" in lines
+    assert "shortest route misses the deadline" in lines
+    assert "2 jump(s)" in vr.mission_bearing(world, mission)
+    assert "wages 10 cr/jump, 20 cr total" in lines
+
+
+@pytest.mark.parametrize("kind", ["bounty", "escort"])
+@pytest.mark.parametrize("outcome", ["won", "destroyed", "expired"])
+def test_pending_mission_resolution_checkpoint_clears_tracking(monkeypatch, kind, outcome):
+    world, mission = _mission_details_world(kind)
+    vr.accept_mission(world, mission)
+    vr.track_mission(world, mission.id)
+    world.save.pending_travel = {
+        "phase": "primary" if kind == "bounty" else "escorts", "bounty": mission.to_dict(),
+        "escorts": [mission.to_dict()] if kind == "escort" else [], "escort_index": 0,
+        "encounter": {},
+    }
+    if outcome == "expired":
+        world.save.turn = 11
+    monkeypatch.setattr(vr, "screen_combat", lambda *args: outcome)
+    seen = []
+    def checkpoint(current):
+        if not current.save.active_missions:
+            assert current.save.pending_travel is not None
+            assert current.save.tracked_mission_id is None
+            seen.append(1)
+    world._checkpoint = checkpoint
+    with contextlib.redirect_stdout(io.StringIO()):
+        if kind == "bounty":
+            vr._resolve_bounty(vr.Palette(False), world, world.save.pending_travel)
+        else:
+            vr._resolve_escort_missions(vr.Palette(False), world, mission.target_system)
+    assert seen
+
+
+
+def test_queued_bounty_route_budgets_preceding_fights():
+    world, mission = _mission_details_world("bounty")
+    earlier = vr.Mission(9, "bounty", "Earlier", 500, 0, mission.target_system, pirate_tier=1)
+    world.save.active_missions = [earlier]
+    base = vr.bfs_path(world.by_id, 0, mission.target_system)
+    assert len(vr.mission_route(world, mission)) == len(base) + 2
+    vr.accept_mission(world, mission)
+    assert len(vr.mission_route(world, mission)) == len(base) + 2
+    assert "1 earlier contract" in " ".join(vr.mission_details(world, mission))
+    world.save.current_system = mission.target_system
+    assert len(vr.mission_route(world, mission)) == 4
+    world.save.active_missions.remove(earlier)
+    assert len(vr.mission_route(world, mission)) == 2
+
+
+def test_tiny_contract_board_splits_entries_and_keeps_selection(monkeypatch):
+    import re
+    world, mission = _mission_details_world("escort")
+    world.by_id[mission.target_system].name = "A particularly long system name that cannot fit one page"
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 20)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 10)
+    output = io.StringIO()
+    offset = 0
+    frames = []
+    selected = []
+    def key():
+        nonlocal offset
+        frame = output.getvalue()[offset:]
+        offset = len(output.getvalue())
+        frames.append(frame)
+        assert len(frame.split("\r\n")) <= 10
+        assert all(vr._visible_width(row) <= 20 for row in frame.split("\r\n"))
+        plain = vr._ANSI_RE.sub("", frame)
+        page, total = map(int, re.search(r"Contracts (\d+)/(\d+)", plain).groups())
+        return "N" if page < total else "1" if not selected else "B"
+    monkeypatch.setattr(vr, "read_key", key)
+    monkeypatch.setattr(vr, "screen_mission_details", lambda p, w, m, active: selected.append(m.id))
+    with contextlib.redirect_stdout(output):
+        vr.screen_missions(vr.Palette(False), world)
+    assert len(frames) > 2 and selected == [mission.id]

@@ -88,6 +88,7 @@ RESET = f"{ESC}[0m"
 BOLD = f"{ESC}[1m"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
 _OUTPUT_WIDTH = 80
+_OUTPUT_HEIGHT = 24
 
 
 # ---------------------------------------------------------------------------
@@ -1034,6 +1035,7 @@ class SaveData:
     pending_travel: dict | None = None
     event_rng_state: list | tuple | None = None
     mission_boards: dict[int, dict] = field(default_factory=dict)
+    tracked_mission_id: int | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -1055,6 +1057,7 @@ class SaveData:
             "pending_travel": self.pending_travel,
             "event_rng_state": self.event_rng_state,
             "mission_boards": {str(k): v for k, v in self.mission_boards.items()},
+            "tracked_mission_id": self.tracked_mission_id,
         }
 
     @classmethod
@@ -1078,6 +1081,7 @@ class SaveData:
             pending_travel=_load_pending_travel(d.get("pending_travel")),
             event_rng_state=d.get("event_rng_state"),
             mission_boards=_load_mission_boards(d.get("mission_boards", {})),
+            tracked_mission_id=_load_tracked_mission_id(d.get("tracked_mission_id")),
         )
 
 
@@ -1103,6 +1107,8 @@ class World:
             expire_missions(self)
             _normalize_mission_ids(self.save)
             generate_mission_board(self)
+        if tracked_mission(self) is None:
+            self.save.tracked_mission_id = None
         self.save.event_rng_state = self.event_rng.getstate()
         if self.save.pending_travel is not None:
             self.save.pending_travel["destroyed"] = self.ship_destroyed_this_hop
@@ -1727,6 +1733,8 @@ def expire_missions(world: World) -> list[str]:
         else:
             active.append(mission)
     world.save.active_missions = active
+    if not any(m.id == world.save.tracked_mission_id for m in active):
+        world.save.tracked_mission_id = None
     return messages
 
 
@@ -1755,6 +1763,8 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
         else:
             still_active.append(m)
     world.save.active_missions = still_active
+    if not any(m.id == world.save.tracked_mission_id for m in still_active):
+        world.save.tracked_mission_id = None
     return msgs
 
 
@@ -2521,6 +2531,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
         out_line(f"{p.gold}{msg}{RESET}")
     out_line()
     draw_status_bar(p, world)
+    _show_tracked_mission(p, world)
 
     out_line(_box_title(p, f"Station Services: {world.here.station_name}"))
     menu_rows = [
@@ -2981,60 +2992,270 @@ def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -
     out_line(f"{p.gold}Cargo, hull, and fuel capacity all jump considerably.{RESET}")
 
 
-def screen_missions(p: Palette, world: World) -> None:
-    board = posted_mission_offers(world)
-    while True:
-        out_line()
-        out_line(_box_title(p, f"Bounty & Contract Board: {world.here.station_name}"))
-        header = f" {p.gold}KEY  TYPE      MISSION CONTRACT & OBJECTIVES                        REWARD{RESET}"
-        out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
-        out_line(_box_divider(p))
-        if not board:
-            empty_row = f"  {p.muted}No contracts currently available on this station.{RESET}"
-            pad_len = max(0, 77 - _vis_len(empty_row))
-            out_line(f"{p.accent}│{RESET}{empty_row}{' ' * pad_len}{p.accent}│{RESET}")
-        else:
-            for i, m in enumerate(board):
-                if m.kind == "bounty":
-                    badge_str = f"{p.wrong}[BOUNTY]{RESET} "
-                elif m.kind == "escort":
-                    badge_str = f"{p.gold}[ESCORT]{RESET} "
-                else:
-                    badge_str = f"{p.accent}[CARGO]{RESET}  "
-                reward_str = f"{p.gold}+{m.reward:,}cr{RESET}"
-                m_desc = m.description
-                if _vis_len(m_desc) > 44:
-                    m_desc = m_desc[:41] + "..."
-                row_str = f"  {p.gold}[{LETTERS[i]}]{RESET}  {badge_str} {m_desc:<44} {_pad(reward_str, 10, 'right')}"
-                pad_len = max(0, 77 - _vis_len(row_str))
-                out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
+def _mission_plain(text) -> str:
+    return "".join(c if c.isprintable() else " " for c in _ANSI_RE.sub("", str(text)))
 
-        out_line(_box_bottom(p))
-        posted = world.save.mission_boards.get(world.save.current_system)
-        if posted is not None:
-            out_line(f"{p.muted}Offers refresh on day {posted['refresh_turn']}; jumps advance the day.{RESET}")
-        out_line(f"{p.muted}Active contracts: {len(world.save.active_missions)}/{MAX_ACTIVE_MISSIONS}.{RESET}")
-        if world.save.active_missions:
-            out_line(f"{p.muted}Active missions:{RESET}")
-            for m in world.save.active_missions:
-                out_line(f"  {p.muted}- {m.description} (+{m.reward}cr){RESET}")
-        out_prompt(f"  {p.muted}Accept which, or [Q] back? {RESET}")
+
+def _load_tracked_mission_id(value) -> int | None:
+    if value is not None and (type(value) is not int or value < 1):
+        raise ResumeError("The tracked contract cannot be read.")
+    return value
+
+
+def tracked_mission(world: World) -> Mission | None:
+    return next((m for m in world.save.active_missions
+                 if m.id == world.save.tracked_mission_id and not mission_expired(world, m)), None)
+
+
+def track_mission(world: World, mission_id: int | None) -> None:
+    if world.save.pending_travel is not None:
+        raise MissionError("Finish the interrupted journey before changing contracts.")
+    if mission_id is not None and not any(m.id == mission_id and not mission_expired(world, m)
+                                          for m in world.save.active_missions):
+        raise MissionError("That contract is no longer active.")
+    world.save.tracked_mission_id = mission_id
+
+
+def abandon_mission(world: World, mission_id: int) -> str:
+    if world.save.pending_travel is not None:
+        raise MissionError("Finish the interrupted journey before changing contracts.")
+    mission = next((m for m in world.save.active_missions if m.id == mission_id), None)
+    if mission is None:
+        raise MissionError("That contract is no longer active.")
+    world.save.active_missions.remove(mission)
+    if world.save.tracked_mission_id == mission.id:
+        world.save.tracked_mission_id = None
+    message = f"Abandoned: {mission.description}. Cargo retained; no reward or fee."
+    world.save.pilot.note(message)
+    return message
+
+
+def preceding_bounties(world: World, mission: Mission) -> int:
+    count = 0
+    if mission.kind == "bounty":
+        for active in world.save.active_missions:
+            if active.id == mission.id:
+                break
+            if active.kind == "bounty" and active.target_system == mission.target_system and not mission_expired(world, active):
+                count += 1
+    return count
+
+
+def mission_route(world: World, mission: Mission) -> list[int]:
+    path = bfs_path(world.by_id, world.save.current_system, mission.target_system)
+    if mission.kind == "bounty":
+        target = world.by_id[mission.target_system]
+        neighbor = min(target.connections,
+                       key=lambda sid: (fuel_cost_for_jump(target, world.by_id[sid], world.save.ship), sid))
+        retries = preceding_bounties(world, mission) + (1 if not path else 0)
+        path += [neighbor, mission.target_system] * retries
+    return path
+
+
+def mission_bearing(world: World, mission: Mission) -> str:
+    target = world.by_id[mission.target_system]
+    path = mission_route(world, mission)
+    location = f"{target.name} ({target.x},{target.y})"
+    if not path:
+        return f"{location}: at this station"
+    first = world.by_id[path[0]]
+    return f"{location}: {len(path)} jump(s), next bearing ({first.x},{first.y})"
+
+
+def mission_details(world: World, mission: Mission) -> list[str]:
+    """Read-only terms and explicit estimates; never reveal remote market state."""
+    path = mission_route(world, mission)
+    reward = bounty_reward_for(world, mission.reward) if mission.kind in ("bounty", "escort") else mission.reward
+    target = world.by_id[mission.target_system]
+    lines = [mission.description, f"Destination: {mission_bearing(world, mission)}",
+             f"Target danger: {target.danger}" if target.discovered else "Target danger: uncharted"]
+    ahead = preceding_bounties(world, mission)
+    if ahead:
+        lines.append(f"Queued bounties: {ahead} earlier contract(s) at this target resolve first. Budget includes re-entry after each, assuming they remain active and you win.")
+    if mission.kind == "bounty" and path and path[-1] == world.save.current_system:
+        lines.append("Retry: leave this system and jump back to re-engage the bounty; budget includes both jumps.")
+    if mission.deadline_turn is None:
+        lines.append("Deadline: none. Jumps advance the day.")
+    else:
+        remaining = mission.deadline_turn - world.save.turn
+        lines.append(f"Deadline: day {mission.deadline_turn} inclusive; today {world.save.turn}, {max(0, remaining)} jump(s) left.")
+        if remaining < 0:
+            lines.append("EXPIRED: this contract cannot pay.")
+        elif len(path) > remaining and mission.kind != "scan":
+            lines.append("WARNING: the shortest route misses the deadline.")
+    lines.append(f"Gross payout: {reward:,} cr. Credits available: {world.save.pilot.credits:,} cr.")
+    procurement = 0
+    if mission.kind == "delivery":
+        quantity = mission.quantity or 0
+        have = world.save.cargo.get(mission.commodity, 0)
+        missing = max(0, quantity - have)
+        price = price_for(world, world.save.current_system, mission.commodity)
+        procurement = missing * price
+        free = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
+        lines.extend([
+            f"Cargo: deliver {quantity} {COMMODITIES[mission.commodity]['label']}; {have} aboard, buy {missing} more.",
+            f"Procurement at this station: {missing} x {price} = {procurement:,} cr; prices can move after purchases.",
+            f"Hold: need {missing} free units; {free} available. Delivery consumes the cargo.",
+        ])
+        if missing > free:
+            lines.append("WARNING: make cargo space or upgrade before procuring the full load.")
+    elif mission.kind == "scan":
+        lines.append("Survey: chart this target by arriving or discovering it with your scanner. No cargo required.")
+        lines.append("Accepting or tracking the bearing does not chart the system.")
+    elif mission.kind == "bounty":
+        lines.append(f"Combat: intercept a tier {mission.pirate_tier} raider at the target. Escape leaves the bounty active; destruction fails it.")
+        lines.append("Bounty kills can trigger a mistaken-identity inquiry and notoriety.")
+    elif mission.kind == "escort":
+        lines.append(f"Combat: one tier {mission.pirate_tier} raider fight on EVERY jump while active, including detours.")
+        lines.append("Other escort contracts add their own fights. Escape or destruction fails this convoy.")
+        lines.append("Payment follows a won convoy fight on arrival at the target; no cargo space is needed.")
+    fuel = 0
+    max_leg = 0
+    previous = world.save.current_system
+    for sid in path:
+        leg = fuel_cost_for_jump(world.by_id[previous], world.by_id[sid], world.save.ship)
+        max_leg = max(max_leg, leg)
+        fuel += leg
+        previous = sid
+    fuel_cash = max(0, fuel - world.save.ship.fuel) * 6
+    wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
+    wages = wage * len(path)
+    outlay = procurement + fuel_cash + wages
+    lines.extend([
+        f"Shortest-route budget: {fuel} fuel ({world.save.ship.fuel} aboard), {fuel_cash} cr top-ups; wages {wage} cr/jump, {wages} cr total.",
+        f"Estimated remaining cash outlay: {outlay:,} cr; payout less this outlay: {reward - outlay:+,} cr.",
+        "Estimate excludes cargo already paid for, repairs, detours, combat gains/losses and changing prices; it is not total profit.",
+        "Budget assumes refuelling stops and retained crew. Survey scanning may avoid travel. Remote danger remains unknown until charted.",
+    ])
+    if max_leg > fuel_capacity(world.save.ship):
+        lines.append("WARNING: a shortest-route jump exceeds tank capacity; upgrade or find another route.")
+    if outlay > world.save.pilot.credits:
+        lines.append("WARNING: current credits do not cover the estimated remaining outlay.")
+    return [_mission_plain(line) for line in lines]
+
+
+def _mission_text_pages(lines: list[str], *, overhead: int = 7) -> list[list[str]]:
+    rows = [row for line in lines for row in _wrap_output(_mission_plain(line), max(1, _OUTPUT_WIDTH - 1)).split("\r\n")]
+    size = max(1, _OUTPUT_HEIGHT - overhead)
+    return [rows[i:i + size] for i in range(0, len(rows), size)] or [[]]
+
+
+def _show_tracked_mission(p: Palette, world: World) -> None:
+    mission = tracked_mission(world)
+    if mission is not None:
+        kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
+        out_line(f"{p.gold}Tracked {_mission_plain(kind)}: {_mission_plain(mission_bearing(world, mission))}{RESET}")
+
+
+def screen_mission_details(p: Palette, world: World, mission: Mission, *, active: bool) -> None:
+    page = 0
+    while True:
+        lines = mission_details(world, mission)
+        max_pages = sum(len(_wrap_output(line, max(1, _OUTPUT_WIDTH - 1)).split("\r\n")) for line in lines)
+        title = f"Contract #{mission.id} {max_pages}/{max_pages}"
+        footer = "[N]ext [P]rev [B]ack > "
+        overhead = max(7, 1 + len(_wrap_output(title, _OUTPUT_WIDTH).split("\r\n"))
+                       + len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
+                       + (2 if active else 1))
+        pages = _mission_text_pages(lines, overhead=overhead)
+        page = min(page, len(pages) - 1)
+        out_line()
+        out_line(f"{p.gold}Contract #{mission.id} {page + 1}/{len(pages)}{RESET}")
+        for row in pages[page]:
+            out_line(row)
+        actions = "[N]ext [P]rev [B]ack"
+        if active:
+            toggle = "Untrack" if world.save.tracked_mission_id == mission.id else "Track"
+            out_line(f"[T] {toggle}")
+            out_line("[D] Abandon")
+        elif page == len(pages) - 1:
+            out_line("[A]ccept contract")
+        out_prompt(actions + " > ")
         key = read_command()
-        out_line(key)
-        if key == "Q":
+        if key in ("B", "Q"):
             return
-        idx = LETTERS.index(key) if key in LETTERS else -1
-        if idx < 0 or idx >= len(board):
-            continue
-        mission = board[idx]
-        try:
-            accept_mission(world, mission)
-        except MissionError as exc:
-            out_line(f"{p.wrong}{exc}{RESET}")
-            continue
-        board.pop(idx)
-        world.checkpoint()
-        out_line(f"{p.correct}Accepted: {mission.description}{RESET}")
+        if key == "N":
+            page = min(page + 1, len(pages) - 1)
+        elif key == "P":
+            page = max(0, page - 1)
+        else:
+            try:
+                if not active and key == "A" and page == len(pages) - 1:
+                    accept_mission(world, mission)
+                    world.checkpoint()
+                    out_line(f"{p.correct}Accepted: {_mission_plain(mission.description)}{RESET}")
+                    pause(p)
+                    return
+                if active and key == "T":
+                    track_mission(world, None if world.save.tracked_mission_id == mission.id else mission.id)
+                    world.checkpoint()
+                    out_line("Tracking updated.")
+                    pause(p)
+                elif active and key == "D":
+                    if confirm("Abandon this contract? Forfeit its reward; keep cargo, no fee.", p):
+                        message = abandon_mission(world, mission.id)
+                        world.checkpoint()
+                        out_line(_mission_plain(message))
+                        pause(p)
+                        return
+            except MissionError as exc:
+                out_line(f"{p.wrong}{exc}{RESET}")
+                pause(p)
+
+
+def screen_missions(p: Palette, world: World) -> None:
+    page = 0
+    while True:
+        entries = [(m, False) for m in posted_mission_offers(world)] + [(m, True) for m in world.save.active_missions]
+        wrapped = []
+        for mission, active in entries:
+            kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
+            state = "TRACKED" if active and world.save.tracked_mission_id == mission.id else "ACTIVE" if active else "OFFER"
+            label = _mission_plain(f"{state} {kind}: {world.by_id[mission.target_system].name} (+{mission.reward:,}cr)")
+            wrapped.append((mission, active, _wrap_output(label, max(1, _OUTPUT_WIDTH - 5)).split("\r\n")))
+        summary = [f"Active: {len(world.save.active_missions)}/{MAX_ACTIVE_MISSIONS}"]
+        posted = world.save.mission_boards.get(world.save.current_system)
+        if posted:
+            summary.append(f"Refresh day {posted['refresh_turn']}")
+        footer = "[1-9] Details [N]ext [P]rev [B]ack > "
+        max_pages = max(1, sum(len(rows) for _, _, rows in wrapped))
+        overhead = 1 + len(_wrap_output(f"Contracts {max_pages}/{max_pages}", _OUTPUT_WIDTH).split("\r\n"))
+        overhead += sum(len(_wrap_output(line, _OUTPUT_WIDTH).split("\r\n")) for line in summary)
+        overhead += len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
+        capacity = max(1, _OUTPUT_HEIGHT - overhead)
+        pages = [([], [])]  # rows, selectable contracts; continued rows stay selectable
+        for mission, active, rows in wrapped:
+            for row in rows:
+                body, choices = pages[-1]
+                choice = next((i for i, (m, _) in enumerate(choices) if m is mission), None)
+                if len(body) >= capacity or (choice is None and len(choices) >= 9):
+                    pages.append(([], []))
+                    body, choices = pages[-1]
+                    choice = None
+                if choice is None:
+                    choice = len(choices)
+                    choices.append((mission, active))
+                body.append(f"[{choice + 1}] {row}")
+        page = min(page, len(pages) - 1)
+        out_line()
+        out_line(f"{p.gold}Contracts {page + 1}/{len(pages)}{RESET}")
+        for row in pages[page][0]:
+            out_line(row)
+        if not entries:
+            out_line("No contracts currently available.")
+        for line in summary:
+            out_line(line)
+        out_prompt(footer)
+        key = read_command()
+        if key in ("B", "Q"):
+            return
+        if key == "N":
+            page = min(page + 1, len(pages) - 1)
+        elif key == "P":
+            page = max(0, page - 1)
+        elif len(key) == 1 and "1" <= key <= "9" and int(key) <= len(pages[page][1]):
+            mission, active = pages[page][1][int(key) - 1]
+            screen_mission_details(p, world, mission, active=active)
 
 
 def screen_status(p: Palette, world: World) -> None:
@@ -3183,6 +3404,7 @@ def screen_chart(p: Palette, world: World) -> str | None:
     while True:
         here = world.here
         out_line()
+        _show_tracked_mission(p, world)
         out_line(_box_title(p, f"Navigation Star Chart: {here.name}"))
         header = f" {p.gold}KEY  BEARING DESTINATION       SECTOR      ECONOMY       DANGER   JUMP COST{RESET}"
         out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
@@ -3212,6 +3434,12 @@ def screen_chart(p: Palette, world: World) -> str | None:
             out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
 
         out_line(_box_bottom(p))
+        mission = tracked_mission(world)
+        route = mission_route(world, mission) if mission is not None else []
+        if route and route[0] in options:
+            letter = CHART_CONNECTION_LETTERS[options.index(route[0])]
+            next_system = world.by_id[route[0]]
+            out_line(f"{p.gold}Tracked route: [{letter}] next bearing ({next_system.x},{next_system.y}){RESET}")
         scan_available = world.save.ship.scanner_tier > 0
         actions = []
         if scan_available:
@@ -3889,7 +4117,7 @@ def screen_customs(p: Palette, world: World) -> None:
 
 
 def main() -> int:
-    global _OUTPUT_WIDTH
+    global _OUTPUT_WIDTH, _OUTPUT_HEIGHT
 
     sys.stdout.reconfigure(encoding="utf-8")
     info = _load_door_info()
@@ -3897,6 +4125,10 @@ def main() -> int:
         _OUTPUT_WIDTH = max(1, int(info.get("terminal_width", 80)))
     except (TypeError, ValueError):
         _OUTPUT_WIDTH = 80
+    try:
+        _OUTPUT_HEIGHT = max(10, min(200, int(info.get("terminal_height", 24))))
+    except (TypeError, ValueError):
+        _OUTPUT_HEIGHT = 24
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
     save_dir = _default_save_dir()
     # Real NetBBS launches always carry a real positive user_id from the
