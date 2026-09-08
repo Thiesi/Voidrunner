@@ -4705,7 +4705,83 @@ def test_screen_market_contraband_row_fits_the_box(monkeypatch):
     _assert_box_rows_match_border(buf.getvalue(), "screen_market@Haven")
 
 
-def test_screen_station_menu_special_ops_rows_fit_the_box(monkeypatch):
+@pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("expanded", [False,True])
+def test_station_deck_pages_keep_telemetry_actions_and_exit_visible(monkeypatch,width,height,expanded):
+    import re
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    world=_world_with_seed(42)
+    world.save.ship.has_gunner=True
+    world.save.ship.hull_hp=1
+    world.save.pilot.credits=5
+    world.save.cargo={"weapons":2}
+    world.save.active_event={"description":"Regional supply disruption", "turns_remaining":3}
+    before=world.save.to_dict()
+    world._checkpoint=lambda _:pytest.fail("Browsing checkpointed")
+    output=io.StringIO();frames=[];toggled=False
+    def choose():
+        nonlocal toggled
+        frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0)
+        assert len(frame.splitlines())<=height
+        assert all(vr._visible_width(line)<=width for line in frame.splitlines())
+        plain=" ".join(frame.split())
+        assert "[Q]Exit:" in plain
+        assert "5cr" in plain
+        if expanded and not toggled:
+            toggled=True
+            return "X"
+        frames.append(frame)
+        page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
+        return "Q" if page==count else ">"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):assert vr.screen_station_menu(vr.Palette(False),world)=="Q"
+    text=" ".join(" ".join(frames).split())
+    for phrase in ("Station Services", "CRITICAL HULL", "Contraband aboard", "Regional supply disruption", "LOW CASH", "Cargo 2/", "[M]", "[Y]", "[B]", "[C]", "[S]", "[H]", "[G]", "[T]"):
+        assert phrase in text
+    if expanded:assert "systems charted" in text and "Crew:" in text
+    assert world.save.to_dict()==before
+
+
+@pytest.mark.parametrize("key",list("MYBCSHGTQ"))
+def test_station_deck_service_keys_work_after_paging_and_expansion(monkeypatch,key):
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",20);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",10)
+    world=_world_with_seed(42)
+    before=world.save.to_dict()
+    commands=iter([">","X",">","<",key])
+    monkeypatch.setattr(vr,"read_key",lambda:next(commands))
+    with contextlib.redirect_stdout(io.StringIO()):assert vr.screen_station_menu(vr.Palette(False),world)==key
+    assert world.save.to_dict()==before
+
+
+@pytest.mark.parametrize("commands", [b">X><XQ", b">X><", b">XMQYQQ"])
+def test_real_cockpit_paging_toggle_and_exit_preserve_career(tmp_path,commands):
+    import json,os,subprocess
+    world=_world_with_seed(42)
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
+    original=(tmp_path/"77.json").read_bytes()
+    info=tmp_path/"door_info.json"
+    info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+    assert result.returncode==0 and not result.stderr
+    assert b"Command Deck:" in result.stdout and b"[X]Compact" in result.stdout
+    if b"M" in commands:
+        assert b"Commodity Market" in result.stdout and b"Engineering Yard:" in result.stdout
+    assert (tmp_path/"77.json").read_bytes()==original
+
+
+def test_station_retained_settlement_result_is_durable_before_disconnect(tmp_path):
+    world=_world_with_seed(42)
+    vr.buy_futures_contract(world,"food",2,5)
+    world.save.turn=5
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
+    with _door_stopped_at(tmp_path,b"",b"Result:"):
+        saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+        assert not saved.active_futures
+        assert saved.cargo=={"food":2}
+
+
+def test_screen_station_menu_special_ops_fit_the_standard_page(monkeypatch):
     world = _world_with_seed(304)
     world.save.current_system = world.landmark["system_id"]
     world.by_id[world.save.current_system].discovered = True
@@ -4716,7 +4792,11 @@ def test_screen_station_menu_special_ops_rows_fit_the_box(monkeypatch):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_station_menu(vr.Palette(truecolor=False), world)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_station_menu@all-special-ops")
+    text = vr._ANSI_RE.sub("", buf.getvalue())
+    assert all(vr._visible_width(line) <= 80 for line in text.splitlines())
+    assert len(text.splitlines()) <= 24
+    for key in ("[L]", "[D]", "[P]", "[W]"):
+        assert key in text
 
 
 @pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
@@ -7592,3 +7672,44 @@ def test_opening_quote_avoids_cargo_already_promised_to_an_earlier_delivery():
     vr.check_mission_completions(world)
     assert world.save.flags["opening_assignment_completed"]
     assert any(m.description == "Earlier order" for m in world.save.active_missions)
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("orders", [1, 3])
+def test_cockpit_settlement_results_stay_inside_height_budget(monkeypatch, width, height, orders):
+    import re
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    world = _world_with_seed(42)
+    for commodity in ["food", "textiles", "medicine"][:orders]:
+        vr.buy_futures_contract(world, commodity, 1, 5)
+    world.save.turn = 5
+    settled, calls, snapshots, frames = [], [], [], []
+    real_settle = vr.settle_futures_contracts
+    def settle(current):
+        calls.append(1)
+        result = real_settle(current)
+        settled.extend(result)
+        return result
+    monkeypatch.setattr(vr, "settle_futures_contracts", settle)
+    world._checkpoint = lambda current: snapshots.append(current.save.to_dict())
+    output = io.StringIO()
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0)
+        frames.append(frame)
+        assert len(frame.splitlines()) <= height
+        assert all(vr._visible_width(line) <= width for line in frame.splitlines())
+        assert "[Q]Exit:" in frame
+        page, count = map(int, re.search(r"Command Deck:.*?(\d+)/(\d+)", frame, re.S).groups())
+        return "Q" if page == count else ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output):
+        assert vr.screen_station_menu(vr.Palette(False), world) == "Q"
+    assert calls == [1] and len(snapshots) == 1 and len(settled) == orders
+    content = []
+    for frame in frames:
+        plain = vr._ANSI_RE.sub("", frame)
+        assert plain.split("Command Deck:", 1)[0].strip() in ("", ">")
+        content.append(re.search(r"\d+/\d+\r\n(.*?)\r\n\[<\]", plain, re.S).group(1))
+    text = " ".join(" ".join(content).split())
+    for message in settled: assert text.count(message) == 1

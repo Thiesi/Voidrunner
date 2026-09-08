@@ -3349,13 +3349,58 @@ def create_career(p: Palette, info: dict) -> str | None:
     return None
 
 
+def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
+    """Read-only cockpit and service entries; action keys are stable on every page."""
+    ship, pilot, here = world.save.ship, world.save.pilot, world.here
+    wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}"))
+    lines = [f"Station Services: {here.station_name}",
+             f"Day {world.save.turn} | {here.economy} | Danger {here.danger}",
+             f"{ship.hull_class}: Hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}; Cargo {sum(world.save.cargo.values())}/{cargo_capacity(ship)} used."]
+    if has_contraband(world):
+        lines.append("Contraband aboard: customs risk. [D] Dump Contraband")
+    event = world.save.active_event
+    if event:
+        lines.append(f"Economy event: {event['description']} ({event['turns_remaining']} day(s) left). [T] Ledger for affected stations.")
+    costs = [fuel_cost_for_jump(here, world.by_id[sid], ship) for sid in here.connections]
+    if costs and ship.fuel < min(costs):
+        lines.append(f"LOW FUEL: no connected jump affordable in fuel; minimum {min(costs)}. [Y] Refuel at 6cr/unit.")
+    if ship.hull_hp * 5 <= hull_hp_max(ship):
+        lines.append("CRITICAL HULL: [Y] repair before risking another encounter.")
+    if wage:
+        lines.append(f"Crew wages: {wage}cr/jump." + (" LOW CASH: next wages exceed credits." if pilot.credits < wage else ""))
+    mission = tracked_mission(world)
+    if mission is not None:
+        kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
+        deadline = "no deadline" if mission.deadline_turn is None else f"due day {mission.deadline_turn}"
+        lines.append(f"Tracked {kind}: {mission_bearing(world, mission)}; {deadline}. [C] Chart, then [R] contract route.")
+    actions = ["[M] Commodity Market", "[Y] Engineering Yard", "[B] Mission Board",
+               "[C] Navigation Chart", "[S] Pilot Status", "[H] Hall of Fame",
+               "[G] Pilot Guide", "[T] Trading Ledger", "[Q] Disembark & Save"]
+    if landmark_available_here(world): actions.append(f"[L] {world.landmark['label']}")
+    if concord_commission_available(world): actions.append("[P] Privateer Commission")
+    if blackwake_made_available(world): actions.append("[W] Welcome to the Wake")
+    row = ""
+    for action in actions:
+        combined = f"{row}  |  {action}" if row else action
+        if row and _visible_width(_mission_plain(combined)) > max(1, _OUTPUT_WIDTH - 1):
+            lines.append(row); row = action
+        else: row = combined
+    if row: lines.append(row)
+    if expanded:
+        lines.extend([f"Pilot: {pilot.handle}. Rank: {rank_for(pilot.credits)}.",
+                      f"System: {here.name} ({here.x},{here.y}). Sector: {sector_for(here)}.",
+                      f"Commitments: {len(world.save.active_missions)} contract(s); {len(world.save.active_futures)} futures order(s).",
+                      f"Progress: {sum(system.discovered for system in world.galaxy)}/{len(world.galaxy)} systems charted; {pilot.kills} raiders defeated; {pilot.missions_completed} missions completed."])
+        crew = [info["label"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
+        lines.append("Crew: " + (", ".join(crew) if crew else "none") + ".")
+    return lines
+
+
 def screen_station_menu(p: Palette, world: World) -> str:
     completed = settle_futures_contracts(world)
     completed += check_mission_completions(world)
     if completed:
         world.checkpoint()
-    for msg in completed:
-        out_line(f"{p.gold}{msg}{RESET}")
     if is_stranded(world):
         # Checked here, not only right after the action that could cause
         # it -- this is the outer loop's own home base, reached after
@@ -3373,41 +3418,18 @@ def screen_station_menu(p: Palette, world: World) -> str:
         out_line()
         out_line(f"{p.gold}{BOLD}★ ★ ★ Promoted to {promoted}! ★ ★ ★{RESET}")
         pause(p)
-    out_line()
-    draw_status_bar(p, world)
-    _show_tracked_mission(p, world)
-
-    out_line(_box_title(p, f"Station Services: {world.here.station_name}"))
-    menu_rows = [
-        f"   {p.gold}[M]{RESET} Commodity Market     {p.gold}[Y]{RESET} Engineering Yard     {p.gold}[B]{RESET} Mission Board",
-        f"   {p.gold}[C]{RESET} Navigation Chart     {p.gold}[S]{RESET} Pilot Status         {p.gold}[H]{RESET} Hall of Fame",
-        f"   {p.gold}[G]{RESET} Pilot Guide          {p.gold}[T]{RESET} Trading Ledger       {p.gold}[Q]{RESET} Disembark & Save",
-    ]
-    for row in menu_rows:
-        pad_len = max(0, 77 - _vis_len(row))
-        out_line(f"{p.accent}│{RESET}{row}{' ' * pad_len}{p.accent}│{RESET}")
-
-    special_ops = []
-    if landmark_available_here(world):
-        special_ops.append(f"{p.gold}[L]{RESET} {world.landmark['label']}")
-    if has_contraband(world):
-        special_ops.append(f"{p.wrong}[D]{RESET} Dump Contraband")
-    if concord_commission_available(world):
-        special_ops.append(f"{p.accent}[P]{RESET} Privateer Commission")
-    if blackwake_made_available(world):
-        special_ops.append(f"{p.accent}[W]{RESET} Welcome to the Wake")
-
-    if special_ops:
-        out_line(_box_divider(p))
-        for op in special_ops:
-            row = f"   {op}"
-            pad_len = max(0, 77 - _vis_len(row))
-            out_line(f"{p.accent}│{RESET}{row}{' ' * pad_len}{p.accent}│{RESET}")
-    out_line(_box_bottom(p))
-    out_prompt(f"  {p.gold}Command Deck{RESET} {p.muted}> {RESET}")
-    choice = read_command()
-    out_line(choice)
-    return choice
+    page, expanded = 0, False
+    while True:
+        lines = station_deck_lines(world, expanded=expanded)
+        if completed:
+            lines[0:0] = ["Result: " + message for message in completed]
+        footer = "[<]Prev [>]Next [X]Compact [Q]Exit: " if expanded else "[<]Prev [>]Next [X]Expand [Q]Exit: "
+        choice, page, count = _draw_service_page(p, f"Command Deck: {world.save.pilot.credits:,}cr", lines, footer, page)
+        if choice == ">": page = min(page + 1, count - 1)
+        elif choice == "<": page = max(0, page - 1)
+        elif choice == "X": expanded, page = not expanded, 0
+        elif choice in "MYBCSHGTQLDPW" and len(choice) == 1:
+            return choice
 
 
 def landmark_available_here(world: World) -> bool:
