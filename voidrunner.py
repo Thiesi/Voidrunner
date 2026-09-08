@@ -1033,6 +1033,7 @@ class SaveData:
     # The galaxy generator has its own independent, unchanged RNG.
     pending_travel: dict | None = None
     event_rng_state: list | tuple | None = None
+    mission_boards: dict[int, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -1053,6 +1054,7 @@ class SaveData:
             "next_futures_id": self.next_futures_id,
             "pending_travel": self.pending_travel,
             "event_rng_state": self.event_rng_state,
+            "mission_boards": {str(k): v for k, v in self.mission_boards.items()},
         }
 
     @classmethod
@@ -1075,6 +1077,7 @@ class SaveData:
             next_futures_id=d.get("next_futures_id", 1),
             pending_travel=_load_pending_travel(d.get("pending_travel")),
             event_rng_state=d.get("event_rng_state"),
+            mission_boards=_load_mission_boards(d.get("mission_boards", {})),
         )
 
 
@@ -1096,6 +1099,10 @@ class World:
         Resetting a career preserves this binding.
         """
         self.sync_discovered()
+        if self.save.pending_travel is None:
+            expire_missions(self)
+            _normalize_mission_ids(self.save)
+            generate_mission_board(self)
         self.save.event_rng_state = self.event_rng.getstate()
         if self.save.pending_travel is not None:
             self.save.pending_travel["destroyed"] = self.ship_destroyed_this_hop
@@ -1116,6 +1123,8 @@ class World:
         pointed at a fresh galaxy/save underneath."""
         _validate_pending_travel_consistency(save)
         self.save = save
+        if save.pending_travel is None:
+            _normalize_mission_ids(save)
         self.galaxy: list[GalaxySystem] = generate_galaxy(save.seed)
         self.by_id: dict[int, GalaxySystem] = {s.id: s for s in self.galaxy}
         for sid in save.discovered:
@@ -1547,19 +1556,90 @@ def settle_futures_contracts(world: World) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+MISSION_BOARD_DAYS = 3
+MAX_ACTIVE_MISSIONS = 3
+
+
+class MissionError(ValueError):
+    """A rejected contract action makes no changes."""
+
+
+def _load_mission_boards(data: dict) -> dict[int, dict]:
+    try:
+        if not isinstance(data, dict) or len(data) > GALAXY_SYSTEM_COUNT:
+            raise ValueError("invalid boards")
+        result = {}
+        for key, board in data.items():
+            sid = int(key)
+            if not 0 <= sid < GALAXY_SYSTEM_COUNT or sid in result or not isinstance(board, dict):
+                raise ValueError("invalid station")
+            if type(board["refresh_turn"]) is not int or board["refresh_turn"] < 0:
+                raise ValueError("invalid refresh day")
+            offers = board["offers"]
+            if not isinstance(offers, list) or len(offers) > 4:
+                raise ValueError("invalid offers")
+            for data in offers:
+                mission = Mission.from_dict(data)
+                if mission.kind not in ("delivery", "scan", "bounty", "escort") or mission.origin_system != sid:
+                    raise ValueError("invalid offer")
+                _validate_combat_mission_snapshot(data, mission.kind)
+                if mission.kind == "delivery" and (mission.commodity is None or mission.quantity is None or mission.quantity < 1):
+                    raise ValueError("invalid delivery")
+            result[sid] = board
+        return result
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ResumeError("The saved contract boards cannot be read.") from exc
+
+
+def _normalize_mission_ids(save: SaveData) -> None:
+    """Repair legacy duplicate IDs while docked; never alter pending snapshots."""
+    records = [m.to_dict() for m in save.active_missions]
+    for board in save.mission_boards.values():
+        records.extend(board["offers"])
+    next_id = max([save.next_mission_id, 1] + [r["id"] + 1 for r in records])
+    seen = set()
+    for record in records:
+        if record["id"] in seen or record["id"] < 1:
+            record["id"] = next_id
+            next_id += 1
+        seen.add(record["id"])
+    for mission, record in zip(save.active_missions, records):
+        mission.id = record["id"]
+    save.next_mission_id = next_id
+
+
 def generate_mission_board(world: World) -> list[Mission]:
-    rng = world.event_rng
-    hops = bfs_hops(world.by_id, world.save.current_system)
-    board: list[Mission] = []
-    for kind in rng.sample(["delivery", "delivery", "bounty", "scan", "escort"], k=rng.randint(3, 4)):
-        mission = _generate_mission(world, kind, hops)
-        if mission is not None:
-            board.append(mission)
-    return board
+    """Stable posted offers: browsing/acceptance never replenishes the board."""
+    sid = world.save.current_system
+    cached = world.save.mission_boards.get(sid)
+    if cached is None or world.save.turn >= cached["refresh_turn"]:
+        _normalize_mission_ids(world.save)
+        rng = random.Random(f"voidrunner-board-v1:{world.save.seed}:{sid}:{world.save.turn}")
+        hops = bfs_hops(world.by_id, sid)
+        offers = []
+        for kind in rng.sample(["delivery", "delivery", "bounty", "scan", "escort"], k=rng.randint(3, 4)):
+            mission = _generate_mission(world, kind, hops, rng=rng)
+            if mission is not None:
+                offers.append(mission.to_dict())
+                world.save.next_mission_id += 1
+        cached = {"refresh_turn": world.save.turn + MISSION_BOARD_DAYS, "offers": offers}
+        world.save.mission_boards[sid] = cached
+    return posted_mission_offers(world)
 
 
-def _generate_mission(world: World, kind: str, hops: dict[int, int]) -> Mission | None:
-    rng = world.event_rng
+def posted_mission_offers(world: World) -> list[Mission]:
+    """Read-only view of offers prepared at the preceding station checkpoint."""
+    cached = world.save.mission_boards.get(world.save.current_system)
+    if cached is None or world.save.turn >= cached["refresh_turn"]:
+        return []
+    # Return copies: a UI list or stale caller must not mutate the posted terms.
+    return [Mission.from_dict(m) for m in cached["offers"]
+            if not mission_expired(world, Mission.from_dict(m))
+            and not (m["kind"] == "scan" and world.by_id[m["target_system"]].discovered)]
+
+
+def _generate_mission(world: World, kind: str, hops: dict[int, int], *, rng=None) -> Mission | None:
+    rng = world.event_rng if rng is None else rng
     origin = world.save.current_system
     if kind == "delivery":
         candidates = [sid for sid, h in hops.items() if 1 <= h <= 5 and sid != origin]
@@ -1614,12 +1694,44 @@ def _generate_mission(world: World, kind: str, hops: dict[int, int]) -> Mission 
 
 
 def accept_mission(world: World, mission: Mission) -> None:
-    world.save.active_missions.append(mission)
-    world.save.next_mission_id += 1
+    if len(world.save.active_missions) >= MAX_ACTIVE_MISSIONS:
+        raise MissionError(f"You can carry at most {MAX_ACTIVE_MISSIONS} active contracts. Finish a contract first.")
+    if mission_expired(world, mission):
+        raise MissionError("That contract has expired.")
+    if any(m.id == mission.id for m in world.save.active_missions):
+        raise MissionError("That contract is already active.")
+    if mission.origin_system != world.save.current_system:
+        raise MissionError("Accept this contract at its originating station.")
+    posted = world.save.mission_boards.get(world.save.current_system)
+    if posted is None or world.save.turn >= posted["refresh_turn"] or mission.to_dict() not in posted["offers"]:
+        raise MissionError("That offer is no longer posted. Reopen the contract board.")
+    if mission.kind == "scan" and world.by_id[mission.target_system].discovered:
+        raise MissionError("That survey target is already charted.")
+    posted["offers"].remove(mission.to_dict())
+    world.save.active_missions.append(Mission.from_dict(mission.to_dict()))
+    world.save.next_mission_id = max(world.save.next_mission_id, mission.id + 1)
+
+
+def mission_expired(world: World, mission: Mission) -> bool:
+    return mission.deadline_turn is not None and world.save.turn > mission.deadline_turn
+
+
+def expire_missions(world: World) -> list[str]:
+    messages = []
+    active = []
+    for mission in world.save.active_missions:
+        if mission_expired(world, mission):
+            message = f"Mission expired: {mission.description}"
+            world.save.pilot.note(message)
+            messages.append(message)
+        else:
+            active.append(mission)
+    world.save.active_missions = active
+    return messages
 
 
 def check_mission_completions(world: World, *, just_discovered: int | None = None) -> list[str]:
-    msgs: list[str] = []
+    msgs = expire_missions(world)
     still_active: list[Mission] = []
     for m in world.save.active_missions:
         done = False
@@ -1638,10 +1750,6 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
                 world.save.pilot.highlight(f"First mission complete: {m.description}.")
             world.save.pilot.missions_completed += 1
             msg = f"Mission complete: {m.description} (+{m.reward}cr)"
-            world.save.pilot.note(msg)
-            msgs.append(msg)
-        elif m.deadline_turn is not None and world.save.turn > m.deadline_turn:
-            msg = f"Mission expired: {m.description}"
             world.save.pilot.note(msg)
             msgs.append(msg)
         else:
@@ -2874,7 +2982,7 @@ def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -
 
 
 def screen_missions(p: Palette, world: World) -> None:
-    board = generate_mission_board(world)
+    board = posted_mission_offers(world)
     while True:
         out_line()
         out_line(_box_title(p, f"Bounty & Contract Board: {world.here.station_name}"))
@@ -2902,6 +3010,10 @@ def screen_missions(p: Palette, world: World) -> None:
                 out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
 
         out_line(_box_bottom(p))
+        posted = world.save.mission_boards.get(world.save.current_system)
+        if posted is not None:
+            out_line(f"{p.muted}Offers refresh on day {posted['refresh_turn']}; jumps advance the day.{RESET}")
+        out_line(f"{p.muted}Active contracts: {len(world.save.active_missions)}/{MAX_ACTIVE_MISSIONS}.{RESET}")
         if world.save.active_missions:
             out_line(f"{p.muted}Active missions:{RESET}")
             for m in world.save.active_missions:
@@ -2914,8 +3026,13 @@ def screen_missions(p: Palette, world: World) -> None:
         idx = LETTERS.index(key) if key in LETTERS else -1
         if idx < 0 or idx >= len(board):
             continue
-        mission = board.pop(idx)
-        accept_mission(world, mission)
+        mission = board[idx]
+        try:
+            accept_mission(world, mission)
+        except MissionError as exc:
+            out_line(f"{p.wrong}{exc}{RESET}")
+            continue
+        board.pop(idx)
         world.checkpoint()
         out_line(f"{p.correct}Accepted: {mission.description}{RESET}")
 
@@ -3398,6 +3515,19 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
     dest = world.by_id[dest_id]
     while index < len(missions):
         mission = Mission.from_dict(missions[index])
+        if mission_expired(world, mission):
+            world.save.active_missions.remove(mission)
+            message = f"Mission expired: {mission.description}"
+            world.save.pilot.note(message)
+            index += 1
+            if travel is not None:
+                travel["escort_index"] = index
+                travel["encounter"] = {}
+            world.checkpoint()
+            out_line(f"{p.wrong}{message}{RESET}")
+            if world.ship_destroyed_this_hop:
+                break
+            continue
         state = _travel_encounter(world)
         if "pirate" not in state:
             state["pirate"] = dataclasses.asdict(generate_pirate(world, tier=mission.pirate_tier))
@@ -3437,6 +3567,15 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
 
 def _resolve_bounty(p: Palette, world: World, travel: dict) -> None:
     bounty = Mission.from_dict(travel["bounty"])
+    if mission_expired(world, bounty):
+        world.save.active_missions.remove(bounty)
+        message = f"Mission expired: {bounty.description}"
+        world.save.pilot.note(message)
+        travel["phase"] = "escorts"
+        travel["encounter"] = {}
+        world.checkpoint()
+        out_line(f"{p.wrong}{message}{RESET}")
+        return
     state = _travel_encounter(world)
     if "pirate" not in state:
         state["pirate"] = dataclasses.asdict(generate_pirate(world, tier=bounty.pirate_tier))
@@ -3488,6 +3627,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         world.save.turn += 1
         world.ship_destroyed_this_hop = False
         lines = [f"Jumping to {'the unknown' if not dest.discovered else dest.name}..."]
+        lines.extend(expire_missions(world))
         tick_price_reversion(world)
         event_msg = tick_economy_event(world)
         if event_msg:
@@ -3795,6 +3935,7 @@ def main() -> int:
                 screen_shipyard(p, world)
             elif choice == "B":
                 screen_missions(p, world)
+                continue  # Browsing is read-only; acceptance checkpoints itself.
             elif choice == "C":
                 dest = screen_chart(p, world)
                 if dest is not None:

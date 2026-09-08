@@ -353,13 +353,22 @@ def test_write_save_is_atomic_no_tmp_file_left_behind(tmp_path):
 # -- missions --------------------------------------------------------------
 
 
+def _post_and_accept_test_mission(world, mission):
+    """Post authored test terms before exercising the real acceptance command."""
+    board = world.save.mission_boards.setdefault(world.save.current_system, {
+        "refresh_turn": world.save.turn + vr.MISSION_BOARD_DAYS, "offers": [],
+    })
+    board["offers"].append(mission.to_dict())
+    vr.accept_mission(world, mission)
+
+
 def test_delivery_mission_completes_on_arrival_with_enough_cargo():
     world = _world_with_seed(4)
     dest = world.here.connections[0]
     mission = vr.Mission(id=1, kind="delivery", description="test delivery", reward=500,
                           origin_system=world.save.current_system, target_system=dest,
                           commodity="food", quantity=3, deadline_turn=None)
-    vr.accept_mission(world, mission)
+    _post_and_accept_test_mission(world, mission)
     world.save.cargo["food"] = 5
     world.save.current_system = dest
 
@@ -377,7 +386,7 @@ def test_delivery_mission_does_not_complete_with_insufficient_cargo():
     mission = vr.Mission(id=1, kind="delivery", description="test delivery", reward=500,
                           origin_system=world.save.current_system, target_system=dest,
                           commodity="food", quantity=3, deadline_turn=None)
-    vr.accept_mission(world, mission)
+    _post_and_accept_test_mission(world, mission)
     world.save.cargo["food"] = 1
     world.save.current_system = dest
 
@@ -392,7 +401,7 @@ def test_expired_mission_is_dropped_with_a_message():
     mission = vr.Mission(id=1, kind="delivery", description="late delivery", reward=500,
                           origin_system=world.save.current_system, target_system=999,
                           commodity="food", quantity=3, deadline_turn=0)
-    vr.accept_mission(world, mission)
+    _post_and_accept_test_mission(world, mission)
     world.save.turn = 10
 
     messages = vr.check_mission_completions(world)
@@ -406,7 +415,7 @@ def test_scan_mission_completes_when_target_system_is_discovered():
     mission = vr.Mission(id=1, kind="scan", description="survey", reward=200,
                           origin_system=world.save.current_system, target_system=17,
                           deadline_turn=None)
-    vr.accept_mission(world, mission)
+    _post_and_accept_test_mission(world, mission)
 
     messages = vr.check_mission_completions(world, just_discovered=17)
 
@@ -423,7 +432,7 @@ def _accept_bounty(world, *, target_system: int, pirate_tier: int = 2, reward: i
     mission = vr.Mission(id=1, kind="bounty", description="test bounty", reward=reward,
                           origin_system=world.save.current_system, target_system=target_system,
                           pirate_tier=pirate_tier)
-    vr.accept_mission(world, mission)
+    _post_and_accept_test_mission(world, mission)
     return mission
 
 
@@ -519,8 +528,8 @@ def test_second_escort_mission_wave_does_not_fire_after_the_first_ones_destroys_
     m2 = vr.Mission(id=11, kind="escort", description="second convoy", reward=100,
                      origin_system=0, target_system=dest_id, pirate_tier=1,
                      deadline_turn=world.save.turn + 50)
-    vr.accept_mission(world, m1)
-    vr.accept_mission(world, m2)
+    _post_and_accept_test_mission(world, m1)
+    _post_and_accept_test_mission(world, m2)
     # No bounty exists at dest_id here, so the ordinary random-encounter
     # roll isn't preempted -- world.event_rng is unseeded (see
     # _world_with_seed), so without this it can occasionally (flakily)
@@ -592,7 +601,7 @@ def test_new_system_charted_announcement_prints_before_escort_completion(monkeyp
     mission = vr.Mission(id=2, kind="escort", description="test escort", reward=500,
                           origin_system=world.save.current_system, target_system=dest_id,
                           pirate_tier=1, deadline_turn=world.save.turn + 50)
-    vr.accept_mission(world, mission)
+    _post_and_accept_test_mission(world, mission)
     monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: "won")
     # No bounty exists at dest_id here (unlike the sibling bounty test
     # above), so screen_travel's own bounty branch doesn't preempt the
@@ -1902,10 +1911,10 @@ def test_station_menu_offers_dump_only_with_contraband_aboard(monkeypatch):
 
 def _accepted_escort_mission(world, dest_id, tier=1):
     hops = vr.bfs_hops(world.by_id, 0)
-    mission = vr.Mission(id=999, kind="escort", description="Escort a supply convoy to Somewhere",
+    mission = vr.Mission(id=world.save.next_mission_id, kind="escort", description="Escort a supply convoy to Somewhere",
                           reward=500, origin_system=0, target_system=dest_id, pirate_tier=tier,
                           deadline_turn=world.save.turn + 50)
-    vr.accept_mission(world, mission)
+    _post_and_accept_test_mission(world, mission)
     return mission
 
 
@@ -1914,6 +1923,7 @@ def test_generate_mission_board_can_include_escort_missions():
     world.event_rng = random.Random(0)
     found = False
     for seed in range(200):
+        world.save.turn = seed * vr.MISSION_BOARD_DAYS
         world.event_rng = random.Random(seed)
         board = vr.generate_mission_board(world)
         if any(m.kind == "escort" for m in board):
@@ -3112,7 +3122,7 @@ def test_screen_missions_reward_column_aligns_across_reward_digit_widths(monkeyp
     world = _world_with_seed(310)
     world.save.pilot.credits = 5_000
     monkeypatch.setattr(
-        vr, "generate_mission_board",
+        vr, "posted_mission_offers",
         lambda world: [
             vr.Mission(id=1, kind="bounty", description="Short", reward=5,
                        origin_system=0, target_system=1, pirate_tier=1, deadline_turn=None),
@@ -3210,7 +3220,7 @@ def test_screen_crew_and_galaxy_map_boxes_match_79_columns(monkeypatch):
 def test_empty_mission_board_renders_clean_notice_in_box(monkeypatch):
     world = _world_with_seed(313)
     p = vr.Palette(truecolor=False)
-    monkeypatch.setattr(vr, "generate_mission_board", lambda w: [])
+    monkeypatch.setattr(vr, "posted_mission_offers", lambda w: [])
     monkeypatch.setattr(vr, "read_key", lambda: "Q")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -3404,7 +3414,7 @@ def test_cancelled_career_does_not_create_save(tmp_path):
 def test_invalid_customs_input_waits_without_mutating_cargo(monkeypatch):
     world = _world_with_seed(42)
     world.save.cargo = {"weapons": 2}
-    before = world.save.to_dict()
+    before = __import__("copy").deepcopy(world.save.to_dict())
     keys = iter(["?", "\r", "S"])
 
     def choose():
@@ -3657,6 +3667,7 @@ def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkey
     world.save.active_missions = [
         vr.Mission(1, "bounty", "Intercept raider", 500, 0, destination, pirate_tier=2),
     ]
+    world.checkpoint()  # Include the station preparation before real startup.
     vr.persist(world, tmp_path, 77)
     initial = json.loads((tmp_path / "77.json").read_text(encoding="utf-8"))
     with _door_stopped_at(tmp_path, b"CAF", b" damage."):
@@ -4110,3 +4121,260 @@ def test_control_string_started_before_timeout_retains_its_payload():
     assert reader.read_key() == vr.IGNORED_KEY
     assert reader.read_key() == vr.IGNORED_KEY
     assert reader.read_key() == "Q"
+
+
+def test_posted_missions_survive_reopen_restart_and_acceptance(tmp_path):
+    world = _world_with_seed(42)
+    first = vr.generate_mission_board(world)
+    rng = world.event_rng.getstate()
+    assert vr.generate_mission_board(world) == first
+    assert world.event_rng.getstate() == rng
+    accepted = first[0]
+    vr.accept_mission(world, accepted)
+    vr.persist(world, tmp_path, 77)
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    restarted = vr.World(saved)
+    assert vr.generate_mission_board(restarted) == first[1:]
+    assert restarted.save.active_missions == [accepted]
+    with pytest.raises(vr.MissionError):
+        vr.accept_mission(restarted, accepted)
+
+
+def test_board_refresh_boundary_and_stale_offer_rejection():
+    world = _world_with_seed(42)
+    first = vr.generate_mission_board(world)
+    world.save.turn += vr.MISSION_BOARD_DAYS - 1
+    assert vr.generate_mission_board(world) == first
+    world.save.turn += 1
+    fresh = vr.generate_mission_board(world)
+    assert not {m.id for m in first} & {m.id for m in fresh}
+    before = __import__("copy").deepcopy(world.save.to_dict())
+    with pytest.raises(vr.MissionError, match="no longer posted"):
+        vr.accept_mission(world, first[0])
+    assert world.save.to_dict() == before
+
+
+def test_exhausted_board_does_not_refill_before_refresh():
+    world = _world_with_seed(42)
+    board = vr.generate_mission_board(world)
+    for mission in board:
+        vr.accept_mission(world, mission)
+        world.save.active_missions.clear()  # completed jobs must not refill offers
+    assert vr.generate_mission_board(world) == []
+    world.save.turn += vr.MISSION_BOARD_DAYS
+    assert vr.generate_mission_board(world)
+
+
+def test_all_station_boards_have_bounded_unique_offers():
+    world = _world_with_seed(42)
+    ids = []
+    for station in world.galaxy:
+        world.save.current_system = station.id
+        board = vr.generate_mission_board(world)
+        assert len(board) <= 4
+        ids.extend(m.id for m in board)
+    assert len(world.save.mission_boards) == vr.GALAXY_SYSTEM_COUNT
+    assert len(ids) == len(set(ids))
+    assert world.save.next_mission_id > max(ids)
+
+
+def test_active_limit_rejects_without_consuming_posted_offer():
+    import copy
+
+    world = _world_with_seed(42)
+    offered = vr.generate_mission_board(world)[0]
+    world.save.active_missions = [
+        vr.Mission(100 + i, "bounty", "Existing", 500, 0, 1, pirate_tier=1)
+        for i in range(vr.MAX_ACTIVE_MISSIONS)
+    ]
+    before = copy.deepcopy(world.save.to_dict())
+    with pytest.raises(vr.MissionError, match="at most"):
+        vr.accept_mission(world, offered)
+    assert world.save.to_dict() == before
+
+
+def test_acceptance_rejects_unposted_or_altered_terms():
+    world = _world_with_seed(42)
+    invented = vr.Mission(1, "bounty", "Invented", 900, 0, 1, pirate_tier=1)
+    with pytest.raises(vr.MissionError, match="no longer posted"):
+        vr.accept_mission(world, invented)
+    offer = vr.generate_mission_board(world)[0]
+    original_reward = offer.reward
+    offer.reward += 1
+    with pytest.raises(vr.MissionError, match="no longer posted"):
+        vr.accept_mission(world, offer)
+    assert vr.generate_mission_board(world)[0].reward == original_reward
+
+
+@pytest.mark.parametrize("kind", ["delivery", "scan"])
+@pytest.mark.parametrize("turn", [4, 5, 6])
+def test_mission_deadlines_are_inclusive_and_checked_before_rewards(kind, turn):
+    world = _world_with_seed(42)
+    world.save.turn = turn
+    world.save.current_system = 1
+    world.save.cargo = {"food": 3}
+    world.save.active_missions = [
+        vr.Mission(1, kind, "Deadline", 500, 0, 1, commodity="food", quantity=3, deadline_turn=5),
+    ]
+    before = world.save.pilot.credits
+    messages = vr.check_mission_completions(world, just_discovered=1)
+    assert world.save.pilot.credits == before + (500 if turn <= 5 else 0)
+    assert not world.save.active_missions
+    if turn > 5:
+        assert "expired" in messages[0]
+        assert world.save.cargo == {"food": 3}
+
+
+@pytest.mark.parametrize("kind", ["bounty", "escort"])
+@pytest.mark.parametrize("deadline", [0, 1])
+def test_departure_expires_combat_jobs_before_encounters(kind, deadline, monkeypatch):
+    world = _world_with_seed(42)
+    dest = world.here.connections[0]
+    world.save.active_missions = [vr.Mission(1, kind, "Deadline", 500, 0, dest, deadline_turn=deadline, pirate_tier=1)]
+    calls = []
+    monkeypatch.setattr(vr, "screen_combat", lambda *args: calls.append(1) or "won")
+    monkeypatch.setattr(vr, "_resolve_random_travel_encounter", lambda *args: None)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(False), world, dest)
+    assert calls == ([1] if deadline == 1 else [])
+    assert world.save.pilot.credits == 1200 + (500 if deadline == 1 else 0)
+    assert not world.save.active_missions
+
+
+def test_already_charted_survey_is_unavailable_without_replacement():
+    world = _world_with_seed(42)
+    target = next(s.id for s in world.galaxy if not s.discovered)
+    mission = vr.Mission(1, "scan", "Survey", 500, 0, target)
+    world.save.mission_boards[0] = {"refresh_turn": 3, "offers": [mission.to_dict()]}
+    world.by_id[target].discovered = True
+    assert vr.generate_mission_board(world) == []
+    with pytest.raises(vr.MissionError, match="already charted"):
+        vr.accept_mission(world, mission)
+    assert world.save.mission_boards[0]["offers"] == [mission.to_dict()]
+
+
+def test_legacy_duplicate_ids_repaired_only_after_pending_travel():
+    world = _world_with_seed(42)
+    world.save.active_missions = [
+        vr.Mission(1, "escort", "A", 500, 0, 1, pirate_tier=1),
+        vr.Mission(1, "escort", "B", 500, 0, 1, pirate_tier=1),
+    ]
+    world.save.pending_travel = {
+        "version": 1, "origin": 0, "destination": 1, "was_discovered": True,
+        "destroyed": False, "phase": "primary", "primary": "random", "bounty": None,
+        "escorts": [m.to_dict() for m in world.save.active_missions], "escort_index": 0, "encounter": {},
+    }
+    world.save.event_rng_state = world.event_rng.getstate()
+    resumed = vr.World(vr.SaveData.from_dict(world.save.to_dict()))
+    resumed.checkpoint()
+    assert [m.id for m in resumed.save.active_missions] == [1, 1]
+    resumed.save.pending_travel = None
+    resumed.checkpoint()
+    ids = [m.id for m in resumed.save.active_missions]
+    assert len(set(ids)) == 2
+    assert resumed.save.next_mission_id > max(ids)
+
+
+def test_legacy_over_limit_career_keeps_every_contract():
+    world = _world_with_seed(42)
+    world.save.active_missions = [vr.Mission(1, "scan", f"Legacy {i}", 500, 0, 1) for i in range(5)]
+    restored = vr.World(vr.SaveData.from_dict(world.save.to_dict()))
+    assert len(restored.save.active_missions) == 5
+    assert len({m.id for m in restored.save.active_missions}) == 5
+    offer = vr.generate_mission_board(restored)[0]
+    with pytest.raises(vr.MissionError, match="at most"):
+        vr.accept_mission(restored, offer)
+
+
+def test_real_board_reopen_and_kill_retains_posted_terms(tmp_path):
+    world = _world_with_seed(42)
+    vr.persist(world, tmp_path, 77)
+    with _door_stopped_at(tmp_path, b"B", b"Accept which"):
+        first, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    with _door_stopped_at(tmp_path, b"B", b"Accept which"):
+        reopened, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert first.mission_boards and reopened.mission_boards == first.mission_boards
+    assert reopened.next_mission_id == first.next_mission_id
+    assert reopened.event_rng_state == first.event_rng_state
+
+
+@pytest.mark.parametrize("kind", ["bounty", "escort"])
+@pytest.mark.parametrize("destroyed", [False, True])
+def test_resumed_legacy_expired_combat_job_cannot_pay_or_start_another_wave(kind, destroyed, monkeypatch):
+    world = _world_with_seed(42)
+    world.save.turn = 2
+    expired = vr.Mission(1, kind, "Expired", 500, 0, 1, deadline_turn=1, pirate_tier=1)
+    later = vr.Mission(2, "escort", "Later", 500, 0, 1, deadline_turn=5, pirate_tier=1)
+    world.save.active_missions = [expired] + ([later] if destroyed and kind == "escort" else [])
+    travel = {
+        "version": 1, "origin": 0, "destination": 1, "was_discovered": True,
+        "destroyed": destroyed, "phase": "primary" if kind == "bounty" else "escorts",
+        "primary": kind if kind == "bounty" else "random",
+        "bounty": expired.to_dict() if kind == "bounty" else None,
+        "escorts": [m.to_dict() for m in world.save.active_missions if m.kind == "escort"],
+        "escort_index": 0, "encounter": {},
+    }
+    world.save.pending_travel = travel
+    world.save.event_rng_state = world.event_rng.getstate()
+    world = vr.World(vr.SaveData.from_dict(world.save.to_dict()))
+    monkeypatch.setattr(vr, "screen_combat", lambda *args: pytest.fail("Expired job started combat"))
+    with contextlib.redirect_stdout(io.StringIO()):
+        if kind == "bounty":
+            vr._resolve_bounty(vr.Palette(False), world, world.save.pending_travel)
+        else:
+            vr._resolve_escort_missions(vr.Palette(False), world, 1)
+    assert world.save.pilot.credits == 1200
+    assert expired not in world.save.active_missions
+    assert world.save.pilot.missions_completed == 0
+    if destroyed and kind == "escort":
+        assert world.save.active_missions == [later]
+        assert world.save.pending_travel["escort_index"] == 1
+
+
+def test_board_browsing_never_checkpoints_or_changes_state(monkeypatch):
+    import copy
+    world = _world_with_seed(42)
+    world.checkpoint()
+    before = copy.deepcopy(world.save.to_dict())
+    rng = world.event_rng.getstate()
+    monkeypatch.setattr(world, "checkpoint", lambda: pytest.fail("Browsing wrote the save"))
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_missions(vr.Palette(False), world)
+    assert world.save.to_dict() == before
+    assert world.event_rng.getstate() == rng
+
+
+def test_station_checkpoint_prepares_board_and_expires_jobs():
+    world = _world_with_seed(42)
+    world.save.turn = 5
+    world.save.active_missions = [vr.Mission(1, "scan", "Expired", 500, 0, 1, deadline_turn=4)]
+    writes = []
+    world._checkpoint = lambda current: writes.append(current.save.to_dict())
+    world.checkpoint()
+    assert len(writes) == 1
+    assert writes[0]["mission_boards"]["0"]["refresh_turn"] == 8
+    assert not writes[0]["active_missions"]
+    assert vr.posted_mission_offers(world)
+
+
+def test_unprepared_board_browsing_does_not_generate_or_expire(monkeypatch):
+    import copy
+    world = _world_with_seed(42)
+    world.save.turn = 5
+    world.save.active_missions = [vr.Mission(1, "scan", "Expired", 500, 0, 1, deadline_turn=4)]
+    before = copy.deepcopy(world.save.to_dict())
+    monkeypatch.setattr(world, "checkpoint", lambda: pytest.fail("Browsing wrote the save"))
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_missions(vr.Palette(False), world)
+    assert world.save.to_dict() == before
+
+
+@pytest.mark.parametrize("seed", [0, 42, 310])
+def test_board_preparation_does_not_advance_encounter_rng(seed):
+    world = _world_with_seed(seed)
+    before = world.event_rng.getstate()
+    world.checkpoint()
+    assert world.event_rng.getstate() == before
+    assert vr.posted_mission_offers(world)
