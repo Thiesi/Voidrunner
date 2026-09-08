@@ -2491,8 +2491,8 @@ def generate_concord_patrol(world: World) -> Pirate:
     return Pirate(name=rng.choice(CONCORD_PATROL_NAMES), tier=tier, hp=hp, hp_max=hp)
 
 
-def cargo_load_fraction(world: World) -> float:
-    total = sum(world.save.cargo.values())
+def cargo_load_fraction(world: World, *, cargo_units: int | None = None) -> float:
+    total = sum(world.save.cargo.values()) if cargo_units is None else cargo_units
     cap = cargo_capacity(world.save.ship)
     return 0.0 if cap == 0 else min(1.0, total / cap)
 
@@ -2518,9 +2518,9 @@ def fight_round(world: World, pirate: Pirate) -> tuple[int, int, list[str]]:
     return dmg_to_pirate, dmg_to_player, lines
 
 
-def evade_chance(world: World, pirate: Pirate, *, dumped_cargo: bool) -> float:
+def evade_chance(world: World, pirate: Pirate, *, dumped_cargo: bool, cargo_units: int | None = None) -> float:
     ship = world.save.ship
-    chance = 0.5 + ship.engine_tier * 0.08 - pirate.tier * 0.07 - cargo_load_fraction(world) * 0.15
+    chance = 0.5 + ship.engine_tier * 0.08 - pirate.tier * 0.07 - cargo_load_fraction(world, cargo_units=cargo_units) * 0.15
     if dumped_cargo:
         chance += 0.20
     return max(0.05, min(0.90, chance))
@@ -5775,6 +5775,50 @@ def screen_notoriety_patrol(p: Palette, world: World) -> None:
     _screen_combat_session(p, world, patrol, patrol=True)
 
 
+def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, patrol: bool, details: bool = False) -> list[str]:
+    """Read-only combat terms; no random draw or persisted presentation state."""
+    ship, pilot = world.save.ship, world.save.pilot
+    used = sum(world.save.cargo.values())
+    lines = []
+    if result:
+        lines.append("Last exchange:")
+        for message in result:
+            lines.extend(_wrap_output(_mission_plain(message), max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
+    if details: lines.append("Tactical Systems:")
+    lines += [
+        f"{pirate.name} (tier {pirate.tier}): HP {pirate.hp}/{pirate.hp_max}.",
+        f"Your hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}.",
+        f"Cargo {used}/{cargo_capacity(ship)} used; Day {world.save.turn}.",
+    ]
+    if ship.hull_hp * 3 <= hull_hp_max(ship): lines.append("LOW HULL: one third of maximum hull or less.")
+    lines += [
+        "[F] Fight: fire once; a surviving enemy returns fire.",
+        f"[E] Evade: about {evade_chance(world, pirate, dumped_cargo=False):.0%} success; failure draws enemy fire.",
+    ]
+    if patrol:
+        cost = notoriety_fine_cost(pilot.notoriety)
+        lines.append((f"[S] Surrender: pay {cost}cr, clear notoriety, Concord +2 and escape. " if pilot.credits >= cost else f"Surrender requires {cost}cr. ") +
+                     ("Available." if pilot.credits >= cost else "UNAFFORDABLE; surrender unavailable."))
+    else:
+        chance = evade_chance(world, pirate, dumped_cargo=bool(used), cargo_units=max(0, used - 1))
+        lines.append(f"[D] Dump & evade: about {chance:.0%} success; " +
+                     ("lose one unit of a random held commodity; failure draws fire."
+                      if used else "hold empty; same chance as Evade."))
+        cost = bribe_cost(pirate)
+        lines.append((f"[B] Bribe: " if pilot.credits >= cost else "Bribe unavailable: ") +
+                     f"{cost}cr only if accepted (about {bribe_chance(world, pirate):.0%}); "
+                     "Blackwake +2 if accepted; refusal draws enemy fire. " + ("Available." if pilot.credits >= cost else "UNAFFORDABLE; bribe unavailable."))
+    if details:
+        lines += [f"Shields Tier {ship.shield_tier}: reduce incoming damage by {ship.shield_tier * 3}, minimum 1.",
+                  f"Weapons Tier {ship.weapon_tier}: +{ship.weapon_tier * 4} damage; gunner bonus +{3 if ship.has_gunner else 0}.",
+                  f"Notoriety {pilot.notoriety}. " + ("Destroying this patrol: notoriety +3, Concord -10, Blackwake +3; no salvage."
+                  if patrol else "Destroying this pirate earns salvage; Concord +2, Blackwake -1.")]
+        travel = world.save.pending_travel
+        if not patrol and travel is not None and travel.get("phase") == "primary" and travel.get("primary") == "bounty":
+            lines.append(f"After a bounty victory, a {WRONG_BOUNTY_KILL_CHANCE:.0%} mistaken-identity inquiry can add notoriety +{NOTORIETY_PER_WRONG_BOUNTY_KILL} and Concord -3, on top of the kill's standing changes.")
+    return lines
+
+
 def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: bool) -> str:
     """Commit each decision's full effects and opponent HP before narration.
 
@@ -5791,42 +5835,31 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         world.checkpoint()
     else:
         pirate = Pirate(**combat["pirate"])
-        for line in combat["lines"]:
-            out_line(f"  {line}")
         if combat["outcome"] is not None:
+            for line in combat["lines"]: out_line(f"  {line}")
             return combat["outcome"]
     ship = world.save.ship
     fine = notoriety_fine_cost(world.save.pilot.notoriety)
+    page, details = 0, False
     while True:
-        pirate_bar = _gauge_bar(pirate.hp, pirate.hp_max, 8, p)
-        hull_bar = _gauge_bar(ship.hull_hp, hull_hp_max(ship), 8, p)
-        out_line(
-            f"  {p.wrong}{BOLD}{pirate.name}{RESET} (tier {pirate.tier})  "
-            f"HP {pirate_bar} {pirate.hp}/{pirate.hp_max}   |   "
-            f"{p.accent}Your hull{RESET} {hull_bar} {ship.hull_hp}/{hull_hp_max(ship)}"
-        )
         can_pay = world.save.pilot.credits >= (fine if patrol else bribe_cost(pirate))
-        actions = "[F]ight [E]vade"
-        if patrol:
-            if can_pay:
-                actions += f" [S]urrender & pay {fine}cr"
-        else:
-            actions += " [D]ump&evade"
-            if can_pay:
-                actions += " [B]ribe"
-        out_prompt(f"{p.muted}{actions} [Q]uick status: {RESET}")
-        action = read_command()
-        out_line(action)
+        actions = "F/E/S" if patrol and can_pay else "F/E" if patrol else "F/E/D/B" if can_pay else "F/E/D"
+        action, page, count = _draw_service_page(
+            p, f"Combat {world.save.pilot.credits:,}cr",
+            combat_display_lines(world, pirate, combat["lines"], patrol=patrol, details=details),
+            f"[{actions}]Act [Q]Info [< >]Page: ", page,
+        )
+        if action == ">":
+            page = min(page + 1, count - 1)
+            continue
+        if action == "<":
+            page = max(0, page - 1)
+            continue
+        if action == "Q":
+            details, page = not details, 0
+            continue
         lines = []
         outcome = None
-        if action == "Q":
-            out_line(
-                f"  {p.accent}Tactical Systems:{RESET} Hull {ship.hull_hp}/{hull_hp_max(ship)} | "
-                f"Shields Tier {ship.shield_tier} (-{ship.shield_tier * 3} dmg) | "
-                f"Weapons Tier {ship.weapon_tier} (+{ship.weapon_tier * 4} dmg) | "
-                f"Bank {world.save.pilot.credits:,} cr | Notoriety {world.save.pilot.notoriety}"
-            )
-            continue
         if action == "F":
             _, _, lines = fight_round(world, pirate)
             if pirate.hp <= 0:
@@ -5891,9 +5924,9 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             outcome = "destroyed"
         combat.update(pirate=dataclasses.asdict(pirate), outcome=outcome, lines=lines)
         world.checkpoint()
-        for line in lines:
-            out_line(f"  {line}")
+        page = 0
         if outcome is not None:
+            for line in lines: out_line(f"  {line}")
             return outcome
 
 

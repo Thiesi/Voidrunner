@@ -2445,7 +2445,8 @@ def test_notoriety_patrol_surrender_is_not_offered_without_enough_credits():
     with contextlib.redirect_stdout(buf):
         vr.screen_notoriety_patrol(vr.Palette(truecolor=False), world)
 
-    assert "Surrender" not in buf.getvalue()
+    assert "[S]" not in buf.getvalue()
+    assert "UNAFFORDABLE" in buf.getvalue()
     assert world.save.pilot.notoriety == 10  # the stray "S" did nothing
 
 
@@ -8179,3 +8180,167 @@ def test_real_display_saved_before_ack_and_applied_from_restart_title(tmp_path, 
         if style in ("mono", "plain"): assert b"\x1b" not in result.stdout
         if style == "basic": assert b"38;" not in result.stdout
         if style == "plain": assert result.stdout.isascii()
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("patrol", [False, True])
+@pytest.mark.parametrize("style", ["auto", "plain"])
+def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch, width, height, patrol, style):
+    import re
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    world = _world_with_seed(42)
+    world.save.cargo["food"] = 3
+    pirate = vr.generate_pirate(world, tier=2)
+    snapshots, frames = [], []
+    world._checkpoint = lambda current: snapshots.append(current.save.to_dict())
+    output = io.StringIO()
+    state = {"fired": False, "details": False, "saved": None, "rng": None}
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0)
+        frames.append(frame)
+        assert len(frame.splitlines()) <= height
+        assert all(vr._visible_width(line) <= width for line in frame.splitlines())
+        assert "[Q]Info" in frame and "[< >]Page:" in frame
+        if not state["fired"]:
+            state["fired"] = True
+            return "F"
+        if state["saved"] is None:
+            state["saved"] = world.save.to_dict()
+            state["rng"] = world.event_rng.getstate()
+        assert world.save.to_dict() == state["saved"]
+        assert world.event_rng.getstate() == state["rng"]
+        page, count = map(int, re.search(r"Combat.*?(\d+)/(\d+)", frame, re.S).groups())
+        if page < count: return ">"
+        if not state["details"]:
+            state["details"] = True
+            return "Q"
+        raise EOFError
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output), pytest.raises(EOFError):
+        vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=patrol)
+    assert len(snapshots) == 2
+    text = " ".join(" ".join(frames).split())
+    for label in ("Last exchange:", "damage.", "Tactical Systems:", "Cargo 3/24 used", "Your hull", "Fuel", "Shields Tier"):
+        assert label in text
+    if patrol: assert "clear notoriety" in text and "no salvage" in text
+    else: assert "one unit" in text and "only if accepted" in text and "refusal draws" in text
+
+
+@pytest.mark.parametrize("patrol", [False, True])
+def test_combat_telemetry_browsing_does_not_change_fight_result(monkeypatch, patrol):
+    worlds = [_world_with_seed(42), _world_with_seed(42)]
+    results = []
+    for index, world in enumerate(worlds):
+        world.event_rng.seed(42)
+        pirate = vr.generate_pirate(world, tier=2)
+        keys = iter("Q><Q?" * 5 if index else "")
+        monkeypatch.setattr(vr, "read_key", lambda: next(keys, "F"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            results.append(vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=patrol))
+    assert results[0] == results[1]
+    assert worlds[0].save.to_dict() == worlds[1].save.to_dict()
+    assert worlds[0].event_rng.getstate() == worlds[1].event_rng.getstate()
+
+
+@pytest.mark.parametrize("patrol", [False, True])
+def test_combat_telemetry_unaffordable_actions_have_terms_without_hotkeys(patrol):
+    world = _world_with_seed(42)
+    world.save.pilot.credits = 0
+    pirate = vr.generate_pirate(world, tier=2)
+    before, rng = world.save.to_dict(), world.event_rng.getstate()
+    text = " ".join(vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True))
+    assert ("[S]" if patrol else "[B]") not in text
+    assert "UNAFFORDABLE" in text
+    assert str(vr.notoriety_fine_cost(0) if patrol else vr.bribe_cost(pirate)) + "cr" in text
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_review_combat_info_keeps_exchange_before_tactical_heading(monkeypatch, width, height):
+    world = _world_with_seed(42); pirate = vr.Pirate("Raider", 0, 50, 50)
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    lines = vr.combat_display_lines(world, pirate, ["Your last shot hit."], patrol=False, details=True)
+    pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/B]Act [Q]Info [< >]Page: ")
+    assert pages[0][0] == "Last exchange:"
+    assert lines.index("Your last shot hit.") < lines.index("Tactical Systems:")
+
+
+@pytest.mark.parametrize("tier", [0, 4])
+@pytest.mark.parametrize("cargo", [0, 1, 12, 24])
+def test_review_combat_dump_terms_disclose_actual_escape_probability(tier, cargo):
+    import copy
+    world = _world_with_seed(42); world.save.cargo = {"food": cargo}
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    pirate = vr.Pirate("Raider", tier, 80, 80)
+    line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False) if row.startswith("[D]"))
+    after = copy.deepcopy(world)
+    if cargo: vr._dispose_cargo(after, "food", 1)
+    assert f"{vr.evade_chance(after, pirate, dumped_cargo=bool(cargo)):.0%}" in line
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+    assert "one unit" in line if cargo else "hold empty" in line
+
+
+@pytest.mark.parametrize("hull", [20, 60])
+def test_review_combat_low_hull_warning_does_not_invent_one_hit_risk(hull):
+    world = _world_with_seed(42); world.save.ship.hull_hp = hull
+    lines = " ".join(vr.combat_display_lines(world, vr.Pirate("Weak raider", 0, 20, 20), [], patrol=False))
+    assert "another hit may destroy" not in lines
+    assert ("LOW HULL" in lines) == (hull <= 20)
+
+
+@pytest.mark.parametrize("patrol", [False, True])
+def test_review_combat_kill_terms_name_both_factions_and_notoriety(patrol):
+    world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 2, 50, 50)
+    lines = " ".join(vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True))
+    assert ("Concord -10" if patrol else "Concord +2") in lines
+    assert ("Blackwake +3" if patrol else "Blackwake -1") in lines
+    if patrol: assert "notoriety +3" in lines
+
+
+
+def test_dump_preview_matches_actual_post_disposal_escape_boundary(monkeypatch):
+    world = _world_with_seed(42); world.save.cargo = {"food": 1}
+    pirate = vr.Pirate("Raider", 0, 50, 50)
+    line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False) if row.startswith("[D]"))
+    monkeypatch.setattr(vr, "read_key", lambda: "D")
+    monkeypatch.setattr(world.event_rng, "random", lambda: 0.695)
+    with contextlib.redirect_stdout(io.StringIO()): assert vr.screen_combat(vr.Palette(False), world, pirate) == "escaped"
+    assert not world.save.cargo and "70%" in line
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("details", [False, True])
+def test_real_exchange_text_starts_on_first_combat_page(monkeypatch, width, height, details):
+    world = _world_with_seed(42); pirate = vr.Pirate("Rust Wraith", 1, 80, 80)
+    _, _, result = vr.fight_round(world, pirate)
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    lines = vr.combat_display_lines(world, pirate, result, patrol=False, details=details)
+    pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/B]Act [Q]Info [< >]Page: ")
+    assert len(pages[0]) > 1 and result[0].split()[0] in " ".join(pages[0][1:])
+    text = " ".join(" ".join(row for page in pages for row in page).split())
+    for entry in result: assert " ".join(entry.split()) in text
+
+
+@pytest.mark.parametrize("patrol", [False, True])
+def test_peaceful_combat_action_discloses_its_standing_gain(patrol):
+    world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 1, 50, 50)
+    lines = vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True)
+    action = next(row for row in lines if row.startswith("[S]" if patrol else "[B]"))
+    assert ("Concord +2" if patrol else "Blackwake +2") in action
+
+
+@pytest.mark.parametrize("phase,primary,patrol,expected", [
+    ("primary", "bounty", False, True), ("primary", "random", False, False),
+    ("escorts", "bounty", False, False), ("primary", "bounty", True, False),
+])
+def test_bounty_combat_info_discloses_post_win_inquiry_without_drawing_rng(phase, primary, patrol, expected):
+    import copy
+    world = _world_with_seed(42)
+    world.save.pending_travel = {"phase": phase, "primary": primary}
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    pirate = vr.Pirate("Opponent", 2, 50, 50)
+    text = " ".join(vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True))
+    assert ("12%" in text and "inquiry" in text and "Concord -3" in text and "notoriety +2" in text) == expected
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
