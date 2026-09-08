@@ -4965,92 +4965,101 @@ CHART_RESERVED_LETTERS = "SGVRQ"
 CHART_CONNECTION_LETTERS = [c for c in LETTERS if c not in CHART_RESERVED_LETTERS]
 
 
+def chart_entries(world: World, result: str | None = None) -> list[tuple[int | None, str]]:
+    here = world.here
+    intro = f"{here.name} ({here.x},{here.y}); {sector_for(here)}. Day {world.save.turn}."
+    entries = [(None, intro)]
+    if result: entries.insert(0, (None, "Result: " + result))
+    mission = tracked_mission(world)
+    route = mission_route(world, mission) if mission and not (mission.kind == "scan" and world.by_id[mission.target_system].discovered) else []
+    if mission: entries.append((None, f"Tracked #{mission.id}: {mission_bearing(world, mission)}"))
+    actions = "[G]Route planner [V]Map/list"
+    if world.save.ship.scanner_tier > 0: actions += " [S]Scan"
+    if mission: actions += " [R]Contract route"
+    entries.append((None, actions))
+    for sid in sorted(here.connections):
+        dest = world.by_id[sid]
+        cost = fuel_cost_for_jump(here, dest, world.save.ship)
+        name = dest.name if dest.discovered else "Uncharted Bearing"
+        terms = f"{sector_for(dest)}; {dest.economy}; Danger {dest.danger}" if dest.discovered else "danger unknown"
+        low = " LOW FUEL" if world.save.ship.fuel < cost else ""
+        tracked = " TRACKED NEXT" if route and route[0] == sid else ""
+        entries.append((sid, f"{name} ({dest.x},{dest.y}); {terms}; {cost} fuel{low}{tracked}."))
+    return entries
+
+
+def _chart_pages(world: World, title: str, footer: str, result: str | None):
+    entries = chart_entries(world, result)
+    # Budget conservatively with one key prefix per wrapped continuation row.
+    wrapped = [(sid, _wrap_output(_mission_plain(text), max(1, _OUTPUT_WIDTH - 5)).split("\r\n")) for sid, text in entries]
+    budget_rows = ["[A] " + row for _, rows in wrapped for row in rows]
+    capacity = max(len(rows) for rows in _trade_pages(budget_rows, title, footer))
+    pages = [([], {})]
+    index = 0
+    for sid, paragraph in wrapped:
+        letter = CHART_CONNECTION_LETTERS[index % len(CHART_CONNECTION_LETTERS)] if sid is not None else None
+        rows, choices = pages[-1]
+        if rows and (len(rows) + len(paragraph) > capacity or letter in choices):
+            pages.append(([], {}))
+        for row in paragraph:
+            rows, choices = pages[-1]
+            if len(rows) == capacity:
+                pages.append(([], {})); rows, choices = pages[-1]
+            if sid is not None:
+                choices[letter] = sid
+                rows.append(f"[{letter}] {row}")
+            else: rows.append(row)
+        if sid is not None: index += 1
+    return pages
+
+
 def screen_chart(p: Palette, world: World) -> int | None:
-    """Returns a destination system id to travel to, or None if the
-    player backed out."""
+    """Return a deliberately selected adjacent destination, or Back."""
+    page, result = 0, None
+    footer = "[<]Prev [>]Next [Q]Back: " if _OUTPUT_WIDTH >= 30 else "[<] [>] [Q]Back: "
     while True:
-        here = world.here
-        out_line()
-        _show_tracked_mission(p, world)
-        out_line(_box_title(p, f"Navigation Star Chart: {here.name}"))
-        header = f" {p.gold}KEY  BEARING DESTINATION       SECTOR      ECONOMY       DANGER   JUMP COST{RESET}"
-        out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
-        out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
-        options: list[int] = []
-        for sid in sorted(here.connections):
-            dest = world.by_id[sid]
-            cost = fuel_cost_for_jump(here, dest, world.save.ship)
-            letter = CHART_CONNECTION_LETTERS[len(options)]
-            options.append(sid)
-
-            in_range = world.save.ship.fuel >= cost
-            fuel_label = f"{cost} fuel" if in_range else f"{p.wrong}{cost} fuel (LOW){RESET}"
-
-            if dest.discovered:
-                danger_str = (
-                    f"{p.correct}Safe (0){RESET}" if dest.danger == 0
-                    else (f"{p.gold}Danger {dest.danger}{RESET}" if dest.danger == 1 else f"{p.wrong}Danger {dest.danger}{RESET}")
-                )
-                row_str = f"  {p.gold}[{letter}]{RESET}  {dest.name:<17} {sector_for(dest):<15} {dest.economy:<13} {_pad(danger_str, 9)} {_pad(fuel_label, 12)}"
-            else:
-                row_str = (
-                    f"  {p.gold}[{letter}]{RESET}  {p.muted}??? (Uncharted Bearing)  "
-                    f"Unknown   Uncharted   Unknown   {fuel_label}{RESET}"
-                )
-            pad_len = max(0, 77 - _vis_len(row_str))
-            out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
-
-        out_line(_box_bottom(p))
+        title = f"Navigation: Fuel {world.save.ship.fuel}/{fuel_capacity(world.save.ship)}"
+        pages = _chart_pages(world, title, footer, result)
+        page = min(page, len(pages) - 1)
+        out_line(); out_line(f"{p.gold}{title} {page + 1}/{len(pages)}{RESET}")
+        for row in pages[page][0]: out_line(row)
+        out_prompt(footer); key = read_command(); out_line(key)
+        if key == "Q": return None
+        if key == ">": page = min(page + 1, len(pages) - 1); continue
+        if key == "<": page = max(0, page - 1); continue
         mission = tracked_mission(world)
-        route = mission_route(world, mission) if mission is not None else []
-        if route and route[0] in options:
-            letter = CHART_CONNECTION_LETTERS[options.index(route[0])]
-            next_system = world.by_id[route[0]]
-            out_line(f"{p.gold}Tracked route: [{letter}] next bearing ({next_system.x},{next_system.y}){RESET}")
-        scan_available = world.save.ship.scanner_tier > 0
-        actions = []
-        if scan_available:
-            actions.append(f"{p.gold}[S]{RESET}can distant contacts")
-        if mission is not None:
-            actions.append(f"{p.gold}[R]{RESET}oute for tracked contract")
-        actions.append(f"{p.gold}[G]{RESET}eneral route planner")
-        actions.append(f"{p.gold}[V]{RESET}iew spatial map / list")
-        out_line(f"  {'   '.join(actions)}")
-        out_prompt(f"  {p.muted}Jump to which, or [Q] back? {RESET}")
-        key = read_command()
-        out_line(key)
-        if key == "Q":
-            return None
-        if key == "S" and scan_available:
-            _do_scan(p, world)
+        if key == "S" and world.save.ship.scanner_tier > 0:
+            result, page = _do_scan(p, world), 0
             continue
         if key == "R" and mission is not None:
             screen_mission_navigation(p, world, mission, active=True)
+            page = 0
             continue
         if key == "G":
-            _screen_auto_route(p, world)
+            _screen_auto_route(p, world); page = 0
             continue
         if key == "V":
-            screen_galaxy_map(p, world)
+            screen_galaxy_map(p, world); page = 0
             continue
-        idx = CHART_CONNECTION_LETTERS.index(key) if key in CHART_CONNECTION_LETTERS else -1
-        if idx < 0 or idx >= len(options):
-            continue
-        dest_id = options[idx]
-        cost = fuel_cost_for_jump(here, world.by_id[dest_id], world.save.ship)
+        options = sorted(world.here.connections)
+        choices = (dict(zip(CHART_CONNECTION_LETTERS, options)) if len(options) <= len(CHART_CONNECTION_LETTERS)
+                   else pages[page][1])
+        if key not in choices: continue
+        dest_id = choices[key]
+        cost = fuel_cost_for_jump(world.here, world.by_id[dest_id], world.save.ship)
         if world.save.ship.fuel < cost:
-            out_line(f"{p.wrong}Not enough fuel ({cost} needed, have {world.save.ship.fuel}).{RESET}")
+            result, page = f"Not enough fuel ({cost} needed, have {world.save.ship.fuel}).", 0
             continue
         return dest_id
 
 
-def _do_scan(p: Palette, world: World) -> None:
+def _do_scan(p: Palette, world: World) -> str:
     range_hops = 2 + world.save.ship.scanner_tier + (1 if world.save.ship.has_navigator else 0)
     hops = bfs_hops(world.by_id, world.save.current_system)
     candidates = [sid for sid, h in hops.items() if h <= range_hops and not world.by_id[sid].discovered]
     if not candidates:
         out_line(f"{p.muted}Long-range sensors find nothing new nearby.{RESET}")
-        return
+        return "Long-range sensors find nothing new nearby."
     target = world.event_rng.choice(candidates)
     world.by_id[target].discovered = True
     world.sync_discovered()
@@ -5059,6 +5068,7 @@ def _do_scan(p: Palette, world: World) -> None:
     out_line(f"{p.correct}Sensor contact! {world.by_id[target].name} is now on your chart.{RESET}")
     for msg in completed:
         out_line(f"{p.gold}{msg}{RESET}")
+    return " ".join([f"Sensor contact! {world.by_id[target].name} is now on your chart."] + completed)
 
 
 def map_bounds(sector: int | None) -> tuple[int, int, int, int]:

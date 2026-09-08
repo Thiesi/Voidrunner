@@ -4719,37 +4719,78 @@ def test_screen_station_menu_special_ops_rows_fit_the_box(monkeypatch):
     _assert_box_rows_match_border(buf.getvalue(), "screen_station_menu@all-special-ops")
 
 
-def test_screen_chart_rows_fit_the_box_for_every_sector_name(monkeypatch):
-    # Every one of the six named sectors (SECTOR_NAMES) is at least 12
-    # characters -- longer than the chart row's own sector column used to
-    # budget for -- so any discovered system, in any sector, is enough to
-    # exercise the fix; picking the highest-degree system just maximizes
-    # how many rows get checked in one pass.
-    world = _world_with_seed(305)
-    best = max(world.galaxy, key=lambda s: len(s.connections))
-    world.save.current_system = best.id
-    best.discovered = True
-    for nid in best.connections:
-        world.by_id[nid].discovered = True
-    monkeypatch.setattr(vr, "read_key", lambda: "Q")
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr.screen_chart(vr.Palette(truecolor=False), world)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_chart")
+@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("discovered",[False,True])
+def test_navigation_chart_pages_preserve_all_connections_and_career(monkeypatch,width,height,discovered):
+    import copy,re
+    world=_world_with_seed(305);world.here.connections=list(range(1,len(world.galaxy)))
+    for station in world.galaxy[1:]:station.discovered=discovered
+    before=copy.deepcopy(world.save.to_dict());rng=world.event_rng.getstate()
+    monkeypatch.setattr(world,"checkpoint",lambda:pytest.fail("Chart browsing saved"))
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    output=io.StringIO();frames=[]
+    def choose():
+        frame=output.getvalue();frames.append(frame);output.seek(0);output.truncate(0)
+        plain=" ".join(vr._ANSI_RE.sub("",frame).split())
+        match=re.search(r"Navigation: Fuel 24/24 (\d+)/(\d+)",plain);assert match and len(frames)<300
+        assert "[Q]Back" in plain
+        return "Q" if match[1]==match[2] else ">"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output): assert vr.screen_chart(vr.Palette(False),world) is None
+    assert all(len(frame.splitlines())<=height for frame in frames)
+    assert all(vr._visible_width(line)<=width for frame in frames for line in frame.splitlines())
+    # Remove repeated row keys before joining wrapped entry text.
+    text=" ".join(re.sub(r"\[[A-Z]\] ","",vr._ANSI_RE.sub(""," ".join(frames))).split())
+    for station in world.galaxy[1:]:
+        if discovered: assert station.name in text and vr.sector_for(station) in text
+        else: assert station.name not in text
+        assert f"({station.x},{station.y})" in text
+    if not discovered: assert "danger unknown" in text
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
-def test_screen_chart_uncharted_bearing_row_fits_the_box(monkeypatch):
-    world = _world_with_seed(306)
-    best = max(world.galaxy, key=lambda s: len(s.connections))
-    world.save.current_system = best.id
-    best.discovered = True
-    # Leave every neighbor undiscovered to force the "??? (Uncharted
-    # Bearing)" placeholder row instead of a real destination row.
-    monkeypatch.setattr(vr, "read_key", lambda: "Q")
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr.screen_chart(vr.Palette(truecolor=False), world)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_chart@uncharted")
+@pytest.mark.parametrize("width,height",[(40,12),(80,24)])
+def test_navigation_chart_selects_last_connection_beyond_one_alphabet(monkeypatch,width,height):
+    import re
+    world=_world_with_seed(42);world.here.connections=list(range(1,len(world.galaxy)))
+    for station in world.galaxy:station.discovered=True
+    target=world.galaxy[-1];target.name="FINAL";world.save.ship.fuel=999
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    output=io.StringIO();seen=[]
+    def choose():
+        frame=vr._ANSI_RE.sub("",output.getvalue());seen.append(frame);output.seek(0);output.truncate(0)
+        match=re.search(r"\[([A-Z])\] FINAL",frame)
+        if match:
+            assert match[1] not in vr.CHART_RESERVED_LETTERS
+            return match[1]
+        assert len(seen)<100
+        return ">"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):selected=vr.screen_chart(vr.Palette(False),world)
+    assert selected==target.id and len(seen)>1 and world.here.id==0
+
+
+@pytest.mark.parametrize("commands",[b"C><QQ",b"C",b"CAQQ",b"CA"])
+def test_real_responsive_chart_back_eof_and_rejected_jump_preserve_career(tmp_path,commands):
+    import json,os,subprocess
+    world=_world_with_seed(42);world.save.ship.fuel=0;world.save.cargo={"food":1}
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
+    original=(tmp_path/"77.json").read_bytes()
+    info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+    assert result.returncode==0 and not result.stderr and b"Navigation: Fuel" in result.stdout
+    if b"A" in commands: assert b"Result: Not enough fuel" in result.stdout
+    assert (tmp_path/"77.json").read_bytes()==original
+
+
+def test_chart_retained_scan_result_is_checkpointed_before_disconnect(tmp_path):
+    world=_world_with_seed(42);world.save.ship.scanner_tier=1
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
+    before=set(world.save.discovered)
+    with _door_stopped_at(tmp_path,b"CS",b"Result: Sensor contact!"):
+        saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+        assert len(set(saved.discovered)-before)==1 and saved.turn==0
 
 
 def test_screen_hall_of_fame_rows_fit_the_box_at_max_field_widths(monkeypatch):
@@ -4833,25 +4874,18 @@ def test_screen_missions_preserves_rewards_in_compact_entries(monkeypatch):
     assert "Details" in output and "[B]ack" in output
 
 
-def test_screen_chart_danger_and_fuel_columns_align_between_safe_and_danger_rows(monkeypatch):
-    world = _world_with_seed(311)
-    here = world.here
-    # Force at least one safe (danger 0) and one dangerous connected system
-    # so both branches of `danger_str` render in the same screen.
-    assert len(here.connections) >= 2, "seed 311's start system needs 2+ connections for this test"
-    safe_id, danger_id = here.connections[0], here.connections[1]
-    world.by_id[safe_id].danger = 0
-    world.by_id[danger_id].danger = 3
-    for sid in (safe_id, danger_id):
-        world.by_id[sid].discovered = True
-    monkeypatch.setattr(vr, "read_key", lambda: "Q")
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr.screen_chart(vr.Palette(truecolor=False), world)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_chart@safe-and-danger")
-    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n")]
-    fuel_columns = {line.index("fuel") for line in stripped if "fuel" in line and "[" in line}
-    assert len(fuel_columns) == 1, f"fuel-cost column drifted between rows: {fuel_columns}"
+def test_navigation_chart_keeps_danger_and_fuel_distinct_with_retained_rejection(monkeypatch):
+    world=_world_with_seed(311)
+    safe,danger=world.here.connections[:2]
+    world.by_id[safe].danger=0;world.by_id[danger].danger=3
+    for sid in (safe,danger):world.by_id[sid].discovered=True
+    world.save.ship.fuel=0
+    key=vr.CHART_CONNECTION_LETTERS[sorted(world.here.connections).index(danger)]
+    keys=iter([key,"Q"]);monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:assert vr.screen_chart(vr.Palette(False),world) is None
+    plain=vr._ANSI_RE.sub("",output.getvalue())
+    assert "Danger 0" in plain and "Danger 3" in plain and "LOW FUEL" in plain
+    assert "Result: Not enough fuel" in plain and world.save.turn==0
 
 
 def test_screen_title_renders_full_splash_with_tagline_and_exact_box_width():
@@ -6296,7 +6330,8 @@ def test_tracked_chart_hint_identifies_the_actual_destination_key(monkeypatch, d
     with contextlib.redirect_stdout(output):
         dest = vr.screen_chart(vr.Palette(False), world)
     assert dest == first
-    assert f"Tracked route: [{key}]" in output.getvalue()
+    assert f"[{key}]" in output.getvalue()
+    assert "TRACKED NEXT" in " ".join(__import__("re").sub(r"\[[A-Z]\] ", "", vr._ANSI_RE.sub("", output.getvalue())).split())
     assert world.by_id[first].discovered is discovered
 
 
