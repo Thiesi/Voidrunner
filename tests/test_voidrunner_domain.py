@@ -4398,6 +4398,122 @@ def test_screen_futures_lists_tradeable_goods_and_outstanding_contracts(monkeypa
     assert "Outstanding orders" in text
 
 
+@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+def test_futures_picker_pages_keep_terms_choices_and_return_position(monkeypatch,width,height):
+    import re
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    world=_world_with_seed(42);world.save.pilot.credits=10_000
+    for commodity in ["food","textiles","medicine"]:vr.buy_futures_contract(world,commodity,1,5)
+    before=world.save.to_dict();output=io.StringIO();frames=[];opened=[];last_page=None
+    def inspect(p,w,contract):opened.append(contract.id)
+    monkeypatch.setattr(vr,"_screen_futures_order",inspect)
+    def choose():
+        nonlocal last_page
+        frame=output.getvalue();output.seek(0);output.truncate(0);frames.append(frame)
+        assert len(frame.splitlines())<=height
+        assert all(vr._visible_width(line)<=width for line in frame.splitlines())
+        assert "[B]" in frame
+        page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
+        if opened:
+            assert page==last_page
+            return "B"
+        if page==count:
+            last_page=page
+            return max(re.findall(r"\[(\d)\]",frame))
+        return "N"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_futures(vr.Palette(False),world,vr.LEGAL_COMMODITIES)
+    assert opened==[world.save.active_futures[-1].id]
+    text=" ".join(" ".join(frames).split())
+    assert "8%" in text and "Outstanding orders" in text
+    assert world.save.to_dict()==before
+
+
+@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("kind",["draft","order","legacy"])
+def test_futures_draft_and_order_pages_fit_and_preserve_all_terms(monkeypatch,width,height,kind):
+    import re
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    world=_world_with_seed(42);vr.buy_futures_contract(world,"food",2,5)
+    contract=world.save.active_futures[0]
+    if kind=="legacy":contract.origin_system=None
+    before=world.save.to_dict();frames=[];output=io.StringIO()
+    def choose():
+        frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0);frames.append(frame)
+        assert len(frame.splitlines())<=height
+        assert all(vr._visible_width(line)<=width for line in frame.splitlines())
+        assert "[B]Back:" in " ".join(frame.split())
+        page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
+        return "B" if page==count else ">"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):
+        if kind=="draft":vr._screen_buy_futures(vr.Palette(False),world,"food")
+        else:vr._screen_futures_order(vr.Palette(False),world,contract)
+    text=" ".join(" ".join(frames).split())
+    if kind=="legacy":assert "original remote" in text and "[X]Cancel" not in text
+    else:assert "nonrefundable" in text and "Pickup:" in text
+    assert world.save.to_dict()==before
+
+
+def test_futures_invalid_quantity_retains_draft_without_saving(monkeypatch):
+    world=_world_with_seed(42);before=world.save.to_dict()
+    keys=iter(["Q","Q","B"]);values=iter(["3","not a number"])
+    monkeypatch.setattr(vr,"read_key",lambda:next(keys));monkeypatch.setattr(vr,"read_line_raw",lambda **kw:next(values))
+    with contextlib.redirect_stdout(io.StringIO()) as output:vr._screen_buy_futures(vr.Palette(False),world,"food")
+    text=output.getvalue()
+    assert "Quantity must fit" in text and text.count("Quantity: 3;")==2
+    assert world.save.to_dict()==before
+
+
+@pytest.mark.parametrize("commands",[b"MX1>Q3\rTTBBQ",b"MX1>",b"MX1Q\rBBQ",b"MX1SNBBQ"])
+def test_real_responsive_futures_draft_back_cancel_and_eof_preserve_career(tmp_path,commands):
+    import json,os,subprocess
+    world=_world_with_seed(42)
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
+    before=(tmp_path/"77.json").read_bytes()
+    info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+    assert result.returncode==0 and not result.stderr and b"Order Food:" in result.stdout
+    if b"SN" in commands:assert b"Signing cancelled" in result.stdout
+    assert (tmp_path/"77.json").read_bytes()==before
+
+
+@pytest.mark.parametrize("action",["sign","cancel"])
+def test_retained_futures_result_is_saved_before_disconnect(tmp_path,action):
+    world=_world_with_seed(42)
+    if action=="cancel":vr.buy_futures_contract(world,"food",2,5)
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
+    command=b"MX1SY" if action=="sign" else b"MXN4XY"
+    marker=b"Result: Futures contract:" if action=="sign" else b"Result: Order cancelled:"
+    with _door_stopped_at(tmp_path,command,marker):
+        saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+        assert bool(saved.active_futures)==(action=="sign")
+        assert saved.pilot.credits!=world.save.pilot.credits
+
+
+@pytest.mark.parametrize("count",[0,1,3])
+@pytest.mark.parametrize("notice_count",[0,30])
+def test_picker_footer_only_offers_present_choices(monkeypatch,count,notice_count):
+    import re
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",80);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",24)
+    output=io.StringIO();frames=[]
+    def choose():
+        frame=output.getvalue();output.seek(0);output.truncate(0);frames.append(frame)
+        choices=[line for line in frame.splitlines() if re.match(r"\[\d\] Item",line)]
+        if not choices:assert "Select" not in frame
+        else:
+            span="[1]" if len(choices)==1 else f"[1-{len(choices)}]"
+            assert span+" Select" in frame
+            assert "[1-4] Select" not in frame
+        page,total=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
+        return "B" if page==total else "N"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):
+        assert vr._pick_trade_field("Picker",[(i,f"Item {i}") for i in range(count)],max_choices=4,notice=["Notice"]*notice_count) is None
+    assert frames
+
+
 def test_buy_futures_rejects_invalid_duration_without_mutation():
     world = _world_with_seed(177)
     before = world.save.pilot.credits

@@ -3498,7 +3498,8 @@ def screen_market(p: Palette, world: World) -> None:
         if key == "<": page = max(0, page - 1); continue
         if key == "X":
             futures_goods = [c for c in goods if COMMODITIES[c]["legal"] or world.here.economy == "Haven"]
-            screen_futures(p, world, futures_goods)
+            response = screen_futures(p, world, futures_goods)
+            if response is not None: result = response
             page = 0
             continue
         idx = LETTERS.index(key) if key in LETTERS else -1
@@ -3507,112 +3508,94 @@ def screen_market(p: Palette, world: World) -> None:
             if response is not None: result, page = response, 0
 
 
-def screen_futures(p: Palette, world: World, goods: list[str]) -> None:
-    page = 0
+def screen_futures(p: Palette, world: World, goods: list[str]) -> str | None:
+    result, page_state = None, {}
     while True:
-        entries = [("goods", c) for c in goods] + [("order", c) for c in world.save.active_futures]
-        count = max(1, (len(entries) + 3) // 4)
-        page = min(page, count - 1)
-        visible = entries[page * 4:page * 4 + 4]
-        out_line()
-        out_line(f"{p.gold}Futures Exchange - {page + 1}/{count}{RESET}")
-        out_line("Wholesale orders: separate from spot stock; station pickup, 8% nonrefundable fee rounded up per unit.")
-        for index, (kind, item) in enumerate(visible, 1):
-            if kind == "goods":
-                principal, fee = futures_quote(world, item, 1)
-                out_line(f"[{index}] Order {COMMODITIES[item]['label']}: {principal}+{fee}cr/unit")
-            else:
-                status = "ready" if world.save.turn >= item.settle_turn else f"day {item.settle_turn}"
-                place = "legacy remote delivery" if item.origin_system is None else world.by_id[item.origin_system].name
-                out_line(_mission_plain(f"[{index}] #{item.id}: {item.quantity} {COMMODITIES[item.commodity]['label']}, {status}; {place}"))
-        out_line(f"Outstanding orders: {len(world.save.active_futures)}/{MAX_FUTURES_CONTRACTS}")
-        out_prompt("[1-4] Details [N]ext [P]rev [B]ack > ")
-        key = read_command()
-        if key in ("B", "Q"):
-            return
-        if key == "N":
-            page = min(page + 1, count - 1)
-        elif key == "P":
-            page = max(0, page - 1)
-        elif len(key) == 1 and "1" <= key <= "4" and int(key) <= len(visible):
-            kind, item = visible[int(key) - 1]
-            if kind == "goods":
-                _screen_buy_futures(p, world, item)
-            else:
-                _screen_futures_order(p, world, item)
+        options = []
+        for commodity in goods:
+            principal, fee = futures_quote(world, commodity, 1)
+            options.append((("goods", commodity), f"Order {COMMODITIES[commodity]['label']}: {principal}+{fee}cr/unit"))
+        for contract in world.save.active_futures:
+            status = "ready" if world.save.turn >= contract.settle_turn else f"day {contract.settle_turn}"
+            place = "legacy remote delivery" if contract.origin_system is None else world.by_id[contract.origin_system].name
+            options.append((("order", contract), f"#{contract.id}: {contract.quantity} {COMMODITIES[contract.commodity]['label']}, {status}; {place}"))
+        notice = ["Wholesale orders: separate from spot stock; station pickup, 8% nonrefundable fee rounded up per unit.",
+                  f"Outstanding orders: {len(world.save.active_futures)}/{MAX_FUTURES_CONTRACTS}"]
+        if result: notice.insert(0, "Result: " + result)
+        selected = _pick_trade_field(f"Futures Exchange: {world.save.pilot.credits:,}cr", options, max_choices=4, notice=notice, page_state=page_state)
+        if selected is None: return result
+        kind, item = selected
+        response = _screen_buy_futures(p, world, item) if kind == "goods" else _screen_futures_order(p, world, item)
+        if response is not None: result, page_state = response, {}
 
 
-def _screen_futures_order(p: Palette, world: World, contract: FuturesContract) -> None:
+def _screen_futures_order(p: Palette, world: World, contract: FuturesContract) -> str | None:
+    page, result = 0, None
     while True:
-        out_line()
-        out_line(f"Order #{contract.id}: {contract.quantity} {COMMODITIES[contract.commodity]['label']}")
+        lines = [f"Quantity: {contract.quantity} {COMMODITIES[contract.commodity]['label']}."]
         if contract.origin_system is None:
-            out_line("Legacy order: original remote delivery/full-refund terms apply.")
-            out_line(f"Settles on day {contract.settle_turn}; paid {contract.locked_price}cr.")
-            out_prompt("[B]ack > ")
+            lines += ["Legacy order: original remote delivery/full-refund terms apply.",
+                      f"Settles on day {contract.settle_turn}; paid {contract.locked_price}cr."]
         else:
             fee = contract.locked_price - contract.principal
-            out_line(_mission_plain(f"Pickup: {world.by_id[contract.origin_system].name}, from day {contract.settle_turn}."))
-            out_line(f"Paid {contract.principal}cr for goods + {fee}cr nonrefundable fee.")
-            out_line("Collected on arrival/station entry when the full order fits; otherwise it waits.")
-            out_line(f"[X] Cancel: refund {contract.principal}cr, forfeit {fee}cr fee.")
-            out_prompt("[B]ack > ")
-        key = read_command()
-        if key in ("B", "Q"):
-            return
-        if key == "X" and contract.origin_system is not None:
+            lines += [f"Pickup: {world.by_id[contract.origin_system].name}, from day {contract.settle_turn}.",
+                      f"Paid {contract.principal}cr for goods + {fee}cr nonrefundable fee.",
+                      "Collected on arrival/station entry when the full order fits; otherwise it waits.",
+                      f"[X] Cancel: refund {contract.principal}cr, forfeit {fee}cr fee."]
+        if result: lines.insert(0, "Result: " + result)
+        footer = "[<>]Page " + ("[X]Cancel " if contract.origin_system is not None else "") + "[B]Back: "
+        key, page, count = _draw_service_page(p, f"Order #{contract.id}: {world.save.pilot.credits:,}cr", lines, footer, page)
+        if key in ("B", "Q"): return None
+        if key == ">": page = min(page + 1, count - 1)
+        elif key == "<": page = max(0, page - 1)
+        elif key == "X" and contract.origin_system is not None:
             if confirm(f"Cancel order #{contract.id} for {contract.principal}cr? Fee is not refunded.", p):
-                try:
-                    message = cancel_futures_contract(world, contract.id)
+                try: message = cancel_futures_contract(world, contract.id)
                 except TradeError as exc:
-                    out_line(str(exc))
-                    pause(p)
-                    return
+                    result, page = str(exc), 0
+                    continue
                 world.checkpoint()
                 out_line(message)
-                pause(p)
-                return
+                return message
+            result, page = "Cancellation declined; order retained.", 0
 
 
-def _screen_buy_futures(p: Palette, world: World, commodity: str) -> None:
-    quantity, duration = 1, FUTURES_DURATIONS[0]
+def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
+    quantity, duration, page, result = 1, FUTURES_DURATIONS[0], 0, None
     while True:
         principal, fee = futures_quote(world, commodity, quantity)
-        out_line()
-        out_line(f"Order {COMMODITIES[commodity]['label']}")
-        out_line(f"Quantity: {quantity}; term: {duration} days.")
-        out_line(_mission_plain(f"Pickup: {world.here.name}, from day {world.save.turn + duration}."))
-        out_line(f"Goods {principal}cr + nonrefundable fee {fee}cr = {principal + fee}cr.")
-        out_line(f"Credits: {world.save.pilot.credits}cr. Full cargo space needed only at pickup.")
-        out_line("Cancellation refunds goods principal only; full holds leave orders waiting.")
-        out_prompt("[Q] Quantity [T] Term [S] Sign [B] Back > ")
-        key = read_command()
-        if key == "B":
-            return
-        if key == "Q":
+        lines = [f"Quantity: {quantity}; term: {duration} days.",
+                 f"Pickup: {world.here.name}, from day {world.save.turn + duration}.",
+                 f"Goods {principal}cr + nonrefundable fee {fee}cr = {principal + fee}cr.",
+                 "Full cargo space needed only at pickup. Cancellation refunds goods principal only; full holds leave orders waiting."]
+        if result: lines.insert(0, "Result: " + result)
+        footer = "[<>]Page [Q]Qty [T]Term [S]Sign [B]Back: "
+        key, page, count = _draw_service_page(p, f"Order {COMMODITIES[commodity]['label']}: {world.save.pilot.credits:,}cr", lines, footer, page)
+        if key == "B": return None
+        if key == ">": page = min(page + 1, count - 1)
+        elif key == "<": page = max(0, page - 1)
+        elif key == "Q":
             out_prompt(f"Quantity (1-{cargo_capacity(world.save.ship)}, Enter keeps {quantity}): ")
             raw = read_line_raw(max_len=5)
             if raw:
-                chosen = int(raw)
+                chosen = int(raw) if raw.isascii() and raw.isdigit() else 0
                 if 1 <= chosen <= cargo_capacity(world.save.ship):
-                    quantity = chosen
-                else:
-                    out_line("Quantity must fit your ship's cargo capacity.")
-                    pause(p)
+                    quantity, result = chosen, None
+                else: result = "Quantity must fit your ship's cargo capacity."
+                page = 0
         elif key == "T":
             duration = FUTURES_DURATIONS[(FUTURES_DURATIONS.index(duration) + 1) % len(FUTURES_DURATIONS)]
+            result, page = None, 0
         elif key == "S":
             if confirm(f"Pay {principal + fee}cr now, including the nonrefundable {fee}cr fee?", p):
-                try:
-                    message = buy_futures_contract(world, commodity, quantity, duration)
+                try: message = buy_futures_contract(world, commodity, quantity, duration)
                 except TradeError as exc:
-                    out_line(str(exc))
-                    pause(p)
+                    result, page = str(exc), 0
                     continue
                 world.checkpoint()
                 out_line(f"{p.correct}{message}{RESET}")
-                pause(p)
-                return
+                return message
+            result, page = "Signing cancelled; order draft retained.", 0
 
 
 def trading_ledger_lines(world: World) -> list[str]:
@@ -3726,11 +3709,12 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
     return lines
 
 
-def _pick_trade_field(title: str, options: list[tuple[object, str]]) -> object | None:
-    footer = "[1-9] Select [N]ext [P]rev [B]ack: "
+def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choices: int = 9, notice: list[str] | None = None, page_state: dict[str, int] | None = None) -> object | None:
+    footer = f"[1-{max_choices}] Select [N]ext [P]rev [B]ack: "
+    notice_rows = [row for line in notice or [] for row in _wrap_output(_mission_plain(line), max(1, _OUTPUT_WIDTH - 1)).split("\r\n")]
     wrapped_options = [(value, _mission_plain(label), _wrap_output(_mission_plain(label), max(1, _OUTPUT_WIDTH - 5)).split("\r\n"))
                        for value, label in options]
-    maximum_pages = max(1, sum(len(rows) for _, _, rows in wrapped_options) + len(options))
+    maximum_pages = max(1, sum(len(rows) for _, _, rows in wrapped_options) + len(options) + len(notice_rows))
     def budget(heading, controls):
         width = max(1, _OUTPUT_WIDTH - 1)
         overhead = len(_wrap_output(f"{heading} {maximum_pages}/{maximum_pages}", width).split("\r\n"))
@@ -3740,6 +3724,9 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]]) -> object |
     def ordinary_page():
         return {"title": title, "footer": footer, "rows": [], "choices": [], "required": ()}
     pages = [ordinary_page()]
+    for row in notice_rows:
+        if len(pages[-1]["rows"]) == capacity: pages.append(ordinary_page())
+        pages[-1]["rows"].append(row)
     for ordinal, (value, label, wrapped) in enumerate(wrapped_options, 1):
         if len(wrapped) > capacity:
             # One logical choice, with a short heading and a complete label.
@@ -3760,21 +3747,28 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]]) -> object |
             pages.append(ordinary_page())
             continue
         current = pages[-1]
-        if current["rows"] and (len(current["rows"]) + len(wrapped) > capacity or len(current["choices"]) == 9):
+        if current["rows"] and (len(current["rows"]) + len(wrapped) > capacity or len(current["choices"]) == max_choices):
             pages.append(ordinary_page()); current = pages[-1]
         current["choices"].append(value)
         choice = len(current["choices"])
         current["rows"].extend(f"[{choice}] {row}" for row in wrapped)
     if len(pages) > 1 and not pages[-1]["rows"]: pages.pop()
-    if not options: pages[0]["rows"] = ["No observed destinations yet."]
-    page, seen = 0, set()
+    if not options and not notice_rows: pages[0]["rows"] = ["No observed destinations yet."]
+    page = max(0, min(page_state.get("page", 0), len(pages) - 1)) if page_state is not None else 0
+    seen = set()
     while True:
         current = pages[page]
+        if page_state is not None: page_state["page"] = page
         out_line(); out_line(f"{current['title']} {page + 1}/{len(pages)}")
         for row in current["rows"]: out_line(row)
         seen.add(page)
-        out_prompt(current["footer"]); key = read_command(); out_line(key)
-        if key == "B": return None
+        controls = current["footer"] if current["choices"] or current["required"] else "[N]ext [P]rev [B]ack: "
+        if current["choices"] and not current["required"]:
+            count = len(current["choices"])
+            span = "[1]" if count == 1 else f"[1-{count}]"
+            controls = controls.replace(f"[1-{max_choices}]", span, 1)
+        out_prompt(controls); key = read_command(); out_line(key)
+        if key in ("B", "Q"): return None
         if key == "N": page = min(page + 1, len(pages) - 1)
         elif key == "P": page = max(0, page - 1)
         elif len(key) == 1 and "1" <= key <= "9" and int(key) <= len(current["choices"]):
