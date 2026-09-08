@@ -1099,6 +1099,7 @@ class SaveData:
     # Any hold quantity without a lot is older cargo of unknown acquisition cost.
     cargo_basis: dict[str, list[list[int]]] = field(default_factory=dict)
     trading_ledger: TradingLedger = field(default_factory=TradingLedger)
+    market_memory: dict[int, dict[str, dict]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -1127,6 +1128,7 @@ class SaveData:
             "best_credits": self.best_credits,
             "cargo_basis": self.cargo_basis,
             "trading_ledger": dataclasses.asdict(self.trading_ledger),
+            "market_memory": {str(sid): quotes for sid, quotes in self.market_memory.items()},
         }
 
     @classmethod
@@ -1161,6 +1163,8 @@ class SaveData:
             contraband_trade_milestones=_load_trade_total(d.get("contraband_trade_milestones", 0), nonnegative=True),
             cargo_basis={c: [list(lot) for lot in lots] for c, lots in d.get("cargo_basis", {}).items()},
             trading_ledger=TradingLedger(**d.get("trading_ledger", {})),
+            market_memory={int(sid): {c: dict(q) for c, q in quotes.items()}
+                           for sid, quotes in d.get("market_memory", {}).items()},
         )
 
 
@@ -1258,11 +1262,30 @@ def _validate_save_document(data: dict) -> None:
             integer(value, "ledger " + key)
     if basis or any(value for key, value in ledger.items() if key != "since_day"):
         require(ledger.get("since_day") is not None, "ledger start day")
+    memory = data.get("market_memory", {})
+    require(isinstance(memory, dict) and len(memory) <= GALAXY_SYSTEM_COUNT, "market memory")
+    memory_ids = set()
+    for key, quotes in memory.items():
+        require(isinstance(key, str) and key.isascii() and key.isdecimal(), "remembered station")
+        sid = int(key)
+        system(sid, "remembered station")
+        require(sid not in memory_ids, "duplicate remembered station")
+        memory_ids.add(sid)
+        require(isinstance(quotes, dict) and set(quotes) <= set(COMMODITIES), "remembered commodities")
+        for quote in quotes.values():
+            require(isinstance(quote, dict), "remembered quote")
+            _reject_unknown_save_fields(quote, {"day", "buy", "sell"}, "remembered quote")
+            require(set(quote) == {"day", "buy", "sell"}, "remembered quote")
+            integer(quote["day"], "quote observation day", maximum=data["turn"])
+            if quote["buy"] is not None:
+                integer(quote["buy"], "remembered buy price", minimum=1)
+            integer(quote["sell"], "remembered sale price", minimum=1)
     discovered = data["discovered"]
     require(isinstance(discovered, list) and len(discovered) <= GALAXY_SYSTEM_COUNT, "chart")
     for sid in discovered:
         system(sid, "chart system")
     require(len(discovered) == len(set(discovered)), "chart systems")
+    require(memory_ids <= set(discovered), "market observations outside the chart")
     drift = data.get("market_drift", {})
     require(isinstance(drift, dict), "market drift")
     seen = set()
@@ -1348,6 +1371,7 @@ class World:
             expire_missions(self)
             _normalize_mission_ids(self.save)
             generate_mission_board(self)
+            remember_local_market(self)
         if tracked_mission(self) is None:
             self.save.tracked_mission_id = None
         self.save.event_rng_state = self.event_rng.getstate()
@@ -1664,6 +1688,97 @@ def _nudge_drift(world: World, system_id: int, commodity: str, delta: float) -> 
     table = world.save.market_drift.setdefault(system_id, {})
     current = table.get(commodity, 1.0)
     table[commodity] = max(0.6, min(1.6, current + delta))
+
+
+def remember_local_market(world: World) -> None:
+    """Observe only docked, locally visible quotes, without consuming RNG."""
+    if world.save.pending_travel is not None:
+        return
+    for commodity in COMMODITIES:
+        legal = COMMODITIES[commodity]["legal"]
+        if not legal and world.here.economy != "Haven" and not world.save.cargo.get(commodity, 0):
+            continue
+        unit = price_for(world, world.here.id, commodity)
+        _remember_market_quote(world, world.here.id, commodity, unit)
+
+
+def _remember_market_quote(world: World, system_id: int, commodity: str, unit: int) -> dict:
+    quote = {"day": world.save.turn, "sell": round(unit * SELL_SPREAD),
+             "buy": unit if COMMODITIES[commodity]["legal"] or world.by_id[system_id].economy == "Haven" else None}
+    world.save.market_memory.setdefault(system_id, {})[commodity] = quote
+    return quote
+
+
+def cargo_cost_preview(world: World, commodity: str, quantity: int) -> tuple[int, int]:
+    """Read-only FIFO allocation matching disposal, including unknown older stock."""
+    lots = world.save.cargo_basis.get(commodity, [])
+    unknown = min(quantity, world.save.cargo.get(commodity, 0) - sum(lot[0] for lot in lots))
+    remaining = quantity - unknown
+    cost = 0
+    for units, paid in lots:
+        taken = min(remaining, units)
+        cost += paid * taken // units
+        remaining -= taken
+        if not remaining:
+            break
+    return cost, unknown
+
+
+def trade_route_quote(world: World, destination: int, commodity: str, quantity: int, *, use_hold: bool = False) -> dict:
+    """Estimate against remembered sale data; never query a live remote market."""
+    if world.save.pending_travel is not None:
+        raise TradeError("Finish the journey before estimating a new trade.")
+    if (type(destination) is not int or destination == world.here.id or destination not in world.by_id
+            or not isinstance(commodity, str) or commodity not in COMMODITIES
+            or type(quantity) is not int or quantity < 1 or type(use_hold) is not bool):
+        raise TradeError("Choose another station, a commodity and a positive whole quantity.")
+    remembered = world.save.market_memory.get(destination, {}).get(commodity)
+    if remembered is None:
+        raise TradeError("No observed sale quote for this commodity at that station. Visit its market first.")
+    if use_hold:
+        if quantity > world.save.cargo.get(commodity, 0):
+            raise TradeError("That quantity is not in your hold.")
+        cost, unknown = cargo_cost_preview(world, commodity, quantity)
+        procurement = 0
+    else:
+        if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
+            raise TradeError("This station does not openly sell that commodity.")
+        if quantity + sum(world.save.cargo.values()) > cargo_capacity(world.save.ship):
+            raise TradeError("That purchase would exceed your free hold space.")
+        cost = procurement = quantity * price_for(world, world.here.id, commodity)
+        unknown = 0
+    path = bfs_path(world.by_id, world.here.id, destination)
+    legs = []
+    origin = world.here.id
+    for sid in path:
+        burn = fuel_cost_for_jump(world.by_id[origin], world.by_id[sid], world.save.ship)
+        legs.append((sid, burn))
+        origin = sid
+    fuel = sum(burn for _, burn in legs)
+    wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
+    wages = wage * len(path)
+    fuel_cash = max(0, fuel - world.save.ship.fuel) * 6
+    receipts = quantity * remembered["sell"]
+    conflicts = []
+    available = world.save.cargo.get(commodity, 0) + (0 if use_hold else quantity)
+    older_cargo = 0 if use_hold else world.save.cargo.get(commodity, 0)
+    for hop, sid in enumerate(path, 1):
+        for mission in world.save.active_missions:
+            if (mission.kind == "delivery" and mission.commodity == commodity
+                    and mission.target_system == sid and mission.quantity <= available
+                    and (mission.deadline_turn is None or world.save.turn + hop <= mission.deadline_turn)):
+                if mission.quantity > older_cargo:
+                    conflicts.append(mission.description)
+                older_cargo = max(0, older_cargo - mission.quantity)
+                available -= mission.quantity
+    return {"destination": destination, "commodity": commodity, "quantity": quantity, "use_hold": use_hold,
+            "observed_day": remembered["day"], "unit_sale": remembered["sell"], "receipts": receipts,
+            "cargo_cost": cost, "unknown_units": unknown, "procurement": procurement, "legs": legs,
+            "fuel": fuel, "fuel_cash": fuel_cash, "wages": wages,
+            "cash_needed": procurement + fuel_cash + wages,
+            "conflicts": conflicts,
+            "margin": None if unknown or conflicts else receipts - cost - fuel * 6 - wages,
+            "feasible": all(burn <= fuel_capacity(world.save.ship) for _, burn in legs)}
 
 
 def tick_price_reversion(world: World) -> None:
@@ -3425,15 +3540,250 @@ def trading_ledger_lines(world: World) -> list[str]:
     return lines
 
 
+def _trade_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
+    width = max(1, _OUTPUT_WIDTH - 1)
+    overhead = (len(_wrap_output(footer, width).split("\r\n"))
+                + len(_wrap_output(title + " 999/999", width).split("\r\n")) + 3)
+    return _mission_text_pages(lines, overhead=overhead)
+
+
+def remembered_market_lines(world: World) -> list[str]:
+    lines = ["Last observed prices, not live remote data. Jumps advance the day; prices can change."]
+    for sid, quotes in sorted(world.save.market_memory.items(), key=lambda item: world.by_id[item[0]].name):
+        system = world.by_id[sid]
+        lines.append(f"{system.name} - {system.economy}.")
+        for commodity, quote in quotes.items():
+            buy = f"{quote['buy']}cr" if quote["buy"] is not None else "prohibited"
+            lines.append(f"{COMMODITIES[commodity]['label']}: buy {buy}, sell {quote['sell']}cr. Day {quote['day']} ({world.save.turn - quote['day']} days old).")
+    if not world.save.market_memory:
+        lines.append("No market observations yet. Older discoveries have no recorded quotes.")
+    return lines
+
+
+def trade_route_lines(world: World, destination: int | None, commodity: str, quantity: int, use_hold: bool) -> list[str]:
+    name = world.by_id[destination].name if destination is not None else "not selected"
+    lines = [f"Destination: {name}. Cargo: {COMMODITIES[commodity]['label']} x{quantity}.",
+             f"Source: {'existing hold cargo' if use_hold else 'buy new cargo here'}. Credits: {world.save.pilot.credits:,}cr.",
+             "Use [E]dit draft to change the route. Back makes no changes; this estimate never buys cargo or launches a route."]
+    if destination is None:
+        return lines + ["No other station has remembered prices yet. Visit another station or receive a trader's market report first."]
+    try:
+        quote = trade_route_quote(world, destination, commodity, quantity, use_hold=use_hold)
+    except TradeError as exc:
+        return lines + [str(exc)]
+    age = world.save.turn - quote["observed_day"]
+    lines.extend([
+        f"Destination sell quote: {quote['unit_sale']}cr/unit, observed day {quote['observed_day']} ({age} days old).",
+        f"Sale receipts if the full load arrives: {quote['receipts']:,}cr.",
+        f"Cargo acquisition cost: {quote['cargo_cost']:,}cr recorded; {quote['unknown_units']} units with unknown cost.",
+        f"Buy now: {quote['procurement']:,}cr. Credits after buying: {world.save.pilot.credits - quote['procurement']:,}cr.",
+        f"Fuel: {quote['fuel']} units, replacement value {quote['fuel'] * 6}cr. Additional fuel cash: {quote['fuel_cash']}cr with your current tank.",
+        f"Crew wages: {quote['wages']}cr for {len(quote['legs'])} jumps. Arrival day {world.save.turn + len(quote['legs'])} if uninterrupted.",
+        f"Cash needed before sale: {quote['cash_needed']:,}cr. Budget {'covered' if quote['cash_needed'] <= world.save.pilot.credits else 'SHORT by ' + str(quote['cash_needed'] - world.save.pilot.credits) + 'cr'}.",
+    ])
+    if not quote["feasible"]:
+        lines.append("INFEASIBLE: a route leg exceeds your tank capacity. Upgrade or plan a different route.")
+    elif quote["margin"] is not None:
+        lines.append(f"Estimated margin after cargo, replacement fuel and wages: {quote['margin']:+,}cr.")
+    else:
+        lines.append("Total margin unavailable: unknown cargo costs or delivery commitments affect this load.")
+    if quote["conflicts"]:
+        lines.append("DELIVERY CONFLICT: these contracts may consume this commodity on the route: " + "; ".join(quote["conflicts"]) + ".")
+    lines.append("ROUTE - shortest by jumps; fuel top-ups at stations are budgeted at 6cr/unit.")
+    tank = world.save.ship.fuel
+    previous = world.here
+    for sid, burn in quote["legs"]:
+        system = world.by_id[sid]
+        if tank < burn and burn <= fuel_capacity(world.save.ship):
+            station = previous.name if previous.discovered else "the uncharted intermediate station"
+            lines.append(f"Refuel {burn - tank} units at {station} before the next leg.")
+            tank = burn
+        label = system.name if system.discovered else "Uncharted system"
+        danger = str(system.danger) if system.discovered else "unknown"
+        blocked = " BLOCKED by tank capacity." if burn > fuel_capacity(world.save.ship) else ""
+        lines.append(f"Jump: {label}; {burn} fuel; danger {danger}.{blocked}")
+        tank = max(0, tank - burn)
+        previous = system
+    lines.append("Estimate assumes the remembered sale price and intact cargo. Market changes, encounters, repairs, fines, detours and other income/spending are excluded.")
+    return lines
+
+
+def _pick_trade_field(title: str, options: list[tuple[object, str]]) -> object | None:
+    footer = "[1-9] Select [N]ext [P]rev [B]ack: "
+    budget = len(_trade_pages(["row"] * _OUTPUT_HEIGHT, title, footer)[0])
+    pages = [([], [])]
+    for value, label in options:
+        choice = None
+        for row in _wrap_output(_mission_plain(label), max(1, _OUTPUT_WIDTH - 5)).split("\r\n"):
+            rows, choices = pages[-1]
+            if len(rows) >= budget or (choice is None and len(choices) >= 9):
+                pages.append(([], []))
+                rows, choices = pages[-1]
+                choice = None
+            if choice is None:
+                choices.append(value)
+                choice = len(choices)
+            rows.append(f"[{choice}] {row}")
+    page = 0
+    while True:
+        out_line()
+        out_line(f"{title} {page + 1}/{len(pages)}")
+        for row in pages[page][0]:
+            out_line(row)
+        if not options:
+            out_line("No observed destinations yet.")
+        out_prompt(footer)
+        key = read_command()
+        out_line(key)
+        if key == "B":
+            return None
+        if key == "N":
+            page = min(page + 1, len(pages) - 1)
+        elif key == "P":
+            page = max(0, page - 1)
+        elif len(key) == 1 and "1" <= key <= "9" and int(key) <= len(pages[page][1]):
+            return pages[page][1][int(key) - 1]
+
+
+def edit_door_draft(*, title: str, initial: dict, fields: list[tuple],
+                    apply: Callable[[dict], object], error_type: type[Exception]) -> object | None:
+    """Standalone synchronous draft editor: scalar fields, apply/back, retained errors.
+
+    Mirrors the host resource-editor contract without importing Session/DatabaseLane
+    into the self-contained door. Field edits change only the copied draft.
+    """
+    draft = dict(initial)
+    page, error = 0, None
+    footer = " ".join(f"[{key}]{label}" for key, label, _, _ in fields) + " [S]Apply [N]ext [P]rev [B]ack: "
+    while True:
+        lines = [f"[{key}] {label}: {display(draft)}" for key, label, display, _ in fields]
+        lines += ["Apply uses these draft values. Back discards edits; no career data is written."]
+        if error:
+            lines.insert(0, "Cannot apply: " + error)
+        pages = _trade_pages(lines, title, footer)
+        page = min(page, len(pages) - 1)
+        out_line()
+        out_line(f"{title} {page + 1}/{len(pages)}")
+        for line in pages[page]:
+            out_line(line)
+        out_prompt(footer)
+        key = read_command()
+        out_line(key)
+        if key == "B":
+            return None
+        if key == "N":
+            page = min(page + 1, len(pages) - 1)
+        elif key == "P":
+            page = max(0, page - 1)
+        elif key == "S":
+            try:
+                return apply(draft)
+            except error_type as exc:
+                error, page = str(exc), 0
+        else:
+            for hotkey, _, _, edit in fields:
+                if key == hotkey:
+                    try:
+                        edit(draft)
+                        error = None
+                    except error_type as exc:
+                        error = str(exc)
+                    page = 0
+                    break
+
+
+def _edit_trade_route(world: World, initial: dict) -> dict | None:
+    destinations = [(sid, world.by_id[sid].name) for sid in world.save.market_memory if sid != world.here.id]
+    destinations.sort(key=lambda item: item[1])
+
+    def pick(draft, field, title, choices):
+        selected = _pick_trade_field(title, choices)
+        if selected is not None:
+            draft[field] = selected
+
+    def quantity(draft):
+        out_prompt(f"Quantity 1-{cargo_capacity(world.save.ship)} (Enter keeps {draft['quantity']}): ")
+        raw = read_line_raw(max_len=5)
+        if not raw:
+            return
+        if not raw.isascii() or not raw.isdecimal() or not 1 <= int(raw) <= cargo_capacity(world.save.ship):
+            raise TradeError("Choose a quantity within your cargo capacity.")
+        draft["quantity"] = int(raw)
+
+    def apply(draft):
+        trade_route_quote(world, **draft)
+        return dict(draft)
+
+    fields = [
+        ("D", "Destination", lambda d: world.by_id[d['destination']].name if d['destination'] is not None else "not selected",
+         lambda d: pick(d, "destination", "Destination", destinations)),
+        ("C", "Cargo", lambda d: COMMODITIES[d['commodity']]['label'],
+         lambda d: pick(d, "commodity", "Cargo", [(c, v['label']) for c, v in COMMODITIES.items()])),
+        ("Q", "Quantity", lambda d: str(d['quantity']), quantity),
+        ("H", "Hold source", lambda d: "existing hold cargo" if d['use_hold'] else "buy new cargo here",
+         lambda d: d.update(use_hold=not d['use_hold'])),
+    ]
+    return edit_door_draft(title="Route Draft", initial=initial, fields=fields, apply=apply, error_type=TradeError)
+
+
+def screen_trade_route(p: Palette, world: World) -> None:
+    destinations = sorted((sid for sid in world.save.market_memory if sid != world.here.id), key=lambda sid: world.by_id[sid].name)
+    parameters = {"destination": destinations[0] if destinations else None,
+                  "commodity": "food", "quantity": 1, "use_hold": False}
+    page = 0
+    footer = "[E]dit draft [N]ext [P]rev [B]ack: "
+    while True:
+        pages = _trade_pages(trade_route_lines(world, **parameters), "Trade Route", footer)
+        page = min(page, len(pages) - 1)
+        out_line()
+        out_line(f"Trade Route {page + 1}/{len(pages)}")
+        for line in pages[page]:
+            out_line(line)
+        out_prompt(footer)
+        key = read_command()
+        out_line(key)
+        if key == "B":
+            return
+        if key == "N":
+            page = min(page + 1, len(pages) - 1)
+        elif key == "P":
+            page = max(0, page - 1)
+        elif key == "E":
+            edited = _edit_trade_route(world, parameters)
+            if edited is not None:
+                parameters, page = edited, 0
+
+
+def screen_remembered_markets(p: Palette, world: World) -> None:
+    footer = "[N]ext [P]rev [B]ack: "
+    pages = _trade_pages(remembered_market_lines(world), "Market Memory", footer)
+    page = 0
+    while True:
+        out_line()
+        out_line(f"Market Memory {page + 1}/{len(pages)}")
+        for line in pages[page]:
+            out_line(line)
+        out_prompt(footer)
+        key = read_command()
+        out_line(key)
+        if key in ("B", "Q"):
+            return
+        if key == "N":
+            page = min(page + 1, len(pages) - 1)
+        elif key == "P":
+            page = max(0, page - 1)
+
+
 def screen_trading_ledger(p: Palette, world: World) -> None:
-    pages = _mission_text_pages(trading_ledger_lines(world), overhead=5)
+    footer = "[M]arkets [R]oute [N]ext [P]rev [B]ack: "
+    pages = _trade_pages(trading_ledger_lines(world), "Trading Ledger", footer)
     page = 0
     while True:
         out_line()
         out_line(f"Trading Ledger {page + 1}/{len(pages)}")
         for line in pages[page]:
             out_line(line)
-        out_prompt("[N]ext [P]rev [B]ack: ")
+        out_prompt(footer)
         action = read_command()
         out_line(action)
         if action in ("B", "Q"):
@@ -3442,6 +3792,10 @@ def screen_trading_ledger(p: Palette, world: World) -> None:
             page = min(page + 1, len(pages) - 1)
         elif action == "P":
             page = max(0, page - 1)
+        elif action == "M":
+            screen_remembered_markets(p, world)
+        elif action == "R":
+            screen_trade_route(p, world)
 
 
 def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
@@ -4524,11 +4878,12 @@ def _encounter_distress_call(p: Palette, world: World) -> None:
 
 
 def _encounter_market_tip(p: Palette, world: World, dest: GalaxySystem) -> None:
-    """Pure flavor/utility -- reveals a real, already-computed price
-    (`price_for`) at a nearby, already-discovered system. No new state,
-    no choice to make, and no `random.Random` calls that could affect
-    anything but which system/commodity the tip names."""
+    """Remember the revealed quote with the encounter result; RNG order is unchanged."""
     state = _travel_encounter(world)
+    if state.get("done"):
+        for line in state.get("result", []):
+            out_line(f"{p.gold}{line}{RESET}")
+        return
     hops = bfs_hops(world.by_id, dest.id)
     candidates = [sid for sid, h in hops.items() if 1 <= h <= 4 and world.by_id[sid].discovered]
     if not candidates:
@@ -4538,9 +4893,11 @@ def _encounter_market_tip(p: Palette, world: World, dest: GalaxySystem) -> None:
     system = world.by_id[sid]
     commodity = world.event_rng.choice(list(COMMODITIES))
     price = price_for(world, sid, commodity)
+    quote = _remember_market_quote(world, sid, commodity, price)
     label = COMMODITIES[commodity]["label"]
+    buy = f"{quote['buy']}cr" if quote["buy"] is not None else "prohibited"
     _encounter_result(p, world, state, [
-        f"You intercept a trader's data burst: {label} is going for {price}cr at {system.name}.",
+        f"You intercept a trader's data burst: {label} at {system.name}, buy {buy}, sell {quote['sell']}cr. Recorded on day {world.save.turn}.",
     ])
 
 

@@ -78,6 +78,383 @@ except vr['PilotBusy']:
     assert acquired.stdout.strip() == b"acquired" and path.read_bytes() == b""
 
 
+def _world_with_market_memory():
+    world = _world_with_seed(42)
+    destination = world.here.connections[0]
+    world.save.current_system = destination
+    world.by_id[destination].discovered = True
+    vr.remember_local_market(world)
+    world.save.current_system = 0
+    vr.remember_local_market(world)
+    world.save.discovered = [system.id for system in world.galaxy if system.discovered]
+    return world, destination
+
+
+def test_market_memory_observes_locally_and_stays_stale_until_revisited(tmp_path):
+    import copy
+    world, destination = _world_with_market_memory()
+    initial = copy.deepcopy(world.save.market_memory[destination])
+    rng = world.event_rng.getstate()
+    world.save.turn = 7
+    vr._nudge_drift(world, destination, "food", 0.5)
+    world.checkpoint()
+    assert world.save.market_memory[destination] == initial
+    assert world.event_rng.getstate() == rng
+    assert world.save.market_memory[0]["food"]["day"] == 7
+    vr.persist(world, tmp_path, 77)
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert saved.market_memory[destination] == initial
+    world = vr.World(saved)
+    world.save.current_system = destination
+    world.checkpoint()
+    assert world.save.market_memory[destination]["food"]["day"] == 7
+    assert world.save.market_memory[destination]["food"]["sell"] != initial["food"]["sell"]
+
+
+def test_market_memory_does_not_invent_history_from_legacy_discoveries():
+    world = _world_with_seed(42)
+    data = world.save.to_dict()
+    data.pop("market_memory")
+    data["discovered"] = list(world.by_id)
+    old = vr.World(vr.SaveData.from_dict(data))
+    assert not old.save.market_memory
+    old.checkpoint()
+    assert set(old.save.market_memory) == {0}
+    old.save.pending_travel = {}
+    old.save.current_system = 1
+    vr.remember_local_market(old)
+    assert set(old.save.market_memory) == {0}
+
+
+def test_market_memory_keeps_the_last_contraband_sale_quote_without_inventing_open_purchase():
+    world = _world_with_seed(42)
+    world.save.cargo = {"weapons": 1}
+    vr.remember_local_market(world)
+    quote = dict(world.save.market_memory[0]["weapons"])
+    assert quote["buy"] is None and quote["sell"] > 0
+    world.save.cargo.clear()
+    world.save.turn = 3
+    vr.remember_local_market(world)
+    assert world.save.market_memory[0]["weapons"] == quote
+    assert world.save.market_memory[0]["food"]["day"] == 3
+
+
+def test_market_memory_data_burst_records_only_the_revealed_remote_quote_without_extra_rng():
+    world = _world_with_seed(42)
+    for system in world.galaxy:
+        system.discovered = True
+    world.event_rng.seed(919)
+    expected = random.Random()
+    expected.setstate(world.event_rng.getstate())
+    dest = world.here
+    hops = vr.bfs_hops(world.by_id, dest.id)
+    sid = expected.choice([sid for sid, h in hops.items() if 1 <= h <= 4 and world.by_id[sid].discovered])
+    commodity = expected.choice(list(vr.COMMODITIES))
+    unit = vr.price_for(world, sid, commodity)
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._encounter_market_tip(vr.Palette(False), world, dest)
+    assert set(world.save.market_memory) == {0, sid}
+    assert set(world.save.market_memory[sid]) == {commodity}
+    assert world.save.market_memory[sid][commodity]["sell"] == round(unit * vr.SELL_SPREAD)
+    assert world.event_rng.getstate() == expected.getstate()
+    assert "Recorded on day 0" in output.getvalue()
+
+
+def test_completed_market_memory_tip_replays_without_quotes_rng_or_checkpoint(monkeypatch):
+    import copy
+    world, destination = _world_with_market_memory()
+    world.save.pending_travel = {"version": 1, "origin": 0, "destination": destination,
+        "was_discovered": True, "destroyed": False, "phase": "primary", "primary": "random",
+        "bounty": None, "escorts": [], "escort_index": 0,
+        "encounter": {"kind": "tip", "done": True, "result": ["Previously recorded market report."]}}
+    world.checkpoint()
+    world = vr.World(vr.SaveData.from_dict(world.save.to_dict()))
+    before = copy.deepcopy(world.save.to_dict())
+    rng = world.event_rng.getstate()
+    world._checkpoint = lambda current: pytest.fail("Completed report wrote another checkpoint")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._encounter_market_tip(vr.Palette(False), world, world.by_id[destination])
+        vr._resolve_random_travel_encounter(vr.Palette(False), world, world.by_id[destination])
+    assert output.getvalue().count("Previously recorded market report.") == 2
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+def test_trade_route_quote_uses_stale_sale_data_and_exact_fuel_wage_budget(monkeypatch):
+    import copy
+    world, destination = _world_with_market_memory()
+    old_sale = world.save.market_memory[destination]["food"]["sell"]
+    world.save.turn = 6
+    world.save.ship.fuel = 0
+    world.save.ship.has_engineer = world.save.ship.has_navigator = True
+    world.save.pilot.credits = 0
+    original = vr.price_for
+
+    def local_only(current, sid, commodity):
+        assert sid == current.here.id, "Advice queried a live remote market"
+        return original(current, sid, commodity)
+
+    monkeypatch.setattr(vr, "price_for", local_only)
+    before = copy.deepcopy(world.save.to_dict())
+    quote = vr.trade_route_quote(world, destination, "food", 3)
+    path = vr.bfs_path(world.by_id, 0, destination)
+    assert quote["observed_day"] == 0 and quote["receipts"] == old_sale * 3
+    assert quote["cargo_cost"] == 3 * original(world, 0, "food")
+    assert quote["wages"] == len(path) * (vr.CREW_ROLES["engineer"]["wage"] + vr.CREW_ROLES["navigator"]["wage"])
+    assert quote["fuel_cash"] == quote["fuel"] * 6
+    assert quote["cash_needed"] == quote["cargo_cost"] + quote["fuel_cash"] + quote["wages"]
+    assert quote["margin"] == quote["receipts"] - quote["cash_needed"]
+    assert "SHORT" in " ".join(vr.trade_route_lines(world, destination, "food", 3, False))
+    assert world.save.to_dict() == before
+
+
+@pytest.mark.parametrize("quantity", [1, 2, 3, 4, 5])
+def test_trade_route_held_cargo_preview_matches_actual_fifo_disposal(quantity):
+    world, destination = _world_with_market_memory()
+    world.save.cargo = {"food": 2}
+    vr._acquire_cargo(world, "food", 3, 100)
+    quote = vr.trade_route_quote(world, destination, "food", quantity, use_hold=True)
+    cost, unknown = vr._dispose_cargo(world, "food", quantity, proceeds=quote["receipts"], kind="sale")
+    assert (quote["cargo_cost"], quote["unknown_units"]) == (cost, unknown)
+    assert quote["procurement"] == 0
+    assert quote["margin"] is None
+
+
+def test_trade_route_known_hold_uses_actual_basis_not_current_purchase_price():
+    world, destination = _world_with_market_memory()
+    vr._acquire_cargo(world, "food", 2, 17)
+    quote = vr.trade_route_quote(world, destination, "food", 2, use_hold=True)
+    assert quote["cargo_cost"] == 17 and quote["procurement"] == 0
+    assert quote["margin"] == quote["receipts"] - 17 - quote["fuel"] * 6
+
+
+@pytest.mark.parametrize("deadline,conflict", [(0, False), (1, True), (None, True)])
+def test_trade_route_delivery_conflicts_respect_arrival_deadline(deadline, conflict):
+    world, destination = _world_with_market_memory()
+    world.save.active_missions = [vr.Mission(id=1, kind="delivery", description="Reserved cargo",
+        reward=100, origin_system=0, target_system=destination, commodity="food", quantity=3, deadline_turn=deadline)]
+    quote = vr.trade_route_quote(world, destination, "food", 3)
+    assert bool(quote["conflicts"]) is conflict
+    assert (quote["margin"] is None) is conflict
+
+
+def test_trade_route_does_not_claim_an_underfilled_delivery_consumes_the_load():
+    world, destination = _world_with_market_memory()
+    world.save.active_missions = [vr.Mission(id=1, kind="delivery", description="Larger delivery",
+        reward=100, origin_system=0, target_system=destination, commodity="food", quantity=3)]
+    quote = vr.trade_route_quote(world, destination, "food", 2)
+    assert not quote["conflicts"] and quote["margin"] is not None
+
+
+@pytest.mark.parametrize("deliveries,conflicts", [([3], []), ([3, 3], ["Delivery 2"]), ([4], ["Delivery 1"])])
+def test_trade_route_new_purchase_uses_older_cargo_as_delivery_buffer(deliveries, conflicts):
+    world, destination = _world_with_market_memory()
+    world.save.cargo = {"food": 3}
+    world.save.active_missions = [vr.Mission(id=i, kind="delivery", description=f"Delivery {i}",
+        reward=100, origin_system=0, target_system=destination, commodity="food", quantity=quantity)
+        for i, quantity in enumerate(deliveries, 1)]
+    quote = vr.trade_route_quote(world, destination, "food", 3)
+    assert quote["conflicts"] == conflicts
+    assert (quote["margin"] is None) is bool(conflicts)
+    held = vr.trade_route_quote(world, destination, "food", 3, use_hold=True)
+    assert bool(held["conflicts"]) is (deliveries[0] <= 3)
+
+
+def test_trade_route_hides_uncharted_intermediate_names_and_rejects_oversized_legs(monkeypatch):
+    world, _ = _world_with_market_memory()
+    destination = max(world.by_id, key=lambda sid: len(vr.bfs_path(world.by_id, 0, sid)))
+    path = vr.bfs_path(world.by_id, 0, destination)
+    assert len(path) > 1
+    world.save.current_system = destination
+    vr.remember_local_market(world)
+    world.save.current_system = 0
+    for sid in path[:-1]:
+        world.by_id[sid].discovered = False
+    lines = " ".join(vr.trade_route_lines(world, destination, "food", 1, False))
+    assert "Uncharted system" in lines and "danger unknown" in lines
+    assert all(world.by_id[sid].name not in lines for sid in path[:-1])
+    monkeypatch.setattr(vr, "fuel_capacity", lambda ship: 0)
+    quote = vr.trade_route_quote(world, destination, "food", 1)
+    assert not quote["feasible"]
+    lines = " ".join(vr.trade_route_lines(world, destination, "food", 1, False))
+    assert "INFEASIBLE" in lines and "Estimated margin" not in lines
+
+
+@pytest.mark.parametrize("fault", ["unknown_quote", "same_station", "quantity", "boolean", "space", "missing_hold", "pending", "illegal"])
+def test_trade_route_rejections_write_nothing(fault):
+    import copy
+    world, destination = _world_with_market_memory()
+    commodity, quantity, held = "food", 1, False
+    if fault == "unknown_quote": world.save.market_memory.clear()
+    elif fault == "same_station": destination = 0
+    elif fault == "quantity": quantity = -1
+    elif fault == "boolean": quantity = True
+    elif fault == "space": quantity = vr.cargo_capacity(world.save.ship) + 1
+    elif fault == "missing_hold": held = True
+    elif fault == "pending": world.save.pending_travel = {}
+    elif fault == "illegal":
+        commodity = "weapons"
+        world.save.market_memory[destination][commodity] = {"day": 0, "buy": 100, "sell": 80}
+    before = copy.deepcopy(world.save.to_dict())
+    with pytest.raises(vr.TradeError):
+        vr.trade_route_quote(world, destination, commodity, quantity, use_hold=held)
+    assert world.save.to_dict() == before
+
+
+@pytest.mark.parametrize("memory", [
+    None, [], {"48": {}}, {"1": {}, "01": {}}, {"1": {"invalid": {}}},
+    {"1": {"food": {"day": 1, "buy": 10, "sell": 8}}},
+    {"1": {"food": {"day": False, "buy": 10, "sell": 8}}},
+    {"1": {"food": {"day": 0, "buy": 0, "sell": 8}}},
+    {"1": {"food": {"day": 0, "buy": 10, "sell": -1}}},
+    {"1": {"food": {"day": 0, "buy": 10, "sell": 0}}},
+    {"1": {"food": {"day": 0, "buy": 10}}},
+    {"1": {"food": {"day": 0, "buy": 10, "sell": 8, "future": 1}}},
+])
+def test_market_memory_rejects_malformed_quotes_without_rewriting(tmp_path, memory):
+    import json
+    data = _world_with_seed(42).save.to_dict()
+    data["market_memory"] = memory
+    malformed = json.dumps(data).encode()
+    (tmp_path / "77.json").write_bytes(malformed)
+    with pytest.raises(vr.ResumeError):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert (tmp_path / "77.json").read_bytes() == malformed
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("screen", ["memory", "route"])
+def test_market_memory_and_route_pages_reach_the_end_within_terminal_size(monkeypatch, width, height, screen):
+    import copy
+    import re
+    world = _world_with_seed(42)
+    for system in world.galaxy:
+        world.save.current_system = system.id
+        system.discovered = True
+        vr.remember_local_market(world)
+    world.save.current_system = 0
+    world.save.turn = 9
+    before = copy.deepcopy(world.save.to_dict())
+    rng = world.event_rng.getstate()
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    output = io.StringIO()
+    pages = []
+    title = "Market Memory" if screen == "memory" else "Trade Route"
+
+    def choose():
+        value = output.getvalue()
+        pages.append(value)
+        output.seek(0)
+        output.truncate(0)
+        assert len(pages) < 2000
+        match = re.search(re.escape(title) + r" (\d+)/(\d+)", " ".join(value.split()))
+        assert match
+        assert world.save.to_dict() == before
+        return "B" if match[1] == match[2] else "N"
+
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output):
+        if screen == "memory":
+            vr.screen_remembered_markets(vr.Palette(False), world)
+        else:
+            vr.screen_trade_route(vr.Palette(False), world)
+    for page in pages:
+        assert len(page.splitlines()) <= height, (width, height, page)
+        assert all(vr._visible_width(row) <= width for row in page.splitlines())
+    assert world.event_rng.getstate() == rng
+    if screen == "memory":
+        text = " ".join(" ".join(pages).split())
+        assert all(system.name in text for system in world.galaxy)
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_trade_route_destination_picker_pages_keep_selection_and_back_available(monkeypatch, width, height):
+    import re
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    options = [(i, f"Very Long Station Destination Number {i}") for i in range(48)]
+    output = io.StringIO()
+    pages = []
+
+    def choose():
+        value = output.getvalue()
+        pages.append(value)
+        output.seek(0)
+        output.truncate(0)
+        match = re.search(r"Destination (\d+)/(\d+)", " ".join(value.split()))
+        assert match and len(pages) < 500
+        return "1" if match[1] == match[2] else "N"
+
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output):
+        selected = vr._pick_trade_field("Destination", options)
+    assert 0 <= selected <= 47
+    assert "Number 47" in " ".join(pages[-1].split()) or "47" in pages[-1]
+    for page in pages:
+        assert len(page.splitlines()) <= height, page
+        assert all(vr._visible_width(row) <= width for row in page.splitlines())
+        assert "[B]ack" in page
+
+
+def test_trade_route_editing_fields_and_cancelling_is_read_only(monkeypatch):
+    import copy
+    world, _ = _world_with_market_memory()
+    for sid in (2, 3):
+        world.save.current_system = sid
+        vr.remember_local_market(world)
+    world.save.current_system = 0
+    before = copy.deepcopy(world.save.to_dict())
+    commands = iter("ED2C2QHHSB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(commands))
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: "2")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_trade_route(vr.Palette(False), world)
+    assert "x2" in output.getvalue()
+    assert "existing hold cargo" in output.getvalue() and "buy new cargo here" in output.getvalue()
+    assert world.save.to_dict() == before
+
+
+@pytest.mark.parametrize("commands", [b"TMBRBBQ", b"TR", b"TREQ3\nBBBQ", b"TREQ3\n"])
+def test_real_market_memory_and_route_back_or_eof_preserve_career(tmp_path, commands):
+    import json
+    import os
+    import subprocess
+    world, _ = _world_with_market_memory()
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    original = (tmp_path / "77.json").read_bytes()
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+    assert result.returncode == 0 and not result.stderr
+    assert b"Trade Route 1/" in result.stdout
+    if b"M" in commands:
+        assert b"Market Memory 1/" in result.stdout
+    if b"E" in commands:
+        assert b"Route Draft 1/" in result.stdout and b"Quantity 1-" in result.stdout
+    assert (tmp_path / "77.json").read_bytes() == original
+
+
+def test_real_market_memory_is_saved_after_trade_and_arrival_before_acknowledgement(tmp_path):
+    world = _world_with_seed(42)
+    world.event_rng.seed(0)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    key = vr.LETTERS[vr.LEGAL_COMMODITIES.index("food")].encode()
+    with _door_stopped_at(tmp_path, b"M" + key + b"B2\n", b"Bought 2x"):
+        bought, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert bought.market_memory[0]["food"]["buy"] == vr.price_for(vr.World(bought), 0, "food")
+    destination = sorted(world.here.connections)[0]
+    jump_key = vr.CHART_CONNECTION_LETTERS[0].encode()
+    marker = ("Station Services: " + world.by_id[destination].station_name).encode()
+    with _door_stopped_at(tmp_path, b"C" + jump_key, marker):
+        arrived, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert arrived.current_system == destination and arrived.pending_travel is None
+        assert arrived.market_memory[destination]["food"]["day"] == 1
+        assert arrived.market_memory[0]["food"] == bought.market_memory[0]["food"]
+
+
 def test_trading_ledger_preserves_fifo_costs_and_unknown_legacy_stock(tmp_path):
     import json
     world = _world_with_seed(42)
@@ -241,7 +618,7 @@ def test_trading_ledger_pages_fit_and_do_not_write(monkeypatch, width, height):
     rng = world.event_rng.getstate()
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
     monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
-    count = len(vr._mission_text_pages(vr.trading_ledger_lines(world), overhead=5))
+    count = len(vr._trade_pages(vr.trading_ledger_lines(world), "Trading Ledger", "[M]arkets [R]oute [N]ext [P]rev [B]ack: "))
     output = io.StringIO()
     pages = []
 
@@ -329,6 +706,54 @@ def test_trading_ledger_combat_dump_accounts_only_for_real_cargo(monkeypatch, qu
     assert world.save.trading_ledger.cargo_loss_cost == cost
     assert world.save.trading_ledger.uncosted_losses == 0
     assert not world.save.cargo_basis
+
+
+def test_market_memory_rejects_uncharted_observation_before_exposing_station(tmp_path):
+    import json
+    world = _world_with_seed(42)
+    sid = next(s.id for s in world.galaxy if s.id not in world.save.discovered)
+    world.save.market_memory[sid] = {"food": {"day": 0, "buy": 12, "sell": 11}}
+    raw = json.dumps(world.save.to_dict()).encode()
+    (tmp_path / "77.json").write_bytes(raw)
+    with pytest.raises(vr.ResumeError, match="outside the chart"):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert (tmp_path / "77.json").read_bytes() == raw
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_trade_route_draft_cancel_retains_original_and_fits_pages(monkeypatch, width, height):
+    import copy, re
+    world, destination = _world_with_market_memory()
+    initial = dict(destination=destination, commodity="food", quantity=1, use_hold=False)
+    before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    output = io.StringIO(); frames = []
+    def choose():
+        frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
+        match = re.search(r"Route Draft (\d+)/(\d+)", " ".join(frame.split()))
+        assert match and len(frames) < 100
+        if len(frames) == 1: return "H"
+        return "B" if match[1] == match[2] else "N"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): assert vr._edit_trade_route(world, initial) is None
+    assert initial["use_hold"] is False and initial["quantity"] == 1
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+    assert all(len(frame.splitlines()) <= height for frame in frames)
+    assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
+
+
+def test_trade_route_draft_rejection_keeps_edits_until_apply(monkeypatch):
+    import copy
+    world, destination = _world_with_market_memory()
+    initial = dict(destination=destination, commodity="food", quantity=1, use_hold=False)
+    before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
+    keys = iter("QHSHS")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: "3")
+    with contextlib.redirect_stdout(io.StringIO()) as output: result = vr._edit_trade_route(world, initial)
+    assert result == {**initial, "quantity": 3} and initial["quantity"] == 1
+    assert "Cannot apply" in output.getvalue() and "Quantity: 3" in output.getvalue()
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
 
 
 # -- galaxy generation -------------------------------------------------
@@ -1240,7 +1665,8 @@ def test_market_tip_reveals_a_real_price_at_a_nearby_discovered_system():
     with contextlib.redirect_stdout(buf):
         vr._encounter_market_tip(vr.Palette(truecolor=False), world, dest)
 
-    assert "going for" in buf.getvalue()
+    normalized = " ".join(buf.getvalue().split())
+    assert "buy " in normalized and "sell " in normalized
 
 
 def test_market_tip_with_no_discovered_neighbors_shows_fallback_without_crashing():
