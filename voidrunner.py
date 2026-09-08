@@ -652,7 +652,7 @@ UPGRADES: dict[str, dict] = {
 # fields exactly.
 CREW_ROLES: dict[str, dict] = {
     "gunner": {"label": "Gunner", "hire_cost": 800, "wage": 15, "effect": "+3 combat damage per hit"},
-    "engineer": {"label": "Engineer", "hire_cost": 700, "wage": 12, "effect": "-1 fuel/jump (min 1)"},
+    "engineer": {"label": "Engineer", "hire_cost": 200, "wage": 2, "effect": "-25% fuel, round up (min 1)"},
     "navigator": {"label": "Navigator", "hire_cost": 600, "wage": 10, "effect": "+1 scan range"},
 }
 # hull class -> base cargo/fuel/hull, before any tier upgrades are added
@@ -896,24 +896,39 @@ class Mission:
 
 @dataclass
 class FuturesContract:
-    """Locks in today's price for a commodity, paid up front, settling
-    -- the goods actually arriving in cargo -- some number of turns
-    later regardless of where the pilot ends up traveling in the
-    meantime. Lets a trader hedge against (or speculate ahead of) a
-    price swing, notably a scheduled economy event's own crash/boom,
-    without needing cargo room for the goods today."""
+    """Prepaid goods for station pickup after maturity.
+
+    Missing pickup metadata identifies old remote-delivery orders; preserve
+    their original settlement terms until consumed.
+    """
     id: int
     commodity: str
     quantity: int
-    locked_price: int  # total paid up front, already including FUTURES_PREMIUM
+    locked_price: int  # total paid up front, including brokerage fee
     settle_turn: int
+    origin_system: int | None = None  # None: preserve legacy remote settlement.
+    principal: int | None = None
 
     def to_dict(self) -> dict:
-        return dataclasses.asdict(self)
+        data = dataclasses.asdict(self)
+        if self.origin_system is None and self.principal is None:
+            # Legacy orders retain absent metadata when checkpointed again.
+            del data["origin_system"]
+            del data["principal"]
+        return data
 
     @classmethod
     def from_dict(cls, d: dict) -> "FuturesContract":
-        return cls(**{f.name: d[f.name] for f in dataclasses.fields(cls) if f.name in d})
+        contract = cls(**{f.name: d[f.name] for f in dataclasses.fields(cls) if f.name in d})
+        if "origin_system" in d or "principal" in d:
+            if (type(contract.origin_system) is not int or not 0 <= contract.origin_system < GALAXY_SYSTEM_COUNT
+                    or type(contract.principal) is not int or type(contract.locked_price) is not int
+                    or not 0 <= contract.principal <= contract.locked_price
+                    or type(contract.quantity) is not int or contract.quantity < 1
+                    or type(contract.settle_turn) is not int or contract.settle_turn < 0
+                    or not isinstance(contract.commodity, str) or contract.commodity not in COMMODITIES):
+                raise ResumeError("The saved futures pickup terms cannot be read.")
+        return contract
 
 
 class ResumeError(Exception):
@@ -1036,6 +1051,8 @@ class SaveData:
     event_rng_state: list | tuple | None = None
     mission_boards: dict[int, dict] = field(default_factory=dict)
     tracked_mission_id: int | None = None
+    contraband_trade_balance: int = 0
+    contraband_trade_milestones: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -1058,6 +1075,8 @@ class SaveData:
             "event_rng_state": self.event_rng_state,
             "mission_boards": {str(k): v for k, v in self.mission_boards.items()},
             "tracked_mission_id": self.tracked_mission_id,
+            "contraband_trade_balance": self.contraband_trade_balance,
+            "contraband_trade_milestones": self.contraband_trade_milestones,
         }
 
     @classmethod
@@ -1082,6 +1101,8 @@ class SaveData:
             event_rng_state=d.get("event_rng_state"),
             mission_boards=_load_mission_boards(d.get("mission_boards", {})),
             tracked_mission_id=_load_tracked_mission_id(d.get("tracked_mission_id")),
+            contraband_trade_balance=_load_trade_total(d.get("contraband_trade_balance", 0)),
+            contraband_trade_milestones=_load_trade_total(d.get("contraband_trade_milestones", 0), nonnegative=True),
         )
 
 
@@ -1369,7 +1390,7 @@ def bfs_hops(by_id: dict[int, GalaxySystem], start_id: int) -> dict[int, int]:
 def fuel_cost_for_jump(a: GalaxySystem, b: GalaxySystem, ship: Ship | None = None) -> int:
     cost = max(1, round(_distance(a, b) / 6))
     if ship is not None and ship.has_engineer:
-        cost = max(1, cost - 1)
+        cost = max(1, cost - (cost + 3) // 4)
     return cost
 
 
@@ -1494,61 +1515,87 @@ def tick_economy_event(world: World) -> str | None:
     return f"Galaxy news: {description} (roughly {turns} turns)."
 
 
-# Futures contracts: lock in *today's* price for a commodity, paid up
-# front, for delivery some number of turns out -- a hedge against (or a
-# speculative bet ahead of) a price swing, notably a scheduled economy
-# event's own crash/boom, without needing cargo room for the goods
-# today. FUTURES_PREMIUM is the brokerage's own cut for the service --
-# without it, a futures contract would be a strictly-better free option
-# on top of an ordinary purchase (lock in today's price for later
-# delivery, at literally no cost, whenever cargo room is the only
-# constraint), rather than a real hedging trade-off.
-FUTURES_PREMIUM = 1.08
+# New orders preserve a goods principal separately from their nonrefundable fee.
+FUTURES_PREMIUM = 1.08  # Legacy price multiplier; new fees use integer rounding.
+FUTURES_FEE_PERCENT = 8
 FUTURES_DURATIONS = (5, 10, 20)
+MAX_FUTURES_CONTRACTS = 8
+
+
+class TradeError(ValueError):
+    """Rejected economy actions leave the career unchanged."""
+
+
+def futures_quote(world: World, commodity: str, quantity: int) -> tuple[int, int]:
+    if commodity not in COMMODITIES or type(quantity) is not int or quantity < 1:
+        raise TradeError("Choose a valid commodity and positive whole quantity.")
+    unit = price_for(world, world.save.current_system, commodity)
+    return unit * quantity, max(1, (unit * FUTURES_FEE_PERCENT + 99) // 100) * quantity
 
 
 def buy_futures_contract(world: World, commodity: str, quantity: int, duration: int) -> str:
-    """Locks in `quantity` units of `commodity` at today's price (plus
-    `FUTURES_PREMIUM`) for delivery `duration` turns from now. Caller
-    (`_screen_futures_buy`) is responsible for checking affordability
-    and confirming with the player first -- this always executes."""
-    unit_price = round(price_for(world, world.save.current_system, commodity) * FUTURES_PREMIUM)
-    total = unit_price * quantity
-    world.save.pilot.credits -= total
+    if world.save.pending_travel is not None:
+        raise TradeError("Finish the journey before placing an order.")
+    if type(duration) is not int or duration not in FUTURES_DURATIONS:
+        raise TradeError("Choose a 5, 10 or 20 day term.")
+    principal, fee = futures_quote(world, commodity, quantity)
+    if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
+        raise TradeError("This station does not sell contraband futures.")
+    if quantity > cargo_capacity(world.save.ship):
+        raise TradeError("Order quantity exceeds your ship's cargo capacity.")
+    if len(world.save.active_futures) >= MAX_FUTURES_CONTRACTS:
+        raise TradeError(f"At most {MAX_FUTURES_CONTRACTS} outstanding orders; collect or cancel one first.")
+    total = principal + fee
+    if total > world.save.pilot.credits:
+        raise TradeError(f"Need {total}cr including the nonrefundable {fee}cr fee.")
     contract = FuturesContract(
         id=world.save.next_futures_id, commodity=commodity, quantity=quantity,
         locked_price=total, settle_turn=world.save.turn + duration,
+        origin_system=world.save.current_system, principal=principal,
     )
+    world.save.pilot.credits -= total
+    record_contraband_trade(world, commodity, -total)
     world.save.active_futures.append(contract)
     world.save.next_futures_id += 1
     label = COMMODITIES[commodity]["label"]
-    msg = f"Futures contract: {quantity}x {label} locked at {unit_price}cr/unit, delivery in {duration} turns."
+    msg = (f"Futures contract: {quantity}x {label}, goods {principal}cr + fee {fee}cr. "
+           f"Pickup at {world.here.name} from day {contract.settle_turn}.")
     world.save.pilot.note(msg)
     return msg
 
 
-def settle_futures_contracts(world: World) -> list[str]:
-    """Called once per turn, alongside the other per-turn ticks in
-    `screen_travel` -- delivers every contract whose `settle_turn` has
-    arrived straight into cargo, wherever the pilot currently is (the
-    whole point of a futures contract is not needing to be anywhere in
-    particular when it settles). A contract that no longer fits in the
-    hold is refunded in full rather than silently lost or force-fit
-    over capacity -- "never a dead end" applies to a bad hold-space
-    gamble as much as it does to a bad fight."""
-    ship = world.save.ship
-    due = [f for f in world.save.active_futures if world.save.turn >= f.settle_turn]
-    if not due:
-        return []
-    messages: list[str] = []
-    for contract in due:
+def cancel_futures_contract(world: World, contract_id: int) -> str:
+    if world.save.pending_travel is not None:
+        raise TradeError("Finish the journey before cancelling an order.")
+    contract = next((c for c in world.save.active_futures if c.id == contract_id), None)
+    if contract is None or contract.origin_system is None:
+        raise TradeError("That pickup order is no longer active.")
+    world.save.active_futures.remove(contract)
+    world.save.pilot.credits += contract.principal
+    record_contraband_trade(world, contract.commodity, contract.principal)
+    fee = contract.locked_price - contract.principal
+    msg = f"Order cancelled: {contract.principal}cr refunded; {fee}cr brokerage fee retained."
+    world.save.pilot.note(msg)
+    return msg
+
+
+def settle_futures_contracts(world: World, *, legacy_only: bool = False) -> list[str]:
+    """Deliver ready pickup orders at their station; honor legacy terms once."""
+    messages = []
+    for contract in list(world.save.active_futures):
+        if world.save.turn < contract.settle_turn:
+            continue
+        legacy = contract.origin_system is None
+        if not legacy and (legacy_only or world.save.current_system != contract.origin_system):
+            continue
+        room = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
+        if room < contract.quantity and not legacy:
+            continue  # Ready goods wait; no automatic refund or lost fee.
         world.save.active_futures.remove(contract)
         label = COMMODITIES[contract.commodity]["label"]
-        room = cargo_capacity(ship) - sum(world.save.cargo.values())
         if room < contract.quantity:
             world.save.pilot.credits += contract.locked_price
-            msg = (f"Futures contract for {contract.quantity}x {label} settled, but there's no cargo "
-                    f"room -- refunded {contract.locked_price}cr.")
+            msg = f"Legacy futures: no cargo room -- refunded {contract.locked_price}cr under original terms."
         else:
             world.save.cargo[contract.commodity] = world.save.cargo.get(contract.commodity, 0) + contract.quantity
             msg = f"Futures contract settled: {contract.quantity}x {label} delivered to your hold."
@@ -1876,6 +1923,28 @@ def bribe_chance(world: World, pirate: Pirate) -> float:
     rep = world.save.pilot.reputation.get(FACTION_BLACKWAKE, 0)
     chance = 0.30 + min(0.25, max(0, rep) * 0.01) - pirate.tier * 0.05
     return max(0.05, min(0.85, chance))
+
+
+CONTRABAND_STANDING_STEP = 500
+
+
+def _load_trade_total(value, *, nonnegative=False) -> int:
+    if type(value) is not int or (nonnegative and value < 0):
+        raise ResumeError("The saved contraband trading record cannot be read.")
+    return value
+
+
+def record_contraband_trade(world: World, commodity: str, cash_delta: int) -> None:
+    """Reward only new lifetime cash-surplus milestones, never action count."""
+    if COMMODITIES[commodity]["legal"]:
+        return
+    world.save.contraband_trade_balance += cash_delta
+    milestones = max(0, world.save.contraband_trade_balance) // CONTRABAND_STANDING_STEP
+    earned = milestones - world.save.contraband_trade_milestones
+    if earned > 0:
+        world.save.contraband_trade_milestones = milestones
+        adjust_reputation(world, FACTION_BLACKWAKE, earned)
+        world.save.pilot.note(f"Contraband trading milestone: +{earned} Blackwake standing.")
 
 
 def adjust_reputation(world: World, faction: str, delta: int) -> None:
@@ -2507,6 +2576,12 @@ def create_career(p: Palette, info: dict) -> str | None:
 
 
 def screen_station_menu(p: Palette, world: World) -> str:
+    completed = settle_futures_contracts(world)
+    completed += check_mission_completions(world)
+    if completed:
+        world.checkpoint()
+    for msg in completed:
+        out_line(f"{p.gold}{msg}{RESET}")
     if is_stranded(world):
         # Checked here, not only right after the action that could cause
         # it -- this is the outer loop's own home base, reached after
@@ -2524,11 +2599,6 @@ def screen_station_menu(p: Palette, world: World) -> str:
         out_line()
         out_line(f"{p.gold}{BOLD}★ ★ ★ Promoted to {promoted}! ★ ★ ★{RESET}")
         pause(p)
-    completed = check_mission_completions(world)
-    if completed:
-        world.checkpoint()
-    for msg in completed:
-        out_line(f"{p.gold}{msg}{RESET}")
     out_line()
     draw_status_bar(p, world)
     _show_tracked_mission(p, world)
@@ -2640,6 +2710,8 @@ def screen_market(p: Palette, world: World) -> None:
         used = sum(world.save.cargo.values())
         hold_bar = _gauge_bar(used, cap, 10, p)
         out_line(f"  {p.accent}Cargo Hold:{RESET} {hold_bar} {used}/{cap} units   │   {p.gold}[X]{RESET} Futures Exchange")
+        if any(not COMMODITIES[c]["legal"] for c in goods):
+            out_line("Blackwake: +1 standing per new 500cr net contraband trading gain; purchases count against gains.")
         out_prompt(f"  {p.muted}Trade which [A-{LETTERS[len(rows)-1]}], or [Q] back? {RESET}")
         key = read_command()
         out_line(key)
@@ -2657,73 +2729,111 @@ def screen_market(p: Palette, world: World) -> None:
 
 
 def screen_futures(p: Palette, world: World, goods: list[str]) -> None:
-    """The Futures Exchange, reached from `screen_market`'s own [X]
-    option -- `goods` is that same market's own tradeable-commodity
-    list, so a contract can only be locked in for something this
-    system's market actually deals in."""
+    page = 0
+    while True:
+        entries = [("goods", c) for c in goods] + [("order", c) for c in world.save.active_futures]
+        count = max(1, (len(entries) + 3) // 4)
+        page = min(page, count - 1)
+        visible = entries[page * 4:page * 4 + 4]
+        out_line()
+        out_line(f"{p.gold}Futures Exchange - {page + 1}/{count}{RESET}")
+        out_line("New orders: station pickup, 8% nonrefundable fee rounded up per unit.")
+        for index, (kind, item) in enumerate(visible, 1):
+            if kind == "goods":
+                principal, fee = futures_quote(world, item, 1)
+                out_line(f"[{index}] Order {COMMODITIES[item]['label']}: {principal}+{fee}cr/unit")
+            else:
+                status = "ready" if world.save.turn >= item.settle_turn else f"day {item.settle_turn}"
+                place = "legacy remote delivery" if item.origin_system is None else world.by_id[item.origin_system].name
+                out_line(_mission_plain(f"[{index}] #{item.id}: {item.quantity} {COMMODITIES[item.commodity]['label']}, {status}; {place}"))
+        out_line(f"Outstanding orders: {len(world.save.active_futures)}/{MAX_FUTURES_CONTRACTS}")
+        out_prompt("[1-4] Details [N]ext [P]rev [B]ack > ")
+        key = read_command()
+        if key in ("B", "Q"):
+            return
+        if key == "N":
+            page = min(page + 1, count - 1)
+        elif key == "P":
+            page = max(0, page - 1)
+        elif len(key) == 1 and "1" <= key <= "4" and int(key) <= len(visible):
+            kind, item = visible[int(key) - 1]
+            if kind == "goods":
+                _screen_buy_futures(p, world, item)
+            else:
+                _screen_futures_order(p, world, item)
+
+
+def _screen_futures_order(p: Palette, world: World, contract: FuturesContract) -> None:
     while True:
         out_line()
-        out_line(_box_title(p, f"Futures Exchange: {world.here.station_name}"))
-        intro = f" {p.muted}Lock in today's price ({round((FUTURES_PREMIUM - 1) * 100)}% fee) for remote delivery to your hold.{RESET}"
-        out_line(f"{p.accent}│{RESET}{intro}{' ' * max(0, 77 - _vis_len(intro))}{p.accent}│{RESET}")
-        if world.save.active_futures:
-            out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
-            outstanding = f" {p.gold}Outstanding contracts:{RESET}"
-            out_line(f"{p.accent}│{RESET}{outstanding}{' ' * max(0, 77 - _vis_len(outstanding))}{p.accent}│{RESET}")
-            for contract in world.save.active_futures:
-                label = COMMODITIES[contract.commodity]["label"]
-                remaining = contract.settle_turn - world.save.turn
-                f_str = f"    • {contract.quantity}x {label:<16} settles in {max(0, remaining)} turn(s)"
-                pad_len = max(0, 77 - _vis_len(f_str))
-                out_line(f"{p.accent}│{RESET}{f_str}{' ' * pad_len}{p.accent}│{RESET}")
-        out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
-        header = f" {p.gold}KEY  COMMODITY            FUTURES LOCK PRICE       TERMS{RESET}"
-        out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
-        out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
-        for i, commodity in enumerate(goods):
-            price = round(price_for(world, world.here.id, commodity) * FUTURES_PREMIUM)
-            label = COMMODITIES[commodity]["label"]
-            f_row = f"  {p.gold}[{LETTERS[i]}]{RESET}  {label:<18} {price:>6} cr / unit locked   Guaranteed Delivery"
-            pad_len = max(0, 77 - _vis_len(f_row))
-            out_line(f"{p.accent}│{RESET}{f_row}{' ' * pad_len}{p.accent}│{RESET}")
-        out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
-        out_prompt(f"  {p.muted}Buy forward contract for which, or [Q] back? {RESET}")
+        out_line(f"Order #{contract.id}: {contract.quantity} {COMMODITIES[contract.commodity]['label']}")
+        if contract.origin_system is None:
+            out_line("Legacy order: original remote delivery/full-refund terms apply.")
+            out_line(f"Settles on day {contract.settle_turn}; paid {contract.locked_price}cr.")
+            out_prompt("[B]ack > ")
+        else:
+            fee = contract.locked_price - contract.principal
+            out_line(_mission_plain(f"Pickup: {world.by_id[contract.origin_system].name}, from day {contract.settle_turn}."))
+            out_line(f"Paid {contract.principal}cr for goods + {fee}cr nonrefundable fee.")
+            out_line("Collected on arrival/station entry when the full order fits; otherwise it waits.")
+            out_line(f"[X] Cancel: refund {contract.principal}cr, forfeit {fee}cr fee.")
+            out_prompt("[B]ack > ")
         key = read_command()
-        out_line(key)
-        if key == "Q":
+        if key in ("B", "Q"):
             return
-        idx = LETTERS.index(key) if key in LETTERS else -1
-        if idx < 0 or idx >= len(goods):
-            continue
-        _screen_buy_futures(p, world, goods[idx])
+        if key == "X" and contract.origin_system is not None:
+            if confirm(f"Cancel order #{contract.id} for {contract.principal}cr? Fee is not refunded.", p):
+                try:
+                    message = cancel_futures_contract(world, contract.id)
+                except TradeError as exc:
+                    out_line(str(exc))
+                    pause(p)
+                    return
+                world.checkpoint()
+                out_line(message)
+                pause(p)
+                return
 
 
 def _screen_buy_futures(p: Palette, world: World, commodity: str) -> None:
-    unit_price = round(price_for(world, world.here.id, commodity) * FUTURES_PREMIUM)
-    label = COMMODITIES[commodity]["label"]
-    max_qty = world.save.pilot.credits // unit_price if unit_price > 0 else 0
-    if max_qty <= 0:
-        out_line(f"{p.wrong}Can't afford even one unit at {unit_price}cr.{RESET}")
-        return
-    out_prompt(f"{p.muted}{label} -- {unit_price}cr/unit locked. Quantity (max {max_qty}, Enter to cancel): {RESET}")
-    raw = read_line_raw(max_len=5)
-    qty = int(raw) if raw.isdigit() else 0
-    qty = min(qty, max_qty)
-    if qty <= 0:
-        return
-    out_prompt(f"{p.muted}Delivery in how many turns -- "
-        f"{'/'.join(f'[{d}]' for d in FUTURES_DURATIONS)}? {RESET}")
-    raw_duration = read_line_raw(max_len=3)
-    duration = int(raw_duration) if raw_duration.isdigit() else 0
-    if duration not in FUTURES_DURATIONS:
-        out_line(f"{p.wrong}Choose one of {', '.join(str(d) for d in FUTURES_DURATIONS)}.{RESET}")
-        return
-    total = unit_price * qty
-    if not confirm(f"Lock in {qty}x {label} for {total}cr, delivered in {duration} turns?", p):
-        return
-    result = buy_futures_contract(world, commodity, qty, duration)
-    world.checkpoint()
-    out_line(f"{p.correct}{result}{RESET}")
+    quantity, duration = 1, FUTURES_DURATIONS[0]
+    while True:
+        principal, fee = futures_quote(world, commodity, quantity)
+        out_line()
+        out_line(f"Order {COMMODITIES[commodity]['label']}")
+        out_line(f"Quantity: {quantity}; term: {duration} days.")
+        out_line(_mission_plain(f"Pickup: {world.here.name}, from day {world.save.turn + duration}."))
+        out_line(f"Goods {principal}cr + nonrefundable fee {fee}cr = {principal + fee}cr.")
+        out_line(f"Credits: {world.save.pilot.credits}cr. Full cargo space needed only at pickup.")
+        out_line("Cancellation refunds goods principal only; full holds leave orders waiting.")
+        out_prompt("[Q] Quantity [T] Term [S] Sign [B] Back > ")
+        key = read_command()
+        if key == "B":
+            return
+        if key == "Q":
+            out_prompt(f"Quantity (1-{cargo_capacity(world.save.ship)}, Enter keeps {quantity}): ")
+            raw = read_line_raw(max_len=5)
+            if raw:
+                chosen = int(raw)
+                if 1 <= chosen <= cargo_capacity(world.save.ship):
+                    quantity = chosen
+                else:
+                    out_line("Quantity must fit your ship's cargo capacity.")
+                    pause(p)
+        elif key == "T":
+            duration = FUTURES_DURATIONS[(FUTURES_DURATIONS.index(duration) + 1) % len(FUTURES_DURATIONS)]
+        elif key == "S":
+            if confirm(f"Pay {principal + fee}cr now, including the nonrefundable {fee}cr fee?", p):
+                try:
+                    message = buy_futures_contract(world, commodity, quantity, duration)
+                except TradeError as exc:
+                    out_line(str(exc))
+                    pause(p)
+                    continue
+                world.checkpoint()
+                out_line(f"{p.correct}{message}{RESET}")
+                pause(p)
+                return
 
 
 def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
@@ -2754,8 +2864,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
         world.save.pilot.credits -= cost
         world.save.cargo[commodity] = world.save.cargo.get(commodity, 0) + qty
         _nudge_drift(world, world.here.id, commodity, min(0.05, qty * 0.01))
-        if not COMMODITIES[commodity]["legal"]:
-            adjust_reputation(world, FACTION_BLACKWAKE, 1)
+        record_contraband_trade(world, commodity, -cost)
         world.checkpoint()
         out_line(f"{p.correct}Bought {qty}x {label} for {cost}cr.{RESET}")
     elif action == "S":
@@ -2775,8 +2884,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
         if world.save.cargo[commodity] <= 0:
             del world.save.cargo[commodity]
         _nudge_drift(world, world.here.id, commodity, -min(0.05, qty * 0.01))
-        if not COMMODITIES[commodity]["legal"]:
-            adjust_reputation(world, FACTION_BLACKWAKE, 1)
+        record_contraband_trade(world, commodity, proceeds)
         world.checkpoint()
         out_line(f"{p.correct}Sold {qty}x {label} for {proceeds}cr.{RESET}")
 
@@ -3861,7 +3969,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         if event_msg:
             lines.append(event_msg)
         lines.extend(pay_crew_wages(world))
-        lines.extend(settle_futures_contracts(world))
+        lines.extend(settle_futures_contracts(world, legacy_only=True))
         was_discovered = dest.discovered
         dest.discovered = True
         if not was_discovered:
@@ -3909,7 +4017,8 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         inspect = False
         if not world.ship_destroyed_this_hop:
             world.save.current_system = dest_id
-            lines = check_mission_completions(
+            lines = settle_futures_contracts(world)
+            lines += check_mission_completions(
                 world, just_discovered=None if travel["was_discovered"] else dest_id,
             )
             if has_contraband(world) and dest.economy != "Haven":
