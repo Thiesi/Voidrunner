@@ -8760,6 +8760,109 @@ def test_preexisting_bounty_target_has_no_new_controls_or_undisclosed_penalty(mo
     assert world.save.pilot.missions_completed == 1
 
 
+@pytest.mark.parametrize("kind", ["derelict", "distress"])
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("style", ["auto", "plain"])
+def test_exploration_terms_fit_and_browsing_has_no_effects(monkeypatch, kind, width, height, style):
+    import copy, re
+    world = _world_with_seed(42); world.save.ship.fuel = 3
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    output = io.StringIO(); frames = []
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert len(frame.splitlines()) <= height
+        assert all(vr._visible_width(line) <= width for line in frame.splitlines())
+        assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+        assert "Fuel 3" in " ".join(vr._ANSI_RE.sub("", frame).split())
+        page, count = map(int, re.search(r"(?:Derelict|Distress).*?(\d+)/(\d+)", frame, re.S).groups())
+        if len(frames) == 1:
+            first = " ".join(frame.split())
+            assert "30% ambush" in first if kind == "derelict" else "tank empty" in first
+            return "?"
+        if page == count: raise EOFError
+        return ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    world._checkpoint = lambda current: pytest.fail("Browsing checkpointed")
+    with contextlib.redirect_stdout(output), pytest.raises(EOFError):
+        getattr(vr, "_encounter_" + ("derelict" if kind == "derelict" else "distress_call"))(vr.Palette(False), world)
+    text = " ".join(" ".join(frames).split())
+    assert ("70%" in text and "30%" in text) if kind == "derelict" else "60-180cr" in text
+    assert "[I] Ignore" in text
+
+
+@pytest.mark.parametrize("fuel", [0, 1, 2, 3, 4, 5])
+def test_distress_cost_preview_matches_each_possible_draw(monkeypatch, fuel):
+    for draw in (2, 3, 4):
+        world = _world_with_seed(42); world.save.ship.fuel = fuel
+        before = world.save.pilot.credits
+        costs = iter([draw, 180])
+        monkeypatch.setattr(world.event_rng, "randint", lambda low, high: next(costs))
+        monkeypatch.setattr(vr, "read_key", lambda: "H")
+        text = " ".join(vr.distress_terms(world))
+        low, high = min(fuel, 2), min(fuel, 4)
+        assert f"spend {low if low == high else str(low) + '-' + str(high)} fuel" in text
+        assert ("tank empty" in text) == (fuel <= 4)
+        with contextlib.redirect_stdout(io.StringIO()): vr._encounter_distress_call(vr.Palette(False), world)
+        assert world.save.ship.fuel == fuel - min(fuel, draw)
+        assert world.save.pilot.credits == before + 180
+        assert world.save.pilot.reputation[vr.FACTION_CONCORD] == 3
+
+
+@pytest.mark.parametrize("danger", range(6))
+@pytest.mark.parametrize("ambush", [False, True])
+def test_derelict_reward_and_opponent_match_destination_terms(monkeypatch, danger, ambush):
+    world, _ = _world_with_pending_fight()
+    travel = world.save.pending_travel; travel["primary"] = "random"; travel["bounty"] = None
+    travel["encounter"] = {"kind": "derelict"}
+    world.by_id[travel["destination"]].danger = danger
+    world.here.danger = (danger + 2) % 5
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
+    monkeypatch.setattr(world.event_rng, "random", lambda: 0.99 if ambush else 0.0)
+    monkeypatch.setattr(world.event_rng, "randint", lambda low, high: high)
+    pirates = []
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: pirates.append(pirate) or "escaped")
+    before = world.save.pilot.credits
+    text = " ".join(vr.derelict_terms(world))
+    assert f"danger {danger}/5" in text and f"60-{100 + danger * 120}cr" in text
+    with contextlib.redirect_stdout(io.StringIO()): vr._encounter_derelict(vr.Palette(False), world)
+    if ambush: assert pirates[0].tier == min(4, danger + 1)
+    else: assert world.save.pilot.credits == before + 100 + danger * 120
+
+
+def _world_with_exploration_choice(kind):
+    world, _ = _world_with_pending_fight()
+    travel = world.save.pending_travel
+    travel.update(primary="random", bounty=None, encounter={"kind": kind})
+    world.save.active_missions = []
+    world.by_id[travel["destination"]].discovered = True
+    return world
+
+
+@pytest.mark.parametrize("kind", ["derelict", "distress"])
+def test_real_exploration_browsing_and_disconnect_preserve_pending_save(tmp_path, kind):
+    world = _world_with_exploration_choice(kind); vr.persist(world, tmp_path, 77)
+    path = tmp_path / "77.json"; before = path.read_bytes()
+    with _door_stopped_at(tmp_path, b">?<", b"Page: <") as output:
+        # This echo exists only after both navigation keys and invalid input were read.
+        assert b"Page: >" in output and b"Page: ?" in output and b"Page: <" in output
+        assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("kind,key,marker", [("derelict", b"I", b"leave the derelict"), ("distress", b"H", b"Grateful survivors")])
+def test_real_exploration_decision_is_durable_before_result(tmp_path, kind, key, marker):
+    world = _world_with_exploration_choice(kind); vr.persist(world, tmp_path, 77)
+    fuel, credits = world.save.ship.fuel, world.save.pilot.credits
+    with _door_stopped_at(tmp_path, key, marker):
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        if kind == "distress":
+            assert fuel - 4 <= saved.ship.fuel <= fuel - 2
+            assert credits + 60 <= saved.pilot.credits <= credits + 180
+            assert saved.pilot.reputation[vr.FACTION_CONCORD] == 3
+        else: assert saved.ship.fuel == fuel and saved.pilot.credits == credits
+
+
 
 
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
@@ -8874,3 +8977,17 @@ def test_bounty_combat_risk_terms_match_identification_state_without_rng(identit
     else:
         assert "Concord -3" not in text and "12%" not in text
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("standing", [-100, 0, 97, 98, 99, 100])
+def test_distress_terms_disclose_actual_capped_standing_gain(monkeypatch, standing):
+    world = _world_with_seed(42); world.save.pilot.reputation[vr.FACTION_CONCORD] = standing
+    rng = world.event_rng.getstate()
+    terms = " ".join(vr.distress_terms(world))
+    gain = min(3, 100 - standing)
+    assert f"Concord standing +{gain}" in terms
+    assert world.event_rng.getstate() == rng
+    monkeypatch.setattr(world.event_rng, "randint", lambda low, high: low)
+    monkeypatch.setattr(vr, "read_key", lambda: "H")
+    with contextlib.redirect_stdout(io.StringIO()): vr._encounter_distress_call(vr.Palette(False), world)
+    assert world.save.pilot.reputation[vr.FACTION_CONCORD] - standing == gain

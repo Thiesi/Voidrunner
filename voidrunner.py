@@ -5570,28 +5570,65 @@ def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySyste
         _encounter_result(p, world, state, [])
 
 
+def encounter_danger(world: World) -> int:
+    travel = world.save.pending_travel
+    return world.by_id[travel["destination"]].danger if travel is not None else world.here.danger
+
+
+def exploration_choice(p: Palette, world: World, title: str, lines: list[str], actions: str) -> str:
+    """Read-only paged terms; only an advertised decision leaves this view."""
+    page = 0
+    while True:
+        action, page, count = _draw_service_page(
+            p, f"{title} {world.save.pilot.credits:,}cr Fuel {world.save.ship.fuel}", lines,
+            f"[{actions}]Act [<>]Page: ", page,
+        )
+        if action == ">": page = min(page + 1, count - 1)
+        elif action == "<": page = max(0, page - 1)
+        elif action in actions.split("/"): return action
+
+
+def derelict_terms(world: World) -> list[str]:
+    danger = encounter_danger(world)
+    return [
+        "[B] Board: 70% salvage; 30% ambush.",
+        f"Drifting hulk. Sector danger {danger}/5; fuel {world.save.ship.fuel}/{fuel_capacity(world.save.ship)}.",
+        f"Salvage recovers 60-{100 + max(0, danger) * 120}cr.",
+        f"Ambush: one tier {max(0, danger - 1)}-{min(4, danger + 1)} opponent; ordinary combat choices and losses apply.",
+        "Boarding costs no fuel. [I] Ignore: no reward or penalty; continue your journey.",
+    ]
+
+
+def distress_terms(world: World) -> list[str]:
+    fuel = world.save.ship.fuel
+    low, high = min(fuel, 2), min(fuel, 4)
+    cost = str(low) if low == high else f"{low}-{high}"
+    lines = [
+        f"[H] Help: spend {cost} fuel.",
+        f"Survivors offer 60-180cr and Concord standing +{min(3, 100 - world.save.pilot.reputation.get(FACTION_CONCORD, 0))} (cap 100). No combat. Current fuel: {fuel}.",
+        f"Fuel after helping: {fuel - high}-{fuel - low}.",
+        "[I] Ignore: spend nothing, no reputation penalty; continue your journey.",
+    ]
+    if fuel <= 4: lines.insert(1, "Risk: tank empty.")
+    return lines
+
+
 def _encounter_derelict(p: Palette, world: World) -> None:
     state = _travel_encounter(world)
     if state.get("done"):
         return
     if "ambush" not in state:
-        out_line(f"{p.muted}Sensors pick up a derelict hulk drifting nearby.{RESET}")
-        while True:
-            out_prompt(f"{p.muted}[B]oard for salvage or [I]gnore and continue? {RESET}")
-            action = read_command()
-            out_line(action)
-            if action in ("B", "I"):
-                break
+        action = exploration_choice(p, world, "Derelict", derelict_terms(world), "B/I")
         if action == "I":
             _encounter_result(p, world, state, ["You leave the derelict behind."])
             return
         if world.event_rng.random() < 0.70:
-            reward = world.event_rng.randint(60, 100 + max(0, world.here.danger) * 120)
+            reward = world.event_rng.randint(60, 100 + max(0, encounter_danger(world)) * 120)
             world.save.pilot.credits += reward
             world.save.pilot.note(f"Salvaged a derelict hulk (+{reward}cr).")
             _encounter_result(p, world, state, [f"Salvage recovered: {reward}cr."])
             return
-        state["ambush"] = dataclasses.asdict(generate_pirate(world))
+        state["ambush"] = dataclasses.asdict(generate_pirate(world, danger=encounter_danger(world)))
         world.checkpoint()
     out_line(f"{p.wrong}The wreck's defenses weren't as dead as they looked!{RESET}")
     screen_combat(p, world, Pirate(**state["ambush"]))
@@ -5602,13 +5639,7 @@ def _encounter_distress_call(p: Palette, world: World) -> None:
     state = _travel_encounter(world)
     if state.get("done"):
         return
-    out_line(f"{p.muted}A garbled distress signal reaches your comms.{RESET}")
-    while True:
-        out_prompt(f"{p.muted}[H]elp (costs fuel) or [I]gnore and continue? {RESET}")
-        action = read_command()
-        out_line(action)
-        if action in ("H", "I"):
-            break
+    action = exploration_choice(p, world, "Distress", distress_terms(world), "H/I")
     if action == "I":
         _encounter_result(p, world, state, ["You continue past the distress signal."])
         return
