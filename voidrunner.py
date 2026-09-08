@@ -889,9 +889,13 @@ class Mission:
     quantity: int | None = None
     deadline_turn: int | None = None
     pirate_tier: int | None = None
+    opening_assignment: bool = False
 
     def to_dict(self) -> dict:
-        return dataclasses.asdict(self)
+        data = dataclasses.asdict(self)
+        if self.opening_assignment is False:
+            del data["opening_assignment"]
+        return data
 
     @classmethod
     def from_dict(cls, d: dict) -> "Mission":
@@ -950,6 +954,8 @@ def _validate_combat_mission_snapshot(data: dict, kind: str) -> None:
         raise ValueError("invalid mission snapshot")
     _reject_unknown_save_fields(data, {f.name for f in dataclasses.fields(Mission)}, "mission snapshot")
     mission = Mission.from_dict(data)
+    if type(mission.opening_assignment) is not bool or (mission.opening_assignment and kind != "delivery"):
+        raise ValueError("invalid opening assignment")
     if (mission.kind != kind or not isinstance(mission.description, str)
             or type(mission.id) is not int or mission.id < 1
             or type(mission.reward) is not int or mission.reward < 0):
@@ -1242,6 +1248,7 @@ def _validate_save_document(data: dict) -> None:
             record(item, cls, key)
             integer(item["id"], "contract ID", minimum=1)
             if cls is Mission:
+                require(not item.get("opening_assignment") or key == "active_missions", "opening assignment placement")
                 require(item["kind"] in ("delivery", "scan", "bounty", "escort"), "contract kind")
                 text(item["description"], "contract description")
                 integer(item["reward"], "contract reward")
@@ -1256,6 +1263,13 @@ def _validate_save_document(data: dict) -> None:
                 integer(item["quantity"], "order quantity", minimum=1)
                 integer(item["locked_price"], "order payment")
                 integer(item["settle_turn"], "order maturity")
+    opening_jobs = [item for item in data.get("active_missions", []) if item.get("opening_assignment") is True]
+    require(len(opening_jobs) <= 1, "opening assignment count")
+    if opening_jobs:
+        require(flags.get("opening_assignment_taken") is True and not flags.get("opening_assignment_completed"),
+                "opening assignment progress")
+    if flags.get("opening_assignment_completed"):
+        require(flags.get("opening_assignment_taken") is True, "opening assignment progress")
     event = data.get("active_event")
     if event is not None:
         event_fields = {"economy", "commodity", "direction", "turns_remaining", "description"}
@@ -1910,6 +1924,8 @@ def _generate_mission(world: World, kind: str, hops: dict[int, int], *, rng=None
 
 
 def accept_mission(world: World, mission: Mission) -> None:
+    if mission.opening_assignment:
+        raise MissionError("Accept First Flight from the Pilot Guide.")
     if len(world.save.active_missions) >= MAX_ACTIVE_MISSIONS:
         raise MissionError(f"You can carry at most {MAX_ACTIVE_MISSIONS} active contracts. Finish a contract first.")
     if mission_expired(world, mission):
@@ -1930,6 +1946,55 @@ def accept_mission(world: World, mission: Mission) -> None:
 
 def mission_expired(world: World, mission: Mission) -> bool:
     return mission.deadline_turn is not None and world.save.turn > mission.deadline_turn
+
+
+def opening_assignment_offer(world: World) -> Mission | None:
+    """Quote an affordable first delivery without touching saves or RNG state."""
+    save = world.save
+    if (save.pending_travel is not None or save.current_system != 0 or save.turn != 0
+            or save.flags.get("opening_assignment_taken")):
+        return None
+    ship = save.ship
+    room = cargo_capacity(ship) - sum(save.cargo.values())
+    wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}"))
+    candidates = []
+    for sid in world.here.connections:
+        target = world.by_id[sid]
+        fuel = fuel_cost_for_jump(world.here, target, ship)
+        if 2 * fuel > fuel_capacity(ship):
+            continue
+        for commodity in ECONOMY_DEMANDS[target.economy]:
+            if not COMMODITIES[commodity]["legal"]:
+                continue
+            if any(m.kind == "delivery" and m.target_system == sid and m.commodity == commodity
+                   and not mission_expired(world, m) for m in save.active_missions):
+                continue  # Earlier deliveries would consume this introductory load first.
+            missing = max(0, 3 - save.cargo.get(commodity, 0))
+            price = price_for(world, 0, commodity)
+            budget = missing * price + max(0, 2 * fuel - ship.fuel) * 6 + 2 * wage
+            if missing > room or budget > save.pilot.credits:
+                continue
+            preference = (target.danger, fuel, commodity not in ECONOMY_PRODUCES[world.here.economy], price, sid, commodity)
+            reward = 3 * price + 2 * fuel * 6 + 2 * wage + 200
+            candidates.append((preference, Mission(
+                id=save.next_mission_id, kind="delivery", origin_system=0, target_system=sid,
+                description=f"First Flight: deliver 3 {COMMODITIES[commodity]['label']} to {target.name}",
+                commodity=commodity, quantity=3, reward=reward, opening_assignment=True,
+            )))
+    return min(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def accept_opening_assignment(world: World, expected: Mission) -> None:
+    """Validate the complete displayed offer before committing any rule changes."""
+    offer = opening_assignment_offer(world)
+    if offer is None or offer.to_dict() != expected.to_dict():
+        raise MissionError("The opening assignment changed or is unavailable. Reopen the guide.")
+    if len(world.save.active_missions) >= MAX_ACTIVE_MISSIONS:
+        raise MissionError(f"You can carry at most {MAX_ACTIVE_MISSIONS} active contracts.")
+    world.save.active_missions.append(offer)
+    world.save.next_mission_id = offer.id + 1
+    world.save.flags["opening_assignment_taken"] = True
+    world.save.tracked_mission_id = offer.id
 
 
 def expire_missions(world: World) -> list[str]:
@@ -1964,6 +2029,8 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
             done = True
         if done:
             world.save.pilot.credits += m.reward
+            if m.opening_assignment:
+                world.save.flags["opening_assignment_completed"] = True
             if world.save.pilot.missions_completed == 0:
                 world.save.pilot.highlight(f"First mission complete: {m.description}.")
             world.save.pilot.missions_completed += 1
@@ -2960,7 +3027,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
     menu_rows = [
         f"   {p.gold}[M]{RESET} Commodity Market     {p.gold}[Y]{RESET} Engineering Yard     {p.gold}[B]{RESET} Mission Board",
         f"   {p.gold}[C]{RESET} Navigation Chart     {p.gold}[S]{RESET} Pilot Status         {p.gold}[H]{RESET} Hall of Fame",
-        f"   {p.gold}[Q]{RESET} Disembark & Save",
+        f"   {p.gold}[G]{RESET} Pilot Guide          {p.gold}[Q]{RESET} Disembark & Save",
     ]
     for row in menu_rows:
         pad_len = max(0, 77 - _vis_len(row))
@@ -3606,6 +3673,109 @@ def _show_tracked_mission(p: Palette, world: World) -> None:
     if mission is not None:
         kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
         out_line(f"{p.gold}Tracked {_mission_plain(kind)}: {_mission_plain(mission_bearing(world, mission))}{RESET}")
+
+
+def pilot_recap(world: World) -> list[str]:
+    save = world.save
+    ready = sum(1 for order in save.active_futures if save.turn >= order.settle_turn)
+    lines = [f"Docked: {world.here.name}. Day {save.turn}; {save.pilot.credits:,} cr.",
+             f"Commitments: {len(save.active_missions)} contract(s), {len(save.active_futures)} futures order(s), {ready} mature."]
+    mission = tracked_mission(world)
+    if mission is not None:
+        deadline = "no deadline" if mission.deadline_turn is None else f"due day {mission.deadline_turn}"
+        lines.append(f"Plan: {mission.description}; {deadline}.")
+    else:
+        lines.append("No contract tracked. Use the Mission Board to inspect and track your jobs.")
+    return [_mission_plain(line) for line in lines]
+
+
+def pilot_guide_lines(world: World) -> list[str]:
+    lines = ["Use [B]ack to return to the station deck before using its market, yard or chart commands.",
+             "Your ship is your livelihood. Supply outlying stations, build capital, and choose what kind of pilot to become."]
+    lines += pilot_recap(world)
+    active = next((m for m in world.save.active_missions if m.opening_assignment), None)
+    if active is not None:
+        have = world.save.cargo.get(active.commodity, 0)
+        lines += [f"First Flight: {have}/{active.quantity} {COMMODITIES[active.commodity]['label']} aboard.",
+                  f"Deliver at {world.by_id[active.target_system].name}. Docking with the full load completes it automatically; delivery consumes those goods."]
+    elif world.save.flags.get("opening_assignment_completed"):
+        lines.append("First Flight complete. Your next goal: a first ship upgrade, then choose a regular trade or contract route.")
+    elif world.save.flags.get("opening_assignment_taken"):
+        lines.append("First Flight is closed. An abandoned introductory job cannot be taken again this career.")
+    elif opening_assignment_offer(world) is not None:
+        lines.append("Optional First Flight: Freeport merchants will sponsor one local delivery. [O]ffer shows all terms before acceptance.")
+    else:
+        lines.append("First Flight needs an affordable cargo and return-fuel budget while still at Freeport on day zero. The guide remains available anywhere.")
+    lines += [
+        "1. Buy cargo: [M]arket, choose the commodity's letter, [B]uy, enter a quantity. Buying spends credits and needs free hold space. Enter with no quantity cancels.",
+        "2. Keep fuel: [Y]ard, [R]efuel. Each fuel unit costs 6 cr. Reserve enough for the outward and return jumps; keep credits for repairs and crew wages too.",
+        "3. Depart: [C]hart, select the destination's letter. A jump advances one day, uses fuel and charges wages. Browsing, trading and upgrades do not advance the day.",
+        "4. Deliver a contract by docking with its full cargo. Ordinary trading instead uses [M]arket, commodity letter, [S]ell. Sales pay less than the local buy quote; distant prices can change.",
+        "5. First upgrade: [Y]ard, [A] Cargo Bay Expansion adds 8 cargo spaces. [F] Hull Reinforcement adds 35 maximum hull. Keep travel money before investing.",
+        f"Your next cargo tier costs {UPGRADES['cargo']['cost'](world.save.ship.cargo_tier):,} cr." if world.save.ship.cargo_tier < UPGRADES['cargo']['max_tier'] else "Your cargo upgrades are complete.",
+        "Danger is a risk rating, not a guarantee you can win a fight. Evasion can fail; bribes cost credits and can be refused. Read the encounter choices before acting.",
+        "[B]oard shows full contract terms, tracking and abandonment. [G]uide keeps this recap available. [Q] on the station deck saves and leaves the game.",
+    ]
+    return lines
+
+
+def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> None:
+    fuel = fuel_cost_for_jump(world.here, world.by_id[offer.target_system], world.save.ship)
+    wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
+    lines = ["Freeport merchants need a reliable new pilot. First Flight sponsors one delivery; acceptance also tracks it."]
+    lines += mission_details(world, offer)
+    lines += [f"Reserve {2 * fuel} fuel for delivery and return; {world.save.ship.fuel} aboard. Fuel replacement costs {12 * fuel} cr for both jumps.",
+              f"Current crew: {wage} cr per jump, {2 * wage} cr for delivery and return.",
+              "Payment covers the quoted three units, round-trip fuel and current crew wages plus 200 cr. Detours, repairs, encounters and later prices can change your result.",
+              "No deadline. This uses one active-contract slot. Abandonment closes First Flight for this career; the guide stays available.",
+              "After acceptance, use [M]arket to buy the goods, [Y]ard to refuel if needed, then [C]hart to jump to the named station."]
+    pages = _mission_text_pages(lines, overhead=5)
+    page = 0
+    while True:
+        out_line()
+        out_line(f"First Flight {page + 1}/{len(pages)}")
+        for line in pages[page]:
+            out_line(line)
+        out_prompt(("[A]ccept " if page == len(pages) - 1 else "") + "[N]ext [P]rev [B]ack: ")
+        key = read_command()
+        if key in ("B", "Q"):
+            return
+        if key == "N" and page < len(pages) - 1:
+            page += 1
+        elif key == "P" and page:
+            page -= 1
+        elif key == "A" and page == len(pages) - 1:
+            try:
+                accept_opening_assignment(world, offer)
+            except MissionError as exc:
+                out_line(str(exc))
+            else:
+                world.checkpoint()
+                out_line("First Flight accepted and tracked. Return with [B]ack, then use [M]arket to buy your cargo.")
+            pause(p)
+            return
+
+
+def screen_pilot_guide(p: Palette, world: World) -> None:
+    page = 0
+    while True:
+        pages = _mission_text_pages(pilot_guide_lines(world), overhead=5)
+        page = min(page, len(pages) - 1)
+        offer = opening_assignment_offer(world)
+        out_line()
+        out_line(f"Pilot Guide {page + 1}/{len(pages)}")
+        for line in pages[page]:
+            out_line(line)
+        out_prompt(("[O]ffer " if offer is not None else "") + "[N]ext [P]rev [B]ack: ")
+        key = read_command()
+        if key in ("B", "Q"):
+            return
+        if key == "N" and page < len(pages) - 1:
+            page += 1
+        elif key == "P" and page:
+            page -= 1
+        elif key == "O" and offer is not None:
+            _screen_opening_offer(p, world, offer)
 
 
 def screen_mission_details(p: Palette, world: World, mission: Mission, *, active: bool) -> None:
@@ -4703,6 +4873,11 @@ def main() -> int:
             out_line(f"{p.muted}Welcome back, {save.pilot.handle}. Day {save.turn}.{RESET}")
         world = World(save, checkpoint=lambda current: persist(current, save_dir, user_id))
         world.checkpoint()
+        if is_new:
+            out_line("Start at [G] Pilot Guide for an optional first delivery and flight instructions.")
+        elif world.save.pending_travel is None:
+            for line in pilot_recap(world):
+                out_line(line)
         if world.save.pending_travel is not None:
             out_line(f"{p.gold}Resuming your interrupted journey. Station access follows its resolution.{RESET}")
             screen_travel(p, world, world.save.pending_travel["destination"])
@@ -4717,6 +4892,9 @@ def main() -> int:
             elif choice == "B":
                 screen_missions(p, world)
                 continue  # Browsing is read-only; acceptance checkpoints itself.
+            elif choice == "G":
+                screen_pilot_guide(p, world)
+                continue  # Guide browsing is read-only; acceptance checkpoints itself.
             elif choice == "C":
                 dest = screen_chart(p, world)
                 if dest is not None:

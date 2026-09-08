@@ -5597,3 +5597,287 @@ def test_notoriety_above_one_hundred_survives_checkpoint_and_restart(tmp_path):
     loaded.pilot.notoriety = 1000
     vr.write_save(tmp_path, 77, loaded)
     assert vr.load_or_create_save(tmp_path, 77, "Tester")[0].pilot.notoriety == 1000
+
+
+def test_opening_assignment_quotes_real_affordable_neighborhoods_without_rng_or_save_changes():
+    import copy
+    for seed in range(64):
+        world = _world_with_seed(seed)
+        world.checkpoint()
+        before = copy.deepcopy(world.save.to_dict())
+        rng_before = world.event_rng.getstate()
+        offer = vr.opening_assignment_offer(world)
+        assert offer is not None, seed
+        assert offer.target_system in world.here.connections and offer.quantity == 3
+        assert offer.commodity in vr.ECONOMY_DEMANDS[world.by_id[offer.target_system].economy]
+        assert vr.COMMODITIES[offer.commodity]["legal"] and offer.deadline_turn is None
+        fuel = vr.fuel_cost_for_jump(world.here, world.by_id[offer.target_system], world.save.ship)
+        cost = 3 * vr.price_for(world, 0, offer.commodity)
+        assert 2 * fuel <= world.save.ship.fuel and cost <= world.save.pilot.credits
+        assert offer.reward - cost - 12 * fuel == 200
+        assert world.save.to_dict() == before and world.event_rng.getstate() == rng_before
+        assert vr.opening_assignment_offer(world).to_dict() == offer.to_dict()
+
+
+@pytest.mark.parametrize("reason", ["later", "away", "taken", "broke", "full", "stale", "capacity", "pending"])
+def test_opening_assignment_rejection_is_atomic(reason):
+    import copy
+    world = _world_with_seed(42)
+    world.checkpoint()
+    offer = vr.opening_assignment_offer(world)
+    if reason == "later":
+        world.save.turn = 1
+    elif reason == "away":
+        world.save.current_system = offer.target_system
+    elif reason == "taken":
+        world.save.flags["opening_assignment_taken"] = True
+    elif reason == "broke":
+        world.save.pilot.credits = 0
+    elif reason == "full":
+        other = next(c for c in vr.LEGAL_COMMODITIES if c != offer.commodity)
+        world.save.cargo = {other: vr.cargo_capacity(world.save.ship)}
+    elif reason == "stale":
+        offer.reward += 1
+    elif reason == "capacity":
+        world.save.active_missions = [vr.Mission(100 + i, "delivery", "Existing", 10, 0, offer.target_system,
+                                               commodity="food", quantity=1) for i in range(vr.MAX_ACTIVE_MISSIONS)]
+    else:
+        world.save.pending_travel = {"version": 1}
+    before = copy.deepcopy(world.save.to_dict())
+    with pytest.raises(vr.MissionError):
+        vr.accept_opening_assignment(world, offer)
+    assert world.save.to_dict() == before
+
+
+def test_opening_assignment_is_tracked_durable_and_pays_only_once_without_deadline(tmp_path):
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    offer = vr.opening_assignment_offer(world)
+    vr.accept_opening_assignment(world, offer)
+    world.checkpoint()
+    loaded, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    world = vr.World(loaded, checkpoint=lambda current: vr.persist(current, tmp_path, 77))
+    assert vr.tracked_mission(world).opening_assignment
+    assert world.save.flags["opening_assignment_taken"] and vr.opening_assignment_offer(world) is None
+    before = world.save.pilot.credits
+    world.save.current_system = offer.target_system
+    world.save.turn = 100
+    world.save.cargo[offer.commodity] = 4
+    assert len(vr.check_mission_completions(world)) == 1
+    assert world.save.cargo[offer.commodity] == 1
+    assert world.save.pilot.credits == before + offer.reward
+    assert world.save.flags["opening_assignment_completed"]
+    assert vr.check_mission_completions(world) == []
+    world.checkpoint()
+    loaded, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert loaded.pilot.missions_completed == 1 and loaded.pilot.credits == before + offer.reward
+    assert "First Flight complete" in " ".join(vr.pilot_guide_lines(vr.World(loaded)))
+
+
+def test_abandoned_opening_assignment_cannot_be_repeated_until_a_new_career():
+    world = _world_with_seed(42)
+    world.checkpoint()
+    offer = vr.opening_assignment_offer(world)
+    vr.accept_opening_assignment(world, offer)
+    vr.abandon_mission(world, offer.id)
+    assert vr.opening_assignment_offer(world) is None
+    assert "First Flight is closed" in " ".join(vr.pilot_guide_lines(world))
+    world.reset(vr.retire_pilot(world.save))
+    assert not world.save.flags.get("opening_assignment_taken")
+    assert vr.opening_assignment_offer(world) is not None
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("screen", ["guide", "offer"])
+def test_opening_guide_and_offer_pages_fit_and_browsing_is_read_only(monkeypatch, width, height, screen):
+    import copy
+    world = _world_with_seed(42)
+    world.checkpoint()
+    before = copy.deepcopy(world.save.to_dict())
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    output = io.StringIO()
+    pages = []
+    guide_count = len(vr._mission_text_pages(vr.pilot_guide_lines(world), overhead=5))
+
+    def choose():
+        value = output.getvalue()
+        pages.append(value)
+        output.seek(0)
+        output.truncate(0)
+        assert world.save.to_dict() == before
+        assert len(pages) <= 100
+        return "B" if ("[A]ccept" in value if screen == "offer" else len(pages) == guide_count) else "N"
+
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output):
+        if screen == "guide":
+            vr.screen_pilot_guide(vr.Palette(False), world)
+        else:
+            vr._screen_opening_offer(vr.Palette(False), world, vr.opening_assignment_offer(world))
+    assert world.save.to_dict() == before
+    for page in pages:
+        rows = page.splitlines()
+        assert len(rows) <= height, (width, height, rows)
+        assert all(vr._visible_width(row) <= width for row in rows)
+    if screen == "offer":
+        assert all("[A]ccept" not in page for page in pages[:-1])
+
+
+def test_real_first_flight_survives_kills_through_acceptance_purchase_delivery_and_upgrade(tmp_path):
+    import os
+    import subprocess
+    world = _world_with_seed(42)
+    world.event_rng.seed(0)  # Ordinary first hop has no random encounter.
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    offer = vr.opening_assignment_offer(world)
+    cargo_cost = 3 * vr.price_for(world, 0, offer.commodity)
+    with _door_stopped_at(tmp_path, b"GO" + b"N" * 10 + b"A", b"First Flight accepted and tracked"):
+        accepted, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert accepted.active_missions[0].opening_assignment and accepted.tracked_mission_id == offer.id
+    market_key = vr.LETTERS[vr.LEGAL_COMMODITIES.index(offer.commodity)].encode()
+    with _door_stopped_at(tmp_path, b"M" + market_key + b"B3\n", b"Bought 3x"):
+        bought, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert bought.cargo[offer.commodity] == 3 and bought.pilot.credits == 1200 - cargo_cost
+    jump_key = vr.CHART_CONNECTION_LETTERS[sorted(world.here.connections).index(offer.target_system)].encode()
+    with _door_stopped_at(tmp_path, b"C" + jump_key, b"Mission complete: First Flight:"):
+        delivered, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert delivered.flags["opening_assignment_completed"]
+        assert delivered.pilot.credits == 1200 - cargo_cost + offer.reward
+        assert delivered.turn == 1 and not delivered.active_missions
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"QQ", capture_output=True,
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path),
+                                     NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")), timeout=10)
+    assert result.returncode == 0 and not result.stderr
+    resumed, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert resumed.pending_travel is None and resumed.pilot.credits == delivered.pilot.credits
+    with _door_stopped_at(tmp_path, b"YAY", b"Cargo Bay Expansion upgraded to tier 1"):
+        upgraded, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert upgraded.ship.cargo_tier == 1 and upgraded.pilot.credits == resumed.pilot.credits - 800
+
+
+@pytest.mark.parametrize("commands", [b"GBQ", b"GOBBQ", b"G", b"GO"])
+def test_real_opening_guide_back_and_eof_leave_career_unchanged(tmp_path, commands):
+    import os
+    import json
+    import subprocess
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    before = (tmp_path / "77.json").read_bytes()
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+    assert result.returncode == 0 and not result.stderr
+    assert b"Pilot Guide 1/" in result.stdout
+    if b"O" in commands:
+        assert b"First Flight 1/" in result.stdout
+    assert (tmp_path / "77.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("invalid_flag", [None, 0, 1, "yes"])
+def test_invalid_opening_assignment_flag_is_rejected_before_checkpoint_write(tmp_path, invalid_flag):
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    before = (tmp_path / "77.json").read_bytes()
+    offer = vr.opening_assignment_offer(world)
+    offer.opening_assignment = invalid_flag
+    world.save.active_missions.append(offer)
+    with pytest.raises(vr.SaveError):
+        vr.write_save(tmp_path, 77, world.save)
+    assert (tmp_path / "77.json").read_bytes() == before
+
+
+def test_opening_quote_budgets_crew_and_return_fuel_before_acceptance():
+    world = _world_with_seed(42)
+    world.save.ship.has_gunner = True
+    world.save.ship.has_engineer = True
+    world.save.ship.fuel = 0
+    offer = vr.opening_assignment_offer(world)
+    assert offer is not None
+    fuel = vr.fuel_cost_for_jump(world.here, world.by_id[offer.target_system], world.save.ship)
+    price = vr.price_for(world, 0, offer.commodity)
+    assert offer.reward == 3 * price + 12 * fuel + 2 * (15 + 2) + 200
+    # Enough for three cheapest units alone is insufficient for the reserve/wages.
+    world.save.pilot.credits = 3 * min(vr.price_for(world, 0, c) for c in vr.LEGAL_COMMODITIES)
+    assert vr.opening_assignment_offer(world) is None
+
+
+def test_ordinary_legacy_missions_keep_their_serialized_shape():
+    mission = vr.Mission(1, "delivery", "Old job", 100, 0, 1, commodity="food", quantity=3)
+    assert "opening_assignment" not in mission.to_dict()
+    loaded = vr.Mission.from_dict(mission.to_dict())
+    assert loaded.opening_assignment is False and loaded.to_dict() == mission.to_dict()
+
+
+@pytest.mark.parametrize("corruption", ["missing_acceptance", "duplicate", "completed_but_active"])
+def test_contradictory_opening_assignment_progress_cannot_be_saved(tmp_path, corruption):
+    import dataclasses
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    offer = vr.opening_assignment_offer(world)
+    vr.accept_opening_assignment(world, offer)
+    world.checkpoint()
+    before = (tmp_path / "77.json").read_bytes()
+    if corruption == "missing_acceptance":
+        del world.save.flags["opening_assignment_taken"]
+    elif corruption == "duplicate":
+        world.save.active_missions.append(dataclasses.replace(offer, id=999))
+    else:
+        world.save.flags["opening_assignment_completed"] = True
+    with pytest.raises(vr.SaveError):
+        vr.write_save(tmp_path, 77, world.save)
+    assert (tmp_path / "77.json").read_bytes() == before
+
+
+def test_opening_tags_on_posted_offers_are_rejected_before_loading_or_writing(tmp_path):
+    import json
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    path = tmp_path / "77.json"
+    before = path.read_bytes()
+    offer = vr.opening_assignment_offer(world)
+    world.save.mission_boards[0]["offers"][0] = offer.to_dict()
+    with pytest.raises(vr.SaveError):
+        vr.write_save(tmp_path, 77, world.save)
+    assert path.read_bytes() == before
+    malformed = json.dumps(world.save.to_dict()).encode("utf-8")
+    path.write_bytes(malformed)
+    with pytest.raises(vr.ResumeError, match="opening assignment placement"):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == malformed
+
+
+def test_ordinary_mission_acceptance_rejects_an_opening_tag_without_mutating_the_board():
+    import copy
+    world = _world_with_seed(42)
+    world.checkpoint()
+    offer = vr.opening_assignment_offer(world)
+    world.save.mission_boards[0]["offers"][0] = offer.to_dict()
+    before = copy.deepcopy(world.save.to_dict())
+    with pytest.raises(vr.MissionError, match="Pilot Guide"):
+        vr.accept_mission(world, offer)
+    assert world.save.to_dict() == before
+
+
+def test_opening_quote_avoids_cargo_already_promised_to_an_earlier_delivery():
+    world = _world_with_seed(42)
+    world.checkpoint()
+    first = vr.opening_assignment_offer(world)
+    world.save.active_missions.append(vr.Mission(100, "delivery", "Earlier order", 100, 0, first.target_system,
+                                               commodity=first.commodity, quantity=1))
+    offer = vr.opening_assignment_offer(world)
+    assert offer is not None
+    assert (offer.target_system, offer.commodity) != (first.target_system, first.commodity)
+    vr.accept_opening_assignment(world, offer)
+    world.save.cargo[offer.commodity] = offer.quantity
+    world.save.current_system = offer.target_system
+    vr.check_mission_completions(world)
+    assert world.save.flags["opening_assignment_completed"]
+    assert any(m.description == "Earlier order" for m in world.save.active_missions)
