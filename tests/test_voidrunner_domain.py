@@ -2943,6 +2943,27 @@ def test_oversized_picker_keeps_choice_identity_when_returning_from_next_option(
     assert selected == (None if back else 7)
 
 
+@pytest.mark.parametrize("width,height",[(20,10),(40,10),(39,24),(40,12),(80,24)])
+def test_map_list_advertises_only_available_view_actions(monkeypatch,width,height):
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    world=_world_with_seed(42);before=world.save.to_dict()
+    compact=width<40 or height<12
+    commands=iter(["M","N","P","B"] if compact else ["L","M","B"])
+    output=io.StringIO();frames=[]
+    def choose():
+        frame=output.getvalue();output.seek(0);output.truncate(0);frames.append(frame)
+        if "Charted Systems" in " ".join(frame.split()):
+            assert ("[M]ap" in frame) is not compact
+        return next(commands)
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_galaxy_map(vr.Palette(False),world)
+    if compact:
+        assert all("Star Map:" not in frame for frame in frames)
+    else:
+        assert "Star Map:" in frames[-1]
+    assert world.save.to_dict()==before
+
+
 def test_general_route_fuel_topups_do_not_require_whole_route_in_tank():
     world = _world_with_seed(42)
     target = max(world.galaxy, key=lambda s: len(vr.bfs_path(world.by_id, 0, s.id)))
@@ -3710,49 +3731,152 @@ def test_sector_assignment_does_not_touch_the_galaxy_rng():
         assert a.x == b.x and a.y == b.y and a.connections == b.connections
 
 
-def test_screen_galaxy_map_shows_nothing_charted_message_when_empty(monkeypatch):
-    world = _world_with_seed(143)
-    for system in world.galaxy:
-        system.discovered = False
-    monkeypatch.setattr(vr, "read_key", lambda: " ")
-
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr.screen_galaxy_map(vr.Palette(truecolor=False), world)
-
-    assert "Nothing charted yet" in buf.getvalue()
-
-
-def test_screen_galaxy_map_lists_only_discovered_systems_grouped_by_sector(monkeypatch):
+@pytest.mark.parametrize("width,height", [(20,10), (40,12), (80,24)])
+def test_spatial_map_and_exact_list_fit_terminal_and_preserve_career(monkeypatch, width, height):
+    import copy, re
     world = _world_with_seed(144)
-    monkeypatch.setattr(vr, "read_key", lambda: " ")
+    for station in world.galaxy: station.discovered = True
+    before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    output = io.StringIO(); frames = []; map_keys = iter("NPO L".replace(" ", ""))
+    def choose():
+        frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
+        assert len(frames) < 200
+        if "Star Map:" in frame: return next(map_keys)
+        match = re.search(r"Charted Systems (\d+)/(\d+)", " ".join(frame.split()))
+        assert match
+        return "B" if match[1] == match[2] else "N"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): vr.screen_galaxy_map(vr.Palette(False), world)
+    assert all(len(frame.splitlines()) <= height for frame in frames)
+    assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
+    text = " ".join(" ".join(frames).split())
+    for station in world.galaxy: assert station.name in text
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
 
-    discovered_names = {s.name for s in world.galaxy if s.discovered}
-    undiscovered_names = {s.name for s in world.galaxy if not s.discovered}
 
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr.screen_galaxy_map(vr.Palette(truecolor=False), world)
-
-    text = buf.getvalue()
-    for name in discovered_names:
-        assert name in text
-    for name in undiscovered_names:
-        assert name not in text
-    assert any(sector in text for sector in vr.SECTOR_NAMES)
+def test_spatial_map_empty_chart_explains_current_bearing_only():
+    world = _world_with_seed(143)
+    for station in world.galaxy: station.discovered = False
+    text = " ".join(vr.map_list_lines(world, [], None))
+    assert "Nothing charted yet" in text
+    assert "Freeport" not in text and "Uncharted" in text
 
 
-def test_screen_galaxy_map_marks_the_current_system(monkeypatch):
+def test_spatial_map_hides_uncharted_information_except_contract_target():
+    world, mission = _mission_details_world("scan"); vr.accept_mission(world, mission); vr.track_mission(world, mission.id)
+    path = vr.mission_route(world, mission)
+    for sid in path: world.by_id[sid].discovered = False
+    text = " ".join(vr.map_list_lines(world, path, mission.target_system))
+    assert world.by_id[mission.target_system].name in text and "danger unknown" in text
+    for station in world.galaxy:
+        if not station.discovered and station.id != mission.target_system: assert station.name not in text
+    detail = " ".join(vr.map_inspection_lines(world, mission.target_system, path, mission.target_system))
+    assert "connections remain unknown" in detail
+    assert world.by_id[mission.target_system].economy not in detail
+    assert vr.map_system_ids(world, path, mission.target_system) == {s.id for s in world.galaxy if s.discovered} | set(path) | {0}
+
+
+def test_spatial_map_markers_and_connections_are_semantic():
+    world = _world_with_seed(42)
+    for station in world.galaxy: station.discovered = False
+    a, b, c = world.galaxy[:3]
+    a.x,a.y = 0,0; b.x,b.y = 50,25; c.x,c.y = 99,49
+    a.discovered = b.discovered = True
+    a.connections=[1]; b.connections=[0,2]; c.connections=[1]
+    grid = vr.spatial_map_grid(world, [], public_target=None, sector=None, columns=79, rows=20)
+    text = "\n".join(grid)
+    assert "@" in text and "o" in text and "." in text and ":" not in text
+    grid = vr.spatial_map_grid(world, [1,2], public_target=2, sector=None, columns=79, rows=20)
+    text = "\n".join(grid)
+    assert "@" in text and "!" in text and "*" in text and ":" in text
+    # Same projected cell must be labelled instead of silently losing a station.
+    b.x,b.y = 50,25; c.x,c.y = 50,26
+    text = "\n".join(vr.spatial_map_grid(world, [1,2], public_target=None, sector=None, columns=10, rows=4))
+    assert "X" in text
+    c.discovered = True
+    text = "\n".join(vr.spatial_map_grid(world, [], public_target=None, sector=None, columns=10, rows=4))
+    assert "+" in "\n".join(text.splitlines()[1:-1])
+
+
+def test_spatial_map_sector_bounds_match_every_coordinate():
+    for x in range(100):
+        for y in range(50):
+            sector = vr.SECTOR_NAMES.index(vr.sector_for(_Sys(x,y)))
+            xmin,xmax,ymin,ymax = vr.map_bounds(sector)
+            assert xmin <= x <= xmax and ymin <= y <= ymax
+
+
+def test_spatial_map_current_position_and_repeated_route_legs_are_explicit():
     world = _world_with_seed(145)
-    monkeypatch.setattr(vr, "read_key", lambda: " ")
+    lines = vr.map_list_lines(world, [1,0,1], 1)
+    here_line = next(line for line in lines if world.here.name in line)
+    assert "@" in here_line and "here" in here_line
+    assert "arrival leg(s): 1, 3" in " ".join(vr.map_inspection_lines(world, 1, [1,0,1], 1))
 
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr.screen_galaxy_map(vr.Palette(truecolor=False), world)
 
-    here_line = next(line for line in buf.getvalue().splitlines() if world.here.name in line)
-    assert "*" in here_line
-    assert "here" in here_line.lower()
+def test_spatial_map_preserves_tracked_objective_when_given_another_route(monkeypatch):
+    world, mission = _mission_details_world("scan"); vr.accept_mission(world,mission); vr.track_mission(world,mission.id)
+    supplied = [sorted(world.here.connections)[0]]
+    seen=[]
+    original=vr.spatial_map_grid
+    def grid(current,path,**kwargs):
+        seen.append((list(path),kwargs["public_target"]))
+        return original(current,path,**kwargs)
+    monkeypatch.setattr(vr,"spatial_map_grid",grid)
+    monkeypatch.setattr(vr,"read_key",lambda:"B")
+    with contextlib.redirect_stdout(io.StringIO()): vr.screen_galaxy_map(vr.Palette(False),world,path=supplied)
+    assert seen==[(supplied,mission.target_system)]
+    assert not world.by_id[mission.target_system].discovered
+
+
+def test_route_screens_open_map_with_their_exact_path(monkeypatch):
+    world, mission = _mission_details_world("bounty"); vr.accept_mission(world, mission)
+    target = world.by_id[mission.target_system]; target.discovered = True
+    opened = []
+    monkeypatch.setattr(vr, "screen_galaxy_map", lambda p,w,**kw: opened.append(kw))
+    keys = iter("VBVB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_mission_navigation(vr.Palette(False), world, mission, active=True)
+        vr._screen_auto_route(vr.Palette(False), world, destination=target.id)
+    assert opened == [{"path":vr.mission_route(world, mission), "public_target":target.id},
+                      {"path":vr.bfs_path(world.by_id,0,target.id)}]
+
+
+@pytest.mark.parametrize("width,height", [(20,10), (40,12), (80,24)])
+def test_spatial_map_station_info_pages_preserve_every_known_link(monkeypatch, width, height):
+    import re
+    world = _world_with_seed(42)
+    # Exercise a dense, long-lived chart without changing the graph generator.
+    world.here.connections = list(range(1, len(world.galaxy)))
+    for station in world.galaxy: station.discovered = True
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    output = io.StringIO(); frames=[]
+    def choose():
+        frame=output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
+        match=re.search(r"Station Info (\d+)/(\d+)", " ".join(frame.split()))
+        assert match
+        return "B" if match[1] == match[2] else "N"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): vr._screen_map_info(world, 0, [], None)
+    assert all(len(frame.splitlines())<=height for frame in frames)
+    assert all(vr._visible_width(line)<=width for frame in frames for line in frame.splitlines())
+    text=" ".join(" ".join(frames).split())
+    for station in world.galaxy: assert station.name in text
+
+
+@pytest.mark.parametrize("commands", [b"CVBQQ", b"CV", b"CVLIBBQQ", b"CVLI1", b"CGVB BQQ".replace(b" ",b"")])
+def test_real_spatial_map_back_eof_and_inspection_preserve_career(tmp_path, commands):
+    import json, os, subprocess
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current,tmp_path,77); world.checkpoint()
+    original = (tmp_path/"77.json").read_bytes()
+    info=tmp_path/"door_info.json"; info.write_text(json.dumps({"user_id":77,"handle":"Tester"}),encoding="utf-8")
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+    assert result.returncode==0 and not result.stderr and b"Star Map:" in result.stdout
+    if b"LI1" in commands: assert b"Station Info" in result.stdout
+    assert (tmp_path/"77.json").read_bytes()==original
 
 
 def test_chart_screen_offers_view_full_chart(monkeypatch):
@@ -3768,14 +3892,14 @@ def test_chart_screen_offers_view_full_chart(monkeypatch):
 
 def test_chart_screen_v_key_opens_the_galaxy_map(monkeypatch):
     world = _world_with_seed(147)
-    keys = iter(["V", " ", "Q"])
+    keys = iter(["V", "B", "Q"])
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_chart(vr.Palette(truecolor=False), world)
 
-    assert "Charted Systems" in buf.getvalue()
+    assert "Star Map:" in buf.getvalue()
 
 
 # -- paid NPC crew ----------------------------------------------------------
@@ -4709,15 +4833,12 @@ def test_screen_crew_and_galaxy_map_boxes_match_79_columns(monkeypatch):
     crew_borders = {len(line) for line in stripped if line.startswith(("╭", "├", "╰"))}
     assert crew_borders == {79}
 
-    # screen_galaxy_map
-    monkeypatch.setattr(vr, "pause", lambda p: None)
-    buf2 = io.StringIO()
-    with contextlib.redirect_stdout(buf2):
+    # Spatial map uses ASCII borders bounded to the negotiated width.
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_galaxy_map(p, world)
-    _assert_box_rows_match_border(buf2.getvalue(), "screen_galaxy_map")
-    stripped2 = [vr._ANSI_RE.sub("", line) for line in buf2.getvalue().split("\r\n") if line.strip()]
-    map_borders = {len(line) for line in stripped2 if line.startswith(("╭", "╰"))}
-    assert map_borders == {79}
+    borders = [line for line in output.getvalue().splitlines() if line.startswith("+-")]
+    assert len(borders) == 2 and {len(line) for line in borders} == {79}
 
 
 def test_empty_mission_board_renders_clean_notice_and_back(monkeypatch):

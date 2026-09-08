@@ -4679,7 +4679,7 @@ def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, act
     while True:
         if pages is None:
             live = active and any(m.id == mission.id for m in world.save.active_missions) and not mission_expired(world, mission)
-            footer = ("[J]ump next " if live and not (mission.kind == "scan" and world.by_id[mission.target_system].discovered) and mission_route(world, mission) else "") + "[N]ext [P]rev [B]ack: "
+            footer = ("[J]ump next " if live and not (mission.kind == "scan" and world.by_id[mission.target_system].discovered) and mission_route(world, mission) else "") + "[V]Map [N]ext [P]rev [B]ack: "
             lines = ([mission.description, "Contract is no longer active. Return to the board or career log."]
                      if active and not live else mission_navigation_lines(world, mission, active=active))
             if result:
@@ -4699,6 +4699,8 @@ def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, act
             page = min(page + 1, len(pages) - 1)
         elif key == "P":
             page = max(0, page - 1)
+        elif key == "V":
+            screen_galaxy_map(p, world, path=mission_route(world, mission), public_target=mission.target_system)
         elif key == "J" and active:
             try:
                 destination = prepare_mission_jump(world, mission.id)
@@ -5021,7 +5023,7 @@ def screen_chart(p: Palette, world: World) -> int | None:
         if mission is not None:
             actions.append(f"{p.gold}[R]{RESET}oute for tracked contract")
         actions.append(f"{p.gold}[G]{RESET}eneral route planner")
-        actions.append(f"{p.gold}[V]{RESET}iew full chart by sector")
+        actions.append(f"{p.gold}[V]{RESET}iew spatial map / list")
         out_line(f"  {'   '.join(actions)}")
         out_prompt(f"  {p.muted}Jump to which, or [Q] back? {RESET}")
         key = read_command()
@@ -5068,36 +5070,173 @@ def _do_scan(p: Palette, world: World) -> None:
         out_line(f"{p.gold}{msg}{RESET}")
 
 
-def screen_galaxy_map(p: Palette, world: World) -> None:
-    """Every discovered system, grouped by named sector -- the "readable
-    chart at scale" the star chart's own short direct-neighbor list
-    can't provide once a career has charted more than a handful of
-    systems. Read-only: jumping still happens via the star chart's own
-    neighbor list or the [G]o to auto-route, not here."""
-    hops = bfs_hops(world.by_id, world.save.current_system)
-    out_line()
-    out_line(_box_title(p, "Charted Systems"))
-    by_sector: dict[str, list[GalaxySystem]] = {}
-    for system in world.galaxy:
-        if system.discovered:
-            by_sector.setdefault(sector_for(system), []).append(system)
-    if not by_sector:
-        empty_str = f"  {p.muted}Nothing charted yet.{RESET}"
-        pad_len = max(0, 77 - _vis_len(empty_str))
-        out_line(f"{p.accent}│{RESET}{empty_str}{' ' * pad_len}{p.accent}│{RESET}")
-    for sector in sorted(by_sector):
-        sec_str = f"  {p.gold}{BOLD}▼ Sector: {sector}{RESET}"
-        pad_len = max(0, 77 - _vis_len(sec_str))
-        out_line(f"{p.accent}│{RESET}{sec_str}{' ' * pad_len}{p.accent}│{RESET}")
-        for system in sorted(by_sector[sector], key=lambda s: s.name):
-            marker = f"{p.accent}*{RESET}" if system.id == world.save.current_system else " "
-            hop = hops.get(system.id)
-            hop_label = "here" if hop == 0 else (f"{hop} jump(s)" if hop is not None else "unreachable")
-            row_str = f"  {marker} {system.name:<18} {system.economy:<12} danger {system.danger}   {p.muted}{hop_label}{RESET}"
-            pad_len = max(0, 77 - _vis_len(row_str))
-            out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
-    out_line(_box_bottom(p))
-    pause(p)
+def map_bounds(sector: int | None) -> tuple[int, int, int, int]:
+    if sector is None:
+        return 0, 99, 0, 49
+    col, row = sector % SECTOR_COLS, sector // SECTOR_COLS
+    return ((col * 100 + SECTOR_COLS - 1) // SECTOR_COLS,
+            ((col + 1) * 100 + SECTOR_COLS - 1) // SECTOR_COLS - 1,
+            (row * 50 + SECTOR_ROWS - 1) // SECTOR_ROWS,
+            ((row + 1) * 50 + SECTOR_ROWS - 1) // SECTOR_ROWS - 1)
+
+
+def map_label(world: World, sid: int, public_target: int | None) -> str:
+    station = world.by_id[sid]
+    name = station.name if station.discovered or sid == public_target else "Uncharted"
+    return f"{name} ({station.x},{station.y})"
+
+
+def map_system_ids(world: World, path: list[int], public_target: int | None) -> set[int]:
+    ids = {s.id for s in world.galaxy if s.discovered} | set(path) | {world.here.id}
+    if public_target is not None:
+        ids.add(public_target)
+    return ids
+
+
+def spatial_map_grid(world: World, path: list[int], *, public_target: int | None,
+                     sector: int | None, columns: int, rows: int) -> list[str]:
+    """Bounded coordinate projection. Lines are visual; exact links live in Info."""
+    columns, rows = max(3, min(119, columns)), max(3, min(36, rows))
+    width, height = columns - 2, rows - 2
+    xmin, xmax, ymin, ymax = map_bounds(sector)
+    ids = map_system_ids(world, path, public_target)
+    positions = {}
+    for sid in sorted(ids):
+        station = world.by_id[sid]
+        if xmin <= station.x <= xmax and ymin <= station.y <= ymax:
+            positions[sid] = ((station.x - xmin) * (width - 1) // max(1, xmax - xmin),
+                              (station.y - ymin) * (height - 1) // max(1, ymax - ymin))
+    grid = [[" " for _ in range(width)] for _ in range(height)]
+    route_edges = {tuple(sorted(pair)) for pair in zip([world.here.id] + path, path)}
+    def line(a, b, glyph):
+        x0, y0 = positions[a]; x1, y1 = positions[b]
+        steps = max(abs(x1 - x0), abs(y1 - y0))
+        for step in range(1, steps):
+            x = round(x0 + (x1 - x0) * step / steps)
+            y = round(y0 + (y1 - y0) * step / steps)
+            if glyph == ":" or grid[y][x] == " ": grid[y][x] = glyph
+    for sid in positions:
+        for neighbor in world.by_id[sid].connections:
+            if neighbor in positions and sid < neighbor and world.by_id[sid].discovered and world.by_id[neighbor].discovered:
+                line(sid, neighbor, ".")
+    for a, b in sorted(route_edges):
+        if a in positions and b in positions:
+            line(a, b, ":")
+    cells = {}
+    for sid, position in positions.items(): cells.setdefault(position, []).append(sid)
+    for (x, y), occupants in cells.items():
+        if world.here.id in occupants: marker = "@"
+        elif public_target in occupants: marker = "!"
+        elif path and path[-1] in occupants: marker = "X"
+        elif len(occupants) > 1: marker = "+"
+        elif occupants[0] in path: marker = "*"
+        else: marker = "o" if world.by_id[occupants[0]].discovered else "?"
+        grid[y][x] = marker
+    border = "+" + "-" * width + "+"
+    return [border] + ["|" + "".join(row) + "|" for row in grid] + [border]
+
+
+def map_list_lines(world: World, path: list[int], public_target: int | None) -> list[str]:
+    ids = map_system_ids(world, path, public_target)
+    hops = bfs_hops(world.by_id, world.here.id)
+    lines = ["Exact positions; @ here, ! objective, X route end, * plotted route."]
+    if not any(s.discovered for s in world.galaxy):
+        lines.append("Nothing charted yet; current and supplied bearings only.")
+    for sector in SECTOR_NAMES:
+        stations = sorted((world.by_id[sid] for sid in ids if sector_for(world.by_id[sid]) == sector), key=lambda s: (s.x, s.y, s.id))
+        if not stations: continue
+        lines.append("Sector: " + sector)
+        for station in stations:
+            markers = ("@" if station.id == world.here.id else "") + ("!" if station.id == public_target else "") + ("*" if station.id in path else "") + ("X" if path and station.id == path[-1] else "")
+            details = f"{station.economy}, danger {station.danger}" if station.discovered else "uncharted; danger unknown"
+            distance = "here" if station.id == world.here.id else f"{hops[station.id]} jumps"
+            lines.append(f"{markers or 'o'} {map_label(world, station.id, public_target)}: {details}; {distance}.")
+    return lines
+
+
+def map_inspection_lines(world: World, sid: int, path: list[int], public_target: int | None) -> list[str]:
+    station = world.by_id[sid]
+    lines = [map_label(world, sid, public_target), "Sector: " + sector_for(station)]
+    if sid == world.here.id: lines.append("Current position.")
+    if sid == public_target: lines.append("Contract objective; public bearing does not chart it.")
+    if sid in path:
+        legs = [str(i) for i, target in enumerate(path, 1) if target == sid]
+        lines.append("Plotted arrival leg(s): " + ", ".join(legs))
+    if station.discovered:
+        lines.append(f"Economy: {station.economy}. Danger: {station.danger}.")
+        lines.append("Known departure connections (not a jump command):")
+        for neighbor in sorted(station.connections):
+            lines.append(map_label(world, neighbor, public_target))
+    else:
+        lines.append("Uncharted: economy, danger and other connections remain unknown.")
+    return lines
+
+
+def _screen_map_info(world: World, sid: int, path: list[int], public_target: int | None) -> None:
+    title, footer = "Station Info", "[N]ext [P]rev [B]ack: "
+    pages = _trade_pages(map_inspection_lines(world, sid, path, public_target), title, footer)
+    page = 0
+    while True:
+        out_line(); out_line(f"{title} {page + 1}/{len(pages)}")
+        for line in pages[page]: out_line(line)
+        out_prompt(footer); key = read_command(); out_line(key)
+        if key in ("B", "Q"): return
+        if key == "N": page = min(page + 1, len(pages) - 1)
+        elif key == "P": page = max(0, page - 1)
+
+
+def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None,
+                      public_target: int | None = None) -> None:
+    """Read-only spatial chart, exact list alternative and station inspection."""
+    mission = tracked_mission(world)
+    if path is None:
+        path = mission_route(world, mission) if mission else []
+    if public_target is None and mission:
+        public_target = mission.target_system
+    path = list(path)
+    sector = SECTOR_NAMES.index(sector_for(world.here))
+    compact = _OUTPUT_WIDTH < 40 or _OUTPUT_HEIGHT < 12
+    list_mode, page = compact, 0
+    title = "Charted Systems"
+    list_footer = "[N]ext [P]rev " + ("" if compact else "[M]ap ") + "[I]nfo [B]ack: "
+    lines = map_list_lines(world, path, public_target)
+    if compact: lines.insert(0, "Spatial map needs 40 columns and 12 rows; exact list is available here.")
+    pages = _trade_pages(lines, title, list_footer)
+    while True:
+        out_line()
+        if list_mode:
+            out_line(f"{title} {page + 1}/{len(pages)}")
+            for line in pages[page]: out_line(line)
+            footer = list_footer
+        else:
+            heading = "Star Map: " + (SECTOR_NAMES[sector] if sector is not None else "Galaxy")
+            xmin, xmax, ymin, ymax = map_bounds(sector)
+            bounds = f"X {xmin}-{xmax}; Y {ymin}-{ymax}"
+            legend = "@ Here ! Goal X End * Route o Known + Cluster; . link : route"
+            footer = "[N/P] Sector [O]verview [L]ist [I]nfo [B]ack: "
+            overhead = 2 + sum(len(_wrap_output(text, max(1, _OUTPUT_WIDTH - 1)).split("\r\n")) for text in (heading, bounds, legend, footer))
+            out_line(heading); out_line(bounds)
+            for row in spatial_map_grid(world, path, public_target=public_target, sector=sector,
+                                        columns=_OUTPUT_WIDTH - 1, rows=_OUTPUT_HEIGHT - overhead): out_line(row)
+            out_line(legend)
+        out_prompt(footer); key = read_command(); out_line(key)
+        if key in ("B", "Q"): return
+        if key == "I":
+            ids = map_system_ids(world, path, public_target)
+            if not list_mode and sector is not None:
+                ids = {sid for sid in ids if sector_for(world.by_id[sid]) == SECTOR_NAMES[sector]}
+            options = sorted(((sid, map_label(world, sid, public_target)) for sid in ids), key=lambda item: item[1])
+            selected = _pick_trade_field("Inspect Station", options)
+            if selected is not None: _screen_map_info(world, selected, path, public_target)
+        elif list_mode:
+            if key == "N": page = min(page + 1, len(pages) - 1)
+            elif key == "P": page = max(0, page - 1)
+            elif key == "M" and not compact: list_mode = False
+        elif key == "L": list_mode = True
+        elif key == "O": sector = None
+        elif key in ("N", "P"):
+            current = SECTOR_NAMES.index(sector_for(world.here)) if sector is None else sector
+            sector = (current + (1 if key == "N" else -1)) % len(SECTOR_NAMES)
 
 
 def prepare_route_jump(world: World, destination: int) -> int:
@@ -5201,7 +5340,7 @@ def _screen_auto_route(p: Palette, world: World, *, destination: int | None = No
     while True:
         if pages is None:
             path = bfs_path(world.by_id, world.here.id, destination) if destination is not None else []
-            footer = ("[J]ump next " if path else "") + "[D]estination [N]ext [P]rev [B]ack: "
+            footer = ("[J]ump next " if path else "") + "[D]estination [V]Map [N]ext [P]rev [B]ack: "
             lines = navigation_route_lines(world, destination)
             if result:
                 lines.insert(0, result)
@@ -5226,6 +5365,8 @@ def _screen_auto_route(p: Palette, world: World, *, destination: int | None = No
             selected = _pick_trade_field("Charted Destination", choices)
             if selected is not None:
                 destination, result, page, pages = selected, None, 0, None
+        elif key == "V":
+            screen_galaxy_map(p, world, path=path)
         elif key == "J":
             try:
                 hop = prepare_route_jump(world, destination)
