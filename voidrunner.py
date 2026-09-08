@@ -4138,7 +4138,7 @@ def shipyard_lines(world: World) -> list[str]:
     return lines
 
 
-def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, page: int) -> tuple[str, int, int]:
+def _service_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
     capacity = max(len(rows) for rows in _trade_pages(lines, title, footer))
     pages = [[]]
     for line in lines:
@@ -4148,6 +4148,12 @@ def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, pa
         for row in wrapped:
             if len(pages[-1]) == capacity: pages.append([])
             pages[-1].append(row)
+    return pages
+
+
+def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, page: int, *, pages: list[list[str]] | None = None) -> tuple[str, int, int]:
+    if pages is None:
+        pages = _service_pages(lines, title, footer)
     page = min(page, len(pages) - 1)
     out_line(); out_line(f"{p.gold}{title} {page + 1}/{len(pages)}{RESET}")
     for line in pages[page]: out_line(line)
@@ -4847,105 +4853,74 @@ def screen_missions(p: Palette, world: World) -> None:
             screen_mission_details(p, world, mission, active=active)
 
 
-def screen_status(p: Palette, world: World) -> None:
+def pilot_record_lines(world: World, section: str = "O") -> list[str]:
+    """Complete retained records, without display truncation or state changes."""
     pilot, ship = world.save.pilot, world.save.ship
-    out_line()
-    rank_name = rank_for(pilot.credits)
-    out_line(_box_title(p, f"Pilot Record: {pilot.handle} ── [ Rank: {rank_name} ]"))
-    creds_line = f"  {p.gold}Credits:{RESET} {pilot.credits:,} cr"
-    pad_len = max(0, 77 - _vis_len(creds_line))
-    out_line(f"{p.accent}│{RESET}{creds_line}{' ' * pad_len}{p.accent}│{RESET}")
+    lines = ["Views: [O]Pilot [C]Jobs [H]Log"]
+    if section == "C":
+        lines.append(f"Active Contracts & Missions: {len(world.save.active_missions)}. Full terms, tracking and routes: station [B] Mission Board.")
+        for mission in world.save.active_missions:
+            target = world.by_id[mission.target_system]
+            deadline = "no deadline" if mission.deadline_turn is None else f"due day {mission.deadline_turn} inclusive ({mission.deadline_turn - world.save.turn} day(s) remaining)"
+            kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
+            reward = bounty_reward_for(world, mission.reward) if mission.kind in ("bounty", "escort") else mission.reward
+            lines.append(f"#{mission.id} {kind}: {mission.description}. Target: {target.name} ({target.x},{target.y}); {deadline}; reward {reward}cr.")
+        if not world.save.active_missions: lines.append("No active missions.")
+        return lines
+    if section == "H":
+        lines.append(f"Career highlights: {len(pilot.highlights)} retained; newest first.")
+        lines.extend(f"* {entry}" for entry in reversed(pilot.highlights))
+        if not pilot.highlights: lines.append("No career highlights yet.")
+        lines.append(f"Recent log: {len(pilot.log)} retained; newest first.")
+        lines.extend(f"- {entry}" for entry in reversed(pilot.log))
+        if not pilot.log: lines.append("No log entries yet.")
+        return lines
+    lines.extend([f"Pilot: {pilot.handle}. Rank: {rank_for(pilot.credits)}. Credits: {pilot.credits:,} cr.",
+                  f"Ship: {ship.hull_class}. Hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}; Cargo {sum(world.save.cargo.values())}/{cargo_capacity(ship)} used."])
     for faction in FACTIONS:
         rep = pilot.reputation.get(faction, 0)
-        rep_label = "Allied" if rep >= 10 else ("Friendly" if rep >= 4 else ("Hostile" if rep <= -5 else "Neutral"))
-        rep_col = p.correct if rep > 0 else (p.wrong if rep < 0 else p.muted)
-        f_line = f"  {p.gold}{FACTION_LABEL[faction]} standing:{RESET} {rep_col}{rep:+d} ({rep_label}){RESET}"
-        pad_len = max(0, 77 - _vis_len(f_line))
-        out_line(f"{p.accent}│{RESET}{f_line}{' ' * pad_len}{p.accent}│{RESET}")
-    out_line(_box_divider(p))
-    ship_line = (
-        f"  {p.gold}Ship:{RESET} {ship.hull_class:<12} │ "
-        f"{p.accent}Hull:{RESET} {_gauge_bar(ship.hull_hp, hull_hp_max(ship), 6, p)} {ship.hull_hp}/{hull_hp_max(ship)} │ "
-        f"{p.accent}Fuel:{RESET} {_gauge_bar(ship.fuel, fuel_capacity(ship), 6, p)} {ship.fuel}/{fuel_capacity(ship)} │ "
-        f"{p.accent}Cargo:{RESET} {cargo_capacity(ship)}"
-    )
-    pad_len = max(0, 77 - _vis_len(ship_line))
-    out_line(f"{p.accent}│{RESET}{ship_line}{' ' * pad_len}{p.accent}│{RESET}")
-
+        label = "Allied" if rep >= 10 else ("Friendly" if rep >= 4 else ("Hostile" if rep <= -5 else "Neutral"))
+        lines.append(f"{FACTION_LABEL[faction]} standing: {rep:+d} ({label}).")
     crew = [info["label"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
-    if crew:
-        c_line = f"  {p.gold}Crew:{RESET} {', '.join(crew)}"
-        pad_len = max(0, 77 - _vis_len(c_line))
-        out_line(f"{p.accent}│{RESET}{c_line}{' ' * pad_len}{p.accent}│{RESET}")
-
-    disc_count = sum(1 for s in world.galaxy if s.discovered)
-    pct = round((disc_count / len(world.galaxy)) * 100)
-    chart_line = f"  {p.gold}Systems charted:{RESET} {disc_count}/{len(world.galaxy)} ({pct}%)   │  {p.gold}Raiders defeated:{RESET} {pilot.kills}"
-    pad_len = max(0, 77 - _vis_len(chart_line))
-    out_line(f"{p.accent}│{RESET}{chart_line}{' ' * pad_len}{p.accent}│{RESET}")
-
-    m_line = f"  {p.gold}Missions completed:{RESET} {pilot.missions_completed}"
-    if pilot.retirements:
-        m_line += f"   │  {p.gold}Retirements:{RESET} {pilot.retirements}"
-    pad_len = max(0, 77 - _vis_len(m_line))
-    out_line(f"{p.accent}│{RESET}{m_line}{' ' * pad_len}{p.accent}│{RESET}")
-
-    if pilot.has_concord_commission:
-        st_line = f"  {p.gold}Standing:{RESET} Concord Privateer"
-        pad_len = max(0, 77 - _vis_len(st_line))
-        out_line(f"{p.accent}│{RESET}{st_line}{' ' * pad_len}{p.accent}│{RESET}")
-    if pilot.has_blackwake_made:
-        bw_line = f"  {p.gold}Standing:{RESET} Made (Blackwake Cartel)"
-        pad_len = max(0, 77 - _vis_len(bw_line))
-        out_line(f"{p.accent}│{RESET}{bw_line}{' ' * pad_len}{p.accent}│{RESET}")
-
+    wages = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}"))
+    lines.append("Crew: " + (", ".join(crew) if crew else "none") + f"; {wages}cr/jump.")
+    discovered = sum(system.discovered for system in world.galaxy)
+    lines.append(f"Systems charted: {discovered}/{len(world.galaxy)} ({round(discovered / len(world.galaxy) * 100)}%). Raiders defeated: {pilot.kills}.")
+    lines.append(f"Missions completed: {pilot.missions_completed}. Retirements: {pilot.retirements}.")
+    if pilot.has_concord_commission: lines.append("Standing: Concord Privateer.")
+    if pilot.has_blackwake_made: lines.append("Standing: Made (Blackwake Cartel).")
     event = world.save.active_event
-    if event:
-        ev_line = f"  {p.gold}Economy event:{RESET} {event['description']} ({event['turns_remaining']} turn(s) left)"
-        pad_len = max(0, 77 - _vis_len(ev_line))
-        out_line(f"{p.accent}│{RESET}{ev_line}{' ' * pad_len}{p.accent}│{RESET}")
-
-    if world.save.active_missions:
-        out_line(_box_divider(p))
-        head_str = f"  {p.gold}Active Contracts & Missions:{RESET}"
-        pad_len = max(0, 77 - _vis_len(head_str))
-        out_line(f"{p.accent}│{RESET}{head_str}{' ' * pad_len}{p.accent}│{RESET}")
-        for m in world.save.active_missions:
-            if m.deadline_turn is not None:
-                rem = max(0, m.deadline_turn - world.save.turn)
-                time_str = f"{rem} turn(s) left"
-            else:
-                time_str = "no deadline"
-            desc = m.description
-            if _vis_len(desc) > 40:
-                desc = desc[:37] + "..."
-            m_str = f"    • {desc:<40} {time_str:>14}  +{m.reward}cr"
-            pad_len = max(0, 77 - _vis_len(m_str))
-            out_line(f"{p.accent}│{RESET}{m_str}{' ' * pad_len}{p.accent}│{RESET}")
-
-    out_line(_box_bottom(p))
-
-    if pilot.highlights:
-        out_line(f"{p.gold}Career highlights:{RESET}")
-        for entry in pilot.highlights[-15:]:
-            out_line(f"  {p.gold}* {entry}{RESET}")
-    if pilot.log:
-        out_line(f"{p.muted}Recent log:{RESET}")
-        for entry in pilot.log[-8:]:
-            out_line(f"  {p.muted}- {entry}{RESET}")
-
+    if event: lines.append(f"Economy event: {event['description']} ({event['turns_remaining']} day(s) left).")
+    lines.append(f"[C] Jobs: {len(world.save.active_missions)} active. [H] Log: {len(pilot.highlights)} highlights, {len(pilot.log)} log entries.")
     if rank_for(pilot.credits) == RANKS[-1][1]:
-        out_prompt(f"{p.muted}[R]etire and start a new career, or any other key to continue... {RESET}")
-        key = read_command()
-        out_line(key)
-        if key == "R":
+        lines.append("[R] Retire ends this career and begins a new one; confirmation required.")
+    return lines
+
+
+def screen_status(p: Palette, world: World) -> None:
+    section, page, result = "O", 0, None
+    cache = {}
+    while True:
+        eligible = rank_for(world.save.pilot.credits) == RANKS[-1][1]
+        footer = "[<>]Page [O/C/H]View " if _OUTPUT_WIDTH < 30 else "[<]Prev [>]Next [O]Pilot [C]Jobs [H]Log "
+        footer += ("[R]Retire " if eligible else "") + "[B]Back: "
+        title = "Pilot Record: " + {"O":"Overview", "C":"Contracts", "H":"History"}[section]
+        if section not in cache:
+            lines = pilot_record_lines(world, section)
+            if result: lines.insert(0, "Result: " + result)
+            cache[section] = _service_pages(lines, title, footer)
+        key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[section])
+        if key in ("B", "Q", " "): return
+        if key == ">": page = min(page + 1, count - 1)
+        elif key == "<": page = max(0, page - 1)
+        elif key in ("O", "C", "H"): section, page = key, 0
+        elif key == "R" and eligible:
             if confirm("This ends your current career for good and begins a new one. Retire?", p):
                 world.reset(retire_pilot(world.save))
                 world.checkpoint()
-                out_line()
-                out_line(f"{p.accent}{BOLD}A new career begins.{RESET}")
-        return
-    pause(p)
+                out_line(); out_line(f"{p.accent}{BOLD}A new career begins.{RESET}")
+                return
+            result, page, cache = "Retirement cancelled; current career retained.", 0, {}
 
 
 def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) -> None:

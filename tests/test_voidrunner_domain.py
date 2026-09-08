@@ -2667,12 +2667,13 @@ def test_pilot_from_dict_defaults_retirements_to_zero_for_old_saves():
 
 def test_screen_status_offers_retirement_only_at_top_rank(monkeypatch):
     world = _world_with_seed(95)
-    world.save.pilot.credits = 100  # far below top rank
-
-    monkeypatch.setattr(vr, "read_key", lambda: (_ for _ in ()).throw(AssertionError("should not prompt")))
-    monkeypatch.setattr(vr, "pause", lambda p, msg="Press any key to continue...": None)
-    with contextlib.redirect_stdout(io.StringIO()):
-        vr.screen_status(vr.Palette(truecolor=False), world)
+    world.save.pilot.credits = 100
+    keys = iter(["R", "B"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "confirm", lambda *args: pytest.fail("Ineligible retirement prompt"))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_status(vr.Palette(True), world)
+    assert "[R]" not in output.getvalue()
 
 
 def test_screen_status_retires_on_confirmation_at_top_rank(monkeypatch):
@@ -2695,12 +2696,13 @@ def test_screen_status_declines_retirement_without_committing(monkeypatch):
     world.save.pilot.credits = vr.RANKS[-1][0]
     old_seed = world.save.seed
 
-    keys = iter(["R", "N"])
+    keys = iter(["R", "N", "B"])
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
 
-    with contextlib.redirect_stdout(io.StringIO()):
+    with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_status(vr.Palette(truecolor=False), world)
 
+    assert "Retirement cancelled" in output.getvalue()
     assert world.save.pilot.retirements == 0
     assert world.save.seed == old_seed
 
@@ -3320,7 +3322,8 @@ def test_retire_pilot_records_a_highlight_on_the_new_career():
 def test_screen_status_shows_career_highlights(monkeypatch):
     world = _world_with_seed(122)
     world.save.pilot.highlight("Something notable happened.")
-    monkeypatch.setattr(vr, "read_key", lambda: " ")
+    keys = iter(["H", "B"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -4263,7 +4266,7 @@ def test_screen_status_shows_active_economy_event(monkeypatch):
     visible = vr._ANSI_RE.sub("", buf.getvalue())
     normalized = " ".join(visible.replace("│", " ").split())
     assert "Economy event" in normalized
-    assert "4 turn(s) left" in normalized
+    assert "4 day(s) left" in normalized
 
 
 def test_retiring_resets_active_economy_event():
@@ -4584,7 +4587,74 @@ def _assert_box_rows_match_border(text: str, label: str) -> None:
             )
 
 
-def test_screen_status_truncates_long_mission_descriptions_to_fit_the_box(monkeypatch):
+@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("section",["C","H"])
+def test_pilot_record_pages_expose_every_retained_entry_once_without_rebuilding(monkeypatch,width,height,section):
+    import re
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    world=_world_with_seed(42)
+    world.save.active_missions=[vr.Mission(i+1,"escort",f"Full contract explanation with a distinctive ending END{i:03}",100,0,1,deadline_turn=100) for i in range(35)]
+    world.save.pilot.highlights=[f"Highlight-{i:03}-END" for i in range(35)]
+    world.save.pilot.log=[f"Log-{i:03}-END" for i in range(80)]
+    before=world.save.to_dict();rng=world.event_rng.getstate()
+    world._checkpoint=lambda _:pytest.fail("Record browsing checkpointed")
+    output=io.StringIO();frames=[];phase=0;builds=[]
+    original=vr._service_pages
+    def build(lines,title,footer):
+        builds.append(title)
+        return original(lines,title,footer)
+    monkeypatch.setattr(vr,"_service_pages",build)
+    def choose():
+        nonlocal phase
+        frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0)
+        assert len(frame.splitlines())<=height
+        assert all(vr._visible_width(line)<=width for line in frame.splitlines())
+        assert "[B]Back:" in " ".join(frame.split())
+        if phase==0:phase=1;return section
+        if phase==2:return "B"
+        frames.append(frame)
+        page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
+        if page==count:phase=2;return "O"
+        return ">"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_status(vr.Palette(False),world)
+    text=" ".join(" ".join(frames).split())
+    markers=[f"END{i:03}" for i in range(35)] if section=="C" else [f"Highlight-{i:03}-END" for i in range(35)]+[f"Log-{i:03}-END" for i in range(80)]
+    for marker in markers:assert text.count(marker)==1
+    assert len(builds)==2
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+
+
+@pytest.mark.parametrize("commands",[b"SCH>OBQ",b"SCH>",b"SRNBQ",b"SR"])
+def test_real_pilot_record_browsing_cancel_and_eof_preserve_career(tmp_path,commands):
+    import json,os,subprocess
+    world=_world_with_seed(42)
+    world.save.pilot.credits=vr.RANKS[-1][0]
+    world.save.pilot.highest_rank_seen=len(vr.RANKS)-1
+    world.save.pilot.highlights=["A retained early accomplishment"]*20
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
+    original=(tmp_path/"77.json").read_bytes()
+    info=tmp_path/"door_info.json"
+    info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+    assert result.returncode==0 and not result.stderr and b"Pilot Record:" in result.stdout
+    if b"N" in commands:assert b"Retirement cancelled" in result.stdout
+    assert (tmp_path/"77.json").read_bytes()==original
+
+
+def test_pilot_record_retirement_acknowledges_a_saved_new_career(tmp_path):
+    world=_world_with_seed(42)
+    world.save.pilot.credits=vr.RANKS[-1][0]
+    world.save.pilot.highest_rank_seen=len(vr.RANKS)-1
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
+    with _door_stopped_at(tmp_path,b"SHRY",b"A new career begins."):
+        saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+        assert saved.pilot.retirements==1 and saved.seed!=world.save.seed
+        assert saved.pilot.credits==1200+vr.RETIREMENT_STARTING_CREDITS_BONUS
+
+
+def test_screen_status_preserves_complete_mission_description(monkeypatch):
     world = _world_with_seed(300)
     world.save.pilot.credits = 15_000
     world.save.active_missions = [
@@ -4592,21 +4662,25 @@ def test_screen_status_truncates_long_mission_descriptions_to_fit_the_box(monkey
                    description="Escort a supply convoy to Perrin's Folly (4 jump(s), raider activity expected)",
                    reward=900, origin_system=0, target_system=5, pirate_tier=3, deadline_turn=40),
     ]
-    monkeypatch.setattr(vr, "read_key", lambda: "X")
+    keys = iter(["C", "B"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_status(vr.Palette(truecolor=False), world)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_status")
+    text = " ".join(vr._ANSI_RE.sub("", buf.getvalue()).split())
+    assert world.save.active_missions[0].description in text
+    assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
 
-def test_screen_status_credits_line_matches_box_border(monkeypatch):
+def test_screen_status_credits_remain_complete_and_width_safe(monkeypatch):
     world = _world_with_seed(301)
     world.save.pilot.credits = 1_234_567
-    monkeypatch.setattr(vr, "read_key", lambda: "X")
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_status(vr.Palette(truecolor=False), world)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_status")
+    assert "1,234,567 cr" in buf.getvalue()
+    assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
 
 @pytest.mark.parametrize("width,height", [(20,10), (40,12), (80,24)])
