@@ -330,17 +330,13 @@ def test_loading_an_existing_save_never_overwrites_the_chosen_callsign(tmp_path)
     assert loaded.pilot.handle == "Voyager1"
 
 
-def test_corrupt_save_is_backed_up_not_silently_discarded(tmp_path):
+def test_corrupt_save_is_preserved_in_place_without_automatic_reset(tmp_path):
     path = tmp_path / "5.json"
     path.write_text("not valid json{{{", encoding="utf-8")
-
-    save, is_new, notice = vr.load_or_create_save(tmp_path, user_id=5, handle="Recovered")
-    assert is_new is True
-    assert notice is not None
-    assert "preserved" in notice
-    backups = list(tmp_path.glob("5.corrupt-*"))
-    assert len(backups) == 1
-    assert backups[0].read_text(encoding="utf-8") == "not valid json{{{"
+    with pytest.raises(vr.ResumeError):
+        vr.load_or_create_save(tmp_path, user_id=5, handle="Recovered")
+    assert path.read_text(encoding="utf-8") == "not valid json{{{"
+    assert not list(tmp_path.glob("5.corrupt-*"))
 
 
 def test_write_save_is_atomic_no_tmp_file_left_behind(tmp_path):
@@ -3443,7 +3439,8 @@ def test_auto_route_checkpoints_each_completed_hop_before_next_hop(tmp_path, mon
         system.discovered = True
     target = next(sid for sid, hops in vr.bfs_hops(world.by_id, 0).items() if hops == 3)
     path = vr.bfs_path(world.by_id, 0, target)
-    world.save.ship.fuel = 100
+    world.save.ship.engine_tier = 3
+    world.save.ship.fuel = vr.fuel_capacity(world.save.ship)
     world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
     vr.persist(world, tmp_path, 77)
     monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: world.by_id[target].name)
@@ -3806,8 +3803,10 @@ def test_real_door_preserves_bad_resume_mission_and_shows_recovery(tmp_path, kin
         "bounty": mission if kind == "bounty" else None,
         "escorts": [mission] if kind == "escort" else [], "escort_index": 0, "encounter": {},
     }
-    vr.persist(world, tmp_path, 77)
+    # Simulate on-disk damage; the production writer now rejects this state.
+    world.save.event_rng_state = world.event_rng.getstate()
     path = tmp_path / "77.json"
+    path.write_text(json.dumps(world.save.to_dict()), encoding="utf-8")
     original = path.read_bytes()
     info = tmp_path / "door_info.json"
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
@@ -3867,8 +3866,10 @@ def test_inconsistent_resume_stops_before_rewriting_save(tmp_path, fault):
     elif fault == "wrong_position":
         world.save.current_system = 1
     world.save.pending_travel = travel
-    vr.persist(world, tmp_path, 77)
+    # Simulate on-disk damage; the production writer now rejects this state.
+    world.save.event_rng_state = world.event_rng.getstate()
     path = tmp_path / "77.json"
+    path.write_text(json.dumps(world.save.to_dict()), encoding="utf-8")
     original = path.read_bytes()
     info = tmp_path / "door_info.json"
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
@@ -5147,3 +5148,423 @@ def test_malformed_score_entries_do_not_break_career_checkpoint(tmp_path, malfor
     world = _world_with_seed(42)
     vr.persist(world, tmp_path, 77)
     assert vr.load_hall_of_fame(tmp_path)[0]["best_credits"] == world.save.pilot.credits
+
+
+@pytest.mark.parametrize("field,value", [
+    ("schema_version", 999), ("schema_version", True), ("galaxy_version", 2),
+    ("seed", "42"), ("turn", -1), ("current_system", 48),
+    ("pilot", []), ("pilot.credits", -1), ("pilot.credits", True),
+    ("pilot.reputation", {"unknown": 4}), ("pilot.log", "not a list"),
+    ("pilot.handle", "Bad\x1b[2J"), ("pilot.highest_rank_seen", 100),
+    ("ship.hull_class", "Unknown"), ("ship.fuel", 999), ("ship.hull_hp", -1),
+    ("ship.engine_tier", 99), ("ship.has_gunner", "yes"),
+    ("cargo", {"unknown": 1}), ("cargo", {"food": -1}), ("cargo", {"food": 999}),
+    ("discovered", [0, 0]), ("discovered", [True]), ("discovered", [49]),
+    ("market_drift", {"0": {"food": float("nan")}}),
+    ("market_drift", {"0": {"food": -1}}), ("market_drift", {"48": {}}),
+    ("flags", {"landmark_investigated": "no"}), ("active_event", []),
+    ("active_missions", "bad"), ("active_futures", {}), ("future_field", {}),
+])
+def test_invalid_career_fields_preserve_original_bytes(tmp_path, field, value):
+    import json
+
+    data = _world_with_seed(42).save.to_dict()
+    target = data
+    keys = field.split(".")
+    for key in keys[:-1]:
+        target = target[key]
+    target[keys[-1]] = value
+    path = tmp_path / "77.json"
+    original = json.dumps(data).encode()
+    path.write_bytes(original)
+    with pytest.raises(vr.ResumeError):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("raw", [b"[]", b"null", b"\xff\xfe\xff", b"{" + b'"seed":1,"seed":2}',
+                                b"[" * 1100 + b"]" * 1100])
+def test_invalid_json_document_stops_without_reset(tmp_path, raw):
+    path = tmp_path / "77.json"
+    path.write_bytes(raw)
+    with pytest.raises(vr.ResumeError):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == raw
+
+
+def test_oversized_career_and_unreadable_file_never_start_new(tmp_path, monkeypatch):
+    path = tmp_path / "77.json"
+    path.write_bytes(b"x" * (vr.MAX_SAVE_BYTES + 1))
+    with pytest.raises(vr.ResumeError, match="file size"):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.stat().st_size == vr.MAX_SAVE_BYTES + 1
+    monkeypatch.setattr(vr, "_read_save_bytes", lambda path: (_ for _ in ()).throw(PermissionError()))
+    with pytest.raises(vr.ResumeError, match="could not be read"):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+
+
+def test_legacy_optional_fields_and_overlimit_contracts_remain_compatible():
+    import json
+
+    world = _world_with_seed(42)
+    world.save.active_missions = [vr.Mission(1, "bounty", "Old contract", 50, 0, 1, pirate_tier=1)] * 5
+    data = world.save.to_dict()
+    for key in ("galaxy_version", "mission_boards", "best_credits", "active_futures", "pending_travel",
+                "event_rng_state", "next_mission_id", "flags", "market_drift"):
+        data.pop(key)
+    loaded = vr._decode_career(json.dumps(data).encode())
+    assert loaded.galaxy_version == 1 and len(loaded.active_missions) == 5
+    assert vr.generate_galaxy(loaded.seed) == vr.generate_galaxy(world.save.seed)
+    resumed = vr.World(loaded)
+    assert len({m.id for m in resumed.save.active_missions}) == 5
+
+
+def test_previous_checkpoint_tracks_changes_and_identical_writes_do_not_age_it(tmp_path):
+    save = _world_with_seed(42).save
+    vr.write_save(tmp_path, 77, save)
+    original = (tmp_path / "77.json").read_bytes()
+    save.pilot.credits += 100
+    vr.write_save(tmp_path, 77, save)
+    previous = tmp_path / "77.previous.json"
+    assert previous.read_bytes() == original
+    vr.write_save(tmp_path, 77, save)
+    assert previous.read_bytes() == original
+    current = (tmp_path / "77.json").read_bytes()
+    save.pilot.credits += 100
+    vr.write_save(tmp_path, 77, save)
+    assert previous.read_bytes() == current
+
+
+def test_invalid_outgoing_checkpoint_does_not_replace_either_saved_copy(tmp_path):
+    save = _world_with_seed(42).save
+    vr.write_save(tmp_path, 77, save)
+    save.pilot.credits += 10
+    vr.write_save(tmp_path, 77, save)
+    before = {p.name: p.read_bytes() for p in tmp_path.glob("*.json")}
+    save.ship.fuel = -1
+    with pytest.raises(vr.SaveError, match="invalid career"):
+        vr.write_save(tmp_path, 77, save)
+    assert {p.name: p.read_bytes() for p in tmp_path.glob("*.json")} == before
+
+
+def test_failed_previous_copy_prevents_current_save_replacement(tmp_path, monkeypatch):
+    save = _world_with_seed(42).save
+    vr.write_save(tmp_path, 77, save)
+    original = (tmp_path / "77.json").read_bytes()
+    replace = vr.os.replace
+
+    def fail_previous(source, target):
+        if target.name == "77.previous.json":
+            raise OSError("previous copy unavailable")
+        return replace(source, target)
+
+    monkeypatch.setattr(vr.os, "replace", fail_previous)
+    save.pilot.credits += 10
+    with pytest.raises(OSError):
+        vr.write_save(tmp_path, 77, save)
+    assert (tmp_path / "77.json").read_bytes() == original
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_pending_journey_is_validated_and_preserved_through_recovery(tmp_path, monkeypatch):
+    import json
+
+    world = _world_with_seed(42)
+    world.event_rng.seed(0)
+    destination = world.here.connections[0]
+    snapshots = []
+    world._checkpoint = lambda current: snapshots.append(json.dumps(current.save.to_dict()).encode())
+    monkeypatch.setattr(vr, "read_key", lambda: "F")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(False), world, destination)
+    pending = next(raw for raw in snapshots if json.loads(raw)["pending_travel"] is not None)
+    (tmp_path / "77.previous.json").write_bytes(pending)
+    (tmp_path / "77.json").write_bytes(b"broken")
+    restored = vr.restore_previous_career(tmp_path, 77, pending)
+    assert restored.pending_travel == json.loads(pending)["pending_travel"]
+    resumed = vr.World(restored)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(False), resumed, destination)
+    assert resumed.save.to_dict() == world.save.to_dict()
+
+
+def _broken_career_with_previous(tmp_path):
+    save = _world_with_seed(42).save
+    save.turn = 7
+    save.pilot.handle = "Recovered Pilot"
+    vr.write_save(tmp_path, 77, save)
+    expected = (tmp_path / "77.json").read_bytes()
+    save.turn = 8
+    vr.write_save(tmp_path, 77, save)
+    (tmp_path / "77.json").write_bytes(b"damaged original")
+    return expected
+
+
+@pytest.mark.parametrize("commands", [b"B", b"RNB", b"R", b"", b"\x1b[AQ"])
+def test_real_recovery_back_decline_eof_and_special_keys_write_nothing(tmp_path, commands):
+    import json
+    import os
+    import subprocess
+
+    _broken_career_with_previous(tmp_path)
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in tmp_path.glob("*.json")}
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+    assert result.returncode == (0 if commands.endswith((b"B", b"Q")) else 1)
+    assert not result.stderr
+    assert b"Career recovery" in result.stdout and b"Day 7" in result.stdout
+    assert b"Pilot callsign" not in result.stdout
+    assert {p.name: p.read_bytes() for p in tmp_path.glob("*.json")} == before
+
+
+def test_real_confirmed_recovery_preserves_original_before_success_and_resumes(tmp_path):
+    expected = _broken_career_with_previous(tmp_path)
+    with _door_stopped_at(tmp_path, b"RY", b"Previous checkpoint restored"):
+        restored, is_new, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert not is_new and restored.turn == 7
+        archives = list(tmp_path.glob("77.recovery-*.json"))
+        assert len(archives) == 1 and archives[0].read_bytes() == b"damaged original"
+        assert (tmp_path / "77.previous.json").read_bytes() == expected
+    with _door_stopped_at(tmp_path, b"Q", b"Welcome back, Recovered Pilot"):
+        restored, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert restored.turn == 7
+
+
+@pytest.mark.parametrize("failure", ["archive", "replacement", "changed", "full"])
+def test_recovery_failure_keeps_primary_and_previous(tmp_path, monkeypatch, failure):
+    expected = _broken_career_with_previous(tmp_path)
+    if failure == "archive":
+        monkeypatch.setattr(vr.tempfile, "NamedTemporaryFile", lambda **kw: (_ for _ in ()).throw(PermissionError()))
+    elif failure == "replacement":
+        replace = vr.os.replace
+
+        def fail_primary(source, destination):
+            if Path(destination).name == "77.json":
+                raise OSError("primary replacement failed")
+            return replace(source, destination)
+
+        monkeypatch.setattr(vr.os, "replace", fail_primary)
+    elif failure == "changed":
+        expected = expected + b" "
+    else:
+        for index in range(vr.MAX_RECOVERY_COPIES):
+            (tmp_path / f"77.recovery-{index}.json").write_bytes(b"retained")
+    before_previous = (tmp_path / "77.previous.json").read_bytes()
+    with pytest.raises((OSError, vr.ResumeError)):
+        vr.restore_previous_career(tmp_path, 77, expected)
+    assert (tmp_path / "77.json").read_bytes() == b"damaged original"
+    assert (tmp_path / "77.previous.json").read_bytes() == before_previous
+    if failure == "replacement":
+        archives = list(tmp_path.glob("77.recovery-*.json"))
+        assert len(archives) == 1 and archives[0].read_bytes() == b"damaged original"
+
+
+@pytest.mark.parametrize("failure", ["write", "flush", "fsync", "close", "publish"])
+def test_failed_recovery_archive_never_consumes_a_retained_slot(tmp_path, monkeypatch, failure):
+    previous = _broken_career_with_previous(tmp_path)
+    create_temporary = vr.tempfile.NamedTemporaryFile
+
+    class FailingArchive:
+        def __init__(self, **kwargs):
+            self.file = create_temporary(**kwargs)
+            self.name = self.file.name
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.file.close()
+            if failure == "close":
+                raise OSError("archive close failed")
+
+        def write(self, data):
+            if failure == "write":
+                self.file.write(data[:3])
+                raise OSError("archive write failed")
+            return self.file.write(data)
+
+        def flush(self):
+            if failure == "flush":
+                raise OSError("archive flush failed")
+            self.file.flush()
+
+        def fileno(self):
+            return self.file.fileno()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vr.tempfile, "NamedTemporaryFile", FailingArchive)
+        if failure in {"fsync", "publish"}:
+            def fail(*args):
+                raise OSError(f"archive {failure} failed")
+            patch.setattr(vr.os, "fsync" if failure == "fsync" else "replace", fail)
+        for _ in range(vr.MAX_RECOVERY_COPIES + 1):
+            with pytest.raises(OSError, match="archive"):
+                vr.restore_previous_career(tmp_path, 77, previous)
+            assert not list(tmp_path.glob("77.recovery-*.json"))
+            assert not list(tmp_path.glob("*.tmp"))
+            assert (tmp_path / "77.json").read_bytes() == b"damaged original"
+            assert (tmp_path / "77.previous.json").read_bytes() == previous
+
+    vr.restore_previous_career(tmp_path, 77, previous)
+    assert (tmp_path / "77.json").read_bytes() == previous
+    archives = list(tmp_path.glob("77.recovery-*.json"))
+    assert len(archives) == 1 and archives[0].read_bytes() == b"damaged original"
+
+
+@pytest.mark.parametrize("full_archives", [False, True])
+def test_missing_primary_requires_recovery_and_validated_previous_can_be_restored(tmp_path, full_archives):
+    expected = _broken_career_with_previous(tmp_path)
+    (tmp_path / "77.json").unlink()
+    if full_archives:
+        for index in range(vr.MAX_RECOVERY_COPIES):
+            (tmp_path / f"77.recovery-{index}.json").write_bytes(b"retained")
+    with pytest.raises(vr.ResumeError, match="missing"):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    restored = vr.restore_previous_career(tmp_path, 77, expected)
+    assert restored.turn == 7 and (tmp_path / "77.json").read_bytes() == expected
+
+
+@pytest.mark.parametrize("kind", ["schema", "galaxy", "journey", "rng", "event", "journey_field",
+                                 "encounter_field", "pirate_field", "combat_field", "snapshot_field"])
+def test_future_formats_never_offer_or_allow_downgrade_recovery(tmp_path, monkeypatch, kind):
+    import json
+    import os
+    import subprocess
+
+    previous = _broken_career_with_previous(tmp_path)
+    future = json.loads(previous)
+    if kind in {"schema", "galaxy"}:
+        future[f"{kind}_version"] = 99
+    elif kind == "journey":
+        future["pending_travel"] = {"version": 99}
+    elif kind == "rng":
+        future["event_rng_state"] = [99, [], None]
+    elif kind == "event":
+        future["active_event"] = {"economy": "Industrial", "commodity": "metals", "direction": "boom",
+                                  "turns_remaining": 2, "description": "News", "future_rule": True}
+    else:
+        destination = vr.World(vr.SaveData.from_dict(future)).here.connections[0]
+        travel = {"version": 1, "origin": 0, "destination": destination, "escort_index": 0, "phase": "primary",
+                  "primary": "random", "encounter": {}, "escorts": [], "destroyed": False, "was_discovered": True,
+                  "bounty": None}
+        future["pending_travel"] = travel
+        pirate = {"name": "Raider", "tier": 1, "hp": 35, "hp_max": 35}
+        if kind == "journey_field":
+            travel["future_rule"] = True
+        elif kind == "encounter_field":
+            travel["encounter"]["future_rule"] = True
+        elif kind == "pirate_field":
+            travel["encounter"]["pirate"] = dict(pirate, future_rule=True)
+        elif kind == "combat_field":
+            travel["encounter"]["combat"] = {"pirate": pirate, "outcome": None, "lines": [], "future_rule": True}
+        else:
+            mission = vr.Mission(1, "bounty", "Raider", 100, 0, destination, pirate_tier=1).to_dict()
+            future["active_missions"] = [mission]
+            travel["primary"] = "bounty"
+            travel["bounty"] = dict(mission, future_rule=True)
+    path = tmp_path / "77.json"
+    path.write_text(json.dumps(future), encoding="utf-8")
+    original = path.read_bytes()
+    with pytest.raises(vr.UnsupportedSave) as error:
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    keys = iter("RB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, error.value).save is None
+    assert "[R]estore" not in output.getvalue()
+    with pytest.raises(vr.UnsupportedSave):
+        vr.restore_previous_career(tmp_path, 77, previous)
+    assert path.read_bytes() == original and not list(tmp_path.glob("77.recovery-*"))
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"RYB", capture_output=True,
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+    assert result.returncode == 0 and not result.stderr
+    assert b"[R]estore" not in result.stdout and b"Pilot callsign" not in result.stdout
+    assert path.read_bytes() == original and not list(tmp_path.glob("77.recovery-*"))
+
+
+@pytest.mark.parametrize("problem", ["oversized", "unreadable", "full"])
+def test_recovery_hides_restore_and_explains_impossible_preservation(tmp_path, monkeypatch, problem):
+    _broken_career_with_previous(tmp_path)
+    primary = tmp_path / "77.json"
+    read = vr._read_save_bytes
+    if problem == "oversized":
+        primary.write_bytes(b"x" * (vr.MAX_SAVE_BYTES + 1))
+    elif problem == "unreadable":
+        def fail_primary(path):
+            if path == primary:
+                raise PermissionError("cannot read primary")
+            return read(path)
+        monkeypatch.setattr(vr, "_read_save_bytes", fail_primary)
+    else:
+        for index in range(vr.MAX_RECOVERY_COPIES):
+            (tmp_path / f"77.recovery-{index}.json").write_bytes(b"retained")
+    before = {path.name: path.read_bytes() for path in tmp_path.glob("*.json")}
+    keys = iter("R" + "N" * 20 + "B")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        result = vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, vr.ResumeError("Career unavailable"))
+    rendered = " ".join(output.getvalue().split())
+    assert result.save is None and result.exit_code == 0
+    assert "[R]estore" not in rendered and "manual recovery" in rendered
+    reason = {"oversized": "file size", "unreadable": "cannot be read", "full": "copies are full"}[problem]
+    assert reason in rendered
+    assert {path.name: path.read_bytes() for path in tmp_path.glob("*.json")} == before
+
+
+def test_missing_economy_event_fields_remain_recoverable_corruption(tmp_path, monkeypatch):
+    import json
+    previous = _broken_career_with_previous(tmp_path)
+    broken = json.loads(previous)
+    broken["active_event"] = {"economy": "Industrial"}
+    (tmp_path / "77.json").write_text(json.dumps(broken), encoding="utf-8")
+    with pytest.raises(vr.ResumeError) as error:
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not isinstance(error.value, vr.UnsupportedSave)
+    keys = iter("B")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, error.value)
+    assert "[R]estore" in output.getvalue()
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_recovery_pages_fit_terminal_and_restore_is_on_last_page(tmp_path, monkeypatch, width, height):
+    _broken_career_with_previous(tmp_path)
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    chunks, current = [], io.StringIO()
+    keys = iter("N" * 40 + "B")
+
+    def read():
+        chunks.append(current.getvalue())
+        current.seek(0)
+        current.truncate(0)
+        return next(keys)
+
+    monkeypatch.setattr(vr, "read_key", read)
+    with contextlib.redirect_stdout(current):
+        vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, vr.ResumeError("Damaged career"))
+    for page in chunks:
+        rows = page.splitlines()
+        assert len(rows) <= height, (width, height, rows)
+        assert all(vr._visible_width(row) <= width for row in rows)
+    assert any("[R]estore" in page for page in chunks)
+
+
+def test_notoriety_above_one_hundred_survives_checkpoint_and_restart(tmp_path):
+    world = _world_with_seed(42)
+    world.save.pilot.notoriety = 99
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    world.save.pilot.notoriety += 3  # A patrol kill crosses the former artificial cap.
+    world.checkpoint()
+    loaded, is_new, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not is_new and loaded.pilot.notoriety == 102
+    loaded.pilot.notoriety = 1000
+    vr.write_save(tmp_path, 77, loaded)
+    assert vr.load_or_create_save(tmp_path, 77, "Tester")[0].pilot.notoriety == 1000
