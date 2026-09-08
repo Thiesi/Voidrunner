@@ -4066,7 +4066,7 @@ def test_shipyard_offers_crew_option(monkeypatch):
     with contextlib.redirect_stdout(buf):
         vr.screen_shipyard(vr.Palette(truecolor=False), world)
 
-    assert "[K] Crew" in buf.getvalue()
+    assert "[K]Crew" in buf.getvalue()
 
 
 def test_shipyard_crew_row_letter_never_collides_with_an_upgrade_row():
@@ -4089,7 +4089,7 @@ def test_shipyard_k_key_opens_crew_screen(monkeypatch):
     with contextlib.redirect_stdout(buf):
         vr.screen_shipyard(vr.Palette(truecolor=False), world)
 
-    assert "Crew Quarters" in buf.getvalue()
+    assert "Crew Roster" in buf.getvalue()
 
 
 def test_chart_screen_reserves_sgv_and_never_assigns_them_to_a_connection(monkeypatch):
@@ -4609,21 +4609,86 @@ def test_screen_status_credits_line_matches_box_border(monkeypatch):
     _assert_box_rows_match_border(buf.getvalue(), "screen_status")
 
 
-def test_screen_shipyard_rows_fit_the_box_at_every_tier(monkeypatch):
-    world = _world_with_seed(302)
-    world.save.pilot.credits = 100_000
-    monkeypatch.setattr(vr, "read_key", lambda: "Q")
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr.screen_shipyard(vr.Palette(truecolor=False), world)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_shipyard@tier0")
+@pytest.mark.parametrize("width,height", [(20,10), (40,12), (80,24)])
+@pytest.mark.parametrize("screen", ["yard", "crew"])
+@pytest.mark.parametrize("maxed", [False, True])
+def test_service_pages_retain_all_terms_and_fit_terminal(monkeypatch,width,height,screen,maxed):
+    import copy,re
+    world=_world_with_seed(302); world.save.pilot.credits=100_000
+    if maxed:
+        for key,upgrade in vr.UPGRADES.items(): setattr(world.save.ship,f"{key}_tier",upgrade["max_tier"])
+        for role in vr.CREW_ROLES: setattr(world.save.ship,f"has_{role}",True)
+    before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate()
+    monkeypatch.setattr(world,"checkpoint",lambda:pytest.fail("Paging saved"))
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width); monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    output=io.StringIO(); frames=[]
+    def choose():
+        frame=output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
+        plain=" ".join(vr._ANSI_RE.sub("",frame).split())
+        match=re.search(r"(?:Engineering Yard|Crew Roster): 100,000cr (\d+)/(\d+)",plain)
+        assert match and len(frames)<200
+        assert "[Q]Back" in plain
+        return "Q" if match[1]==match[2] else ">"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):
+        (vr.screen_shipyard if screen=="yard" else vr.screen_crew)(vr.Palette(False),world)
+    assert all(len(frame.splitlines())<=height for frame in frames)
+    assert all(vr._visible_width(line)<=width for frame in frames for line in frame.splitlines())
+    # Check full terms without mixing page controls into wrapped phrases.
+    plain=" ".join(vr._ANSI_RE.sub(""," ".join(frames)).split())
+    for info in (vr.UPGRADES if screen=="yard" else vr.CREW_ROLES).values():
+        for word in info["label"].split(): assert word in plain
+    if screen=="yard":
+        assert "Freighter-Class" in plain and "Cutter-Class" in plain
+        assert ("MAXED" if maxed else "Tier 0") in plain
+    else: assert ("HIRED" if maxed else "Available") in plain and "cr/jump" in plain
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
-    for key in vr.UPGRADES:
-        setattr(world.save.ship, f"{key}_tier", vr.UPGRADES[key]["max_tier"])
-    buf2 = io.StringIO()
-    with contextlib.redirect_stdout(buf2):
-        vr.screen_shipyard(vr.Palette(truecolor=False), world)
-    _assert_box_rows_match_border(buf2.getvalue(), "screen_shipyard@maxed")
+
+@pytest.mark.parametrize("screen", ["yard","crew"])
+def test_service_choices_keep_price_and_benefit_with_label_at_40_columns(monkeypatch,screen):
+    import re
+    world=_world_with_seed(42)
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",40);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",12)
+    output=io.StringIO();frames=[]
+    def choose():
+        frame=output.getvalue();frames.append(" ".join(vr._ANSI_RE.sub("",frame).split()));output.seek(0);output.truncate(0)
+        match=re.search(r"1,200cr (\d+)/(\d+)",frames[-1]);assert match
+        return "Q" if match[1]==match[2] else ">"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):
+        (vr.screen_shipyard if screen=="yard" else vr.screen_crew)(vr.Palette(False),world)
+    for key,info in (vr.UPGRADES if screen=="yard" else vr.CREW_ROLES).items():
+        matches=[frame for frame in frames if info["label"] in frame]
+        assert len(matches)==1
+        assert info["effect"] in matches[0]
+        cost=info["cost"](getattr(world.save.ship,f"{key}_tier")) if screen=="yard" else info["hire_cost"]
+        assert (f"{cost:,}cr" if screen=="yard" else f"{cost}cr") in matches[0]
+
+
+@pytest.mark.parametrize("commands", [b"Y><QQ",b"Y",b"YK><QQQ",b"YK",b"YANQQ",b"YKANQQQ",b"YR\rQQ",b"YPNQQ"])
+def test_real_responsive_service_browsing_and_cancellation_preserve_career(tmp_path,commands):
+    import json,os,subprocess
+    world=_world_with_seed(42); world.save.ship.fuel=20; world.save.ship.hull_hp=50
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77); world.checkpoint()
+    original=(tmp_path/"77.json").read_bytes()
+    info=tmp_path/"door_info.json"
+    info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+    assert result.returncode==0 and not result.stderr and b"Engineering Yard" in result.stdout
+    if b"K" in commands: assert b"Crew Roster" in result.stdout
+    assert (tmp_path/"77.json").read_bytes()==original
+
+
+def test_service_retained_upgrade_result_is_durable_without_menu_exit(tmp_path):
+    world=_world_with_seed(42)
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77); world.checkpoint()
+    cost=vr.UPGRADES["cargo"]["cost"](world.save.ship.cargo_tier)
+    before=world.save.pilot.credits
+    with _door_stopped_at(tmp_path,b"YAY",b"Result: Cargo Bay Expansion upgraded"):
+        saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+        assert saved.ship.cargo_tier==1 and saved.pilot.credits==before-cost
 
 
 def test_screen_market_contraband_row_fits_the_box(monkeypatch):
@@ -4729,20 +4794,21 @@ def test_screen_customs_rows_fit_the_box_for_a_large_contraband_stash(monkeypatc
 # text immediately after each fixed-width colored field.
 
 
-def test_screen_shipyard_effect_column_aligns_between_tiered_and_maxed_rows(monkeypatch):
-    world = _world_with_seed(309)
-    world.save.pilot.credits = 100_000
-    for key in vr.UPGRADES:
-        setattr(world.save.ship, f"{key}_tier", 0)
-    world.save.ship.engine_tier = vr.UPGRADES["engine"]["max_tier"]
-    monkeypatch.setattr(vr, "read_key", lambda: "Q")
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr.screen_shipyard(vr.Palette(truecolor=False), world)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_shipyard@mixed-tiers")
-    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n")]
-    effect_columns = {line.index("(") for line in stripped if "Tier" in line or "MAXED" in line}
-    assert len(effect_columns) == 1, f"effect column drifted between rows: {effect_columns}"
+@pytest.mark.parametrize("action", ["upgrade", "fuel", "repair", "crew", "refit", "rejected"])
+def test_service_actions_retain_result_and_updated_credit_heading(monkeypatch,action):
+    world=_world_with_seed(309); world.save.pilot.credits=20_000
+    world.save.ship.fuel=0; world.save.ship.hull_hp-=1
+    sequence={"upgrade":"AYQ","fuel":"RQ","repair":"PYQ","crew":"AYQ","refit":"GYQ","rejected":"AQ"}[action]
+    if action=="rejected": world.save.pilot.credits=0
+    keys=iter(sequence); monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    monkeypatch.setattr(vr,"read_line_raw",lambda **kw:"1")
+    saved=[]; world._checkpoint=lambda current:saved.append(current.save.pilot.credits)
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        (vr.screen_crew if action=="crew" else vr.screen_shipyard)(vr.Palette(False),world)
+    plain=vr._ANSI_RE.sub("",output.getvalue())
+    assert "Result:" in plain and f"{world.save.pilot.credits:,}cr" in plain.split("Result:")[0]
+    assert len(saved)==(0 if action=="rejected" else 1)
+    if saved: assert saved[-1]==world.save.pilot.credits
 
 
 def test_screen_missions_preserves_rewards_in_compact_entries(monkeypatch):
@@ -4823,15 +4889,10 @@ def test_screen_crew_and_galaxy_map_boxes_match_79_columns(monkeypatch):
     world = _world_with_seed(312)
     p = vr.Palette(truecolor=False)
 
-    # screen_crew
     monkeypatch.setattr(vr, "read_key", lambda: "Q")
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr.screen_crew(p, world)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_crew")
-    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n") if line.strip()]
-    crew_borders = {len(line) for line in stripped if line.startswith(("╭", "├", "╰"))}
-    assert crew_borders == {79}
+    with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_crew(p, world)
+    assert len(output.getvalue().splitlines()) <= 24
+    assert all(vr._visible_width(line) <= 80 for line in output.getvalue().splitlines())
 
     # Spatial map uses ASCII borders bounded to the negotiated width.
     monkeypatch.setattr(vr, "read_key", lambda: "B")

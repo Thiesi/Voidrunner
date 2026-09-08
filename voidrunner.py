@@ -4098,108 +4098,93 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
 
 
 
-def screen_shipyard(p: Palette, world: World) -> None:
+def shipyard_lines(world: World) -> list[str]:
     ship = world.save.ship
-    while True:
-        out_line()
-        out_line(_box_title(p, f"Engineering Shipyard: {world.here.station_name}"))
-        header = f" {p.gold}KEY  SUBSYSTEM UPGRADE       CURRENT STATUS   NEXT TIER COST  UPGRADE EFFECT{RESET}"
-        out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
-        out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
-        keys = list(UPGRADES.keys())
-        for i, key in enumerate(keys):
-            u = UPGRADES[key]
-            tier = getattr(ship, f"{key}_tier")
-            max_t = u["max_tier"]
-            bar = _gauge_bar(tier, max_t, 5, p)
-            if tier >= max_t:
-                status_str = f"MAXED {bar}"
-                cost_str = f"{'--':>6}   "
-            else:
-                cost = u["cost"](tier)
-                status_str = f"Tier {tier}->{tier + 1} {bar}"
-                cost_str = f"{cost:>6} cr"
-            row_str = f"  {p.gold}[{LETTERS[i]}]{RESET}  {u['label']:<20} {_pad(status_str, 18)} {cost_str}  {p.muted}({u['effect']}){RESET}"
-            pad_len = max(0, 77 - _vis_len(row_str))
-            out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
-
-        refit_options = HULL_REFITS[ship.hull_class]
-        refit_keys = LETTERS[len(keys) : len(keys) + len(refit_options)]
-        out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
-        if not refit_options:
-            refit_msg = f"  {p.muted}Hull: already flying our best available class ({ship.hull_class}){RESET}"
-            pad_len = max(0, 77 - _vis_len(refit_msg))
-            out_line(f"{p.accent}│{RESET}{refit_msg}{' ' * pad_len}{p.accent}│{RESET}")
+    lines = [world.here.station_name,
+             f"Fuel {ship.fuel}/{fuel_capacity(ship)} at 6cr/unit; hull {ship.hull_hp}/{hull_hp_max(ship)} at 4cr/HP."]
+    for i, (key, upgrade) in enumerate(UPGRADES.items()):
+        tier = getattr(ship, f"{key}_tier")
+        status = "MAXED" if tier >= upgrade["max_tier"] else f"Tier {tier} -> {tier + 1}; {upgrade['cost'](tier):,}cr"
+        if _OUTPUT_WIDTH >= 70:
+            lines.append(f"[{LETTERS[i]}] {upgrade['label']:<20} {status:<24} {upgrade['effect']}")
         else:
-            for refit_key, (target_class, cost) in zip(refit_keys, refit_options):
-                refit_msg = f"  {p.gold}[{refit_key}]{RESET}  {target_class}-Class Refit -- {cost:,} cr"
-                pad_len = max(0, 77 - _vis_len(refit_msg))
-                out_line(f"{p.accent}│{RESET}{refit_msg}{' ' * pad_len}{p.accent}│{RESET}")
+            lines.append(f"[{LETTERS[i]}] {upgrade['label']}: {status}. Benefit: {upgrade['effect']}")
+    refits = HULL_REFITS[ship.hull_class]
+    for key, (target, cost) in zip(LETTERS[len(UPGRADES):], refits):
+        lines.append(f"[{key}] {target}-Class Refit: {cost:,}cr; permanent hull change.")
+    if not refits: lines.append(f"Hull: best available class ({ship.hull_class}).")
+    return lines
 
-        out_line(_box_bottom(p))
-        out_line(f"  {p.accent}Fuel:{RESET} {ship.fuel}/{fuel_capacity(ship)} (6 cr/unit)  │  {p.accent}Hull:{RESET} {ship.hull_hp}/{hull_hp_max(ship)} (4 cr/HP)")
-        out_prompt(f"  {p.gold}[U]{RESET}pgrade  {p.gold}[R]{RESET}efuel  {p.gold}[P]{RESET} Repair hull  "
-            f"{p.gold}[K] Crew{RESET}  {p.gold}[Q]{RESET} Return: ")
-        action = read_command()
-        out_line(action)
-        if action == "Q":
-            return
+
+def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, page: int) -> tuple[str, int, int]:
+    capacity = max(len(rows) for rows in _trade_pages(lines, title, footer))
+    pages = [[]]
+    for line in lines:
+        wrapped = _wrap_output(_mission_plain(line), max(1, _OUTPUT_WIDTH - 1)).split("\r\n")
+        if pages[-1] and len(pages[-1]) + len(wrapped) > capacity:
+            pages.append([])
+        for row in wrapped:
+            if len(pages[-1]) == capacity: pages.append([])
+            pages[-1].append(row)
+    page = min(page, len(pages) - 1)
+    out_line(); out_line(f"{p.gold}{title} {page + 1}/{len(pages)}{RESET}")
+    for line in pages[page]: out_line(line)
+    out_prompt(footer); action = read_command(); out_line(action)
+    return action, page, len(pages)
+
+
+def screen_shipyard(p: Palette, world: World) -> None:
+    page, result = 0, None
+    footer = "[<]Prev [>]Next [R]Fuel [P]Repair [K]Crew [Q]Back: "
+    while True:
+        lines = shipyard_lines(world)
+        if result: lines.insert(0, "Result: " + result)
+        action, page, count = _draw_service_page(p, f"Engineering Yard: {world.save.pilot.credits:,}cr", lines, footer, page)
+        if action == "Q": return
+        if action == ">": page = min(page + 1, count - 1); continue
+        if action == "<": page = max(0, page - 1); continue
+        keys = list(UPGRADES)
+        refits = HULL_REFITS[world.save.ship.hull_class]
+        refit_keys = LETTERS[len(keys):len(keys) + len(refits)]
+        response = None
         if action in refit_keys:
-            target_class, cost = refit_options[refit_keys.index(action)]
-            _hull_refit_screen(p, world, target_class, cost)
-            continue
-        if action in LETTERS[:len(keys)]:
-            _buy_upgrade(p, world, keys[LETTERS.index(action)])
-            continue
-        if action == "U":
-            out_prompt(f"  {p.muted}Which upgrade [A-{LETTERS[len(keys)-1]}]? {RESET}")
-            key_choice = read_command()
-            out_line(key_choice)
-            if key_choice not in LETTERS[: len(keys)]:
-                continue
-            _buy_upgrade(p, world, keys[LETTERS.index(key_choice)])
-        elif action == "R":
-            _refuel(p, world)
-        elif action == "P":
-            _repair(p, world)
-        elif action == "K":
-            screen_crew(p, world)
+            target, cost = refits[refit_keys.index(action)]
+            response = _hull_refit_screen(p, world, target, cost)
+        elif action in LETTERS[:len(keys)]: response = _buy_upgrade(p, world, keys[LETTERS.index(action)])
+        elif action == "R": response = _refuel(p, world)
+        elif action == "P": response = _repair(p, world)
+        elif action == "K": screen_crew(p, world)
+        elif action == "U": page = 0  # Historical alias now returns to the upgrade list.
+        if response is not None: result, page = response, 0
+
+
+def crew_roster_lines(world: World) -> list[str]:
+    lines = ["Specialists earn wages on every jump, including detours."]
+    for index, (role, info) in enumerate(CREW_ROLES.items()):
+        hired = getattr(world.save.ship, f"has_{role}")
+        status = "HIRED" if hired else "Available"
+        price = f"{info['wage']}cr/jump" if hired else f"hire {info['hire_cost']}cr + {info['wage']}cr/jump"
+        lines.append(f"[{LETTERS[index]}] {info['label']}: {status}; {price}. Benefit: {info['effect']}")
+    return lines
 
 
 def screen_crew(p: Palette, world: World) -> None:
-    ship = world.save.ship
+    page, result = 0, None
+    footer = f"[<]Prev [>]Next [A-{LETTERS[len(CREW_ROLES)-1]}]Hire/dismiss [Q]Back: "
     while True:
-        out_line()
-        out_line(_box_title(p, "Crew Quarters & Specialist Roster"))
-        header = f" {p.gold}KEY  ROLE           STATUS      WAGE RATE      SPECIALTY / BENEFIT{RESET}"
-        out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
-        out_line(_box_divider(p))
-        keys = list(CREW_ROLES.keys())
-        for i, role in enumerate(keys):
-            info = CREW_ROLES[role]
-            letter = LETTERS[i]
-            if getattr(ship, f"has_{role}"):
-                status = f"{p.correct}HIRED{RESET}    "
-                wage = f"{info['wage']} cr/jump"
-            else:
-                status = f"{p.muted}Available{RESET}"
-                wage = f"{info['hire_cost']}cr + {info['wage']}cr/j"
-            row_str = f"  {p.gold}[{letter}]{RESET}  {info['label']:<14} {status} {wage:<16} {info['effect']}"
-            pad_len = max(0, 77 - _vis_len(row_str))
-            out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
-        out_line(_box_bottom(p))
-        out_prompt(f"  {p.muted}Hire/dismiss which [A-{LETTERS[len(keys)-1]}], or [Q] back? {RESET}")
-        key = read_command()
-        out_line(key)
-        if key == "Q":
-            return
-        idx = LETTERS.index(key) if key in LETTERS else -1
-        if idx < 0 or idx >= len(keys):
-            continue
-        _toggle_crew(p, world, keys[idx])
+        lines = crew_roster_lines(world)
+        if result: lines.insert(0, "Result: " + result)
+        key, page, count = _draw_service_page(p, f"Crew Roster: {world.save.pilot.credits:,}cr", lines, footer, page)
+        if key == "Q": return
+        if key == ">": page = min(page + 1, count - 1); continue
+        if key == "<": page = max(0, page - 1); continue
+        roles = list(CREW_ROLES)
+        if key in LETTERS[:len(roles)]:
+            response = _toggle_crew(p, world, roles[LETTERS.index(key)])
+            if response is not None: result, page = response, 0
 
 
-def _toggle_crew(p: Palette, world: World, role: str) -> None:
+def _toggle_crew(p: Palette, world: World, role: str) -> str | None:
     ship = world.save.ship
     info = CREW_ROLES[role]
     if getattr(ship, f"has_{role}"):
@@ -4207,10 +4192,11 @@ def _toggle_crew(p: Palette, world: World, role: str) -> None:
             setattr(ship, f"has_{role}", False)
             world.checkpoint()
             out_line(f"{p.muted}{info['label']} dismissed.{RESET}")
+            return f"{info['label']} dismissed."
         return
     if world.save.pilot.credits < info["hire_cost"]:
         out_line(f"{p.wrong}Need {info['hire_cost']}cr to hire a {info['label']}.{RESET}")
-        return
+        return f"Need {info['hire_cost']}cr to hire a {info['label']}."
     if not confirm(f"Hire a {info['label']} for {info['hire_cost']}cr "
                     f"(+{info['wage']}cr/jump ongoing wage)?", p):
         return
@@ -4218,38 +4204,40 @@ def _toggle_crew(p: Palette, world: World, role: str) -> None:
     setattr(ship, f"has_{role}", True)
     world.checkpoint()
     out_line(f"{p.correct}{info['label']} hired.{RESET}")
+    return f"{info['label']} hired; {info['wage']}cr/jump ongoing wage."
 
 
-def _buy_upgrade(p: Palette, world: World, key: str) -> None:
+def _buy_upgrade(p: Palette, world: World, key: str) -> str | None:
     ship = world.save.ship
     u = UPGRADES[key]
     tier = getattr(ship, f"{key}_tier")
     if tier >= u["max_tier"]:
         out_line(f"{p.wrong}Already maxed.{RESET}")
-        return
+        return "Already maxed."
     cost = u["cost"](tier)
     if world.save.pilot.credits < cost:
         out_line(f"{p.wrong}Not enough credits ({cost}cr needed).{RESET}")
-        return
+        return f"Not enough credits ({cost}cr needed)."
     if not confirm(f"Buy {u['label']} tier {tier + 1} for {cost}cr?", p):
         return
     world.save.pilot.credits -= cost
     setattr(ship, f"{key}_tier", tier + 1)
     world.checkpoint()
     out_line(f"{p.correct}{u['label']} upgraded to tier {tier + 1}.{RESET}")
+    return f"{u['label']} upgraded to tier {tier + 1} for {cost}cr."
 
 
-def _refuel(p: Palette, world: World) -> None:
+def _refuel(p: Palette, world: World) -> str | None:
     ship = world.save.ship
     room = fuel_capacity(ship) - ship.fuel
     if room <= 0:
         out_line(f"{p.muted}Tanks are already full.{RESET}")
-        return
+        return "Tanks are already full."
     affordable = world.save.pilot.credits // 6
     max_qty = max(0, min(room, affordable))
     if max_qty <= 0:
         out_line(f"{p.wrong}Not enough credits to buy fuel (6cr/unit).{RESET}")
-        return
+        return "Not enough credits to buy fuel (6cr/unit)."
     out_prompt(f"{p.muted}Fuel to buy (max {max_qty}, 6cr/unit): {RESET}")
     raw = read_line_raw(max_len=4)
     qty = int(raw) if raw.isdigit() else 0
@@ -4262,20 +4250,21 @@ def _refuel(p: Palette, world: World) -> None:
     ship.fuel += qty
     world.checkpoint()
     out_line(f"{p.correct}Refueled {qty} units for {cost}cr.{RESET}")
+    return f"Refueled {qty} units for {cost}cr."
 
 
-def _repair(p: Palette, world: World) -> None:
+def _repair(p: Palette, world: World) -> str | None:
     ship = world.save.ship
     missing = hull_hp_max(ship) - ship.hull_hp
     if missing <= 0:
         out_line(f"{p.muted}Hull is already at full integrity.{RESET}")
-        return
+        return "Hull is already at full integrity."
     cost = missing * 4
     if world.save.pilot.credits < cost:
         affordable_hp = world.save.pilot.credits // 4
         if affordable_hp <= 0:
             out_line(f"{p.wrong}Can't afford any repairs right now.{RESET}")
-            return
+            return "Cannot afford repairs right now."
         missing = affordable_hp
         cost = missing * 4
     if not confirm(f"Repair {missing} hull for {cost}cr?", p):
@@ -4284,9 +4273,10 @@ def _repair(p: Palette, world: World) -> None:
     ship.hull_hp += missing
     world.checkpoint()
     out_line(f"{p.correct}Hull repaired to {ship.hull_hp}/{hull_hp_max(ship)}.{RESET}")
+    return f"Hull repaired to {ship.hull_hp}/{hull_hp_max(ship)} for {cost}cr."
 
 
-def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -> None:
+def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -> str | None:
     """One hull-class refit, generalized over `HULL_REFITS`'s own
     branching ladder -- Shuttle owners see two independent calls of this
     (Freighter or Cutter), Freighter/Cutter owners see one (Carrier),
@@ -4295,7 +4285,7 @@ def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -
     ship = world.save.ship
     if world.save.pilot.credits < cost:
         out_line(f"{p.wrong}Need {cost}cr for the {target_class} refit.{RESET}")
-        return
+        return f"Need {cost}cr for the {target_class} refit."
     if not confirm(f"Commission a {target_class}-class refit for {cost}cr? "
                     f"This is a permanent hull upgrade.", p):
         return
@@ -4308,6 +4298,7 @@ def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -
     world.checkpoint()
     out_line(f"{p.gold}{BOLD}Your {previous_class} is towed into drydock and emerges a {target_class}.{RESET}")
     out_line(f"{p.gold}Cargo, hull, and fuel capacity all jump considerably.{RESET}")
+    return f"Commissioned a {target_class} hull for {cost}cr."
 
 
 def _mission_plain(text) -> str:
