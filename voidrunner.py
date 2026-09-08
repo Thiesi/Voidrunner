@@ -1100,6 +1100,7 @@ class SaveData:
     cargo_basis: dict[str, list[list[int]]] = field(default_factory=dict)
     trading_ledger: TradingLedger = field(default_factory=TradingLedger)
     market_memory: dict[int, dict[str, dict]] = field(default_factory=dict)
+    market_depth: dict[int, dict[str, dict[str, int]]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -1129,6 +1130,7 @@ class SaveData:
             "cargo_basis": self.cargo_basis,
             "trading_ledger": dataclasses.asdict(self.trading_ledger),
             "market_memory": {str(sid): quotes for sid, quotes in self.market_memory.items()},
+            "market_depth": {str(sid): goods for sid, goods in self.market_depth.items()},
         }
 
     @classmethod
@@ -1165,6 +1167,8 @@ class SaveData:
             trading_ledger=TradingLedger(**d.get("trading_ledger", {})),
             market_memory={int(sid): {c: dict(q) for c, q in quotes.items()}
                            for sid, quotes in d.get("market_memory", {}).items()},
+            market_depth={int(sid): {c: dict(pool) for c, pool in goods.items()}
+                          for sid, goods in d.get("market_depth", {}).items()},
         )
 
 
@@ -1262,6 +1266,25 @@ def _validate_save_document(data: dict) -> None:
             integer(value, "ledger " + key)
     if basis or any(value for key, value in ledger.items() if key != "since_day"):
         require(ledger.get("since_day") is not None, "ledger start day")
+    depth = data.get("market_depth", {})
+    require(isinstance(depth, dict) and len(depth) <= GALAXY_SYSTEM_COUNT, "market depth")
+    depth_ids = set()
+    economies = {s.id: s.economy for s in generate_galaxy(data["seed"])} if depth else {}
+    for key, goods in depth.items():
+        require(isinstance(key, str) and key.isascii() and key.isdecimal(), "stock station")
+        sid = int(key)
+        system(sid, "stock station")
+        require(sid not in depth_ids, "duplicate stock station")
+        depth_ids.add(sid)
+        require(isinstance(goods, dict) and set(goods) <= set(COMMODITIES), "stock commodities")
+        for commodity, pool in goods.items():
+            require(isinstance(pool, dict), "station stock")
+            _reject_unknown_save_fields(pool, {"day", "stock", "demand"}, "station stock")
+            require(set(pool) == {"day", "stock", "demand"}, "station stock")
+            integer(pool["day"], "stock day", maximum=data["turn"])
+            caps = market_depth_limits(economies[sid], commodity)
+            integer(pool["stock"], "station stock", maximum=caps["stock"])
+            integer(pool["demand"], "station demand", maximum=caps["demand"])
     memory = data.get("market_memory", {})
     require(isinstance(memory, dict) and len(memory) <= GALAXY_SYSTEM_COUNT, "market memory")
     memory_ids = set()
@@ -1272,10 +1295,17 @@ def _validate_save_document(data: dict) -> None:
         require(sid not in memory_ids, "duplicate remembered station")
         memory_ids.add(sid)
         require(isinstance(quotes, dict) and set(quotes) <= set(COMMODITIES), "remembered commodities")
-        for quote in quotes.values():
+        for commodity, quote in quotes.items():
             require(isinstance(quote, dict), "remembered quote")
-            _reject_unknown_save_fields(quote, {"day", "buy", "sell"}, "remembered quote")
-            require(set(quote) == {"day", "buy", "sell"}, "remembered quote")
+            _reject_unknown_save_fields(quote, {"day", "buy", "sell", "stock", "demand"}, "remembered quote")
+            require({"day", "buy", "sell"} <= set(quote), "remembered quote")
+            require(("stock" in quote) == ("demand" in quote), "remembered quantities")
+            if "stock" in quote:
+                if not economies:
+                    economies = {station.id: station.economy for station in generate_galaxy(data["seed"])}
+                caps = market_depth_limits(economies[sid], commodity)
+                for quantity in ("stock", "demand"):
+                    integer(quote[quantity], "remembered " + quantity, maximum=caps[quantity])
             integer(quote["day"], "quote observation day", maximum=data["turn"])
             if quote["buy"] is not None:
                 integer(quote["buy"], "remembered buy price", minimum=1)
@@ -1690,6 +1720,35 @@ def _nudge_drift(world: World, system_id: int, commodity: str, delta: float) -> 
     table[commodity] = max(0.6, min(1.6, current + delta))
 
 
+def market_depth_limits(economy: str, commodity: str) -> dict[str, int]:
+    """Public spot-market ceilings and replenishment per game day."""
+    stock_rate = 6 if commodity in ECONOMY_PRODUCES[economy] else 3
+    demand_rate = 6 if commodity in ECONOMY_DEMANDS[economy] else 3
+    return {"stock": stock_rate * 16, "demand": demand_rate * 16,
+            "stock_rate": stock_rate, "demand_rate": demand_rate}
+
+
+def market_depth_quote(world: World, system_id: int, commodity: str) -> dict[str, int]:
+    """Read-only lazy replenishment; neither browsing nor restart creates stock."""
+    limits = market_depth_limits(world.by_id[system_id].economy, commodity)
+    stored = world.save.market_depth.get(system_id, {}).get(commodity)
+    elapsed = world.save.turn - stored["day"] if stored is not None else 0
+    return {**limits, "day": world.save.turn,
+            **{key: min(limits[key], stored[key] + elapsed * limits[key + "_rate"])
+               if stored is not None else limits[key] for key in ("stock", "demand")}}
+
+
+def _consume_market_depth(world: World, commodity: str, quantity: int, *, buying: bool) -> None:
+    pool = market_depth_quote(world, world.here.id, commodity)
+    if buying:
+        pool["stock"] -= quantity
+    else:
+        pool["demand"] -= quantity
+        pool["stock"] = min(market_depth_limits(world.here.economy, commodity)["stock"], pool["stock"] + quantity)
+    world.save.market_depth.setdefault(world.here.id, {})[commodity] = {
+        key: pool[key] for key in ("day", "stock", "demand")}
+
+
 def remember_local_market(world: World) -> None:
     """Observe only docked, locally visible quotes, without consuming RNG."""
     if world.save.pending_travel is not None:
@@ -1699,12 +1758,14 @@ def remember_local_market(world: World) -> None:
         if not legal and world.here.economy != "Haven" and not world.save.cargo.get(commodity, 0):
             continue
         unit = price_for(world, world.here.id, commodity)
-        _remember_market_quote(world, world.here.id, commodity, unit)
+        _remember_market_quote(world, world.here.id, commodity, unit, depth=market_depth_quote(world, world.here.id, commodity))
 
 
-def _remember_market_quote(world: World, system_id: int, commodity: str, unit: int) -> dict:
+def _remember_market_quote(world: World, system_id: int, commodity: str, unit: int, *, depth: dict | None = None) -> dict:
     quote = {"day": world.save.turn, "sell": round(unit * SELL_SPREAD),
              "buy": unit if COMMODITIES[commodity]["legal"] or world.by_id[system_id].economy == "Haven" else None}
+    if depth is not None:
+        quote.update(stock=depth["stock"], demand=depth["demand"])
     world.save.market_memory.setdefault(system_id, {})[commodity] = quote
     return quote
 
@@ -1745,6 +1806,9 @@ def trade_route_quote(world: World, destination: int, commodity: str, quantity: 
             raise TradeError("This station does not openly sell that commodity.")
         if quantity + sum(world.save.cargo.values()) > cargo_capacity(world.save.ship):
             raise TradeError("That purchase would exceed your free hold space.")
+        stock = market_depth_quote(world, world.here.id, commodity)["stock"]
+        if quantity > stock:
+            raise TradeError(f"Only {stock} units in local stock. Reduce quantity or return after replenishment.")
         cost = procurement = quantity * price_for(world, world.here.id, commodity)
         unknown = 0
     path = bfs_path(world.by_id, world.here.id, destination)
@@ -1771,13 +1835,15 @@ def trade_route_quote(world: World, destination: int, commodity: str, quantity: 
                     conflicts.append(mission.description)
                 older_cargo = max(0, older_cargo - mission.quantity)
                 available -= mission.quantity
+    observed_demand = remembered.get("demand")
+    demand_shortfall = observed_demand is not None and quantity > observed_demand
     return {"destination": destination, "commodity": commodity, "quantity": quantity, "use_hold": use_hold,
             "observed_day": remembered["day"], "unit_sale": remembered["sell"], "receipts": receipts,
             "cargo_cost": cost, "unknown_units": unknown, "procurement": procurement, "legs": legs,
             "fuel": fuel, "fuel_cash": fuel_cash, "wages": wages,
             "cash_needed": procurement + fuel_cash + wages,
-            "conflicts": conflicts,
-            "margin": None if unknown or conflicts else receipts - cost - fuel * 6 - wages,
+            "conflicts": conflicts, "observed_demand": observed_demand, "demand_shortfall": demand_shortfall,
+            "margin": None if unknown or conflicts or demand_shortfall else receipts - cost - fuel * 6 - wages,
             "feasible": all(burn <= fuel_capacity(world.save.ship) for _, burn in legs)}
 
 
@@ -1929,6 +1995,7 @@ def trade_cargo(world: World, commodity: str, quantity: int, *, buying: bool) ->
         raise TradeError("Choose a valid commodity and positive whole quantity.")
     unit = price_for(world, world.here.id, commodity)
     label = COMMODITIES[commodity]["label"]
+    depth = market_depth_quote(world, world.here.id, commodity)
     if buying:
         if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
             raise TradeError("Station authorities prohibit the open purchase of contraband.")
@@ -1937,6 +2004,9 @@ def trade_cargo(world: World, commodity: str, quantity: int, *, buying: bool) ->
         total = quantity * unit
         if total > world.save.pilot.credits:
             raise TradeError(f"Need {total}cr for this purchase.")
+        if quantity > depth["stock"]:
+            raise TradeError(f"Only {depth['stock']} units in stock; replenishes {depth['stock_rate']}/day.")
+        _consume_market_depth(world, commodity, quantity, buying=True)
         world.save.pilot.credits -= total
         _acquire_cargo(world, commodity, quantity, total)
         _nudge_drift(world, world.here.id, commodity, min(0.05, quantity * 0.01))
@@ -1944,7 +2014,10 @@ def trade_cargo(world: World, commodity: str, quantity: int, *, buying: bool) ->
         return f"Bought {quantity}x {label} for {total}cr."
     if quantity > world.save.cargo.get(commodity, 0):
         raise TradeError("You do not have that much cargo.")
+    if quantity > depth["demand"]:
+        raise TradeError(f"Station can buy {depth['demand']} units; demand replenishes {depth['demand_rate']}/day.")
     total = quantity * round(unit * SELL_SPREAD)
+    _consume_market_depth(world, commodity, quantity, buying=False)
     world.save.pilot.credits += total
     _dispose_cargo(world, commodity, quantity, proceeds=total, kind="sale")
     _nudge_drift(world, world.here.id, commodity, -min(0.05, quantity * 0.01))
@@ -2222,7 +2295,7 @@ def opening_assignment_offer(world: World) -> Mission | None:
             missing = max(0, 3 - save.cargo.get(commodity, 0))
             price = price_for(world, 0, commodity)
             budget = missing * price + max(0, 2 * fuel - ship.fuel) * 6 + 2 * wage
-            if missing > room or budget > save.pilot.credits:
+            if missing > room or missing > market_depth_quote(world, 0, commodity)["stock"] or budget > save.pilot.credits:
                 continue
             preference = (target.danger, fuel, commodity not in ECONOMY_PRODUCES[world.here.economy], price, sid, commodity)
             reward = 3 * price + 2 * fuel * 6 + 2 * wage + 200
@@ -3343,7 +3416,7 @@ def screen_market(p: Palette, world: World) -> None:
     while True:
         out_line()
         out_line(_box_title(p, f"Interstellar Commodity Exchange: {system.station_name}"))
-        header = f" {p.gold}KEY  COMMODITY            BUY/UNIT    SELL/UNIT    SPREAD   IN HOLD  STATUS{RESET}"
+        header = f" {p.gold}KEY  COMMODITY            BUY/UNIT    SELL/UNIT     STOCK   IN HOLD  STATUS{RESET}"
         out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
         out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
         rows: list[tuple[str, str]] = []
@@ -3351,7 +3424,7 @@ def screen_market(p: Palette, world: World) -> None:
         for commodity in goods:
             buy = price_for(world, system.id, commodity)
             sell = round(buy * SELL_SPREAD)
-            spread = sell - buy
+            stock = market_depth_quote(world, system.id, commodity)["stock"]
             have = world.save.cargo.get(commodity, 0)
             label = COMMODITIES[commodity]["label"]
 
@@ -3368,7 +3441,7 @@ def screen_market(p: Palette, world: World) -> None:
             key_char = LETTERS[len(rows)]
             row_str = (
                 f"  {p.gold}[{key_char}]{RESET}  {label:<18} "
-                f"{buy:>6} cr   {sell:>6} cr   {spread:>5} cr   "
+                f"{buy:>6} cr   {sell:>6} cr   {stock:>8}   "
                 f"{have:>5}   {tag}"
             )
             rows.append((commodity, row_str))
@@ -3407,7 +3480,7 @@ def screen_futures(p: Palette, world: World, goods: list[str]) -> None:
         visible = entries[page * 4:page * 4 + 4]
         out_line()
         out_line(f"{p.gold}Futures Exchange - {page + 1}/{count}{RESET}")
-        out_line("New orders: station pickup, 8% nonrefundable fee rounded up per unit.")
+        out_line("Wholesale orders: separate from spot stock; station pickup, 8% nonrefundable fee rounded up per unit.")
         for index, (kind, item) in enumerate(visible, 1):
             if kind == "goods":
                 principal, fee = futures_quote(world, item, 1)
@@ -3555,6 +3628,8 @@ def remembered_market_lines(world: World) -> list[str]:
         for commodity, quote in quotes.items():
             buy = f"{quote['buy']}cr" if quote["buy"] is not None else "prohibited"
             lines.append(f"{COMMODITIES[commodity]['label']}: buy {buy}, sell {quote['sell']}cr. Day {quote['day']} ({world.save.turn - quote['day']} days old).")
+            if "stock" in quote:
+                lines.append(f"Observed stock {quote['stock']}; station buying demand {quote['demand']}. Quantities may replenish or change.")
     if not world.save.market_memory:
         lines.append("No market observations yet. Older discoveries have no recorded quotes.")
     return lines
@@ -3574,19 +3649,25 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
     age = world.save.turn - quote["observed_day"]
     lines.extend([
         f"Destination sell quote: {quote['unit_sale']}cr/unit, observed day {quote['observed_day']} ({age} days old).",
-        f"Sale receipts if the full load arrives: {quote['receipts']:,}cr.",
+        f"Sale receipts if the full load arrives and the station buys it: {quote['receipts']:,}cr.",
         f"Cargo acquisition cost: {quote['cargo_cost']:,}cr recorded; {quote['unknown_units']} units with unknown cost.",
         f"Buy now: {quote['procurement']:,}cr. Credits after buying: {world.save.pilot.credits - quote['procurement']:,}cr.",
         f"Fuel: {quote['fuel']} units, replacement value {quote['fuel'] * 6}cr. Additional fuel cash: {quote['fuel_cash']}cr with your current tank.",
         f"Crew wages: {quote['wages']}cr for {len(quote['legs'])} jumps. Arrival day {world.save.turn + len(quote['legs'])} if uninterrupted.",
         f"Cash needed before sale: {quote['cash_needed']:,}cr. Budget {'covered' if quote['cash_needed'] <= world.save.pilot.credits else 'SHORT by ' + str(quote['cash_needed'] - world.save.pilot.credits) + 'cr'}.",
     ])
+    if quote["observed_demand"] is None:
+        lines.append("Destination buying demand was not observed; confirm capacity before relying on the full sale.")
+    else:
+        lines.append(f"Observed destination buying demand: {quote['observed_demand']} units on day {quote['observed_day']}; may replenish or change.")
+    if quote["demand_shortfall"]:
+        lines.append("DEMAND WARNING: this load exceeds observed buying demand. Reduce quantity or obtain a newer observation.")
     if not quote["feasible"]:
         lines.append("INFEASIBLE: a route leg exceeds your tank capacity. Upgrade or plan a different route.")
     elif quote["margin"] is not None:
         lines.append(f"Estimated margin after cargo, replacement fuel and wages: {quote['margin']:+,}cr.")
     else:
-        lines.append("Total margin unavailable: unknown cargo costs or delivery commitments affect this load.")
+        lines.append("Total margin unavailable: unknown cargo costs, delivery commitments or observed buying demand affect this load.")
     if quote["conflicts"]:
         lines.append("DELIVERY CONFLICT: these contracts may consume this commodity on the route: " + "; ".join(quote["conflicts"]) + ".")
     lines.append("ROUTE - shortest by jumps; fuel top-ups at stations are budgeted at 6cr/unit.")
@@ -3604,7 +3685,7 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
         lines.append(f"Jump: {label}; {burn} fuel; danger {danger}.{blocked}")
         tank = max(0, tank - burn)
         previous = system
-    lines.append("Estimate assumes the remembered sale price and intact cargo. Market changes, encounters, repairs, fines, detours and other income/spending are excluded.")
+    lines.append("Estimate assumes the remembered sale price, sufficient station buying demand and intact cargo. Market changes, encounters, repairs, fines, detours and other income/spending are excluded.")
     return lines
 
 
@@ -3802,20 +3883,40 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
     label = COMMODITIES[commodity]["label"]
     buy = price_for(world, world.here.id, commodity)
     sell = round(buy * SELL_SPREAD)
-    out_line(f"{p.accent}{label}{RESET} -- Buy {buy}cr  Sell {sell}cr")
-    out_line(f"Credits: {world.save.pilot.credits}cr. Each unit bought costs {buy}cr; each sold returns {sell}cr.")
-    out_prompt(f"{p.muted}[B]uy [S]ell [Q]cancel: {RESET}")
-    action = read_command()
-    out_line(action)
+    depth = market_depth_quote(world, world.here.id, commodity)
+    lines = [f"Buy {buy}cr/unit; sell {sell}cr/unit.",
+             f"Credits: {world.save.pilot.credits}cr. Hold: {world.save.cargo.get(commodity, 0)} units.",
+             f"Stock {depth['stock']} (+{depth['stock_rate']}/day); station buys {depth['demand']} (+{depth['demand_rate']}/day).",
+             "Only jumps advance days. Reopening this screen does not replenish the market."]
+    footer = "[B]uy [S]ell [N]ext [P]rev [Q]cancel: "
+    title = f"{label} Exchange"
+    pages = _trade_pages(lines, title, footer)
+    page = 0
+    while True:
+        out_line()
+        out_line(f"{title} {page + 1}/{len(pages)}")
+        for line in pages[page]:
+            out_line(line)
+        out_prompt(footer)
+        action = read_command()
+        out_line(action)
+        if action in ("B", "S"):
+            break
+        if action == "Q":
+            return
+        if action == "N":
+            page = min(page + 1, len(pages) - 1)
+        elif action == "P":
+            page = max(0, page - 1)
     if action == "B":
         if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
             out_line(f"{p.wrong}Station authorities prohibit the open purchase of contraband.{RESET}")
             return
         room = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
         affordable = world.save.pilot.credits // buy if buy else room
-        max_qty = max(0, min(room, affordable))
+        max_qty = max(0, min(room, affordable, depth["stock"]))
         if max_qty <= 0:
-            out_line(f"{p.wrong}No room or no credits.{RESET}")
+            out_line(f"{p.wrong}No room, credits or station stock.{RESET}")
             return
         out_prompt(f"{p.muted}Quantity (max {max_qty}, Enter to cancel): {RESET}")
         raw = read_line_raw(max_len=5)
@@ -3832,10 +3933,14 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
         if have <= 0:
             out_line(f"{p.wrong}You have none to sell.{RESET}")
             return
-        out_prompt(f"{p.muted}Quantity (have {have}, Enter to cancel): {RESET}")
+        max_qty = min(have, depth["demand"])
+        if max_qty <= 0:
+            out_line(f"{p.wrong}Station demand is exhausted; replenishes {depth['demand_rate']}/day.{RESET}")
+            return
+        out_prompt(f"{p.muted}Quantity (have {have}, station buys {max_qty}, Enter to cancel): {RESET}")
         raw = read_line_raw(max_len=5)
         qty = int(raw) if raw.isdigit() else 0
-        qty = min(qty, have)
+        qty = min(qty, max_qty)
         if qty <= 0:
             return
         result = trade_cargo(world, commodity, qty, buying=False)

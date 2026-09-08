@@ -647,14 +647,17 @@ def test_trading_ledger_real_purchases_and_sales_survive_kill_without_duplicate_
     with _door_stopped_at(tmp_path, b"M" + key + b"B3\n", b"Bought 3x"):
         bought, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert bought.cargo_basis == {"food": [[3, cost]]}
+        assert bought.market_depth[0]["food"] == {"day": 0, "stock": 45, "demand": 96}
     unit = round(vr.price_for(vr.World(bought), 0, "food") * vr.SELL_SPREAD)
     with _door_stopped_at(tmp_path, b"M" + key + b"S2\n", b"Sold 2x"):
         sold, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert sold.cargo_basis == {"food": [[1, cost // 3]]}
+        assert sold.market_depth[0]["food"] == {"day": 0, "stock": 47, "demand": 94}
         assert (sold.trading_ledger.sales_cost, sold.trading_ledger.sales_revenue) == (cost * 2 // 3, 2 * unit)
     with _door_stopped_at(tmp_path, b"T", b"Trading Ledger 1/"):
         viewed, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert viewed.trading_ledger == sold.trading_ledger
+        assert viewed.market_depth == sold.market_depth
 
 
 @pytest.mark.parametrize("commands", [b"TBQ", b"T"])
@@ -754,6 +757,209 @@ def test_trade_route_draft_rejection_keeps_edits_until_apply(monkeypatch):
     assert result == {**initial, "quantity": 3} and initial["quantity"] == 1
     assert "Cannot apply" in output.getvalue() and "Quantity: 3" in output.getvalue()
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("economy,commodity,stock,demand", [
+    ("Agricultural", "food", 96, 48), ("Industrial", "food", 48, 96),
+    ("Tech", "electronics", 96, 48), ("Mining", "electronics", 48, 48),
+    ("Haven", "weapons", 96, 48),
+])
+def test_market_depth_limits_explain_production_and_demand(economy, commodity, stock, demand):
+    limits = vr.market_depth_limits(economy, commodity)
+    assert limits == {"stock": stock, "demand": demand,
+                      "stock_rate": stock // 16, "demand_rate": demand // 16}
+
+
+def test_market_depth_consumption_restart_and_replenishment_are_bounded(tmp_path):
+    import copy
+    world = _world_with_seed(42)
+    rng = world.event_rng.getstate()
+    before = copy.deepcopy(world.save.to_dict())
+    assert vr.market_depth_quote(world, 0, "food")["stock"] == 48
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+    vr.trade_cargo(world, "food", 20, buying=True)
+    vr.trade_cargo(world, "food", 20, buying=False)
+    pool = vr.market_depth_quote(world, 0, "food")
+    assert pool["stock"] == 48 and pool["demand"] == 76
+    vr.persist(world, tmp_path, 1)
+    restored = vr.World(vr.load_or_create_save(tmp_path, 1, "Tester")[0])
+    assert vr.market_depth_quote(restored, 0, "food") == pool
+    restored.save.turn += 2
+    assert vr.market_depth_quote(restored, 0, "food")["demand"] == 88
+    assert restored.save.market_depth[0]["food"]["day"] == 0
+    restored.save.turn += 10**6
+    assert vr.market_depth_quote(restored, 0, "food")["demand"] == 96
+    assert world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("buying", [True, False])
+def test_market_depth_rejected_trade_is_atomic_including_prices_basis_and_rng(buying):
+    import copy
+    world = _world_with_seed(42)
+    world.save.cargo = {"food": 10}
+    world.save.market_depth = {0: {"food": {"day": 0, "stock": 0, "demand": 0}}}
+    before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
+    with pytest.raises(vr.TradeError, match="stock|Station can buy"):
+        vr.trade_cargo(world, "food", 1, buying=buying)
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+def test_market_depth_split_orders_and_buyback_cannot_restore_station_demand():
+    world = _world_with_seed(42)
+    world.save.ship.hull_class = "Carrier"; world.save.pilot.credits = 100000
+    world.save.cargo = {"food": 100}
+    for _ in range(96):
+        vr.trade_cargo(world, "food", 1, buying=False)
+    vr.trade_cargo(world, "food", 1, buying=True)
+    assert vr.market_depth_quote(world, 0, "food")["demand"] == 0
+    with pytest.raises(vr.TradeError, match="Station can buy 0"):
+        vr.trade_cargo(world, "food", 1, buying=False)
+    world.save.turn = 1
+    vr.trade_cargo(world, "food", 5, buying=False)
+    assert vr.market_depth_quote(world, 0, "food")["demand"] == 1
+
+
+def test_market_depth_old_career_and_future_wholesale_terms_remain_usable():
+    import copy
+    world = _world_with_seed(42)
+    data = copy.deepcopy(world.save.to_dict()); data.pop("market_depth")
+    restored = vr.World(vr.SaveData.from_dict(data))
+    assert restored.save.market_depth == {} and vr.market_depth_quote(restored, 0, "food")["stock"] == 48
+    restored.save.market_depth = {0: {"food": {"day": 0, "stock": 0, "demand": 0}}}
+    restored.save.pilot.credits = 100000
+    vr.buy_futures_contract(restored, "food", 10, 5)
+    restored.save.turn = 5
+    vr.settle_futures_contracts(restored)
+    assert restored.save.cargo["food"] == 10
+    assert restored.save.trading_ledger.since_day == 5
+    assert restored.save.market_depth[0]["food"] == {"day": 0, "stock": 0, "demand": 0}
+
+
+def test_market_depth_observations_are_stale_and_reports_do_not_invent_quantities():
+    world, destination = _world_with_market_memory()
+    observed = dict(world.save.market_memory[destination]["food"])
+    assert {"stock", "demand"} <= observed.keys()
+    world.save.turn = 10
+    world.save.market_depth[destination] = {"food": {"day": 10, "stock": 0, "demand": 0}}
+    assert world.save.market_memory[destination]["food"] == observed
+    vr._remember_market_quote(world, destination, "food", 12)
+    assert "stock" not in world.save.market_memory[destination]["food"]
+
+
+def test_market_depth_route_refuses_unavailable_procurement_and_labels_sale_limits():
+    import copy
+    world, destination = _world_with_market_memory()
+    world.save.market_depth[0] = {"food": {"day": 0, "stock": 0, "demand": 96}}
+    before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
+    with pytest.raises(vr.TradeError, match="local stock"):
+        vr.trade_route_quote(world, destination, "food", 1)
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+    world.save.cargo = {"food": 3}; world.save.cargo_basis = {"food": [[3, 21]]}
+    world.save.market_memory[destination]["food"]["demand"] = 2
+    quote = vr.trade_route_quote(world, destination, "food", 3, use_hold=True)
+    assert quote["margin"] is None and quote["demand_shortfall"]
+    text = " ".join(vr.trade_route_lines(world, destination, "food", 3, True))
+    assert "DEMAND WARNING" in text and "may replenish" in text
+    assert world.event_rng.getstate() == rng and world.save.market_depth == {0: {"food": {"day": 0, "stock": 0, "demand": 96}}}
+
+
+@pytest.mark.parametrize("depth", [
+    [], {"99": {}}, {"0": {}, "00": {}}, {"0": {"gold": {}}},
+    {"0": {"food": {"day": 1, "stock": 1, "demand": 1}}},
+    {"0": {"food": {"day": 0, "stock": 49, "demand": 1}}},
+    {"0": {"food": {"day": 0, "stock": 1, "demand": 97}}},
+    {"0": {"food": {"day": 0, "stock": -1, "demand": 1}}},
+    {"0": {"food": {"day": False, "stock": 1, "demand": 1}}},
+    {"0": {"food": {"day": 0, "stock": 1}}},
+    {"0": {"food": {"day": 0, "stock": 1, "demand": 1, "future": 1}}},
+])
+def test_market_depth_malformed_state_preserves_original_file(tmp_path, depth):
+    import json
+    world = _world_with_seed(42); data = world.save.to_dict(); data["market_depth"] = depth
+    path = tmp_path / "1.json"; path.write_text(json.dumps(data), encoding="utf-8")
+    original = path.read_bytes()
+    with pytest.raises(vr.ResumeError):
+        vr.load_or_create_save(tmp_path, 1, "Tester")
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("commands,buying", [(["B"], True), (["S"], False)])
+def test_market_depth_exhausted_pool_reports_reason_without_quantity_prompt(monkeypatch, commands, buying):
+    import contextlib, io
+    world = _world_with_seed(42); world.save.cargo = {"food": 3}
+    world.save.market_depth = {0: {"food": {"day": 0, "stock": 0, "demand": 0}}}
+    keys = iter(commands); monkeypatch.setattr(vr, "read_command", lambda: next(keys))
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: pytest.fail("Exhausted pool prompted for quantity"))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf): vr._trade_commodity(vr.Palette(False), world, "food")
+    text = " ".join(buf.getvalue().split())
+    assert "Stock 0 (+3/day)" in text and "station buys 0 (+6/day)" in text
+    assert "station stock" in text if buying else "demand is exhausted" in text
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_market_depth_commodity_details_fit_every_page_without_replenishing(monkeypatch, width, height):
+    import copy, re
+    world = _world_with_seed(42); world.save.market_depth = {0: {"metals": {"day": 0, "stock": 3, "demand": 4}}}
+    before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    output = io.StringIO(); frames = []
+    def choose():
+        frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
+        match = re.search(r"Refined Metals Exchange (\d+)/(\d+)", " ".join(frame.split()))
+        assert match and len(frames) < 100
+        return "Q" if match[1] == match[2] else "N"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): vr._trade_commodity(vr.Palette(False), world, "metals")
+    assert "Stock 3 (+6/day)" in " ".join(" ".join(frames).split())
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+    assert all(len(frame.splitlines()) <= height for frame in frames)
+    assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
+
+
+def test_market_depth_opening_assignment_does_not_quote_unavailable_procurement():
+    world = _world_with_seed(42)
+    assert vr.opening_assignment_offer(world) is not None
+    world.save.market_depth[0] = {c: {"day": 0, "stock": 0, "demand": 0} for c in vr.COMMODITIES}
+    assert vr.opening_assignment_offer(world) is None
+
+
+def test_market_depth_contract_delivery_preserves_signed_terms_when_spot_demand_is_zero():
+    world = _world_with_seed(42); world.save.cargo = {"food": 3}
+    world.save.market_depth = {0: {"food": {"day": 0, "stock": 0, "demand": 0}}}
+    world.save.active_missions = [vr.Mission(id=1, kind="delivery", description="Signed delivery", reward=500,
+        origin_system=1, target_system=0, commodity="food", quantity=3)]
+    credits = world.save.pilot.credits
+    vr.check_mission_completions(world)
+    assert world.save.pilot.credits == credits + 500 and not world.save.active_missions and not world.save.cargo
+    assert world.save.market_depth[0]["food"] == {"day": 0, "stock": 0, "demand": 0}
+
+
+@pytest.mark.parametrize("quantity_fields", [{"stock": 1}, {"demand": 1}, {"stock": True, "demand": 1}, {"stock": 1, "demand": 97}])
+def test_market_depth_observed_quantities_are_paired_and_bounded(quantity_fields):
+    world = _world_with_seed(42)
+    world.save.market_memory[0] = {"food": {"day": 0, "buy": 12, "sell": 11, **quantity_fields}}
+    with pytest.raises(vr.ResumeError): vr.SaveData.from_dict(world.save.to_dict())
+
+
+@pytest.mark.parametrize("economy", vr.ECONOMIES)
+@pytest.mark.parametrize("quantity", ["stock", "demand"])
+def test_market_depth_remembered_quantities_respect_each_station_ceiling(tmp_path, economy, quantity):
+    import json
+    world = _world_with_seed(0)
+    sid = next(s.id for s in world.galaxy if s.economy == economy)
+    if sid not in world.save.discovered: world.save.discovered.append(sid)
+    limits = vr.market_depth_limits(economy, "food")
+    quote = {"day": 0, "buy": 12, "sell": 11, "stock": limits["stock"], "demand": limits["demand"]}
+    world.save.market_memory[sid] = {"food": quote}
+    assert not world.save.market_depth  # Price memory also validates without materialized pools.
+    accepted = vr.SaveData.from_dict(world.save.to_dict())
+    assert accepted.market_memory[sid]["food"][quantity] == limits[quantity]
+    quote[quantity] += 1
+    raw = json.dumps(world.save.to_dict()).encode(); (tmp_path / "77.json").write_bytes(raw)
+    with pytest.raises(vr.ResumeError, match="remembered " + quantity):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert (tmp_path / "77.json").read_bytes() == raw
 
 
 # -- galaxy generation -------------------------------------------------
