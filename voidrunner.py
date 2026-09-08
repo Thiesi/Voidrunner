@@ -1009,6 +1009,15 @@ def _validate_tactics(value: dict) -> None:
         raise ValueError("invalid tactical state")
 
 
+def _validate_warrant(value: dict) -> None:
+    if not isinstance(value, dict): raise ValueError("invalid bounty identification")
+    _reject_unknown_save_fields(value, {"version", "matches", "checked", "engaged"}, "bounty identification")
+    if type(value.get("version")) is not int: raise ValueError("invalid identification version")
+    if value["version"] != 1: raise UnsupportedSave("This bounty uses an unsupported identification format.")
+    if any(type(value.get(key)) is not bool for key in ("matches", "checked", "engaged")):
+        raise ValueError("invalid bounty identification")
+
+
 def _load_pending_travel(value: dict | None) -> dict | None:
     if value is None:
         return None
@@ -1037,7 +1046,8 @@ def _load_pending_travel(value: dict | None) -> dict | None:
             _validate_combat_mission_snapshot(value["bounty"], "bounty")
         state = value["encounter"]
         _reject_unknown_save_fields(state, {"inspect", "done", "kind", "pirates", "index", "pirate", "ambush",
-                                           "combat", "result"}, "encounter")
+                                           "combat", "result", "warrant"}, "encounter")
+        if "warrant" in state: _validate_warrant(state["warrant"])
         if value["phase"] == "customs" and not isinstance(state["inspect"], bool):
             raise ValueError("invalid inspection")
         if "done" in state and not isinstance(state["done"], bool):
@@ -1062,7 +1072,7 @@ def _load_pending_travel(value: dict | None) -> dict | None:
             if "tactics" in combat:
                 _validate_tactics(combat["tactics"])
             pirates.append(combat["pirate"])
-            if (combat["outcome"] not in (None, "won", "escaped", "destroyed")
+            if (combat["outcome"] not in (None, "won", "escaped", "destroyed", "reported")
                     or not isinstance(combat["lines"], list)
                     or not all(isinstance(line, str) for line in combat["lines"])):
                 raise ValueError("invalid combat")
@@ -1512,7 +1522,15 @@ def _validate_pending_travel_consistency(save: SaveData) -> None:
         return
     try:
         combat = travel["encounter"].get("combat")
+        warrant = travel["encounter"].get("warrant")
+        if warrant is not None:
+            if travel["phase"] != "primary" or travel["primary"] != "bounty":
+                raise ValueError("identification outside a bounty interception")
+            if combat is not None and not warrant["engaged"] and combat["pirate"]["hp"] != combat["pirate"]["hp_max"]:
+                raise ValueError("damage before bounty engagement")
         if combat is not None:
+            if combat["outcome"] == "reported" and (warrant is None or not warrant["checked"] or warrant["matches"] or warrant["engaged"]):
+                raise ValueError("incorrect warrant report")
             outcome = combat["outcome"]
             if (combat["pirate"]["hp"] == 0) != (outcome == "won"):
                 raise ValueError("opponent damage contradicts outcome")
@@ -4564,7 +4582,7 @@ def mission_details(world: World, mission: Mission) -> list[str]:
         lines.append("Accepting or tracking the bearing does not chart the system.")
     elif mission.kind == "bounty":
         lines.append(f"Combat: intercept a tier {mission.pirate_tier} raider at the target. Escape leaves the bounty active; destruction fails it.")
-        lines.append("Bounty kills can trigger a mistaken-identity inquiry and notoriety.")
+        lines.append("At interception, [V] verifies identity for one fuel before engaging; [W] withdraws. A mistaken-identity kill adds notoriety and harms Concord standing; a confirmed mismatch can be closed without a payout.")
     elif mission.kind == "escort":
         lines.append(f"Combat: one tier {mission.pirate_tier} raider fight on EVERY jump while active, including detours.")
         lines.append("Other escort contracts add their own fights. Escape or destruction fails this convoy.")
@@ -5693,6 +5711,39 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
             break
 
 
+def new_bounty_warrant(world: World, mission: Mission) -> dict:
+    rng = random.Random(f"warrant-v1:{world.save.seed}:{mission.id}:{mission.origin_system}:{mission.target_system}")
+    return {"version": 1, "matches": rng.random() >= WRONG_BOUNTY_KILL_CHANCE, "checked": False, "engaged": False}
+
+
+def verify_bounty_identity(world: World, warrant: dict) -> str:
+    if warrant["engaged"]: raise ValueError("Identification is unavailable after engagement.")
+    if warrant["checked"]: raise ValueError("Identity has already been checked.")
+    if world.save.ship.fuel < 1: raise ValueError("Verification requires one fuel.")
+    world.save.ship.fuel -= 1
+    warrant["checked"] = True
+    return ("Identity confirmed: this is your bounty target." if warrant["matches"] else
+            "Identity mismatch confirmed: registered civilian vessel. Close the incorrect warrant or withdraw; firing accepts the penalty.")
+
+
+def bounty_identification_lines(world: World, warrant: dict) -> list[str]:
+    if warrant["checked"]:
+        status = ("Identity confirmed; no mistaken-identity penalty." if warrant["matches"] else
+                  f"Identity mismatch confirmed. Firing pays the bounty; the wrong-ID penalty is +{NOTORIETY_PER_WRONG_BOUNTY_KILL} notoriety and Concord -3, in addition to combat rewards.")
+    else:
+        status = (f"Identity unverified: {WRONG_BOUNTY_KILL_CHANCE:.0%} of posted matches are incorrect. "
+                  f"Wrong-ID penalty: +{NOTORIETY_PER_WRONG_BOUNTY_KILL} notoriety and Concord -3, in addition to combat rewards.")
+    lines = [status]
+    if not warrant["engaged"]:
+        if not warrant["checked"]:
+            lines.append("[V] Verify before engaging: costs one fuel." if world.save.ship.fuel else "Verification unavailable: requires one fuel.")
+        elif not warrant["matches"]:
+            lines.append("[R] Close incorrect warrant: no fight, payout or mission credit.")
+        lines.append("[W] Withdraw before engaging: keep the contract and continue your journey.")
+    else: lines.append("Engaged: identification and free withdrawal are closed.")
+    return lines
+
+
 def _resolve_bounty(p: Palette, world: World, travel: dict) -> None:
     bounty = Mission.from_dict(travel["bounty"])
     if mission_expired(world, bounty):
@@ -5707,6 +5758,7 @@ def _resolve_bounty(p: Palette, world: World, travel: dict) -> None:
     state = _travel_encounter(world)
     if "pirate" not in state:
         state["pirate"] = dataclasses.asdict(generate_pirate(world, tier=bounty.pirate_tier))
+        state["warrant"] = new_bounty_warrant(world, bounty)
         world.checkpoint()
     pirate = Pirate(**state["pirate"])
     out_line(f"{p.wrong}Your bounty target, the {pirate.name}, is waiting.{RESET}")
@@ -5721,12 +5773,17 @@ def _resolve_bounty(p: Palette, world: World, travel: dict) -> None:
         world.save.pilot.missions_completed += 1
         world.save.pilot.note(f"Bounty complete: {bounty.description} (+{reward}cr)")
         lines.append(f"Bounty complete! +{reward}cr")
-        if world.event_rng.random() < WRONG_BOUNTY_KILL_CHANCE:
+        world.event_rng.random()  # Preserve the historical bounty-completion draw.
+        if state.get("warrant") is not None and not state["warrant"]["matches"]:
             world.save.pilot.notoriety += NOTORIETY_PER_WRONG_BOUNTY_KILL
             adjust_reputation(world, FACTION_CONCORD, -3)
-            world.save.pilot.note("Concord inquiry: that bounty kill was mistaken identity -- notoriety rises.")
-            lines.append("Later, a Concord inquiry flags an irregularity: that 'raider' matches an "
-                         "informant's registered ship. Notoriety rises.")
+            world.save.pilot.note("Bounty identification risk accepted: incorrect target destroyed -- notoriety rises.")
+            lines.append("The target was an incorrect match. The stated identification penalty applies: "
+                         f"+{NOTORIETY_PER_WRONG_BOUNTY_KILL} notoriety, Concord standing -3.")
+    elif outcome == "reported":
+        world.save.active_missions.remove(bounty)
+        world.save.pilot.note(f"Incorrect bounty warrant closed: {bounty.description}.")
+        lines.append("Incorrect warrant closed. No bounty payout or mission credit; no notoriety penalty.")
     elif outcome == "destroyed":
         world.save.active_missions.remove(bounty)
         world.save.pilot.note(f"Bounty failed: {bounty.description}")
@@ -5831,7 +5888,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
 
 
 def screen_combat(p: Palette, world: World, pirate: Pirate) -> str:
-    """Return won/escaped/destroyed; preserve a terminal result until consumed."""
+    """Return won/escaped/destroyed/reported; retain the result until consumed."""
     return _screen_combat_session(p, world, pirate, patrol=False)
 
 
@@ -5846,7 +5903,7 @@ def screen_notoriety_patrol(p: Palette, world: World) -> None:
     _screen_combat_session(p, world, patrol, patrol=True)
 
 
-def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, patrol: bool, details: bool = False, tactics: dict | None = None) -> list[str]:
+def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, patrol: bool, details: bool = False, tactics: dict | None = None, warrant: dict | None = None) -> list[str]:
     """Read-only combat terms; no random draw or persisted presentation state."""
     ship, pilot = world.save.ship, world.save.pilot
     used = sum(world.save.cargo.values())
@@ -5856,6 +5913,7 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         for message in result:
             lines.extend(_wrap_output(_mission_plain(message), max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
     if details: lines.append("Tactical Systems:")
+    if warrant is not None: lines += bounty_identification_lines(world, warrant)
     lines += [
         f"{pirate.name} (tier {pirate.tier}): HP {pirate.hp}/{pirate.hp_max}.",
         f"Your hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}.",
@@ -5896,9 +5954,6 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                   f"Weapons Tier {ship.weapon_tier}: +{ship.weapon_tier * 4} damage; gunner bonus +{3 if ship.has_gunner else 0}.",
                   f"Notoriety {pilot.notoriety}. " + ("Destroying this patrol: notoriety +3, Concord -10, Blackwake +3; no salvage."
                   if patrol else "Destroying this pirate earns salvage; Concord +2, Blackwake -1.")]
-        travel = world.save.pending_travel
-        if not patrol and travel is not None and travel.get("phase") == "primary" and travel.get("primary") == "bounty":
-            lines.append(f"After a bounty victory, a {WRONG_BOUNTY_KILL_CHANCE:.0%} mistaken-identity inquiry can add notoriety +{NOTORIETY_PER_WRONG_BOUNTY_KILL} and Concord -3, on top of the kill's standing changes.")
     return lines
 
 
@@ -5921,6 +5976,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         if combat["outcome"] is not None:
             for line in combat["lines"]: out_line(f"  {line}")
             return combat["outcome"]
+    warrant = encounter.get("warrant")
     tactics = combat.get("tactics")  # Absence preserves an interrupted legacy fight.
     ship = world.save.ship
     fine = notoriety_fine_cost(world.save.pilot.notoriety)
@@ -5929,9 +5985,13 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         can_pay = world.save.pilot.credits >= (fine if patrol else bribe_cost(pirate))
         actions = "F/E/S" if patrol and can_pay else "F/E" if patrol else "F/E/D/B" if can_pay else "F/E/D"
         if tactics is not None and tactics["brace_ready"]: actions = actions.replace("F/", "F/G/")
+        if warrant is not None and not warrant["engaged"]:
+            if not warrant["checked"] and world.save.ship.fuel >= 1: actions += "/V"
+            if warrant["checked"] and not warrant["matches"]: actions += "/R"
+            actions += "/W"
         action, page, count = _draw_service_page(
             p, f"Combat {world.save.pilot.credits:,}cr",
-            combat_display_lines(world, pirate, combat["lines"], patrol=patrol, details=details, tactics=tactics),
+            combat_display_lines(world, pirate, combat["lines"], patrol=patrol, details=details, tactics=tactics, warrant=warrant),
             f"[{actions}]Act [Q]Info [< >]Page: ", page,
         )
         if action == ">":
@@ -5943,9 +6003,21 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         if action == "Q":
             details, page = not details, 0
             continue
+        if action == "V" and warrant is not None and not warrant["engaged"] and not warrant["checked"] and world.save.ship.fuel >= 1:
+            combat["lines"] = [verify_bounty_identity(world, warrant)]
+            world.checkpoint()
+            page = 0
+            continue
         lines = []
         outcome = None
-        if action == "F" or (action == "G" and tactics is not None and tactics["brace_ready"]):
+        engaging = (action in ("F", "E") or (action == "G" and tactics is not None and tactics["brace_ready"])
+                    or (action == "D" and not patrol) or (action == "B" and not patrol and can_pay))
+        if warrant is not None and engaging: warrant["engaged"] = True
+        if action == "W" and warrant is not None and not warrant["engaged"]:
+            lines, outcome = ["You withdraw before engaging; the bounty remains active."], "escaped"
+        elif action == "R" and warrant is not None and warrant["checked"] and not warrant["matches"] and not warrant["engaged"]:
+            lines, outcome = ["Incorrect identity reported; closing this warrant without a fight."], "reported"
+        elif action == "F" or (action == "G" and tactics is not None and tactics["brace_ready"]):
             if tactics is None: _, _, lines = fight_round(world, pirate)
             else: _, _, lines = tactical_round(world, pirate, tactics, action)
             if pirate.hp <= 0:

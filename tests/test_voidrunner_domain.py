@@ -2349,7 +2349,8 @@ def test_wrong_bounty_kill_raises_notoriety_and_lowers_concord_rep(monkeypatch):
     _accept_bounty(world, target_system=dest_id)
     before_rep = world.save.pilot.reputation[vr.FACTION_CONCORD]
     monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: "won")
-    world.event_rng.random = lambda: 0.0  # always triggers the wrong-kill roll
+    monkeypatch.setattr(vr, "new_bounty_warrant", lambda w, m: {"version": 1, "matches": False, "checked": False, "engaged": False})
+    world.event_rng.random = lambda: 0.0
 
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
@@ -2358,12 +2359,13 @@ def test_wrong_bounty_kill_raises_notoriety_and_lowers_concord_rep(monkeypatch):
     assert world.save.pilot.reputation[vr.FACTION_CONCORD] < before_rep
 
 
-def test_bounty_win_without_the_wrong_kill_roll_leaves_notoriety_at_zero(monkeypatch):
+def test_matching_bounty_win_leaves_notoriety_at_zero(monkeypatch):
     world = _world_with_seed(75)
     dest_id = world.here.connections[0]
     _accept_bounty(world, target_system=dest_id)
     monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: "won")
-    world.event_rng.random = lambda: 1.0  # never triggers the wrong-kill roll
+    monkeypatch.setattr(vr, "new_bounty_warrant", lambda w, m: {"version": 1, "matches": True, "checked": False, "engaged": False})
+    world.event_rng.random = lambda: 1.0
 
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_travel(vr.Palette(truecolor=False), world, dest_id)
@@ -5644,6 +5646,8 @@ def test_failed_atomic_replace_preserves_previous_save_and_removes_own_temp(tmp_
         ("ignore_distress", 8, "?I", "continue past the distress"),
         ("bounty", 0, "F", "Bounty complete!"),
         ("bounty_brace", 0, "GFFG", "Braced;"),
+        ("bounty_report", 0, "VR", "Incorrect warrant closed"),
+        ("bounty_withdraw", 0, "W", "withdraw before engaging"),
         ("bounty_loss", 0, "F", "Bounty failed"),
         ("bounty_escape", 0, "E", "escape"),
         ("bounty_dump", 0, "D", "dump cargo"),
@@ -5672,6 +5676,8 @@ def test_every_travel_checkpoint_resumes_to_the_same_career(
     world.save.ship.shield_tier = 3
     world.save.pilot.credits = 10_000
     dest_id = next(s.id for s in world.galaxy if s.danger >= 4)
+    if scenario == "bounty_report":
+        monkeypatch.setattr(vr, "new_bounty_warrant", lambda w, m: {"version": 1, "matches": False, "checked": False, "engaged": False})
     if scenario.startswith("bounty") or scenario.startswith("customs"):
         if scenario.startswith("customs"):
             world.save.current_system = world.here.connections[0]
@@ -8589,6 +8595,172 @@ def test_raider_tiers_follow_destination_danger_and_preserve_rng_draw_order(dang
 
 
 
+def _world_with_bounty_warrant(*, matches=True, checked=False, engaged=False):
+    world, pirate = _world_with_pending_fight(tactics={"version": 1, "profile": "Raider", "step": 0, "brace_ready": True})
+    state = world.save.pending_travel["encounter"]
+    state["pirate"] = vr.dataclasses.asdict(pirate)
+    state["warrant"] = {"version": 1, "matches": matches, "checked": checked, "engaged": engaged}
+    world.by_id[world.save.pending_travel["destination"]].discovered = True
+    return world, pirate, state["warrant"]
+
+
+def test_bounty_warrant_truth_is_stable_and_does_not_consume_encounter_rng():
+    import copy
+    world = _world_with_seed(42)
+    matches = []
+    for mid in range(1, 101):
+        mission = vr.Mission(mid, "bounty", "Target", 500, 0, 7, pirate_tier=2)
+        before = world.event_rng.getstate()
+        first = vr.new_bounty_warrant(world, mission)
+        assert world.event_rng.getstate() == before
+        world.event_rng.random()
+        resumed = vr.World(vr.SaveData.from_dict(copy.deepcopy(world.save.to_dict())))
+        assert vr.new_bounty_warrant(resumed, mission) == first
+        matches.append(first["matches"])
+    assert 5 <= matches.count(False) <= 25
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("matches", [False, True])
+def test_bounty_identification_risk_is_visible_and_paging_is_read_only(monkeypatch, width, height, matches):
+    import copy, re
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    world, pirate, warrant = _world_with_bounty_warrant(matches=matches)
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    output = io.StringIO(); frames = []
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert len(frame.splitlines()) <= height
+        assert all(vr._visible_width(line) <= width for line in frame.splitlines())
+        if len(frames) == 1: assert "12%" in frame
+        assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+        page, count = map(int, re.search(r"Combat.*?(\d+)/(\d+)", frame, re.S).groups())
+        if page == count: raise EOFError
+        return ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    world._checkpoint = lambda current: pytest.fail("Identification browsing checkpointed")
+    with contextlib.redirect_stdout(output), pytest.raises(EOFError): vr.screen_combat(vr.Palette(False), world, pirate)
+    text = " ".join(" ".join(frames).split())
+    assert "[V] Verify" in text and "[W] Withdraw" in text
+    assert "Identity mismatch confirmed" not in text
+
+
+@pytest.mark.parametrize("matches,commands", [(False, "VR"), (False, "W"), (True, "VF"), (False, "VF"), (False, "F")])
+def test_bounty_identification_choices_resolve_contract_with_explicit_consequences(monkeypatch, matches, commands):
+    world, pirate, warrant = _world_with_bounty_warrant(matches=matches)
+    world.save.ship.hull_class = "Carrier"; world.save.ship.hull_hp = vr.hull_hp_max(world.save.ship)
+    world.save.ship.weapon_tier = 4; world.save.ship.has_gunner = True
+    start_fuel, credits = world.save.ship.fuel, world.save.pilot.credits
+    keys = iter(commands)
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys, "F"))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_travel(vr.Palette(False), world, world.save.pending_travel["destination"])
+    assert world.save.pending_travel is None
+    assert world.save.ship.fuel == start_fuel - ("V" in commands)
+    if commands in ("VR", "W"):
+        assert world.save.pilot.credits == credits
+        assert world.save.pilot.missions_completed == world.save.pilot.kills == world.save.pilot.notoriety == 0
+        assert bool(world.save.active_missions) == (commands == "W")
+    else:
+        assert world.save.pilot.missions_completed == world.save.pilot.kills == 1
+        assert world.save.pilot.credits == credits + 500 + 160
+        assert world.save.pilot.notoriety == (0 if matches else vr.NOTORIETY_PER_WRONG_BOUNTY_KILL)
+        assert world.save.pilot.reputation[vr.FACTION_CONCORD] == (2 if matches else -1)
+    if "V" in commands: assert "Identity confirmed" in output.getvalue() if matches else "Identity mismatch confirmed" in output.getvalue()
+
+
+@pytest.mark.parametrize("fault", ["checked", "engaged", "fuel"])
+def test_bounty_verification_rejects_before_changing_any_state(fault):
+    import copy
+    world, _, warrant = _world_with_bounty_warrant()
+    if fault == "fuel": world.save.ship.fuel = 0
+    else: warrant[fault] = True
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    with pytest.raises(ValueError): vr.verify_bounty_identity(world, warrant)
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+def test_bounty_identification_and_free_withdrawal_close_after_engagement(monkeypatch):
+    import copy
+    world, pirate, warrant = _world_with_bounty_warrant(matches=False)
+    keys = iter(["F", "V", "W", "R"]); before = None; rng = None
+    def choose():
+        nonlocal before, rng
+        if warrant["engaged"]:
+            if before is None: before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+            assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+        try: return next(keys)
+        except StopIteration: raise EOFError
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(io.StringIO()), pytest.raises(EOFError): vr.screen_combat(vr.Palette(False), world, pirate)
+    assert warrant["engaged"] and not warrant["checked"]
+
+
+@pytest.mark.parametrize("field,value", [("version", 2), ("version", True), ("matches", 1), ("checked", None), ("engaged", "yes"), ("extra", 1)])
+def test_invalid_bounty_identification_metadata_preserves_career(tmp_path, field, value):
+    import json
+    world, _, warrant = _world_with_bounty_warrant()
+    warrant[field] = value
+    path = tmp_path / "77.json"; path.write_text(json.dumps(world.save.to_dict()), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(vr.ResumeError): vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("fault", ["matching", "unchecked", "engaged", "wrong_phase", "damaged", "missing"])
+def test_contradictory_bounty_report_is_rejected_without_overwriting(tmp_path, fault):
+    import json
+    world, _, warrant = _world_with_bounty_warrant(matches=False, checked=True)
+    travel = world.save.pending_travel; combat = travel["encounter"]["combat"]
+    combat["outcome"] = "reported"
+    if fault == "matching": warrant["matches"] = True
+    elif fault == "unchecked": warrant["checked"] = False
+    elif fault == "engaged": warrant["engaged"] = True
+    elif fault == "wrong_phase": travel["phase"] = "escorts"
+    elif fault == "missing": travel["encounter"].pop("warrant")
+    else: combat["pirate"]["hp"] -= 1
+    path = tmp_path / "77.json"; path.write_text(json.dumps(world.save.to_dict()), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(vr.ResumeError): vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == before
+
+
+def test_bounty_verification_and_report_survive_real_kills_without_duplicate_effects(tmp_path):
+    world, _, warrant = _world_with_bounty_warrant(matches=False)
+    vr.persist(world, tmp_path, 77)
+    initial_fuel, credits = world.save.ship.fuel, world.save.pilot.credits
+    with _door_stopped_at(tmp_path, b"V", b"Identity mismatch confirmed"):
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert saved.pending_travel["encounter"]["warrant"]["checked"]
+        assert saved.ship.fuel == initial_fuel - 1
+    with _door_stopped_at(tmp_path, b"R", b"Incorrect identity reported"):
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert saved.pilot.credits == credits and saved.ship.fuel == initial_fuel - 1
+    # The parent may consume the checkpointed report before the reader kills it.
+    if saved.active_missions:
+        assert saved.pending_travel["encounter"]["combat"]["outcome"] == "reported"
+        with _door_stopped_at(tmp_path, b"", b"Incorrect warrant closed"):
+            saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not saved.active_missions
+    assert saved.pilot.credits == credits and saved.ship.fuel == initial_fuel - 1
+    assert saved.pilot.kills == saved.pilot.missions_completed == saved.pilot.notoriety == 0
+
+
+def test_preexisting_bounty_target_has_no_new_controls_or_undisclosed_penalty(monkeypatch):
+    world, pirate = _world_with_pending_fight()
+    world.save.pending_travel["encounter"]["pirate"] = vr.dataclasses.asdict(pirate)
+    world.save.ship.hull_class = "Carrier"; world.save.ship.hull_hp = vr.hull_hp_max(world.save.ship)
+    world.save.ship.weapon_tier = 4; world.save.ship.has_gunner = True
+    monkeypatch.setattr(vr, "read_key", lambda: "F")
+    monkeypatch.setattr(world.event_rng, "random", lambda: 0.0)
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_travel(vr.Palette(False), world, world.save.pending_travel["destination"])
+    assert world.save.pilot.notoriety == 0
+    assert "[V] Verify" not in output.getvalue() and "[W] Withdraw" not in output.getvalue()
+    assert world.save.pilot.missions_completed == 1
+
+
+
 
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
 def test_review_combat_info_keeps_exchange_before_tactical_heading(monkeypatch, width, height):
@@ -8680,16 +8852,25 @@ def test_peaceful_combat_action_discloses_its_standing_gain(patrol):
     assert ("Concord +2" if patrol else "Blackwake +2") in action
 
 
-@pytest.mark.parametrize("phase,primary,patrol,expected", [
-    ("primary", "bounty", False, True), ("primary", "random", False, False),
-    ("escorts", "bounty", False, False), ("primary", "bounty", True, False),
-])
-def test_bounty_combat_info_discloses_post_win_inquiry_without_drawing_rng(phase, primary, patrol, expected):
+@pytest.mark.parametrize("identity", ["legacy", "unverified-match", "unverified-mismatch", "confirmed", "mismatch"])
+@pytest.mark.parametrize("details", [False, True])
+def test_bounty_combat_risk_terms_match_identification_state_without_rng(identity, details):
     import copy
     world = _world_with_seed(42)
-    world.save.pending_travel = {"phase": phase, "primary": primary}
+    world.save.pending_travel = {"phase": "primary", "primary": "bounty", "encounter": {}}
+    warrant = None if identity == "legacy" else {"version": 1, "matches": identity in ("unverified-match", "confirmed"),
+        "checked": identity in ("confirmed", "mismatch"), "engaged": False}
     before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
     pirate = vr.Pirate("Opponent", 2, 50, 50)
-    text = " ".join(vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True))
-    assert ("12%" in text and "inquiry" in text and "Concord -3" in text and "notoriety +2" in text) == expected
+    text = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False, details=details, warrant=warrant))
+    assert "After a bounty victory" not in text  # Old random inquiry no longer applies.
+    if identity.startswith("unverified"):
+        assert "12%" in text and "Concord -3" in text and "+2 notoriety" in text
+    elif identity == "mismatch":
+        assert "Identity mismatch confirmed" in text and "Concord -3" in text and "+2 notoriety" in text
+        assert "12%" not in text
+    elif identity == "confirmed":
+        assert "no mistaken-identity penalty" in text and "Concord -3" not in text
+    else:
+        assert "Concord -3" not in text and "12%" not in text
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
