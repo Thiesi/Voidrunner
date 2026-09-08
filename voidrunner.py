@@ -6,7 +6,7 @@ for NetBBS (issue #172 vertical: door-managed private save).
 Same v1 door contract as `netbbs.doors.bundled.retro_trivia`: reads the
 drop-file NetBBS hands it via `NETBBS_DOOR_INFO` for handle/user_id/color
 depth, then owns raw stdin/stdout for the whole session (single keystroke
-reads; this module adds its own small raw line-reader on top, for
+reads; this module decodes UTF-8 and whole terminal keys, with a line editor for
 numeric quantities and the callsign prompt, since NetBBS gives a door no
 line-editing help). Runnable completely standalone outside NetBBS too.
 Zero external dependencies -- stdlib only.
@@ -91,9 +91,8 @@ _OUTPUT_WIDTH = 80
 
 
 # ---------------------------------------------------------------------------
-# Drop-file + raw terminal I/O (mirrors retro_trivia.py's own conventions;
-# duplicated rather than imported so this remains one self-contained file a
-# SysOp can point straight at -- see this module's own docstring).
+# Drop-file + raw terminal I/O. Kept local so the bundled game remains a
+# self-contained executable a SysOp can point straight at.
 # ---------------------------------------------------------------------------
 
 
@@ -289,44 +288,272 @@ def _active_sgr_after(text: str, active: str) -> str:
     return active
 
 
+# Unsupported terminal keys are deliberately non-command strings, never an
+# empty string (which is a substring of every menu's key alphabet).
+IGNORED_KEY = "<key>"
+ESCAPE_KEY = "<esc>"
+_INPUT_TIMEOUT = 0.15
+
+
+class _StdioBytes:
+    """Unbuffered byte reads with a short timeout only for partial keys.
+
+    POSIX select supports door pipes. Windows select does not; PeekNamedPipe
+    checks the inherited stdin pipe without a background reader/thread.
+    """
+
+    def __init__(self, stream):
+        self.stream = stream
+        try:
+            self.fd = stream.fileno()
+        except (AttributeError, OSError):
+            self.fd = None  # in-memory scripted terminal
+        self.kernel = None
+        if os.name == "nt" and self.fd is not None:
+            import ctypes
+            import msvcrt
+            from ctypes import wintypes
+
+            self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            self.kernel.GetFileType.argtypes = [wintypes.HANDLE]
+            self.kernel.GetFileType.restype = wintypes.DWORD
+            self.kernel.PeekNamedPipe.argtypes = [
+                wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+            ]
+            self.kernel.PeekNamedPipe.restype = wintypes.BOOL
+            self.handle = msvcrt.get_osfhandle(self.fd)
+
+    def __call__(self, timeout: float | None) -> bytes | None:
+        if self.fd is None:
+            return self.stream.read(1)
+        if timeout is not None:
+            if self.kernel is None:
+                import select
+
+                if not select.select([self.fd], [], [], timeout)[0]:
+                    return None
+            else:
+                import ctypes
+                import msvcrt
+                from ctypes import wintypes
+
+                deadline = time.monotonic() + timeout
+                kind = self.kernel.GetFileType(self.handle)
+                while True:
+                    if kind == 1:  # disk: read/EOF never waits for a key
+                        break
+                    if kind == 2 and msvcrt.kbhit():  # console
+                        break
+                    if kind == 3:  # inherited anonymous/named pipe
+                        available = wintypes.DWORD()
+                        if not self.kernel.PeekNamedPipe(self.handle, None, 0, None,
+                                                        ctypes.byref(available), None):
+                            error = ctypes.get_last_error()
+                            if error in (109, 232):  # broken/closed pipe
+                                return b""
+                            raise ctypes.WinError(error)
+                        if available.value:
+                            break
+                    if time.monotonic() >= deadline:
+                        return None
+                    time.sleep(min(0.005, max(0, deadline - time.monotonic())))
+        return os.read(self.fd, 1)
+
+
+class _DoorInput:
+    """A bounded UTF-8/terminal-key decoder shared by every input screen.
+
+    Partial sequences survive timeouts, so a delayed arrow suffix cannot become
+    a menu command. Control strings and bracketed paste are discarded through
+    their terminator, retaining only enough bytes to recognize that terminator.
+    """
+
+    def __init__(self, read_byte):
+        self.read_byte = read_byte
+        self.mode = "text"
+        self.sequence = bytearray()
+        self.utf8 = bytearray()
+        self.utf8_size = 0
+        self.pending = None
+        self.skip_lf = False
+        self.after_timeout = False
+        self.mouse_remaining = 0
+        self.string_bel = False
+
+    def read_key(self) -> str:
+        for _ in range(256):
+            if self.pending is not None:
+                byte, self.pending = self.pending, None
+            else:
+                timeout = _INPUT_TIMEOUT if not self.after_timeout and (self.mode != "text" or self.utf8) else None
+                byte = self.read_byte(timeout)
+            if byte is None:
+                self.after_timeout = True
+                if self.mode == "escape":
+                    self.mode = "late_escape"
+                    return ESCAPE_KEY
+                return IGNORED_KEY
+            if not byte:
+                raise EOFError("stdin closed")
+            self.after_timeout = False
+            n = byte[0]
+            if self.mouse_remaining:
+                self.mouse_remaining -= 1
+                if not self.mouse_remaining:
+                    self.mode = "text"
+                    return IGNORED_KEY
+                continue
+            if self.mode == "paste":
+                self.sequence.extend(byte)
+                del self.sequence[:-6]
+                if self.sequence.endswith((b"\x1b[201~", b"\x9b201~")):
+                    self.mode = "text"
+                    self.sequence.clear()
+                    return IGNORED_KEY
+                continue
+            if self.mode in ("string", "string_escape"):
+                if (self.mode == "string_escape" and byte == b"\\") or n == 0x9c or (n == 7 and self.string_bel):
+                    self.mode = "text"
+                    return IGNORED_KEY
+                self.mode = "string_escape" if n == 27 else "string"
+                continue
+            if self.mode in ("escape", "late_escape"):
+                late = self.mode == "late_escape"
+                self.mode = "text"
+                if byte in (b"[", b"O"):
+                    self.mode = "csi" if byte == b"[" else "ss3"
+                    self.sequence.clear()
+                    continue
+                if not late and byte in (b"]", b"P", b"X", b"^", b"_"):
+                    self.mode = "string"
+                    self.string_bel = byte == b"]"
+                    continue
+                if 0x20 <= n <= 0x2f:
+                    self.mode = "intermediate"
+                    continue
+                # After Escape was reported as a standalone key, only the
+                # CSI/SS3 suffixes above remain reserved for delayed arrows.
+                # P/X must be independent hotkeys, not open-ended strings.
+                if not late:
+                    # Alt+printable is a single unsupported key, not a command.
+                    # Decode the entire UTF-8 character before discarding it.
+                    self.mode = "alt"
+            if self.mode in ("csi", "ss3", "intermediate"):
+                if n == 27:
+                    self.mode = "escape"
+                    continue
+                if self.mode == "csi" and len(self.sequence) < 8:
+                    self.sequence.extend(byte)
+                if self.mode == "csi" and self.sequence == b"[":
+                    self.mode = "ss3"  # Linux-console ESC [[ A through E
+                    continue
+                if self.mode == "csi" and self.sequence == b"M":
+                    self.mode = "mouse"
+                    self.mouse_remaining = 3  # legacy X10 mouse coordinates
+                    self.sequence.clear()
+                    continue
+                if 0x40 <= n <= 0x7e or (self.mode == "intermediate" and 0x30 <= n <= 0x7e):
+                    self.mode = "paste" if self.mode == "csi" and self.sequence == b"200~" else "text"
+                    self.sequence.clear()
+                    if self.mode == "text":
+                        return IGNORED_KEY
+                elif not 0x20 <= n <= 0x3f:
+                    self.mode = "text"
+                    return IGNORED_KEY
+                continue
+            if self.utf8:
+                if not 0x80 <= n <= 0xbf:
+                    self.pending = byte
+                    self.utf8.clear()
+                    self.mode = "text"
+                    return IGNORED_KEY
+                self.utf8.extend(byte)
+                if len(self.utf8) < self.utf8_size:
+                    continue
+                try:
+                    char = self.utf8.decode("utf-8")
+                except UnicodeDecodeError:
+                    char = IGNORED_KEY
+                self.utf8.clear()
+            elif n == 27:
+                self.mode = "escape"
+                continue
+            elif n in (0x9b, 0x8f):
+                self.mode = "csi" if n == 0x9b else "ss3"
+                self.sequence.clear()
+                continue
+            elif n in (0x90, 0x98, 0x9d, 0x9e, 0x9f):
+                self.mode = "string"
+                self.string_bel = n == 0x9d
+                continue
+            elif n >= 0x80:
+                self.utf8_size = 2 if 0xc2 <= n <= 0xdf else 3 if 0xe0 <= n <= 0xef else 4 if 0xf0 <= n <= 0xf4 else 0
+                if not self.utf8_size:
+                    self.mode = "text"
+                    return IGNORED_KEY
+                self.utf8.extend(byte)
+                continue
+            else:
+                char = chr(n)
+            if self.mode == "alt":
+                self.mode = "text"
+                return IGNORED_KEY
+            if self.skip_lf:
+                self.skip_lf = False
+                if char == "\n":
+                    continue
+            self.skip_lf = char == "\r"
+            if char in ("\r", "\n", "\x7f", "\x08") or char.isprintable():
+                return char
+            return IGNORED_KEY
+        return IGNORED_KEY
+
+
+_INPUT_READER = None
+_INPUT_STREAM = None
+
+
 def read_key() -> str:
-    """One raw byte -- see this module's own docstring. A door owns the
-    raw terminal stream; there is no line-editing help from NetBBS."""
-    data = sys.stdin.buffer.read(1)
-    if not data:
-        raise EOFError("stdin closed")
-    return data.decode("ascii", errors="replace")
+    """Read one decoded character or one harmless unsupported terminal key."""
+    global _INPUT_READER, _INPUT_STREAM
+    stream = sys.stdin.buffer
+    if _INPUT_STREAM is not stream:
+        _INPUT_STREAM = stream
+        _INPUT_READER = _DoorInput(_StdioBytes(stream))
+    return _INPUT_READER.read_key()
 
 
-def read_line_raw(max_len: int = 20, allowed=str.isdigit) -> str:
-    """A minimal raw-mode line reader: backspace (BS/DEL) edits, Enter
-    submits, a leading `ESC [ <letter>` CSI sequence (arrow keys and
-    friends) is swallowed whole rather than leaking stray bytes into the
-    buffer. `allowed` filters which characters are accepted at all --
-    `str.isdigit` for quantity prompts, alnum+space for the callsign
-    prompt."""
+def read_command() -> str:
+    """Match displayed ASCII hotkeys without Unicode case-fold aliases."""
+    key = read_key()
+    return key.upper() if len(key) == 1 and key.isascii() else IGNORED_KEY
+
+
+def read_line_raw(max_len: int = 20, allowed=lambda c: "0" <= c <= "9") -> str:
+    """Edit bounded Unicode text; numeric fields accept ASCII decimal digits.
+
+    Both codepoint count and display width are bounded. Backspace removes a
+    base character with its combining marks, erasing its actual screen columns.
+    """
     buf: list[str] = []
     while True:
         ch = read_key()
         if ch in ("\r", "\n"):
             out_line()
-            return "".join(buf)
+            return unicodedata.normalize("NFC", "".join(buf))
         if ch in ("\x7f", "\x08"):
             if buf:
-                buf.pop()
-                out("\x08 \x08")
+                removed = buf.pop()
+                while unicodedata.combining(removed[0]) and buf:
+                    removed = buf.pop() + removed
+                out("\x08 \x08" * sum(_char_width(c) for c in removed))
             continue
-        if ch == ESC:
-            nxt = read_key()
-            if nxt == "[":
-                while True:
-                    b = read_key()
-                    if b.isalpha() or b == "~":
-                        break
+        if len(ch) != 1 or not ch.isprintable() or not allowed(ch):
             continue
-        if not allowed(ch):
+        if unicodedata.combining(ch) and not buf:
             continue
-        if len(buf) >= max_len:
+        if len(buf) >= max_len or sum(_char_width(c) for c in buf) + _char_width(ch) > max_len:
             continue
         buf.append(ch)
         out(ch)
@@ -335,7 +562,7 @@ def read_line_raw(max_len: int = 20, allowed=str.isdigit) -> str:
 def confirm(prompt: str, p: Palette) -> bool:
     out_prompt(f"{p.muted}{prompt} [Y/N] {RESET}")
     while True:
-        key = read_key().upper()
+        key = read_command()
         if key == "Y":
             out_line("Y")
             return True
@@ -346,7 +573,8 @@ def confirm(prompt: str, p: Palette) -> bool:
 
 def pause(p: Palette, msg: str = "Press any key to continue...") -> None:
     out_prompt(f"{p.muted}{msg}{RESET}")
-    read_key()
+    while read_key() in (IGNORED_KEY, ESCAPE_KEY):
+        pass
     out_line()
 
 
@@ -2149,7 +2377,7 @@ def create_career(p: Palette, info: dict) -> str | None:
     out_line(f"{p.accent}│{RESET}{welcome}{' ' * pad_len}{p.accent}│{RESET}")
     out_line(_box_bottom(p))
     out_prompt(f"  {p.muted}Pilot callsign [{info['handle']}]: {RESET}")
-    entered = read_line_raw(max_len=16, allowed=lambda c: c.isalnum() or c == " ").strip()
+    entered = read_line_raw(max_len=16, allowed=lambda c: c.isalnum() or bool(unicodedata.combining(c)) or c == " ").strip()
     callsign = entered or info["handle"]
     out_line()
     out_line(f"{p.muted}  Starting deployment: Freeport Anchorage{RESET}")
@@ -2214,7 +2442,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
             out_line(f"{p.accent}│{RESET}{row}{' ' * pad_len}{p.accent}│{RESET}")
     out_line(_box_bottom(p))
     out_prompt(f"  {p.gold}Command Deck{RESET} {p.muted}> {RESET}")
-    choice = read_key().upper()
+    choice = read_command()
     out_line(choice)
     return choice
 
@@ -2294,7 +2522,7 @@ def screen_market(p: Palette, world: World) -> None:
         hold_bar = _gauge_bar(used, cap, 10, p)
         out_line(f"  {p.accent}Cargo Hold:{RESET} {hold_bar} {used}/{cap} units   │   {p.gold}[X]{RESET} Futures Exchange")
         out_prompt(f"  {p.muted}Trade which [A-{LETTERS[len(rows)-1]}], or [Q] back? {RESET}")
-        key = read_key().upper()
+        key = read_command()
         out_line(key)
         if key == "Q":
             return
@@ -2341,7 +2569,7 @@ def screen_futures(p: Palette, world: World, goods: list[str]) -> None:
             out_line(f"{p.accent}│{RESET}{f_row}{' ' * pad_len}{p.accent}│{RESET}")
         out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
         out_prompt(f"  {p.muted}Buy forward contract for which, or [Q] back? {RESET}")
-        key = read_key().upper()
+        key = read_command()
         out_line(key)
         if key == "Q":
             return
@@ -2385,7 +2613,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
     sell = round(buy * SELL_SPREAD)
     out_line(f"{p.accent}{label}{RESET} -- Buy {buy}cr  Sell {sell}cr")
     out_prompt(f"{p.muted}[B]uy [S]ell [Q]cancel: {RESET}")
-    action = read_key().upper()
+    action = read_command()
     out_line(action)
     if action == "B":
         if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
@@ -2476,7 +2704,7 @@ def screen_shipyard(p: Palette, world: World) -> None:
         out_line(f"  {p.accent}Fuel:{RESET} {ship.fuel}/{fuel_capacity(ship)} (6 cr/unit)  │  {p.accent}Hull:{RESET} {ship.hull_hp}/{hull_hp_max(ship)} (4 cr/HP)")
         out_prompt(f"  {p.gold}[U]{RESET}pgrade  {p.gold}[R]{RESET}efuel  {p.gold}[P]{RESET} Repair hull  "
             f"{p.gold}[K] Crew{RESET}  {p.gold}[Q]{RESET} Return: ")
-        action = read_key().upper()
+        action = read_command()
         out_line(action)
         if action == "Q":
             return
@@ -2489,7 +2717,7 @@ def screen_shipyard(p: Palette, world: World) -> None:
             continue
         if action == "U":
             out_prompt(f"  {p.muted}Which upgrade [A-{LETTERS[len(keys)-1]}]? {RESET}")
-            key_choice = read_key().upper()
+            key_choice = read_command()
             out_line(key_choice)
             if key_choice not in LETTERS[: len(keys)]:
                 continue
@@ -2525,7 +2753,7 @@ def screen_crew(p: Palette, world: World) -> None:
             out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
         out_line(_box_bottom(p))
         out_prompt(f"  {p.muted}Hire/dismiss which [A-{LETTERS[len(keys)-1]}], or [Q] back? {RESET}")
-        key = read_key().upper()
+        key = read_command()
         out_line(key)
         if key == "Q":
             return
@@ -2679,7 +2907,7 @@ def screen_missions(p: Palette, world: World) -> None:
             for m in world.save.active_missions:
                 out_line(f"  {p.muted}- {m.description} (+{m.reward}cr){RESET}")
         out_prompt(f"  {p.muted}Accept which, or [Q] back? {RESET}")
-        key = read_key().upper()
+        key = read_command()
         out_line(key)
         if key == "Q":
             return
@@ -2781,7 +3009,7 @@ def screen_status(p: Palette, world: World) -> None:
 
     if rank_for(pilot.credits) == RANKS[-1][1]:
         out_prompt(f"{p.muted}[R]etire and start a new career, or any other key to continue... {RESET}")
-        key = read_key().upper()
+        key = read_command()
         out_line(key)
         if key == "R":
             if confirm("This ends your current career for good and begins a new one. Retire?", p):
@@ -2875,7 +3103,7 @@ def screen_chart(p: Palette, world: World) -> str | None:
         actions.append(f"{p.gold}[V]{RESET}iew full chart by sector")
         out_line(f"  {'   '.join(actions)}")
         out_prompt(f"  {p.muted}Jump to which, or [Q] back? {RESET}")
-        key = read_key().upper()
+        key = read_command()
         out_line(key)
         if key == "Q":
             return None
@@ -2988,7 +3216,7 @@ def _screen_auto_route(p: Palette, world: World) -> None:
         for i, s in enumerate(shown):
             out_line(f"  {p.gold}[{pick_letters[i]}]{RESET} {s.name}")
         out_prompt(f"  {p.muted}Which one, or [Q] cancel? {RESET}")
-        key = read_key().upper()
+        key = read_command()
         out_line(key)
         if key == "Q":
             return
@@ -3090,7 +3318,7 @@ def _encounter_derelict(p: Palette, world: World) -> None:
         out_line(f"{p.muted}Sensors pick up a derelict hulk drifting nearby.{RESET}")
         while True:
             out_prompt(f"{p.muted}[B]oard for salvage or [I]gnore and continue? {RESET}")
-            action = read_key().upper()
+            action = read_command()
             out_line(action)
             if action in ("B", "I"):
                 break
@@ -3117,7 +3345,7 @@ def _encounter_distress_call(p: Palette, world: World) -> None:
     out_line(f"{p.muted}A garbled distress signal reaches your comms.{RESET}")
     while True:
         out_prompt(f"{p.muted}[H]elp (costs fuel) or [I]gnore and continue? {RESET}")
-        action = read_key().upper()
+        action = read_command()
         out_line(action)
         if action in ("H", "I"):
             break
@@ -3389,7 +3617,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             if can_pay:
                 actions += " [B]ribe"
         out_prompt(f"{p.muted}{actions} [Q]uick status: {RESET}")
-        action = read_key().upper()
+        action = read_command()
         out_line(action)
         lines = []
         outcome = None
@@ -3489,7 +3717,7 @@ def screen_customs(p: Palette, world: World) -> None:
     value = sum(q * COMMODITIES[c]["base"] for c, q in world.save.cargo.items() if not COMMODITIES[c]["legal"])
     while True:
         out_prompt(f"  {p.muted}[S]urrender contraband [B]ribe the inspector: {RESET}")
-        action = read_key().upper()
+        action = read_command()
         out_line(action)
         if action in ("S", "B"):
             break

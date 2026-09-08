@@ -3876,3 +3876,237 @@ def test_inconsistent_resume_stops_before_rewriting_save(tmp_path, fault):
     assert "your saved career is unchanged" in output
     assert not result.stderr
     assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("sequence", [
+    b"\x1b[A", b"\x1b[1;5B", b"\x1bOF", b"\x1b[15~", b"\x1b[[A",
+    b"\x1b[<0;25;10M", b"\x1b[MABC", b"\x1b(I", b"\x1bY",
+    b"\x1b]0;YBUY\x07", b"\x1bPBUY\x1b\\", b"\x9b1;5C",
+    b"\x1b[200~MYAY\r\nBUY\x1b[201~", b"\x1b" + "界".encode("utf-8"),
+])
+def test_input_decoder_consumes_whole_terminal_key(sequence):
+    reader = vr._DoorInput(lambda timeout: stream.read(1))
+    stream = io.BytesIO(sequence + b"Z")
+    assert reader.read_key() == vr.IGNORED_KEY
+    assert reader.read_key() == "Z"
+    with pytest.raises(EOFError):
+        reader.read_key()
+
+
+def test_fragmented_sequences_survive_timeout_without_command_suffixes():
+    events = iter([b"\x1b", None, b"[", b"1", None, b";", b"5", b"A", b"Z"])
+    timeouts = []
+
+    def read(timeout):
+        timeouts.append(timeout)
+        return next(events)
+
+    reader = vr._DoorInput(read)
+    assert reader.read_key() == vr.ESCAPE_KEY
+    assert reader.read_key() == vr.IGNORED_KEY
+    assert reader.read_key() == vr.IGNORED_KEY
+    assert reader.read_key() == "Z"
+    # Once a partial key has timed out, wait for actual data instead of causing
+    # an endless menu redraw every timeout interval.
+    assert timeouts == [None, vr._INPUT_TIMEOUT, None, vr._INPUT_TIMEOUT,
+                        vr._INPUT_TIMEOUT, None, vr._INPUT_TIMEOUT,
+                        vr._INPUT_TIMEOUT, None]
+
+
+def test_lone_escape_does_not_swallow_next_deliberate_command():
+    events = iter([b"\x1b", None, b"Q"])
+    reader = vr._DoorInput(lambda timeout: next(events))
+    assert reader.read_key() == vr.ESCAPE_KEY
+    assert reader.read_key() == "Q"
+
+
+@pytest.mark.parametrize("text", ["Jörg", "界", "e\u0301", "Û", "🚀"])
+def test_input_decoder_preserves_fragmented_utf8(text):
+    events = []
+    for byte in text.encode("utf-8"):
+        events.extend([bytes([byte]), None])
+    events.append(b"")
+    reader = vr._DoorInput(lambda timeout: events.pop(0))
+    result = []
+    while True:
+        try:
+            key = reader.read_key()
+        except EOFError:
+            break
+        if key != vr.IGNORED_KEY:
+            result.append(key)
+    assert "".join(result) == text
+
+
+@pytest.mark.parametrize("bad", [b"\xff", b"\xc0\xaf", b"\xe2", b"\xed\xa0\x80"])
+def test_malformed_utf8_does_not_lose_following_character(bad):
+    stream = io.BytesIO(bad + b"Z")
+    reader = vr._DoorInput(lambda timeout: stream.read(1))
+    result = []
+    while True:
+        try:
+            key = reader.read_key()
+        except EOFError:
+            break
+        if key != vr.IGNORED_KEY:
+            result.append(key)
+    assert result == ["Z"]
+
+
+def test_input_decoder_bounds_long_control_strings_and_paste():
+    stream = io.BytesIO(b"\x1b[200~" + b"Y" * 5000 + b"\x1b[201~Z")
+    reader = vr._DoorInput(lambda timeout: stream.read(1))
+    for _ in range(21):
+        key = reader.read_key()
+        assert len(reader.sequence) <= 8
+        if key == "Z":
+            break
+        assert key == vr.IGNORED_KEY
+    else:
+        pytest.fail("did not reach the deliberate command after pasted data")
+
+
+def _use_decoded_input(monkeypatch, data):
+    stream = io.BytesIO(data)
+    reader = vr._DoorInput(lambda timeout: stream.read(1))
+    monkeypatch.setattr(vr, "read_key", reader.read_key)
+
+
+def test_unicode_line_editing_erases_wide_and_combining_characters(monkeypatch):
+    _use_decoded_input(monkeypatch, "界e\u0301\x7f\x08Jörg\r\n7\r".encode("utf-8"))
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        name = vr.read_line_raw(16, allowed=lambda c: c.isalnum() or bool(vr.unicodedata.combining(c)))
+        quantity = vr.read_line_raw(5)
+    assert name == "Jörg"
+    assert quantity == "7"  # CRLF submits once, not an empty next field
+    assert "\x08 \x08" * 3 in output.getvalue()
+
+
+def test_numeric_input_rejects_unicode_digits_that_int_cannot_parse(monkeypatch):
+    _use_decoded_input(monkeypatch, "²Ⅳ١３5\r".encode("utf-8"))
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert vr.read_line_raw(5) == "5"
+
+
+def test_text_input_bounds_columns_and_normalizes_name(monkeypatch):
+    _use_decoded_input(monkeypatch, "界界界\re\u0301\r".encode("utf-8"))
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert vr.read_line_raw(4, allowed=str.isalnum) == "界界"
+        assert vr.read_line_raw(4, allowed=lambda c: True) == "é"
+
+
+def test_escape_and_paste_cannot_confirm_action(monkeypatch):
+    _use_decoded_input(monkeypatch, b"\x1bY\x1b[200~Y\x1b[201~\x1b[1;5YN")
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert vr.confirm("Launch?", vr.Palette(False)) is False
+
+
+def test_arrow_keys_cannot_accept_missions(monkeypatch):
+    world = _world_with_seed(42)
+    _use_decoded_input(monkeypatch, b"\x1b[A\x1bOBQ")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_missions(vr.Palette(False), world)
+    assert not world.save.active_missions
+
+
+def test_unsupported_keys_do_not_acknowledge_result_pause(monkeypatch):
+    _use_decoded_input(monkeypatch, b"\x1b[A\x1b[200~Y\x1b[201~KN")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.pause(vr.Palette(False))
+    assert vr.read_key() == "N"
+
+
+def test_real_door_accepts_utf8_name_and_coalesces_crlf(tmp_path):
+    import json
+    import os
+    import subprocess
+
+    env = dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path))
+    env.pop("NETBBS_DOOR_INFO", None)
+    result = subprocess.run(
+        [sys.executable, str(_VOIDRUNNER_PATH)],
+        input="界e\u0301\x7fJörg\r\nYQ".encode("utf-8"),
+        capture_output=True, env=env, timeout=10,
+    )
+    assert result.returncode == 0
+    assert not result.stderr
+    saves = [p for p in tmp_path.glob("*.json") if p.name != "leaderboard.json"]
+    assert len(saves) == 1
+    assert json.loads(saves[0].read_text(encoding="utf-8"))["pilot"]["handle"] == "界Jörg"
+
+
+def test_real_pipe_lone_escape_returns_without_waiting_for_another_byte(tmp_path):
+    world = _world_with_seed(42)
+    vr.persist(world, tmp_path, 77)
+    with _door_stopped_at(tmp_path, b"\x1b", b"<key>"):
+        saved, is_new, notice = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not is_new and notice is None
+    assert saved.turn == 0
+    assert saved.pilot.credits == 1200
+
+
+@pytest.mark.parametrize("partial", [b"\x1b", b"\x1b[1;", b"\xc3", b"\x1b]Y", b"\x1b[200~Y"])
+def test_real_pipe_eof_in_partial_key_never_launches_career(tmp_path, partial):
+    import os
+    import subprocess
+
+    env = dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path))
+    env.pop("NETBBS_DOOR_INFO", None)
+    result = subprocess.run(
+        [sys.executable, str(_VOIDRUNNER_PATH)], input=partial,
+        capture_output=True, env=env, timeout=10,
+    )
+    assert result.returncode == 0
+    assert not result.stderr
+    assert not list(tmp_path.glob("*.json"))
+
+
+@pytest.mark.parametrize("prefix", [b"\x1bP", b"\x1bX", b"\x1b^", b"\x1b_", b"\x90", b"\x98", b"\x9e", b"\x9f"])
+def test_st_only_control_strings_do_not_leak_keys_after_bel(prefix):
+    stream = io.BytesIO(prefix + b"data\x07YBUY\x1b\\Z")
+    reader = vr._DoorInput(lambda timeout: stream.read(1))
+    assert reader.read_key() == vr.IGNORED_KEY
+    assert reader.read_key() == "Z"
+
+
+@pytest.mark.parametrize("start", [b"\x1b[200~", b"\x9b200~"])
+@pytest.mark.parametrize("end", [b"\x1b[201~", b"\x9b201~"])
+def test_paste_accepts_both_csi_terminators(start, end):
+    stream = io.BytesIO(start + b"BUY" + end + b"Q")
+    reader = vr._DoorInput(lambda timeout: stream.read(1))
+    assert reader.read_key() == vr.IGNORED_KEY
+    assert reader.read_key() == "Q"
+
+
+def test_fragmented_escape_cannot_dismiss_result_pause(monkeypatch):
+    events = iter([b"\x1b", None, b"[", b"A", b"K", b"N"])
+    reader = vr._DoorInput(lambda timeout: next(events))
+    monkeypatch.setattr(vr, "read_key", reader.read_key)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.pause(vr.Palette(False))
+    assert reader.read_key() == "N"
+
+
+@pytest.mark.parametrize("text", ["\u017f", "\u0131", "\u00df"])
+def test_unicode_cannot_alias_ascii_commands(monkeypatch, text):
+    _use_decoded_input(monkeypatch, (text + "s").encode("utf-8"))
+    assert vr.read_command() == vr.IGNORED_KEY
+    assert vr.read_command() == "S"
+
+
+@pytest.mark.parametrize("command", [b"P", b"X", b"p", b"x"])
+def test_standalone_escape_does_not_capture_later_hotkeys(command):
+    events = iter([b"\x1b", None, command, b"Q"])
+    reader = vr._DoorInput(lambda timeout: next(events))
+    assert reader.read_key() == vr.ESCAPE_KEY
+    assert reader.read_key() == command.decode("ascii")
+    assert reader.read_key() == "Q"
+
+
+def test_control_string_started_before_timeout_retains_its_payload():
+    events = iter([b"\x1b", b"P", None, b"Y", b"\x1b", b"\\", b"Q"])
+    reader = vr._DoorInput(lambda timeout: next(events))
+    assert reader.read_key() == vr.IGNORED_KEY
+    assert reader.read_key() == vr.IGNORED_KEY
+    assert reader.read_key() == "Q"
