@@ -4765,7 +4765,91 @@ def test_service_retained_upgrade_result_is_durable_without_menu_exit(tmp_path):
         assert saved.ship.cargo_tier==1 and saved.pilot.credits==before-cost
 
 
-def test_screen_market_contraband_row_fits_the_box(monkeypatch):
+@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("haven",[False,True])
+def test_market_catalog_pages_preserve_goods_quotes_and_telemetry(monkeypatch,width,height,haven):
+    import re
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    world=_world_with_seed(42)
+    if haven:world.save.current_system=next(station.id for station in world.galaxy if station.economy=="Haven")
+    world.save.cargo={"weapons":1}
+    before=world.save.to_dict();rng=world.event_rng.getstate()
+    output=io.StringIO();frames=[]
+    def choose():
+        frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0);frames.append(frame)
+        assert len(frame.splitlines())<=height
+        assert all(vr._visible_width(line)<=width for line in frame.splitlines())
+        plain=" ".join(frame.split())
+        assert "[Q]Back:" in plain and "[X]Futures" in plain and "1,200cr" in plain
+        page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
+        return "Q" if page==count else ">"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_market(vr.Palette(False),world)
+    text=" ".join(" ".join(frames).split())
+    for commodity in vr.LEGAL_COMMODITIES+["weapons"]:assert vr.COMMODITIES[commodity]["label"] in text
+    assert "prohibited" in text or haven
+    assert "Illegal" in text and "Stock" in text and "station buys" in text and "in hold" in text
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+
+
+@pytest.mark.parametrize("key",list("ABCDE"))
+def test_market_commodity_keys_keep_identity_after_paging(monkeypatch,key):
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",40);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",12)
+    world=_world_with_seed(42);selected=[]
+    commands=iter([">",">",key,"Q"])
+    monkeypatch.setattr(vr,"read_key",lambda:next(commands))
+    monkeypatch.setattr(vr,"_trade_commodity",lambda p,w,c:selected.append(c))
+    with contextlib.redirect_stdout(io.StringIO()):vr.screen_market(vr.Palette(False),world)
+    assert selected==[vr.LEGAL_COMMODITIES[vr.LETTERS.index(key)]]
+
+
+def test_market_retains_trade_result_through_cancelled_quantity(monkeypatch):
+    world=_world_with_seed(42);saved=[]
+    world._checkpoint=lambda current:saved.append(current.save.to_dict())
+    commands=iter(["A","B","A","B","Q"]);quantities=iter(["1",""])
+    monkeypatch.setattr(vr,"read_key",lambda:next(commands))
+    monkeypatch.setattr(vr,"read_line_raw",lambda **kw:next(quantities))
+    with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_market(vr.Palette(False),world)
+    assert output.getvalue().count("Result: Bought 1x Food")==2
+    assert world.save.cargo=={"food":1} and len(saved)==1
+    assert f"Market: {world.save.pilot.credits:,}cr" in output.getvalue()
+
+
+def test_prohibited_commodity_details_hide_buy_and_reject_unadvertised_purchase(monkeypatch):
+    world=_world_with_seed(42);world.save.cargo={"weapons":1};before=world.save.to_dict()
+    monkeypatch.setattr(vr,"read_key",lambda:"B")
+    with contextlib.redirect_stdout(io.StringIO()) as output:result=vr._trade_commodity(vr.Palette(False),world,"weapons")
+    assert "Buy prohibited" in output.getvalue() and "[B]uy" not in output.getvalue()
+    assert "prohibit" in result and world.save.to_dict()==before
+
+
+@pytest.mark.parametrize("commands",[b"M><AQ Q".replace(b" ",b""),b"M><",b"MAB\rQ",b"MXBQ"])
+def test_real_market_catalog_browsing_cancel_and_eof_preserve_career(tmp_path,commands):
+    import json,os,subprocess
+    world=_world_with_seed(42)
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
+    original=(tmp_path/"77.json").read_bytes()
+    info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+    assert result.returncode==0 and not result.stderr and b"Market: 1,200cr" in result.stdout
+    assert (tmp_path/"77.json").read_bytes()==original
+
+
+@pytest.mark.parametrize("action",["buy","sell"])
+def test_market_retained_trade_result_is_durable_before_disconnect(tmp_path,action):
+    world=_world_with_seed(42)
+    if action=="sell":world.save.cargo={"food":2}
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
+    command=b"MAB1\r" if action=="buy" else b"MAS1\r"
+    marker=b"Result: Bought 1x Food" if action=="buy" else b"Result: Sold 1x Food"
+    with _door_stopped_at(tmp_path,command,marker):
+        saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+        assert saved.cargo=={"food":1}
+        assert saved.pilot.credits!=world.save.pilot.credits
+
+
+def test_screen_market_contraband_catalog_keeps_labels_and_bounds(monkeypatch):
     world = _world_with_seed(303)
     world.save.pilot.credits = 50_000
     haven = next(s for s in world.galaxy if s.economy == "Haven")
@@ -4776,7 +4860,9 @@ def test_screen_market_contraband_row_fits_the_box(monkeypatch):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_market(vr.Palette(truecolor=False), world)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_market@Haven")
+    text = " ".join(vr._ANSI_RE.sub("", buf.getvalue()).split())
+    assert "Illegal" in text and "station buys" in text and "Cargo Hold: 8/" in text
+    assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
 
 @pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])

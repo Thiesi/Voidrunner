@@ -3464,65 +3464,47 @@ def screen_landmark(p: Palette, world: World) -> None:
     pause(p)
 
 
-def screen_market(p: Palette, world: World) -> None:
+def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
     system = world.here
+    lines = [f"Commodity Market: {system.station_name}",
+             f"Cargo Hold: {sum(world.save.cargo.values())}/{cargo_capacity(world.save.ship)} units used. Prices per unit."]
+    for index, commodity in enumerate(goods):
+        quote = price_for(world, system.id, commodity)
+        depth = market_depth_quote(world, system.id, commodity)
+        illegal = not COMMODITIES[commodity]["legal"]
+        buy = "prohibited" if illegal and system.economy != "Haven" else f"{quote}cr"
+        tags = ["Illegal"] if illegal else []
+        event = world.save.active_event
+        if event and event["commodity"] == commodity and system.id in economy_event_system_ids(world, event):
+            tags.append("[CRASH]" if event["direction"] == "crash" else "[BOOM]")
+        lines.append(f"[{LETTERS[index]}] {COMMODITIES[commodity]['label']}: buy {buy}; sell {round(quote * SELL_SPREAD)}cr. "
+                     f"Stock {depth['stock']}; station buys {depth['demand']}; in hold {world.save.cargo.get(commodity, 0)}. "
+                     + " ".join(tags or ["Normal"]))
+    if any(not COMMODITIES[c]["legal"] for c in goods):
+        lines.append("Blackwake: +1 standing per new 500cr net contraband trading gain; purchases count against gains.")
+    return lines
+
+
+def screen_market(p: Palette, world: World) -> None:
+    page, result = 0, None
     while True:
-        out_line()
-        out_line(_box_title(p, f"Interstellar Commodity Exchange: {system.station_name}"))
-        header = f" {p.gold}KEY  COMMODITY            BUY/UNIT    SELL/UNIT     STOCK   IN HOLD  STATUS{RESET}"
-        out_line(f"{p.accent}│{RESET}{header}{' ' * max(0, 77 - _vis_len(header))}{p.accent}│{RESET}")
-        out_line(f"{p.accent}├─────────────────────────────────────────────────────────────────────────────┤{RESET}")
-        rows: list[tuple[str, str]] = []
-        goods = LEGAL_COMMODITIES + [c for c in CONTRABAND_COMMODITIES if system.economy == "Haven" or world.save.cargo.get(c, 0) > 0]
-        for commodity in goods:
-            buy = price_for(world, system.id, commodity)
-            sell = round(buy * SELL_SPREAD)
-            stock = market_depth_quote(world, system.id, commodity)["stock"]
-            have = world.save.cargo.get(commodity, 0)
-            label = COMMODITIES[commodity]["label"]
-
-            tag = ""
-            if not COMMODITIES[commodity]["legal"]:
-                tag = f"{p.wrong}Illegal{RESET}"
-            event = world.save.active_event
-            if event and event["commodity"] == commodity and system.id in economy_event_system_ids(world, event):
-                event_tag = (f"{p.wrong}[CRASH]{RESET}" if event["direction"] == "crash"
-                             else f"{p.correct}[BOOM]{RESET}")
-                tag = (tag + " " + event_tag).strip()
-            if not tag:
-                tag = f"{p.muted}Normal{RESET}"
-
-            key_char = LETTERS[len(rows)]
-            row_str = (
-                f"  {p.gold}[{key_char}]{RESET}  {label:<18} "
-                f"{buy:>6} cr   {sell:>6} cr   {stock:>8}   "
-                f"{have:>5}   {tag}"
-            )
-            rows.append((commodity, row_str))
-            pad_len = max(0, 77 - _vis_len(row_str))
-            out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
-
-        out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
-        cap = cargo_capacity(world.save.ship)
-        used = sum(world.save.cargo.values())
-        hold_bar = _gauge_bar(used, cap, 10, p)
-        out_line(f"  {p.accent}Cargo Hold:{RESET} {hold_bar} {used}/{cap} units   │   {p.gold}[X]{RESET} Futures Exchange")
-        if any(not COMMODITIES[c]["legal"] for c in goods):
-            out_line("Blackwake: +1 standing per new 500cr net contraband trading gain; purchases count against gains.")
-        out_prompt(f"  {p.muted}Trade which [A-{LETTERS[len(rows)-1]}], or [Q] back? {RESET}")
-        key = read_command()
-        out_line(key)
-        if key == "Q":
-            return
+        goods = LEGAL_COMMODITIES + [c for c in CONTRABAND_COMMODITIES if world.here.economy == "Haven" or world.save.cargo.get(c, 0) > 0]
+        lines = market_catalog_lines(world, goods)
+        if result: lines.insert(0, "Result: " + result)
+        footer = f"[<]Prev [>]Next [A-{LETTERS[len(goods)-1]}]Trade [X]Futures [Q]Back: "
+        key, page, count = _draw_service_page(p, f"Market: {world.save.pilot.credits:,}cr", lines, footer, page)
+        if key == "Q": return
+        if key == ">": page = min(page + 1, count - 1); continue
+        if key == "<": page = max(0, page - 1); continue
         if key == "X":
             futures_goods = [c for c in goods if COMMODITIES[c]["legal"] or world.here.economy == "Haven"]
             screen_futures(p, world, futures_goods)
+            page = 0
             continue
         idx = LETTERS.index(key) if key in LETTERS else -1
-        if idx < 0 or idx >= len(rows):
-            continue
-        commodity, _ = rows[idx]
-        _trade_commodity(p, world, commodity)
+        if 0 <= idx < len(goods):
+            response = _trade_commodity(p, world, goods[idx])
+            if response is not None: result, page = response, 0
 
 
 def screen_futures(p: Palette, world: World, goods: list[str]) -> None:
@@ -4049,16 +4031,18 @@ def screen_trading_ledger(p: Palette, world: World) -> None:
             screen_economy_opportunities(p, world)
 
 
-def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
+def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
     label = COMMODITIES[commodity]["label"]
     buy = price_for(world, world.here.id, commodity)
     sell = round(buy * SELL_SPREAD)
     depth = market_depth_quote(world, world.here.id, commodity)
-    lines = [f"Buy {buy}cr/unit; sell {sell}cr/unit.",
+    prohibited = not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven"
+    purchase = "Buy prohibited at this station" if prohibited else f"Buy {buy}cr/unit"
+    lines = [f"{purchase}; sell {sell}cr/unit.",
              f"Credits: {world.save.pilot.credits}cr. Hold: {world.save.cargo.get(commodity, 0)} units.",
              f"Stock {depth['stock']} (+{depth['stock_rate']}/day); station buys {depth['demand']} (+{depth['demand_rate']}/day).",
              "Only jumps advance days. Reopening this screen does not replenish the market."]
-    footer = "[B]uy [S]ell [N]ext [P]rev [Q]cancel: "
+    footer = ("" if prohibited else "[B]uy ") + "[S]ell [N]ext [P]rev [Q]cancel: "
     title = f"{label} Exchange"
     pages = _trade_pages(lines, title, footer)
     page = 0
@@ -4080,14 +4064,16 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
             page = max(0, page - 1)
     if action == "B":
         if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
-            out_line(f"{p.wrong}Station authorities prohibit the open purchase of contraband.{RESET}")
-            return
+            result = "Station authorities prohibit the open purchase of contraband."
+            out_line(f"{p.wrong}{result}{RESET}")
+            return result
         room = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
         affordable = world.save.pilot.credits // buy if buy else room
         max_qty = max(0, min(room, affordable, depth["stock"]))
         if max_qty <= 0:
-            out_line(f"{p.wrong}No room, credits or station stock.{RESET}")
-            return
+            result = "No room, credits or station stock."
+            out_line(f"{p.wrong}{result}{RESET}")
+            return result
         out_prompt(f"{p.muted}Quantity (max {max_qty}, Enter to cancel): {RESET}")
         raw = read_line_raw(max_len=5)
         qty = int(raw) if raw.isdigit() else 0
@@ -4098,15 +4084,18 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
         world.checkpoint()
         out_line(f"{p.correct}{result}{RESET}")
         out_line(f"Credits remaining: {world.save.pilot.credits}cr. Cost recorded in [T] Trading Ledger.")
+        return result
     elif action == "S":
         have = world.save.cargo.get(commodity, 0)
         if have <= 0:
-            out_line(f"{p.wrong}You have none to sell.{RESET}")
-            return
+            result = "You have none to sell."
+            out_line(f"{p.wrong}{result}{RESET}")
+            return result
         max_qty = min(have, depth["demand"])
         if max_qty <= 0:
-            out_line(f"{p.wrong}Station demand is exhausted; replenishes {depth['demand_rate']}/day.{RESET}")
-            return
+            result = f"Station demand is exhausted; replenishes {depth['demand_rate']}/day."
+            out_line(f"{p.wrong}{result}{RESET}")
+            return result
         out_prompt(f"{p.muted}Quantity (have {have}, station buys {max_qty}, Enter to cancel): {RESET}")
         raw = read_line_raw(max_len=5)
         qty = int(raw) if raw.isdigit() else 0
@@ -4117,6 +4106,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
         world.checkpoint()
         out_line(f"{p.correct}{result}{RESET}")
         out_line(f"Credits now: {world.save.pilot.credits}cr. Margin recorded in [T] Trading Ledger.")
+        return result
 
 
 
