@@ -9510,6 +9510,251 @@ def test_bounty_combat_risk_terms_match_identification_state_without_rng(identit
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
 
 
+# Specialist workshops are derived from existing stations and consume real cargo.
+def _world_at_workshop(key, tier=0):
+    world = _world_with_seed(42)
+    world.save.current_system = vr.specialist_stations(world)[key]
+    world.by_id[world.here.id].discovered = True
+    world.save.pilot.credits = 100_000
+    world.save.pilot.highest_rank_seen = len(vr.RANKS) - 1
+    setattr(world.save.ship, key + "_tier", tier)
+    quote = vr.workshop_quote(world, key)
+    world.save.cargo[quote["commodity"]] = quote["quantity"]
+    return world
+
+
+def test_specialist_sites_are_distinct_deterministic_and_preserve_existing_world():
+    import copy,dataclasses
+    for seed in range(60):
+        world = _world_with_seed(seed)
+        before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+        galaxy = [dataclasses.asdict(s) for s in world.galaxy]
+        sites = vr.specialist_stations(world)
+        assert len(set(sites.values())) == 3 and 0 not in sites.values()
+        assert set(sites) == {"cargo", "engine", "scanner"}
+        world.galaxy.reverse()
+        assert vr.specialist_stations(world) == sites
+        world.galaxy.reverse()
+        assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+        assert [dataclasses.asdict(s) for s in world.galaxy] == galaxy
+        assert vr.specialist_stations(vr.World(vr.SaveData.from_dict(before))) == sites
+
+
+@pytest.mark.parametrize("key,tier", [("cargo", t) for t in range(5)] + [("engine", t) for t in range(3)] + [("scanner", t) for t in range(2)])
+def test_workshop_installation_uses_materials_and_cash_for_one_normal_tier(key, tier):
+    import copy
+    world = _world_at_workshop(key, tier)
+    quote = vr.workshop_quote(world, key)
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    message = vr.install_workshop_module(world, key)
+    assert getattr(world.save.ship, key + "_tier") == tier + 1
+    assert world.save.pilot.credits == before["pilot"]["credits"] - (vr.UPGRADES[key]["cost"](tier) * 65 + 99) // 100
+    assert world.save.cargo.get(quote["commodity"], 0) == 0
+    assert world.save.trading_ledger.workshop_spend == quote["credits"]
+    assert world.save.trading_ledger.uncosted_workshop_materials == quote["quantity"]
+    assert world.save.trading_ledger.cargo_loss_cost == 0 and world.save.trading_ledger.uncosted_losses == 0
+    assert world.save.pilot.missions_completed == 0 and world.save.pilot.reputation == before["pilot"]["reputation"]
+    assert world.save.ship.fuel == before["ship"]["fuel"] and world.save.ship.hull_hp == before["ship"]["hull_hp"]
+    assert world.save.turn == before["turn"] and world.event_rng.getstate() == rng
+    assert vr.WORKSHOPS[key]["owner"] in message and message in world.save.pilot.highlights
+    vr.SaveData.from_dict(world.save.to_dict())
+
+
+@pytest.mark.parametrize("key", ["cargo", "engine", "scanner"])
+@pytest.mark.parametrize("condition", ["remote", "credits", "materials", "maxed", "journey", "invalid"])
+def test_workshop_rejected_installation_preserves_everything(key, condition):
+    import copy
+    world = _world_at_workshop(key)
+    if condition == "remote": world.save.current_system = 0
+    elif condition == "credits": world.save.pilot.credits = vr.workshop_quote(world, key)["credits"] - 1
+    elif condition == "materials": world.save.cargo.clear()
+    elif condition == "maxed": setattr(world.save.ship, key + "_tier", vr.UPGRADES[key]["max_tier"])
+    elif condition == "journey": world.save.pending_travel = {"phase": "primary"}
+    elif condition == "invalid": key = "weapon"
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    with pytest.raises(ValueError): vr.install_workshop_module(world, key)
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+def test_workshop_material_accounting_consumes_unknown_then_fifo_without_fake_loss():
+    world = _world_at_workshop("engine", 1)
+    world.save.cargo = {"machinery": 5}; world.save.cargo_basis = {"machinery": [[4, 1000]]}
+    vr.install_workshop_module(world, "engine")
+    assert world.save.cargo == {"machinery": 1} and world.save.cargo_basis == {"machinery": [[1, 250]]}
+    ledger = world.save.trading_ledger
+    assert (ledger.workshop_material_cost, ledger.uncosted_workshop_materials, ledger.workshop_spend) == (750, 1, 1430)
+    assert ledger.cargo_loss_cost == ledger.sales_cost == ledger.delivery_cost == 0
+    assert "materials 750cr recorded cost, plus 1 units of unknown cost" in " ".join(vr.trading_ledger_lines(world))
+    restored = vr.World(vr.SaveData.from_dict(world.save.to_dict()))
+    assert restored.save.trading_ledger == ledger
+
+
+def test_legacy_ledger_defaults_workshop_counters_and_retirement_clears_them():
+    world = _world_with_seed(42); data = world.save.to_dict()
+    fields = ("workshop_spend", "workshop_material_cost", "uncosted_workshop_materials")
+    for field in fields: data["trading_ledger"].pop(field)
+    save = vr.SaveData.from_dict(data)
+    assert all(getattr(save.trading_ledger, field) == 0 for field in fields)
+    upgraded = _world_at_workshop("cargo"); vr.install_workshop_module(upgraded, "cargo")
+    retired = vr.retire_pilot(upgraded.save)
+    assert retired.ship.cargo_tier == 0 and all(getattr(retired.trading_ledger, field) == 0 for field in fields)
+
+
+@pytest.mark.parametrize("field", ["workshop_spend", "workshop_material_cost", "uncosted_workshop_materials"])
+@pytest.mark.parametrize("value", [-1, "unknown"])
+def test_invalid_workshop_ledger_preserves_original_bytes(tmp_path, field, value):
+    import json
+    data = _world_with_seed(42).save.to_dict(); data["trading_ledger"][field] = value
+    path = tmp_path / "77.json"; path.write_text(json.dumps(data), encoding="utf-8"); before = path.read_bytes()
+    with pytest.raises(vr.ResumeError): vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("key", ["cargo", "engine", "scanner"])
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("style", ["auto", "plain"])
+def test_workshop_detail_pages_keep_terms_and_leave_career_untouched(monkeypatch, key, width, height, style):
+    import copy,re
+    world = _world_at_workshop(key)
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    output, contents = io.StringIO(), []
+    world._checkpoint = lambda w: pytest.fail("Workshop browsing checkpointed")
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0)
+        assert len(frame.splitlines()) <= height
+        assert all(vr._visible_width(row) <= width for row in frame.splitlines())
+        assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+        plain = vr._ANSI_RE.sub("", frame)
+        match = re.search(r"Workshop\s+[\d,]+cr\s+(\d+)/(\d+)", plain)
+        page, count = map(int, match.groups())
+        payload = plain[match.end():]
+        payload = re.split(r"\[I\]Install|\[R\]Route", payload)[0]
+        contents.append(payload.strip().removeprefix(">").strip())
+        return "B" if page == count else ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): assert vr.screen_workshop(vr.Palette(False), world, key) is None
+    text = " ".join(" ".join(contents).split())
+    for line in vr.workshop_lines(world, key): assert " ".join(line.split()) in text
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_specialist_directory_paging_keeps_all_named_sites_and_stable_keys(monkeypatch, width, height):
+    import copy,re
+    world = _world_with_seed(42)
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    before = copy.deepcopy(world.save.to_dict()); output = io.StringIO(); frames = []
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert len(frame.splitlines()) <= height
+        assert all(vr._visible_width(row) <= width for row in frame.splitlines())
+        page, count = map(int, re.search(r"Workshops\s+(\d+)/(\d+)", frame).groups())
+        return "B" if page == count else ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): vr.screen_specialists(vr.Palette(False), world)
+    assert world.save.to_dict() == before
+    text = " ".join(" ".join(frames).split())
+    for shop in vr.WORKSHOPS.values(): assert shop["name"] in text and shop["owner"] in text
+
+
+@pytest.mark.parametrize("commands", [b"YS", b"YS1", b"YS1BBQQ", b"YS1RBBBQQ"])
+def test_real_workshop_browsing_and_routes_preserve_career_bytes(tmp_path, commands):
+    import json,os,subprocess
+    world = _world_with_seed(42)
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    before = (tmp_path / "77.json").read_bytes()
+    info = tmp_path / "door_info.json"; info.write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 40, "terminal_height": 12}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True, timeout=10,
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)))
+    assert result.returncode == 0 and not result.stderr and b"Specialist Workshops" in result.stdout
+    assert (tmp_path / "77.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("key,number", [("cargo", b"1"), ("engine", b"2"), ("scanner", b"3")])
+def test_real_workshop_installation_saves_costs_and_tier_before_ack(tmp_path, key, number):
+    import os,subprocess
+    world = _world_at_workshop(key)
+    quote = vr.workshop_quote(world, key)
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    ack = (vr.WORKSHOPS[key]["owner"] + " installed").encode()
+    with _door_stopped_at(tmp_path, b"YS" + number + b"IY", ack):
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert getattr(saved.ship, key + "_tier") == 1
+        assert saved.pilot.credits == 100_000 - quote["credits"]
+        assert not saved.cargo and saved.trading_ledger.workshop_spend == quote["credits"]
+    before = (tmp_path / "77.json").read_bytes()
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"YS" + number + b"BBQQ", capture_output=True, timeout=10,
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")))
+    assert result.returncode == 0 and not result.stderr
+    assert (tmp_path / "77.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_workshop_confirmation_cancel_or_save_failure_cannot_acknowledge_installation(monkeypatch, fail):
+    import copy
+    world = _world_at_workshop("cargo"); before = copy.deepcopy(world.save.to_dict())
+    output = io.StringIO(); keys = iter("IB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "confirm", lambda *args: fail)
+    def checkpoint(w):
+        assert "Iona Rusk installed" not in output.getvalue()
+        raise vr.SaveError()
+    world._checkpoint = checkpoint
+    with contextlib.redirect_stdout(output):
+        if fail:
+            with pytest.raises(vr.SaveError): vr.screen_workshop(vr.Palette(False), world, "cargo")
+        else:
+            vr.screen_workshop(vr.Palette(False), world, "cargo")
+            assert world.save.to_dict() == before
+    assert "Iona Rusk installed" not in output.getvalue()
+
+
+def test_public_workshop_routes_allow_only_the_listed_bearings_without_charting():
+    import copy
+    world = _world_with_seed(42); sites = set(vr.specialist_stations(world).values())
+    for sid in sites:
+        world.by_id[sid].discovered = False
+        before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+        assert vr.prepare_route_jump(world, sid) == vr.bfs_path(world.by_id, 0, sid)[0]
+        assert not world.by_id[sid].discovered
+        assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+    other = next(sid for sid in world.by_id if sid and sid not in sites)
+    world.by_id[other].discovered = False
+    with pytest.raises(vr.MissionError, match="charted"): vr.prepare_route_jump(world, other)
+    world.save.ship.fuel = 0
+    with pytest.raises(vr.MissionError, match="fuel"): vr.prepare_route_jump(world, next(iter(sites)))
+
+
+
+def test_specialist_directory_flies_real_route_then_installs_with_known_materials(monkeypatch, tmp_path):
+    world = _world_with_seed(42)
+    destination = vr.specialist_stations(world)["cargo"]
+    path = vr.bfs_path(world.by_id, 0, destination)
+    world.save.cargo = {"metals": 2}; world.save.cargo_basis = {"metals": [[2, 100]]}
+    world.save.trading_ledger.since_day = world.save.turn
+    keys = iter("1R" + "J" * len(path) + "BIYBB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(world.event_rng, "random", lambda: 0.99)
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    with contextlib.redirect_stdout(io.StringIO()): result = vr.screen_specialists(vr.Palette(False), world)
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert saved.current_system == destination and saved.turn == len(path)
+    assert saved.ship.cargo_tier == 1 and saved.pilot.credits == 680 and not saved.cargo
+    assert saved.ship.fuel < 24 and saved.pending_travel is None
+    assert saved.trading_ledger.workshop_material_cost == 100
+    assert "Iona Rusk installed" in result
+
+
+def test_workshop_discloses_and_consumes_materials_promised_to_a_delivery():
+    world = _world_at_workshop("cargo")
+    world.save.active_missions = [vr.Mission(1, "delivery", "Promised metal", 500, 0, 1, commodity="metals", quantity=2)]
+    assert "cargo promised to delivery contracts" in " ".join(vr.workshop_lines(world, "cargo"))
+    vr.install_workshop_module(world, "cargo")
+    assert not world.save.cargo and len(world.save.active_missions) == 1
+    assert world.save.pilot.missions_completed == 0
+
+
 @pytest.mark.parametrize("standing", [-100, 0, 97, 98, 99, 100])
 def test_distress_terms_disclose_actual_capped_standing_gain(monkeypatch, standing):
     world = _world_with_seed(42); world.save.pilot.reputation[vr.FACTION_CONCORD] = standing
@@ -9522,6 +9767,7 @@ def test_distress_terms_disclose_actual_capped_standing_gain(monkeypatch, standi
     monkeypatch.setattr(vr, "read_key", lambda: "H")
     with contextlib.redirect_stdout(io.StringIO()): vr._encounter_distress_call(vr.Palette(False), world)
     assert world.save.pilot.reputation[vr.FACTION_CONCORD] - standing == gain
+
 
 
 @pytest.mark.parametrize("concord,blackwake", [(-100, 100), (-99, 99), (-98, 98), (0, 0), (95, 95), (96, 96), (99, 99), (100, 100)])

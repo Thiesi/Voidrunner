@@ -1114,6 +1114,9 @@ class TradingLedger:
     fuel_spend: int = 0
     wages: int = 0
     cancelled_fees: int = 0
+    workshop_spend: int = 0
+    workshop_material_cost: int = 0
+    uncosted_workshop_materials: int = 0
 
 
 @dataclass
@@ -2102,6 +2105,9 @@ def _dispose_cargo(world: World, commodity: str, quantity: int, *,
         ledger.delivery_revenue += proceeds - unknown_receipts
         ledger.delivery_cost += cost
         ledger.uncosted_deliveries += unknown_receipts
+    elif kind == "workshop":
+        ledger.workshop_material_cost += cost
+        ledger.uncosted_workshop_materials += unknown
     else:
         ledger.cargo_loss_cost += cost
         ledger.uncosted_losses += unknown
@@ -3977,6 +3983,7 @@ def trading_ledger_lines(world: World) -> list[str]:
         "Mixed delivery payments are divided by cargo quantity. Margins exclude operating costs and other career income or spending.",
         f"Cargo lost or surrendered: {ledger.cargo_loss_cost:,}cr recorded cost, plus {ledger.uncosted_losses} units of unknown cost.",
         f"Fuel purchases: {ledger.fuel_spend:,}cr. Crew wages paid: {ledger.wages:,}cr. Cancelled-order fees: {ledger.cancelled_fees:,}cr.",
+        f"Workshop installations: {ledger.workshop_spend:,}cr paid; materials {ledger.workshop_material_cost:,}cr recorded cost, plus {ledger.uncosted_workshop_materials} units of unknown cost.",
         "These totals begin when recorded, exclude earlier activity, repairs, fines and crew hiring, and are not total career profit.",
         "HOLD - older unknown cargo is consumed first, then recorded purchases in order. Futures costs include brokerage.",
     ]
@@ -4469,6 +4476,120 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
 
 
 
+WORKSHOPS = {
+    "cargo": {"name": "Rivet House", "owner": "Iona Rusk", "economy": "Mining", "commodity": "metals", "units": 2,
+              "voice": "I make room for what matters. Bring good metal; I will find the space."},
+    "engine": {"name": "Tuning Fork", "owner": "Oren Vale", "economy": "Industrial", "commodity": "machinery", "units": 2,
+               "voice": "Every drive has a rhythm. Yours is rushing the quiet parts."},
+    "scanner": {"name": "Far Lantern", "owner": "Dr. Sel Parn", "economy": "Tech", "commodity": "electronics", "units": 1,
+                "voice": "The stars are already talking. We just need a better listener."},
+}
+
+
+def specialist_stations(world: World) -> dict[str, int]:
+    """Stable public bearings in a separate namespace; never chart or draw events."""
+    rng = random.Random(f"workshops-v1:{world.save.seed}")
+    hops = bfs_hops(world.by_id, 0)
+    result = {}
+    for key, workshop in WORKSHOPS.items():
+        available = [s for s in world.galaxy if s.id != 0 and s.id not in result.values()]
+        economy = [s for s in available if s.economy == workshop["economy"]]
+        nearby = [s for s in economy if 2 <= hops[s.id] <= 5]
+        candidates = nearby or economy or available
+        result[key] = rng.choice(sorted(candidates, key=lambda s: s.id)).id
+    return result
+
+
+def workshop_quote(world: World, key: str) -> dict:
+    if key not in WORKSHOPS: raise ValueError("Choose a listed specialist workshop.")
+    workshop, upgrade = WORKSHOPS[key], UPGRADES[key]
+    tier = getattr(world.save.ship, f"{key}_tier")
+    if tier >= upgrade["max_tier"]: raise ValueError(f"{upgrade['label']} is already maxed.")
+    standard = upgrade["cost"](tier)
+    return {"station": specialist_stations(world)[key], "tier": tier + 1,
+            "standard": standard, "credits": (standard * 65 + 99) // 100,
+            "commodity": workshop["commodity"], "quantity": workshop["units"] * (tier + 1)}
+
+
+def workshop_blocker(world: World, key: str) -> str | None:
+    if world.save.pending_travel is not None: return "Finish the current journey first."
+    try: quote = workshop_quote(world, key)
+    except ValueError as exc: return str(exc)
+    if world.here.id != quote["station"]: return "Visit this workshop before installing a module."
+    if world.save.pilot.credits < quote["credits"]: return f"Need {quote['credits']:,}cr for installation."
+    if world.save.cargo.get(quote["commodity"], 0) < quote["quantity"]:
+        return f"Need {quote['quantity']} {COMMODITIES[quote['commodity']]['label']} in your hold."
+    return None
+
+
+def install_workshop_module(world: World, key: str) -> str:
+    blocker = workshop_blocker(world, key)
+    if blocker: raise ValueError(blocker)
+    quote = workshop_quote(world, key)
+    world.save.pilot.credits -= quote["credits"]
+    _dispose_cargo(world, quote["commodity"], quote["quantity"], kind="workshop")
+    _ledger(world).workshop_spend += quote["credits"]
+    setattr(world.save.ship, f"{key}_tier", quote["tier"])
+    message = f"{WORKSHOPS[key]['owner']} installed {UPGRADES[key]['label']} tier {quote['tier']} at {WORKSHOPS[key]['name']}."
+    world.save.pilot.note(message)
+    world.save.pilot.highlight(message)
+    return message
+
+
+def workshop_lines(world: World, key: str) -> list[str]:
+    shop = WORKSHOPS[key]; station = world.by_id[specialist_stations(world)[key]]
+    lines = [f"{shop['name']} at {station.station_name}, {station.name} ({station.x},{station.y}).",
+             f"{shop['owner']}: {shop['voice']}"]
+    try: quote = workshop_quote(world, key)
+    except ValueError as exc: return lines + [str(exc)]
+    commodity = COMMODITIES[quote["commodity"]]["label"]
+    lines += [f"{UPGRADES[key]['label']} tier {quote['tier']}: {quote['credits']:,}cr plus {quote['quantity']} {commodity}. Benefit: {UPGRADES[key]['effect']}.",
+              f"You have {world.save.cargo.get(quote['commodity'], 0)} {commodity}; ordinary yard price {quote['standard']:,}cr without materials.",
+              "The cash price is 65% of ordinary cost. Materials and travel can outweigh that saving; compare your total costs.",
+              "Materials are consumed, including any cargo promised to delivery contracts. No extra fuel or repairs are included."]
+    blocker = workshop_blocker(world, key)
+    lines.append(blocker if blocker else "[I] Install after final confirmation. No day advances.")
+    return lines
+
+
+def screen_workshop(p: Palette, world: World, key: str) -> str | None:
+    page, result = 0, None
+    while True:
+        available = workshop_blocker(world, key) is None
+        footer = ("[I]Install " if available else "") + "[R]Route [B]Back [<>]Page: "
+        lines = (["Result: " + result] if result else []) + workshop_lines(world, key)
+        action, page, count = _draw_service_page(p, f"Workshop {world.save.pilot.credits:,}cr", lines, footer, page)
+        if action in ("B", "Q"): return result
+        if action == ">": page = min(page + 1, count - 1); continue
+        if action == "<": page = max(0, page - 1); continue
+        if action == "R":
+            _screen_auto_route(p, world, destination=specialist_stations(world)[key]); page = 0
+        elif action == "I" and available:
+            quote = workshop_quote(world, key)
+            if confirm(f"Install {UPGRADES[key]['label']} tier {quote['tier']} for {quote['credits']}cr and {quote['quantity']} {COMMODITIES[quote['commodity']]['label']}? Materials are consumed.", p):
+                result = install_workshop_module(world, key)
+                world.checkpoint()
+                page = 0
+
+
+def screen_specialists(p: Palette, world: World) -> str | None:
+    page, result = 0, None
+    while True:
+        stations = specialist_stations(world)
+        lines = (["Result: " + result] if result else []) + ["Named workshops trade specialist installation for supplied materials and credits. Select a workshop for exact terms and a route."]
+        for index, (key, shop) in enumerate(WORKSHOPS.items(), 1):
+            station = world.by_id[stations[key]]
+            lines.append(f"[{index}] {shop['name']}: {shop['owner']}, {UPGRADES[key]['label']}. {station.name}, {station.station_name}.")
+        lines.append("Public bearings do not chart stations or reveal their market prices. Standard services remain available at every yard.")
+        action, page, count = _draw_service_page(p, "Specialist Workshops", lines, "[1-3]View [B]Back [<>]Page: ", page)
+        if action in ("B", "Q"): return result
+        if action == ">": page = min(page + 1, count - 1); continue
+        if action == "<": page = max(0, page - 1); continue
+        if action in ("1", "2", "3"):
+            response = screen_workshop(p, world, list(WORKSHOPS)[int(action) - 1])
+            if response is not None: result, page = response, 0
+
+
 def shipyard_lines(world: World) -> list[str]:
     ship = world.save.ship
     lines = [world.here.station_name,
@@ -4480,6 +4601,8 @@ def shipyard_lines(world: World) -> list[str]:
             lines.append(f"[{LETTERS[i]}] {upgrade['label']:<20} {status:<24} {upgrade['effect']}")
         else:
             lines.append(f"[{LETTERS[i]}] {upgrade['label']}: {status}. Benefit: {upgrade['effect']}")
+    local = next((WORKSHOPS[key] for key, sid in specialist_stations(world).items() if sid == world.here.id), None)
+    if local: lines.append(f"Local specialist: {local['name']}, {local['owner']}. [S] Specialists for material-supplied installations.")
     refits = HULL_REFITS[ship.hull_class]
     for key, (target, cost) in zip(LETTERS[len(UPGRADES):], refits):
         lines.append(f"[{key}] {target}-Class Refit: {cost:,}cr; permanent hull change.")
@@ -4512,7 +4635,7 @@ def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, pa
 
 def screen_shipyard(p: Palette, world: World) -> None:
     page, result = 0, None
-    footer = "[<]Prev [>]Next [R]Fuel [P]Repair [K]Crew [Q]Back: "
+    footer = "[<]Prev [>]Next [R]Fuel [P]Repair [K]Crew [S]Specialists [Q]Back: "
     while True:
         lines = shipyard_lines(world)
         if result: lines.insert(0, "Result: " + result)
@@ -4531,6 +4654,7 @@ def screen_shipyard(p: Palette, world: World) -> None:
         elif action == "R": response = _refuel(p, world)
         elif action == "P": response = _repair(p, world)
         elif action == "K": screen_crew(p, world)
+        elif action == "S": response = screen_specialists(p, world)
         elif action == "U": page = 0  # Historical alias now returns to the upgrade list.
         if response is not None: result, page = response, 0
 
@@ -5644,7 +5768,8 @@ def prepare_route_jump(world: World, destination: int) -> int:
     if type(destination) is not int or destination not in world.by_id:
         raise MissionError("Choose a charted destination first.")
     archive_bearing = world.save.flags.get("archive_v1_started") and destination == world.landmark["system_id"]
-    if not world.by_id[destination].discovered and not archive_bearing:
+    workshop_bearing = destination in specialist_stations(world).values()
+    if not world.by_id[destination].discovered and not archive_bearing and not workshop_bearing:
         raise MissionError("Choose a charted destination first.")
     if world.save.pending_travel is not None:
         raise MissionError("Finish the interrupted journey first.")
