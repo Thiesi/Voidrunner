@@ -4616,6 +4616,8 @@ def test_bounty_reward_for_applies_the_commission_bonus():
 def test_screen_concord_commission_grants_perk_and_bonus_on_confirmation(monkeypatch):
     world = _world_with_seed(186)
     before_credits = world.save.pilot.credits
+    world.save.pilot.reputation[vr.FACTION_CONCORD] = 75
+    keys = iter("JB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -4628,6 +4630,8 @@ def test_screen_concord_commission_grants_perk_and_bonus_on_confirmation(monkeyp
 
 def test_screen_concord_commission_declines_without_confirmation(monkeypatch):
     world = _world_with_seed(187)
+    world.save.pilot.reputation[vr.FACTION_CONCORD] = 75
+    keys = iter("JB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     monkeypatch.setattr(vr, "confirm", lambda prompt, p: False)
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -4639,6 +4643,8 @@ def test_screen_concord_commission_declines_without_confirmation(monkeypatch):
 def test_screen_blackwake_made_grants_perk_and_bonus_on_confirmation(monkeypatch):
     world = _world_with_seed(188)
     before_credits = world.save.pilot.credits
+    world.save.pilot.reputation[vr.FACTION_BLACKWAKE] = 75
+    keys = iter("JB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -4648,14 +4654,14 @@ def test_screen_blackwake_made_grants_perk_and_bonus_on_confirmation(monkeypatch
     assert world.save.pilot.credits == before_credits + vr.BLACKWAKE_MADE_BONUS_CREDITS
 
 
-def test_station_menu_offers_arcs_only_when_available(monkeypatch):
+def test_station_menu_always_offers_faction_contacts(monkeypatch):
     world = _world_with_seed(189)
     monkeypatch.setattr(vr, "read_key", lambda: "Q")
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_station_menu(vr.Palette(truecolor=False), world)
-    assert "[P]" not in buf.getvalue() and "[W]" not in buf.getvalue()
+    assert "[P]" in buf.getvalue() and "[W]" in buf.getvalue()
 
     world.save.pilot.reputation[vr.FACTION_CONCORD] = vr.CONCORD_COMMISSION_THRESHOLD
     world.save.pilot.reputation[vr.FACTION_BLACKWAKE] = vr.BLACKWAKE_MADE_THRESHOLD
@@ -5366,26 +5372,17 @@ def test_empty_mission_board_renders_clean_notice_and_back(monkeypatch):
     assert "[B]ack" in output
 
 
-def test_commission_and_cartel_screens_use_tactical_framing(monkeypatch):
+def test_commission_and_cartel_screens_fit_standard_terminal(monkeypatch):
     world = _world_with_seed(314)
-    p = vr.Palette(truecolor=False)
-    monkeypatch.setattr(vr, "confirm", lambda prompt, p: False)
-
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr.screen_concord_commission(p, world)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_concord_commission")
-    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n") if line.strip()]
-    concord_borders = {len(line) for line in stripped if line.startswith(("╭", "╰"))}
-    assert concord_borders == {79}
-
-    buf2 = io.StringIO()
-    with contextlib.redirect_stdout(buf2):
-        vr.screen_blackwake_made(p, world)
-    _assert_box_rows_match_border(buf2.getvalue(), "screen_blackwake_made")
-    stripped2 = [vr._ANSI_RE.sub("", line) for line in buf2.getvalue().split("\r\n") if line.strip()]
-    blackwake_borders = {len(line) for line in stripped2 if line.startswith(("╭", "╰"))}
-    assert blackwake_borders == {79}
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 24)
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
+    monkeypatch.setattr(vr, "confirm", lambda *args: pytest.fail("Browsing opened a confirmation"))
+    for screen in (vr.screen_concord_commission, vr.screen_blackwake_made):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output): screen(vr.Palette(False), world)
+        assert len(output.getvalue().splitlines()) <= 24
+        assert all(vr._visible_width(row) <= 80 for row in output.getvalue().splitlines())
+        assert "Back" in output.getvalue() and "Standing:" in output.getvalue()
 
 
 def test_status_bar_separator_is_79_columns():
@@ -5413,8 +5410,8 @@ def test_status_bar_separator_is_79_columns():
         (b"MX1SY", b"Futures contract: 1x Food", "active_futures", "nonempty"),
         (b"B1NNNNNNNNA", b"Accepted:", "active_missions", "nonempty"),
         (b"DY", b"Jettisoned 1 units", "cargo", {}),
-        (b"PY", b"Commission accepted", "pilot.has_concord_commission", True),
-        (b"WY", b"Welcome to the family", "pilot.has_blackwake_made", True),
+        (b"PJY", b"Commission accepted", "pilot.has_concord_commission", True),
+        (b"WJY", b"Welcome to the family", "pilot.has_blackwake_made", True),
     ],
 )
 def test_acknowledged_station_action_survives_forced_termination(
@@ -10375,6 +10372,183 @@ def test_invalid_personal_navigator_task_preserves_career(tmp_path, patch):
     assert path.read_bytes() == original
 
 
+
+@pytest.mark.parametrize("concord,blackwake", [(-100, 75), (-51, 75), (-50, 75), (-49, -50), (0, -51), (75, -49), (100, 100)])
+def test_faction_perks_follow_each_memberships_current_standing(concord, blackwake):
+    world = _world_with_seed(42)
+    world.save.pilot.has_concord_commission = world.save.pilot.has_blackwake_made = True
+    world.save.pilot.reputation = {vr.FACTION_CONCORD: concord, vr.FACTION_BLACKWAKE: blackwake}
+    assert vr.bounty_reward_for(world, 1000) == (1250 if concord > -50 else 1000)
+    assert vr.customs_risk_for(world, world.here) == pytest.approx(vr.customs_check_chance(world.here) * (0.5 if blackwake > -50 else 1))
+    for faction, standing in world.save.pilot.reputation.items():
+        status = "ACTIVE" if standing > -50 else "SUSPENDED"
+        assert status in vr.faction_membership_status(world, faction)
+        assert any(vr.FACTION_LABEL[faction] in line and status in line for line in vr.pilot_record_lines(world))
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+def test_faction_suspension_restoration_keeps_credential_and_never_repays_grant(faction):
+    import copy
+    world = _world_with_seed(42); world.save.pilot.reputation[faction] = 75
+    vr.join_faction(world, faction)
+    credits = world.save.pilot.credits
+    vr.adjust_reputation(world, faction, -125)
+    assert not vr.faction_perk_active(world, faction)
+    assert getattr(world.save.pilot, vr.FACTION_MEMBERSHIPS[faction]["field"])
+    before = copy.deepcopy(world.save.to_dict())
+    with pytest.raises(ValueError, match="already held"): vr.join_faction(world, faction)
+    assert world.save.to_dict() == before
+    vr.adjust_reputation(world, faction, 1)
+    assert vr.faction_perk_active(world, faction) and world.save.pilot.credits == credits
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+@pytest.mark.parametrize("fault", ["under_threshold", "already_joined", "pending"])
+def test_faction_join_rejects_before_any_effect(faction, fault):
+    import copy
+    world = _world_with_seed(42); world.save.pilot.reputation[faction] = 75
+    if fault == "under_threshold": world.save.pilot.reputation[faction] = 74
+    elif fault == "already_joined": setattr(world.save.pilot, vr.FACTION_MEMBERSHIPS[faction]["field"], True)
+    else: world.save.pending_travel = {"phase": "arrival"}
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    with pytest.raises(ValueError): vr.join_faction(world, faction)
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("order", [vr.FACTIONS, list(reversed(vr.FACTIONS))])
+def test_both_faction_memberships_can_be_joined_without_revoking_the_other(order):
+    world = _world_with_seed(42); world.save.pilot.reputation = {faction: 75 for faction in vr.FACTIONS}
+    before, rng = world.save.pilot.credits, world.event_rng.getstate()
+    for faction in order: vr.join_faction(world, faction)
+    assert world.save.pilot.credits == before + 4000
+    assert all(vr.faction_perk_active(world, faction) for faction in vr.FACTIONS)
+    assert world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+@pytest.mark.parametrize("state", ["visitor", "eligible", "active", "suspended"])
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("style", ["auto", "plain"])
+def test_faction_contact_pages_preserve_all_terms_without_writes(monkeypatch, faction, state, width, height, style):
+    import copy,re
+    world = _world_with_seed(42)
+    world.save.pilot.reputation[faction] = -50 if state == "suspended" else 75 if state != "visitor" else 0
+    setattr(world.save.pilot, vr.FACTION_MEMBERSHIPS[faction]["field"], state in ("active", "suspended"))
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height); monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    output, bodies = io.StringIO(), []
+    world._checkpoint = lambda w: pytest.fail("Contact browsing checkpointed")
+    monkeypatch.setattr(vr, "confirm", lambda *args: pytest.fail("Browsing opened a confirmation"))
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0)
+        assert len(frame.splitlines()) <= height and all(vr._visible_width(row) <= width for row in frame.splitlines())
+        plain = vr._ANSI_RE.sub("", frame)
+        assert "[B]Back" in " ".join(plain.split())
+        if state=="eligible":assert "[J]Join" in " ".join(plain.split())
+        match = re.search(r"[\d,]+cr\s+(\d+)/(\d+)", plain); assert match
+        page, count = map(int, match.groups())
+        body = re.sub(r"^[\s>]*\w+\s+[\d,]+cr\s+\d+/\d+\s*", "", plain)
+        bodies.append(re.split(r"\[(?:J|B)\](?:Join|Back)", body)[0])
+        assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+        return "B" if page == count else ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): vr._screen_faction_contact(vr.Palette(False), world, faction)
+    assert " ".join(" ".join(bodies).split()) == " ".join(" ".join(vr.faction_contact_lines(world, faction)).split())
+
+
+@pytest.mark.parametrize("key", ["P", "W"])
+@pytest.mark.parametrize("commands", [b"", b">?<BQ", b"JNBQ"])
+def test_real_faction_contact_back_eof_and_refusal_preserve_career(tmp_path, key, commands):
+    import json,os,subprocess
+    world = _world_with_seed(42); world.save.pilot.reputation = {faction: 75 for faction in vr.FACTIONS}
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    (tmp_path / "door_info.json").write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 40, "terminal_height": 12}), encoding="utf-8")
+    original = (tmp_path / "77.json").read_bytes()
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=key.encode() + commands,
+                            capture_output=True, timeout=10, env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")))
+    assert result.returncode == 0 and not result.stderr
+    assert (b"Edda Ro" if key == "P" else b"Rook Talan") in result.stdout
+    assert (tmp_path / "77.json").read_bytes() == original
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+def test_faction_join_save_failure_stops_before_acknowledgement(monkeypatch, faction):
+    world = _world_with_seed(42); world.save.pilot.reputation[faction] = 75
+    output = io.StringIO(); keys = iter("JY"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    greeting = "Commission accepted." if faction == vr.FACTION_CONCORD else "Welcome to the family."
+    def fail(current):
+        assert greeting not in output.getvalue()
+        raise vr.SaveError()
+    world._checkpoint = fail
+    with contextlib.redirect_stdout(output), pytest.raises(vr.SaveError): vr._screen_faction_contact(vr.Palette(False), world, faction)
+    assert greeting not in output.getvalue()
+
+
+@pytest.mark.parametrize("standing", [-53, -52, -51, -50, -49])
+def test_faction_commission_uses_actual_post_combat_standing_at_bounty_payout(monkeypatch, tmp_path, standing):
+    world, pirate = _world_with_pending_fight()
+    world.save.pilot.has_concord_commission = True; world.save.pilot.reputation[vr.FACTION_CONCORD] = standing
+    pirate.hp = 1
+    state = world.save.pending_travel["encounter"]
+    state["pirate"] = vr.dataclasses.asdict(pirate); state["combat"]["pirate"] = vr.dataclasses.asdict(pirate)
+    before = world.save.pilot.credits; destination = world.save.pending_travel["destination"]
+    terms = " ".join(vr.mission_details(world, world.save.active_missions[0]))
+    assert "above -50 when paid" in terms
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    monkeypatch.setattr(vr, "read_key", lambda: "F")
+    with contextlib.redirect_stdout(io.StringIO()): vr.screen_travel(vr.Palette(False), world, destination)
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert saved.pilot.reputation[vr.FACTION_CONCORD] == standing + 2
+    assert saved.pilot.credits == before + 160 + (625 if standing + 2 > -50 else 500)
+    assert saved.pilot.missions_completed == 1 and saved.pending_travel is None
+
+
+def _world_at_faction_customs_phase(phase):
+    world, _ = _world_with_pending_fight()
+    world.save.active_missions = []
+    world.save.cargo = {"weapons": 1}
+    world.save.pilot.has_blackwake_made = True
+    travel = world.save.pending_travel
+    travel.update(phase=phase, primary="random", bounty=None, encounter={})
+    destination = world.by_id[travel["destination"]]
+    assert destination.economy != "Haven"
+    if phase == "customs": world.save.current_system = destination.id
+    destination.discovered = True
+    return world, destination
+
+
+@pytest.mark.parametrize("standing", [-51, -50, -49, 75])
+def test_faction_customs_suspension_changes_real_inspection_dispatch(monkeypatch, tmp_path, standing):
+    import copy
+    world, destination = _world_at_faction_customs_phase("arrival")
+    world.save.pilot.reputation[vr.FACTION_BLACKWAKE] = standing
+    decisions, visits = [], []
+    def save(current):
+        vr.persist(current, tmp_path, 77)
+        if current.save.pending_travel is not None and current.save.pending_travel["phase"] == "customs":
+            decisions.append(copy.deepcopy(current.save.pending_travel["encounter"]))
+    world._checkpoint = save; world.checkpoint()
+    monkeypatch.setattr(world.event_rng, "random", lambda: 0.20)
+    monkeypatch.setattr(vr, "screen_customs", lambda p, w: visits.append(w.here.id))
+    with contextlib.redirect_stdout(io.StringIO()): vr.screen_travel(vr.Palette(False), world, destination.id)
+    assert decisions == [{"inspect": standing <= -50}]
+    assert visits == ([destination.id] if standing <= -50 else [])
+
+
+@pytest.mark.parametrize("inspect", [True, False])
+def test_faction_customs_resume_keeps_resolved_inspection_after_standing_changes(monkeypatch, tmp_path, inspect):
+    world, destination = _world_at_faction_customs_phase("customs")
+    world.save.pending_travel["encounter"] = {"inspect": inspect}
+    world.save.pilot.reputation[vr.FACTION_BLACKWAKE] = 75 if inspect else -100
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester"); resumed = vr.World(saved)
+    visits = []
+    monkeypatch.setattr(resumed.event_rng, "random", lambda: pytest.fail("Resolved customs decision rerolled"))
+    monkeypatch.setattr(vr, "screen_customs", lambda p, w: visits.append(w.here.id))
+    with contextlib.redirect_stdout(io.StringIO()): vr.screen_travel(vr.Palette(False), resumed, destination.id)
+    assert visits == ([destination.id] if inspect else []) and resumed.save.pending_travel is None
+
+
 @pytest.mark.parametrize("route_kind", ["general", "archive"])
 def test_general_route_map_keeps_independent_tracked_objective_and_route_end(monkeypatch, route_kind):
     import copy
@@ -10450,3 +10624,36 @@ def test_personal_crew_roster_retained_experience_unlocks_on_rehire(role,paid):
     assert vr.crew_assignment_blocker(world,role) is None
     vr.accept_crew_assignment(world,role)
     assert vr.crew_assignment_record(world,role)["state"]=="active"
+
+
+@pytest.mark.parametrize("key", ["P","W"])
+@pytest.mark.parametrize("commands", [b"",b"B",b">?<B",b"JNB"])
+def test_real_faction_browsing_does_not_replace_score_after_input(tmp_path,key,commands):
+    import json,os,subprocess
+    world=_world_with_seed(42);world.save.pilot.reputation={f:75 for f in vr.FACTIONS}
+    vr.persist(world,tmp_path,77)
+    info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
+    script="""
+import runpy,sys,os
+v=runpy.run_path(sys.argv[1]);g=v['main'].__globals__
+original_key=g['read_key'];original_replace=os.replace
+entered=False;replaced=[]
+def read_key():
+    global entered
+    try:key=original_key()
+    except EOFError:
+        entered=False;raise
+    entered=True;return key
+def replace(source,target):
+    result=original_replace(source,target)
+    if entered and target.parent.name=='scores':replaced.append(target.name)
+    return result
+g['read_key']=read_key;os.replace=replace
+code=g['main']()
+print('REPLACED:'+str(len(replaced)),file=sys.stderr)
+raise SystemExit(code)
+"""
+    result=subprocess.run([sys.executable,"-c",script,str(_VOIDRUNNER_PATH)],input=key.encode()+commands,capture_output=True,timeout=10,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
+    assert result.returncode==0 and result.stderr.strip()==b"REPLACED:0"
+    assert (b"Edda Ro" if key=="P" else b"Rook Talan") in result.stdout

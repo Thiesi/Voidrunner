@@ -854,9 +854,8 @@ class Pilot:
     # default via from_dict's own .get() below -- no SCHEMA_VERSION
     # bump needed.
     highest_rank_seen: int = 0
-    # Faction endgame arcs (see concord_commission_available/
-    # blackwake_made_available) -- each a one-time-unlockable, lifelong
-    # perk at high standing with its faction, not a repeatable mission.
+    # Retained faction credentials. Perk eligibility derives from current
+    # standing through faction_perk_active; joining grants cannot repeat.
     # Additive fields, safe default via from_dict's own .get() below --
     # no SCHEMA_VERSION bump needed.
     has_concord_commission: bool = False
@@ -2816,19 +2815,90 @@ def adjust_reputation(world: World, faction: str, delta: int) -> None:
     rep[faction] = max(-100, min(100, rep.get(faction, 0) + delta))
 
 
-# Faction endgame arcs: each faction's own reputation, previously only
-# ever affecting bribe odds and customs outcomes in the moment, now has
-# one exclusive, one-time-unlockable, lifelong reward at high standing.
-# Deliberately a single permanent perk plus flavor per faction, not a
-# repeatable mission chain -- matching the scope every other #179
-# feature in this file settled on (retirement, landmark, etc.), not an
-# open-ended new content system.
+# Credentials persist; each faction independently gates its current perk by standing.
 CONCORD_COMMISSION_THRESHOLD = 75
 BLACKWAKE_MADE_THRESHOLD = 75
-CONCORD_COMMISSION_BOUNTY_BONUS = 0.25  # +25% bounty/escort mission rewards, for life
-BLACKWAKE_MADE_CUSTOMS_REDUCTION = 0.5  # halves customs check chance, for life
+CONCORD_COMMISSION_BOUNTY_BONUS = 0.25  # +25% bounty/escort rewards while the commission is active
+BLACKWAKE_MADE_CUSTOMS_REDUCTION = 0.5  # halves new inspection risk while membership is active
 CONCORD_COMMISSION_BONUS_CREDITS = 2000
 BLACKWAKE_MADE_BONUS_CREDITS = 2000
+FACTION_PERK_SUSPEND_AT = -50
+FACTION_MEMBERSHIPS = {
+    FACTION_CONCORD: {"label": "Concord Privateer Commission", "contact": "Commander Edda Ro",
+                     "field": "has_concord_commission", "threshold": CONCORD_COMMISSION_THRESHOLD,
+                     "grant": CONCORD_COMMISSION_BONUS_CREDITS,
+                     "perk": "+25% bounty and escort payouts, evaluated at payout",
+                     "intro": "Edda Ro offers a privateer's commission to pilots trusted by Concord."},
+    FACTION_BLACKWAKE: {"label": "Blackwake Cartel Membership", "contact": "Broker Rook Talan",
+                       "field": "has_blackwake_made", "threshold": BLACKWAKE_MADE_THRESHOLD,
+                       "grant": BLACKWAKE_MADE_BONUS_CREDITS,
+                       "perk": "50% lower chance of a new customs inspection",
+                       "intro": "Rook Talan offers access to the Cartel's network of discreet contacts."},
+}
+
+
+def faction_perk_active(world: World, faction: str) -> bool:
+    info = FACTION_MEMBERSHIPS[faction]
+    return bool(getattr(world.save.pilot, info["field"]) and world.save.pilot.reputation.get(faction, 0) > FACTION_PERK_SUSPEND_AT)
+
+
+def faction_membership_status(world: World, faction: str) -> str:
+    if not getattr(world.save.pilot, FACTION_MEMBERSHIPS[faction]["field"]): return "Not joined"
+    return "Member; perk ACTIVE" if faction_perk_active(world, faction) else "Member; perk SUSPENDED"
+
+
+def faction_join_blocker(world: World, faction: str) -> str | None:
+    if faction not in FACTION_MEMBERSHIPS: return "Choose a listed faction."
+    if world.save.pending_travel is not None: return "Finish the current journey first."
+    info = FACTION_MEMBERSHIPS[faction]
+    if getattr(world.save.pilot, info["field"]): return "Membership already held; the joining grant cannot be claimed again."
+    if world.save.pilot.reputation.get(faction, 0) < info["threshold"]: return f"Reach {info['threshold']} standing with this faction to join."
+    return None
+
+
+def join_faction(world: World, faction: str) -> str:
+    blocker = faction_join_blocker(world, faction)
+    if blocker: raise ValueError(blocker)
+    info = FACTION_MEMBERSHIPS[faction]
+    setattr(world.save.pilot, info["field"], True)
+    world.save.pilot.credits += info["grant"]
+    world.save.pilot.note(f"Joined {info['label']}.")
+    world.save.pilot.highlight(f"Joined {info['label']}; perk applies above {FACTION_PERK_SUSPEND_AT} standing.")
+    greeting = "Commission accepted." if faction == FACTION_CONCORD else "Welcome to the family."
+    return f"{greeting} +{info['grant']:,}cr. {faction_membership_status(world, faction)}."
+
+
+def faction_contact_lines(world: World, faction: str) -> list[str]:
+    info = FACTION_MEMBERSHIPS[faction]
+    lines = [f"{info['contact']}: {info['label']}.",
+             f"Standing: {world.save.pilot.reputation.get(faction, 0)}. {faction_membership_status(world, faction)}.",
+             f"Perk: {info['perk']}.",
+             f"Joining requires {info['threshold']} standing and grants {info['grant']:,}cr once. No entry fee.",
+             f"Perk suspended at {FACTION_PERK_SUSPEND_AT} standing or below; automatically restored above it. Membership stays, with no second grant.",
+             "Dual membership is allowed. Each faction judges its own standing independently. Membership does not clear notoriety or fines.",
+             info["intro"]]
+    if blocker := faction_join_blocker(world, faction): lines.append(blocker)
+    else: lines.append("[J] Join after final confirmation.")
+    return lines
+
+
+def _screen_faction_contact(p: Palette, world: World, faction: str) -> None:
+    page, result = 0, None
+    while True:
+        available = faction_join_blocker(world, faction) is None
+        lines = ([result] if result else []) + faction_contact_lines(world, faction)
+        action, page, count = _draw_service_page(p, f"{FACTION_LABEL[faction].split()[0]} {world.save.pilot.credits:,}cr", lines,
+                                                "[J]Join [B]Back [<>]Page: " if available else "[B]Back [<>]Page: ", page)
+        if action in ("B", "Q"): return
+        if action == ">": page = min(page + 1, count - 1); continue
+        if action == "<": page = max(0, page - 1); continue
+        if action != "J" or not available: continue
+        info = FACTION_MEMBERSHIPS[faction]
+        if not confirm(f"Join {info['label']} with a one-time {info['grant']:,}cr grant?", p): continue
+        result = join_faction(world, faction)
+        world.checkpoint()
+        page = 0
+
 
 
 def concord_commission_available(world: World) -> bool:
@@ -2842,56 +2912,18 @@ def blackwake_made_available(world: World) -> bool:
 
 
 def bounty_reward_for(world: World, base_reward: int) -> int:
-    """Applies the Concord Privateer Commission's own bounty/escort
-    reward bonus -- a permanent, one-time-unlocked perk (see
-    screen_concord_commission), not a per-mission roll."""
-    if world.save.pilot.has_concord_commission:
+    """Evaluate the retained Concord credential and current standing at payout."""
+    if faction_perk_active(world, FACTION_CONCORD):
         return round(base_reward * (1 + CONCORD_COMMISSION_BOUNTY_BONUS))
     return base_reward
 
 
 def screen_concord_commission(p: Palette, world: World) -> None:
-    out_line()
-    out_line(_box_title(p, "Concord Privateer Commission"))
-    intro = [
-        f"  {p.muted}Naval Command has taken notice of your combat record.{RESET}",
-        f"  {p.muted}A formal privateer's commission is on offer -- official sanction to hunt{RESET}",
-        f"  {p.muted}raiders under Concord colors and enhance every bounty and escort payout.{RESET}",
-    ]
-    for line in intro:
-        pad_len = max(0, 77 - _vis_len(line))
-        out_line(f"{p.accent}│{RESET}{line}{' ' * pad_len}{p.accent}│{RESET}")
-    out_line(_box_bottom(p))
-    if not confirm(f"Accept the commission ({CONCORD_COMMISSION_BONUS_CREDITS}cr signing bonus)?", p):
-        return
-    world.save.pilot.has_concord_commission = True
-    world.save.pilot.credits += CONCORD_COMMISSION_BONUS_CREDITS
-    world.save.pilot.note("Accepted a Concord privateer commission.")
-    world.save.pilot.highlight("Commissioned as a Concord privateer -- bounty/escort rewards enhanced for life.")
-    world.checkpoint()
-    out_line(f"{p.correct}Commission accepted. Bounty and escort rewards are enhanced from here on.{RESET}")
+    _screen_faction_contact(p, world, FACTION_CONCORD)
 
 
 def screen_blackwake_made(p: Palette, world: World) -> None:
-    out_line()
-    out_line(_box_title(p, "Blackwake Cartel"))
-    intro = [
-        f"  {p.muted}You have proven yourself to the Cartel's satisfaction.{RESET}",
-        f"  {p.muted}Full membership is on offer -- its underground network of contacts eases{RESET}",
-        f"  {p.muted}your way through customs inspections for as long as you fly.{RESET}",
-    ]
-    for line in intro:
-        pad_len = max(0, 77 - _vis_len(line))
-        out_line(f"{p.accent}│{RESET}{line}{' ' * pad_len}{p.accent}│{RESET}")
-    out_line(_box_bottom(p))
-    if not confirm(f"Accept full membership ({BLACKWAKE_MADE_BONUS_CREDITS}cr welcome gift)?", p):
-        return
-    world.save.pilot.has_blackwake_made = True
-    world.save.pilot.credits += BLACKWAKE_MADE_BONUS_CREDITS
-    world.save.pilot.note("Made a full member of the Blackwake Cartel.")
-    world.save.pilot.highlight("Made a full member of the Blackwake Cartel -- customs risk reduced for life.")
-    world.checkpoint()
-    out_line(f"{p.correct}Welcome to the family. Customs checks are less likely to find you now.{RESET}")
+    _screen_faction_contact(p, world, FACTION_BLACKWAKE)
 
 
 def destroy_ship(world: World) -> str:
@@ -2921,6 +2953,12 @@ def destroy_ship(world: World) -> str:
 
 def customs_check_chance(system: GalaxySystem) -> float:
     return max(0.0, 0.15 + (5 - system.danger) * 0.03)
+
+
+def customs_risk_for(world: World, system: GalaxySystem) -> float:
+    if system.economy == "Haven": return 0.0
+    chance = customs_check_chance(system)
+    return chance * (1 - BLACKWAKE_MADE_CUSTOMS_REDUCTION) if faction_perk_active(world, FACTION_BLACKWAKE) else chance
 
 
 def has_contraband(world: World) -> bool:
@@ -3667,8 +3705,7 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
                "[C] Navigation Chart", "[S] Pilot Status", "[H] Hall of Fame",
                "[G] Pilot Guide", "[N] Archive Contacts", "[T] Trading Ledger", "[O] Display Options", "[Q] Disembark & Save"]
     if landmark_available_here(world): actions.append(f"[L] {world.landmark['label']}")
-    if concord_commission_available(world): actions.append("[P] Privateer Commission")
-    if blackwake_made_available(world): actions.append("[W] Welcome to the Wake")
+    actions += ["[P] Concord Contacts", "[W] Blackwake Contacts"]
     row = ""
     for action in actions:
         combined = f"{row}  |  {action}" if row else action
@@ -5147,6 +5184,8 @@ def mission_details(world: World, mission: Mission) -> list[str]:
         elif len(path) > remaining and mission.kind != "scan":
             lines.append("WARNING: the shortest route misses the deadline.")
     lines.append(f"Gross payout: {reward:,} cr. Credits available: {world.save.pilot.credits:,} cr.")
+    if mission.kind in ("bounty", "escort") and world.save.pilot.has_concord_commission:
+        lines.append("The quoted commission bonus uses current standing; actual payout includes 25% only if Concord standing is above -50 when paid.")
     procurement = 0
     if mission.kind == "delivery":
         quantity = mission.quantity or 0
@@ -5617,8 +5656,8 @@ def pilot_record_lines(world: World, section: str = "O") -> list[str]:
     discovered = sum(system.discovered for system in world.galaxy)
     lines.append(f"Systems charted: {discovered}/{len(world.galaxy)} ({round(discovered / len(world.galaxy) * 100)}%). Raiders defeated: {pilot.kills}.")
     lines.append(f"Missions completed: {pilot.missions_completed}. Retirements: {pilot.retirements}.")
-    if pilot.has_concord_commission: lines.append("Standing: Concord Privateer.")
-    if pilot.has_blackwake_made: lines.append("Standing: Made (Blackwake Cartel).")
+    for faction in FACTION_MEMBERSHIPS:
+        lines.append(f"{FACTION_LABEL[faction]}: {faction_membership_status(world, faction)}. Perks suspend at -50 or below.")
     event = world.save.active_event
     if event: lines.append(f"Economy event: {event['description']} ({event['turns_remaining']} day(s) left).")
     lines.append(f"[C] Jobs: {len(world.save.active_missions)} active. [H] Log: {len(pilot.highlights)} highlights, {len(pilot.log)} log entries.")
@@ -6554,9 +6593,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
                 world, just_discovered=None if travel["was_discovered"] else dest_id,
             )
             if has_contraband(world) and dest.economy != "Haven":
-                chance = customs_check_chance(dest)
-                if world.save.pilot.has_blackwake_made:
-                    chance *= (1 - BLACKWAKE_MADE_CUSTOMS_REDUCTION)
+                chance = customs_risk_for(world, dest)
                 inspect = world.event_rng.random() < chance
         travel["phase"] = "customs"
         travel["encounter"] = {"inspect": inspect}
@@ -7032,10 +7069,12 @@ def main() -> int:
                 continue
             elif choice == "D" and has_contraband(world):
                 screen_dump_contraband(p, world)
-            elif choice == "P" and concord_commission_available(world):
+            elif choice == "P":
                 screen_concord_commission(p, world)
-            elif choice == "W" and blackwake_made_available(world):
+                continue
+            elif choice == "W":
                 screen_blackwake_made(p, world)
+                continue
             elif choice == "Q":
                 world.checkpoint()
                 out_line(f"{p.muted}Docking clamps engaged. Fly safe, {world.save.pilot.handle}.{RESET}")
