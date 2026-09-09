@@ -1533,6 +1533,7 @@ def test_hull_refit_screen_applies_the_refit_charges_credits_and_resets_hull_to_
     world = _world_with_seed(32)
     world.save.pilot.credits = 20_000
     world.save.ship.hull_hp = 10  # damaged, below Shuttle's own max
+    world.checkpoint()  # The existing 20,000cr balance has already been earned.
 
     monkeypatch.setattr(vr, "read_key", lambda: "Y")
     before_log_len = len(world.save.pilot.log)
@@ -3340,6 +3341,7 @@ def test_screen_status_shows_career_highlights(monkeypatch):
 def test_station_menu_announces_a_promotion(monkeypatch):
     world = _world_with_seed(123)
     world.save.pilot.credits = vr.RANKS[1][0]
+    world.checkpoint()
     keys = iter([" ", "Q"])
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
 
@@ -10866,6 +10868,103 @@ def test_archive_terms_disclose_only_remaining_landmark_salvage(stage, investiga
     assert world.save.pilot.credits - credits == (0 if investigated else 3000)
 
 
+
+@pytest.mark.parametrize("index", [1, 2, 3, 4])
+def test_career_rank_views_keep_earned_title_after_spending(index):
+    import copy
+    world = _world_with_seed(42); world.save.pilot.highest_rank_seen = index; world.save.pilot.credits = 10
+    before = copy.deepcopy(world.save.to_dict())
+    for lines in (vr.station_deck_lines(world, expanded=True), vr.pilot_record_lines(world, "O")):
+        assert f"Rank: {vr.RANKS[index][1]}." in " ".join(lines)
+    assert world.save.to_dict() == before
+
+
+@pytest.mark.parametrize("threshold,index", [(5000,1),(20000,2),(75000,3),(250000,4)])
+def test_career_rank_checkpoint_retains_reward_before_next_spend(tmp_path, threshold, index):
+    world = _world_with_seed(42); world._checkpoint = lambda w: vr.persist(w,tmp_path,77)
+    world.save.pilot.credits = threshold; world.checkpoint()
+    saved, _, _ = vr.load_or_create_save(tmp_path,77,"Tester")
+    assert saved.pilot.highest_rank_seen == index
+    world.save.pilot.credits = 10; world.checkpoint(); world.checkpoint()
+    saved, _, _ = vr.load_or_create_save(tmp_path,77,"Tester")
+    assert vr.career_rank(saved.pilot) == vr.RANKS[index][1]
+    assert sum("Promoted to" in entry for entry in saved.pilot.highlights) == 1
+    assert vr.check_rank_up(world) is None
+
+
+@pytest.mark.parametrize("commands,marker", [(b"MAS1\rAB1\r",b"Result: Bought 1x Food"), (b"MAS1\r",b"Result: Sold 1x Food")])
+def test_career_rank_real_nested_market_peak_survives_kill(tmp_path, commands, marker):
+    world = _world_with_seed(42); world.save.pilot.credits = 4999; world.save.cargo = {"food":1}
+    world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
+    assert world.save.pilot.highest_rank_seen == 0
+    with _door_stopped_at(tmp_path,commands,marker):
+        saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+        assert saved.pilot.highest_rank_seen == 1
+        assert vr.career_rank(saved.pilot) == "Independent Trader"
+        if b"AB" in commands: assert saved.pilot.credits < 5000
+        else: assert saved.pilot.credits >= 5000
+
+
+@pytest.mark.parametrize("credits,expected", [(0,0),(4999,0),(5000,1),(19999,1),(20000,2),(74999,2),(75000,3),(249999,3),(250000,4)])
+def test_career_rank_current_funds_support_legacy_rank_without_writes(credits, expected):
+    import copy
+    world = _world_with_seed(42); world.save.pilot.credits = credits; world.save.best_credits = 1000000
+    before=copy.deepcopy(world.save.to_dict())
+    assert vr.career_rank_index(world.save.pilot) == expected
+    terms=" ".join(vr.career_rank_terms(world.save.pilot))
+    if expected<4: assert f"{vr.RANKS[expected+1][0]:,}cr balance" in terms
+    else: assert "Top rank retained" in terms
+    assert world.save.to_dict() == before
+
+
+def test_career_rank_retirement_resets_rank_despite_lifetime_score():
+    world = _world_with_seed(42); world.save.pilot.highest_rank_seen=4; world.save.pilot.credits=1; world.save.best_credits=1000000
+    retired=vr.retire_pilot(world.save)
+    assert retired.best_credits==1000000 and retired.pilot.highest_rank_seen==0
+    assert vr.career_rank(retired.pilot)==vr.RANKS[0][1]
+
+
+def test_career_rank_retained_top_rank_keeps_real_retirement_available(monkeypatch,tmp_path):
+    world=_world_with_seed(42); world.save.pilot.highest_rank_seen=4; world.save.pilot.credits=100
+    world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
+    keys=iter("RY"); monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_status(vr.Palette(False),world)
+    assert "A new career begins" in output.getvalue()
+    saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert saved.pilot.retirements==1 and saved.pilot.highest_rank_seen==0
+
+
+def test_career_rank_save_failure_stops_reward_before_ack(monkeypatch):
+    world=_world_with_seed(42); world.save.pilot.credits=4999; world.save.cargo={"food":1}
+    output=io.StringIO(); keys=iter("AS"); monkeypatch.setattr(vr,"read_key",lambda:next(keys)); monkeypatch.setattr(vr,"read_line_raw",lambda **kw:"1")
+    def fail(current):
+        assert current.save.pilot.highest_rank_seen==1 and "Result: Sold" not in output.getvalue()
+        raise vr.SaveError()
+    world._checkpoint=fail
+    with contextlib.redirect_stdout(output),pytest.raises(vr.SaveError): vr.screen_market(vr.Palette(False),world)
+
+
+@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+def test_career_rank_full_terms_fit_record_pages_without_mutation(monkeypatch,width,height):
+    import copy,re
+    world=_world_with_seed(42); world.save.pilot.highest_rank_seen=2; world.save.pilot.credits=100
+    before=copy.deepcopy(world.save.to_dict()); output=io.StringIO(); bodies=[]
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width); monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    world._checkpoint=lambda w:pytest.fail("Rank browsing checkpointed")
+    def choose():
+        frame=output.getvalue(); output.seek(0); output.truncate(0)
+        assert len(frame.splitlines())<=height and all(vr._visible_width(line)<=width for line in frame.splitlines())
+        plain=vr._ANSI_RE.sub("",frame); match=re.search(r"Overview\s+(\d+)/(\d+)",plain); assert match
+        page,count=map(int,match.groups())
+        body=re.sub(r"^[\s>]*Pilot Record:\s*Overview\s+\d+/\d+\s*","",plain)
+        bodies.append(body.split("[<")[0]); return "B" if page==count else ">"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_status(vr.Palette(False),world)
+    text=" ".join(" ".join(bodies).split())
+    assert "Rank is permanent for this career" in text and "75,000cr balance" in text
+    assert world.save.to_dict()==before
+
+
 @pytest.mark.parametrize("paid,bonus",[(0,1),(5,2),(15,3),(30,4)])
 @pytest.mark.parametrize("hired",[True,False])
 def test_promoted_navigator_survey_terms_match_actual_range_without_writes(paid,bonus,hired):
@@ -10991,3 +11090,39 @@ def test_faction_case_idle_route_is_unavailable_until_acceptance(monkeypatch,fac
     monkeypatch.setattr(vr,"_screen_auto_route",lambda p,w,*,destination:routes.append(destination))
     with contextlib.redirect_stdout(output):vr.screen_faction_story(vr.Palette(False),world,faction)
     assert routes==[vr.faction_story_target(world,faction)] and checkpoints==["accepted"]
+
+
+@pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])
+def test_career_rank_checkpoint_notice_survives_spending_until_deck(monkeypatch,tmp_path,width,height):
+    import re
+    world=_world_with_seed(42);world._checkpoint=lambda w:vr.persist(w,tmp_path,77)
+    world.save.pilot.credits=4999;world.save.cargo={"food":1};world.checkpoint()
+    keys=iter("ASQ");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    monkeypatch.setattr(vr,"read_line_raw",lambda **kw:"1")
+    with contextlib.redirect_stdout(io.StringIO()):vr.screen_market(vr.Palette(False),world)
+    world.save.pilot.credits=100;world.checkpoint();world.checkpoint()
+    saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert saved.pilot.highest_rank_seen==1 and saved.pilot.credits==100
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    output=io.StringIO();bodies=[]
+    def choose():
+        frame=output.getvalue();output.seek(0);output.truncate(0)
+        assert len(frame.splitlines())<=height and all(vr._visible_width(line)<=width for line in frame.splitlines())
+        plain=vr._ANSI_RE.sub("",frame);match=re.search(r"Command Deck:.*?(\d+)/(\d+)",plain,re.S);assert match
+        page,count=map(int,match.groups());bodies.append(plain[match.end():].split("[<]Prev")[0])
+        return "Q" if page==count else ">"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_station_menu(vr.Palette(False),world)
+    text=" ".join(" ".join(bodies).split())
+    assert text.count("Promoted to Independent Trader; rank retained for this career.")==1
+    monkeypatch.setattr(vr,"read_key",lambda:"Q")
+    with contextlib.redirect_stdout(output):vr.screen_station_menu(vr.Palette(False),world)
+    assert "Promoted to" not in output.getvalue()
+
+
+def test_career_rank_new_career_does_not_repeat_old_promotion_notice(monkeypatch):
+    world=_world_with_seed(42);world.save.pilot.credits=5000;world.checkpoint()
+    world.reset(vr.retire_pilot(world.save));world.checkpoint()
+    monkeypatch.setattr(vr,"read_key",lambda:"Q")
+    with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_station_menu(vr.Palette(False),world)
+    assert "Promoted to" not in output.getvalue()
