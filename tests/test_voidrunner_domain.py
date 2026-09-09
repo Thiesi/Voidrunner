@@ -2666,15 +2666,15 @@ def test_pilot_from_dict_defaults_retirements_to_zero_for_old_saves():
     assert pilot.retirements == 0
 
 
-def test_screen_status_offers_retirement_only_at_top_rank(monkeypatch):
+def test_screen_status_shows_finale_requirements_without_ineligible_confirmation(monkeypatch):
     world = _world_with_seed(95)
     world.save.pilot.credits = 100
-    keys = iter(["R", "B"])
+    keys = iter(["R", "S", "B", "B"])
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     monkeypatch.setattr(vr, "confirm", lambda *args: pytest.fail("Ineligible retirement prompt"))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_status(vr.Palette(True), world)
-    assert "[R]" not in output.getvalue()
+    assert "Requires Retained top career rank" in output.getvalue()
 
 
 def test_screen_status_retires_on_confirmation_at_top_rank(monkeypatch):
@@ -2682,7 +2682,7 @@ def test_screen_status_retires_on_confirmation_at_top_rank(monkeypatch):
     world.save.pilot.credits = vr.RANKS[-1][0]
     old_seed = world.save.seed
 
-    keys = iter(["R", "Y"])
+    keys = iter(["R", "S", "Y"])
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -2697,7 +2697,7 @@ def test_screen_status_declines_retirement_without_committing(monkeypatch):
     world.save.pilot.credits = vr.RANKS[-1][0]
     old_seed = world.save.seed
 
-    keys = iter(["R", "N", "B"])
+    keys = iter(["R", "S", "N", "B", "B"])
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
 
     with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -4753,7 +4753,7 @@ def test_pilot_record_pages_expose_every_retained_entry_once_without_rebuilding(
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
-@pytest.mark.parametrize("commands",[b"SCH>OBQ",b"SCH>",b"SRNBQ",b"SR"])
+@pytest.mark.parametrize("commands",[b"SCH>OBQ",b"SCH>",b"SRSNBBQ",b"SR"])
 def test_real_pilot_record_browsing_cancel_and_eof_preserve_career(tmp_path,commands):
     import json,os,subprocess
     world=_world_with_seed(42)
@@ -4776,7 +4776,7 @@ def test_pilot_record_retirement_acknowledges_a_saved_new_career(tmp_path):
     world.save.pilot.credits=vr.RANKS[-1][0]
     world.save.pilot.highest_rank_seen=len(vr.RANKS)-1
     world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
-    with _door_stopped_at(tmp_path,b"SHRY",b"A new career begins."):
+    with _door_stopped_at(tmp_path,b"SHRSY",b"A new career begins."):
         saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
         assert saved.pilot.retirements==1 and saved.seed!=world.save.seed
         assert saved.pilot.credits==1200+vr.RETIREMENT_STARTING_CREDITS_BONUS
@@ -10927,7 +10927,7 @@ def test_career_rank_retirement_resets_rank_despite_lifetime_score():
 def test_career_rank_retained_top_rank_keeps_real_retirement_available(monkeypatch,tmp_path):
     world=_world_with_seed(42); world.save.pilot.highest_rank_seen=4; world.save.pilot.credits=100
     world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
-    keys=iter("RY"); monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    keys=iter("RSY"); monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_status(vr.Palette(False),world)
     assert "A new career begins" in output.getvalue()
     saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
@@ -10963,6 +10963,239 @@ def test_career_rank_full_terms_fit_record_pages_without_mutation(monkeypatch,wi
     text=" ".join(" ".join(bodies).split())
     assert "Rank is permanent for this career" in text and "75,000cr balance" in text
     assert world.save.to_dict()==before
+
+
+# Endings archive the old run and launch a distinct, ordinary-module New Game+.
+def _finale_world(finale="legend"):
+    world=_world_with_seed(42)
+    if finale=="legend": world.save.pilot.highest_rank_seen=4
+    elif finale=="trader":
+        world.save.trading_ledger.sales_revenue=60000; world.save.trading_ledger.sales_cost=10000; world.save.trading_ledger.since_day=0
+    elif finale=="explorer":
+        for system in world.galaxy: system.discovered=True
+        world.sync_discovered()
+    elif finale=="combat": world.save.pilot.kills=50
+    return world
+
+
+@pytest.mark.parametrize("finale",list(vr.CAREER_FINALES))
+def test_career_finale_archives_exact_run_and_grants_ordinary_module(tmp_path,finale):
+    import copy,json
+    world=_finale_world(finale); world.save.pilot.highlight("A distinct old achievement")
+    world.save.pilot.retirements=3; world.save.best_credits=1000000; world.save.display_style="plain"
+    before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate()
+    fresh=vr.finish_career(world.save,finale)
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+    assert fresh.seed!=world.save.seed and fresh.pilot.retirements==4 and fresh.best_credits==1000000
+    assert fresh.pilot.credits==3200 and fresh.pilot.highest_rank_seen==0
+    assert fresh.display_style=="plain" and fresh.discovered==[0] and not fresh.cargo and not fresh.active_missions
+    assert not fresh.faction_stories and not fresh.ship.crew_records
+    expected={vr.CAREER_FINALES[finale]["tier"]} if finale!="legend" else set()
+    for module in ("cargo","scanner","weapon","engine","shield","hull"):
+        assert getattr(fresh.ship,module+"_tier")==int(module in expected)
+    assert len(fresh.retired_careers)==1
+    item=fresh.retired_careers[0]
+    assert item["number"]==4 and item["seed"]==42 and item["finale"]==finale
+    assert item["credits"]==1200 and item["highlights"]==["A distinct old achievement"]
+    assert item["rank"]==vr.career_rank_index(world.save.pilot)
+    assert item["market_margin"]==vr.career_accomplishments(world.save)["trader"]
+    newworld=vr.World(fresh); newworld._checkpoint=lambda w:vr.persist(w,tmp_path,77); newworld.checkpoint()
+    saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert saved.to_dict()==json.loads(json.dumps(newworld.save.to_dict()))
+    assert vr.CAREER_FINALES[finale]["closing"] in " ".join(vr.career_dossier_lines(saved))
+    fresh.retired_careers[0]["highlights"].append("New container")
+    assert world.save.pilot.highlights==["A distinct old achievement"]
+
+
+@pytest.mark.parametrize("finale",list(vr.CAREER_FINALES))
+@pytest.mark.parametrize("fault",["not_ready","travel","capacity"])
+def test_career_finale_rejects_before_reset_rng_or_old_state_mutation(monkeypatch,finale,fault):
+    import copy
+    world=_world_with_seed(42) if fault=="not_ready" else _finale_world(finale)
+    if fault=="travel": world.save.pending_travel={"phase":"arrival"}
+    if fault=="capacity": world.save.retired_careers=[{} for _ in range(vr.MAX_RETIRED_CAREERS)]
+    before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate()
+    monkeypatch.setattr(vr,"_new_career",lambda *args:pytest.fail("Invalid finale created a new run"))
+    with pytest.raises(ValueError):vr.finish_career(world.save,finale)
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+
+
+@pytest.mark.parametrize("margin,ready",[(49999,False),(50000,True),(50001,True),(-50000,False)])
+def test_career_finale_trader_counts_only_recorded_market_margin(margin,ready):
+    world=_world_with_seed(42); ledger=world.save.trading_ledger
+    ledger.sales_cost=50000; ledger.sales_revenue=50000+margin
+    ledger.delivery_revenue=1000000; ledger.uncosted_sales=1000000; ledger.uncosted_deliveries=1000000
+    world.save.pilot.credits=1000000; world.save.best_credits=1000000
+    assert vr.career_accomplishments(world.save)["trader"]==margin
+    assert (vr.career_finale_blocker(world.save,"trader") is None)==ready
+
+
+@pytest.mark.parametrize("finale,below,at",[("explorer",47,48),("combat",49,50)])
+def test_career_finale_nontrader_boundaries_ignore_cash(finale,below,at):
+    world=_world_with_seed(42); world.save.pilot.credits=0
+    for value in (below,at):
+        if finale=="explorer": world.save.discovered=list(range(value))
+        else: world.save.pilot.kills=value
+        assert (vr.career_finale_blocker(world.save,finale) is None)==(value==at)
+
+
+def test_career_finale_repeated_endings_preserve_prior_dossiers_and_legacy_count(tmp_path):
+    import copy
+    world=_finale_world(); world.save.pilot.retirements=7
+    first=vr.finish_career(world.save,"legend"); previous=copy.deepcopy(first.retired_careers)
+    first.pilot.kills=50
+    second=vr.finish_career(first,"combat")
+    assert [item["number"] for item in second.retired_careers]==[8,9]
+    assert second.retired_careers[:-1]==previous and first.retired_careers==previous
+    second.retired_careers[0]["highlights"].append("Changed copy")
+    assert first.retired_careers==previous
+    second.retired_careers[0]["highlights"].pop()
+    vr.write_save(tmp_path,77,second)
+    saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert saved.retired_careers==second.retired_careers and saved.pilot.retirements==9
+
+
+@pytest.mark.parametrize("patch",[{"version":True},{"number":0},{"number":2},{"rank":0},{"finale":"unknown"},{"charted":49},{"market_margin":False},{"seed":"42"},{"highlights":["bad\x1b"]},{"ship":"imaginary"},{"credits":-1},{"days":1.5}])
+def test_career_finale_malformed_dossier_preserves_original(tmp_path,patch):
+    import json
+    fresh=vr.finish_career(_finale_world().save,"legend"); fresh.retired_careers[0].update(patch)
+    path=tmp_path/"77.json"; raw=json.dumps(fresh.to_dict()).encode(); path.write_bytes(raw)
+    with pytest.raises(vr.ResumeError):vr.load_or_create_save(tmp_path,77,"Tester")
+    assert path.read_bytes()==raw
+
+
+@pytest.mark.parametrize("patch",[{"version":2},{"future":True}])
+def test_career_finale_future_dossier_cannot_be_downgraded(tmp_path,patch):
+    import json
+    fresh=vr.finish_career(_finale_world().save,"legend"); fresh.retired_careers[0].update(patch)
+    path=tmp_path/"77.json"; raw=json.dumps(fresh.to_dict()).encode(); path.write_bytes(raw)
+    with pytest.raises(vr.UnsupportedSave):vr.load_or_create_save(tmp_path,77,"Tester")
+    assert path.read_bytes()==raw
+
+
+@pytest.mark.parametrize("records",[None,{},[{}]])
+def test_career_finale_invalid_archive_container_is_preserved(tmp_path,records):
+    import json
+    data=_world_with_seed(42).save.to_dict(); data["retired_careers"]=records
+    path=tmp_path/"77.json"; raw=json.dumps(data).encode(); path.write_bytes(raw)
+    with pytest.raises(vr.ResumeError):vr.load_or_create_save(tmp_path,77,"Tester")
+    assert path.read_bytes()==raw
+
+
+def test_career_finale_full_archive_loads_but_never_evicts_to_retire(tmp_path):
+    import copy
+    fresh=vr.finish_career(_finale_world().save,"legend")
+    fresh.retired_careers=[dict(fresh.retired_careers[0],number=i+1) for i in range(vr.MAX_RETIRED_CAREERS)]
+    fresh.pilot.retirements=vr.MAX_RETIRED_CAREERS; fresh.pilot.highest_rank_seen=4
+    vr.write_save(tmp_path,77,fresh); saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    before=copy.deepcopy(saved.to_dict())
+    with pytest.raises(ValueError,match="archive full"):vr.finish_career(saved,"legend")
+    assert saved.to_dict()==before and len(saved.retired_careers)==128
+    saved.retired_careers.append(dict(saved.retired_careers[-1],number=129)); saved.pilot.retirements=129
+    with pytest.raises(vr.SaveError):vr.write_save(tmp_path,77,saved)
+
+
+@pytest.mark.parametrize("finale,index",[("legend",1),("trader",2),("explorer",3),("combat",4)])
+def test_career_finale_real_kill_ack_keeps_dossier_and_new_equipment(tmp_path,finale,index):
+    world=_finale_world(finale); world.save.pilot.highlight("Preserved through disconnect")
+    world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
+    with _door_stopped_at(tmp_path,f"SR{index}SY".encode(),b"A new career begins."):
+        saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+        assert saved.pilot.retirements==1 and saved.retired_careers[0]["finale"]==finale
+        assert "Preserved through disconnect" in saved.retired_careers[0]["highlights"]
+        tier=vr.CAREER_FINALES[finale]["tier"]
+        if tier:assert getattr(saved.ship,tier+"_tier")==1
+        assert saved.pending_travel is None and not saved.faction_stories and saved.pilot.highest_rank_seen==0
+
+
+@pytest.mark.parametrize("commands",[b"SR",b"SR2><BBQ",b"SR1SNBBQ",b"SD><BQ"])
+def test_career_finale_real_browse_refusal_eof_write_nothing(tmp_path,commands):
+    import json,os,subprocess
+    world=_finale_world(); world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
+    info=tmp_path/"door_info.json"; info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
+    before=(tmp_path/"77.json").read_bytes()
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,timeout=10,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
+    assert result.returncode==0 and not result.stderr
+    assert (tmp_path/"77.json").read_bytes()==before
+    if b"N" in commands:assert b"Retirement cancelled" in result.stdout
+
+
+@pytest.mark.parametrize("finale",list(vr.CAREER_FINALES))
+def test_career_finale_checkpoint_failure_stops_before_new_run_ack(monkeypatch,finale):
+    world=_finale_world(finale); output=io.StringIO(); keys=iter("SY")
+    monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    def fail(current):
+        assert len(current.save.retired_careers)==1 and "A new career begins." not in output.getvalue()
+        raise vr.SaveError()
+    world._checkpoint=fail
+    with contextlib.redirect_stdout(output),pytest.raises(vr.SaveError):vr.screen_career_finale(vr.Palette(False),world)
+
+
+@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("finale",list(vr.CAREER_FINALES))
+def test_career_finale_complete_terms_fit_every_page_without_writes(monkeypatch,width,height,finale):
+    import copy,re
+    world=_finale_world(finale); before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate()
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width); monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    output=io.StringIO(); bodies=[]; world._checkpoint=lambda w:pytest.fail("Finale browsing checkpointed")
+    def choose():
+        frame=output.getvalue(); output.seek(0); output.truncate(0)
+        assert len(frame.splitlines())<=height and all(vr._visible_width(row)<=width for row in frame.splitlines())
+        plain=vr._ANSI_RE.sub("",frame); page,count=map(int,re.search(r"Career Finale\s+(\d+)/(\d+)",plain).groups())
+        body=re.sub(r"^[\s>]*Career Finale\s+\d+/\d+\s*","",plain)
+        bodies.append(body.split("[1-4]Choose")[0]); return "B" if page==count else ">"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):assert vr.screen_career_finale(vr.Palette(False),world) is None
+    assert " ".join(" ".join(bodies).split())==" ".join(" ".join(vr.career_finale_lines(world.save,finale)).split())
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+
+
+@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+def test_career_dossier_pages_include_all_retained_highlights(monkeypatch,width,height):
+    import copy,re
+    world=_finale_world(); world.save.pilot.highlights=[f"Old highlight {i:02}" for i in range(vr.MAX_HIGHLIGHTS)]
+    world.reset(vr.finish_career(world.save,"legend")); before=copy.deepcopy(world.save.to_dict())
+    output=io.StringIO(); bodies=[]; first=True
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width); monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    world._checkpoint=lambda w:pytest.fail("Dossier browsing checkpointed")
+    def choose():
+        nonlocal first
+        frame=output.getvalue(); output.seek(0); output.truncate(0)
+        assert len(frame.splitlines())<=height and all(vr._visible_width(row)<=width for row in frame.splitlines())
+        if first:first=False;return "D"
+        plain=vr._ANSI_RE.sub("",frame); page,count=map(int,re.search(r"Dossiers\s+(\d+)/(\d+)",plain).groups())
+        body=re.sub(r"^[\s>D]*Pilot Record:\s*Dossiers\s+\d+/\d+\s*","",plain)
+        bodies.append(body.split("[<")[0]); return "B" if page==count else ">"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_status(vr.Palette(False),world)
+    text=" ".join(" ".join(bodies).split())
+    assert " ".join(" ".join(vr.career_dossier_lines(world.save)).split())==text
+    for i in range(vr.MAX_HIGHLIGHTS):assert text.count(f"Old highlight {i:02}")==1
+    assert world.save.to_dict()==before
+
+
+def test_career_finale_atomic_replace_failure_preserves_old_run_and_no_ack(monkeypatch,tmp_path):
+    world=_finale_world(); world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    before=(tmp_path/"77.json").read_bytes(); output=io.StringIO(); original=vr._write_bytes_atomic
+    def fail_current(path,data):
+        if path.name=="77.json":raise OSError("replacement unavailable")
+        original(path,data)
+    monkeypatch.setattr(vr,"_write_bytes_atomic",fail_current)
+    keys=iter("SY");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    with contextlib.redirect_stdout(output),pytest.raises(vr.SaveError):vr.screen_career_finale(vr.Palette(False),world)
+    assert "A new career begins." not in output.getvalue() and (tmp_path/"77.json").read_bytes()==before
+    saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert saved.pilot.retirements==0 and not saved.retired_careers
+
+
+@pytest.mark.parametrize("path,value,label",[("trader",0,"Beginning"),("trader",5000,"Broker"),("trader",20000,"Guild Merchant"),("trader",50000,"Founder"),("explorer",1,"Local"),("explorer",12,"Scout"),("explorer",30,"Pathfinder"),("explorer",48,"Cartographer"),("combat",0,"Unproven"),("combat",5,"Escort"),("combat",20,"Defender"),("combat",50,"Ace")])
+def test_career_finale_path_titles_match_recorded_accomplishment(path,value,label):
+    world=_world_with_seed(42)
+    if path=="trader":world.save.trading_ledger.sales_revenue=value
+    elif path=="explorer":world.save.discovered=list(range(value))
+    else:world.save.pilot.kills=value
+    assert f"{path.title()} ({label}):" in " ".join(vr.career_path_lines(world.save))
 
 
 @pytest.mark.parametrize("paid,bonus",[(0,1),(5,2),(15,3),(30,4)])
@@ -11126,3 +11359,59 @@ def test_career_rank_new_career_does_not_repeat_old_promotion_notice(monkeypatch
     monkeypatch.setattr(vr,"read_key",lambda:"Q")
     with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_station_menu(vr.Palette(False),world)
     assert "Promoted to" not in output.getvalue()
+
+
+@pytest.mark.parametrize("count", [41,128])
+def test_career_finale_preserves_accepted_legacy_highlight_lists(monkeypatch,tmp_path,count):
+    world=_finale_world();highlights=[f"Legacy achievement {i}" for i in range(count)]
+    world.save.pilot.highlights=list(highlights);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    old,_,_=vr.load_or_create_save(tmp_path,77,"Tester");assert old.pilot.highlights==highlights
+    keys=iter("SY");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_career_finale(vr.Palette(False),world)
+    assert "A new career begins." in output.getvalue()
+    saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert saved.pilot.retirements==1 and saved.retired_careers[0]["highlights"]==highlights
+    lines=vr.career_dossier_lines(saved)
+    assert [line[2:] for line in lines if line.startswith("* ")]==highlights
+
+
+def test_career_finale_legacy_highlights_survive_real_retirement_disconnect(tmp_path):
+    world=_finale_world();highlights=[f"Legacy event {i}" for i in range(41)]
+    world.save.pilot.highlights=list(highlights);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    with _door_stopped_at(tmp_path,b"SRSY",b"A new career begins."):
+        saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+        assert saved.pilot.retirements==1 and saved.retired_careers[0]["highlights"]==highlights
+
+
+@pytest.mark.parametrize("version", [2,99])
+def test_career_finale_future_incomplete_dossier_disables_recovery(tmp_path,monkeypatch,version):
+    import json
+    fresh=vr.finish_career(_finale_world().save,"legend");vr.write_save(tmp_path,77,fresh)
+    previous=(tmp_path/"77.json").read_bytes();(tmp_path/"77.previous.json").write_bytes(previous)
+    data=fresh.to_dict();data["retired_careers"]=[{"version":version}]
+    raw=json.dumps(data).encode();(tmp_path/"77.json").write_bytes(raw)
+    with pytest.raises(vr.UnsupportedSave) as error:vr.load_or_create_save(tmp_path,77,"Tester")
+    monkeypatch.setattr(vr,"read_key",lambda:"Q")
+    with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_save_recovery(vr.Palette(False),tmp_path,77,error.value)
+    assert "[R]" not in output.getvalue() and (tmp_path/"77.json").read_bytes()==raw
+    assert (tmp_path/"77.previous.json").read_bytes()==previous
+
+
+def test_career_finale_size_preflight_precedes_confirmation_and_keeps_legacy_career(tmp_path,monkeypatch):
+    import copy,json
+    world=_finale_world();world.checkpoint();vr.persist(world,tmp_path,77)
+    highlights=["x"*4096 for _ in range(1010)]+[""]
+    world.save.pilot.highlights=highlights
+    remaining=vr.MAX_SAVE_BYTES-len(json.dumps(world.save.to_dict()).encode())
+    while remaining>4096:
+        highlights.insert(-1,"x"*4096);remaining=vr.MAX_SAVE_BYTES-len(json.dumps(world.save.to_dict()).encode())
+    assert 0<=remaining<=4096
+    highlights[-1]="x"*remaining;vr.persist(world,tmp_path,77)
+    raw=(tmp_path/"77.json").read_bytes();assert len(raw)==vr.MAX_SAVE_BYTES
+    before=copy.deepcopy(world.save.to_dict());rng=world.event_rng.getstate()
+    monkeypatch.setattr(vr,"confirm",lambda *args:pytest.fail("Oversized retirement offered confirmation"))
+    keys=iter("SB");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:result=vr.screen_career_finale(vr.Palette(False),world)
+    assert result and "Retirement unavailable" in result and "Current career retained" in result
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng and (tmp_path/"77.json").read_bytes()==raw
+    saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester");assert saved.pilot.retirements==0

@@ -1188,6 +1188,7 @@ class SaveData:
     market_memory: dict[int, dict[str, dict]] = field(default_factory=dict)
     market_depth: dict[int, dict[str, dict[str, int]]] = field(default_factory=dict)
     faction_stories: dict[str, dict] = field(default_factory=dict)
+    retired_careers: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -1220,6 +1221,7 @@ class SaveData:
             "market_memory": {str(sid): quotes for sid, quotes in self.market_memory.items()},
             "market_depth": {str(sid): goods for sid, goods in self.market_depth.items()},
             **({"faction_stories": self.faction_stories} if self.faction_stories else {}),
+            **({"retired_careers": self.retired_careers} if self.retired_careers else {}),
         }
 
     @classmethod
@@ -1260,6 +1262,7 @@ class SaveData:
             market_depth={int(sid): {c: dict(pool) for c, pool in goods.items()}
                           for sid, goods in d.get("market_depth", {}).items()},
             faction_stories={faction: dict(story) for faction, story in d.get("faction_stories", {}).items()},
+            retired_careers=[dict(item, highlights=list(item["highlights"])) for item in d.get("retired_careers", [])],
         )
 
 
@@ -1452,6 +1455,33 @@ def _validate_save_document(data: dict) -> None:
                 if not economies: economies = {system.id: system.economy for system in generate_galaxy(data["seed"])}
                 require("Haven" in economies.values(), "faction story Haven")
         else: require("choice" not in story, "premature faction story choice")
+    dossiers = data.get("retired_careers", [])
+    require(isinstance(dossiers, list) and len(dossiers) <= MAX_RETIRED_CAREERS, "retired careers")
+    previous_number = 0
+    dossier_fields = {"version", "number", "seed", "started", "ended", "finale", "rank", "ship", "days", "credits", "kills", "missions", "charted", "market_margin", "highlights"}
+    for dossier in dossiers:
+        require(isinstance(dossier, dict), "career dossier")
+        if type(dossier.get("version")) is int and dossier["version"] != 1:
+            raise UnsupportedSave("The retired career uses an unsupported dossier version.")
+        _reject_unknown_save_fields(dossier, dossier_fields, "career dossier")
+        require(set(dossier) == dossier_fields, "career dossier fields")
+        integer(dossier["version"], "dossier version", minimum=1, maximum=1)
+        integer(dossier["number"], "dossier sequence", minimum=previous_number+1, maximum=pilot.get("retirements", 0))
+        previous_number = dossier["number"]
+        integer(dossier["seed"], "dossier seed", minimum=-(2**63))
+        integer(dossier["rank"], "dossier rank", maximum=len(RANKS)-1)
+        integer(dossier["charted"], "dossier chart", maximum=GALAXY_SYSTEM_COUNT)
+        integer(dossier["market_margin"], "dossier margin", minimum=-(2**63))
+        for key in ("days", "credits", "kills", "missions"): integer(dossier[key], "dossier " + key)
+        for key in ("started", "ended"): text(dossier[key], "dossier " + key)
+        require(dossier["ship"] in HULL_CLASSES and dossier["finale"] in CAREER_FINALES, "dossier conclusion")
+        require(isinstance(dossier["highlights"], list), "dossier highlights")
+        for entry in dossier["highlights"]: text(entry, "dossier highlight")
+        finale = dossier["finale"]
+        require((finale == "legend" and dossier["rank"] == len(RANKS)-1)
+                or (finale == "trader" and dossier["market_margin"] >= 50000)
+                or (finale == "explorer" and dossier["charted"] == GALAXY_SYSTEM_COUNT)
+                or (finale == "combat" and dossier["kills"] >= 50), "dossier accomplishment")
     drift = data.get("market_drift", {})
     require(isinstance(drift, dict), "market drift")
     seen = set()
@@ -3291,6 +3321,93 @@ def career_rank_terms(pilot: Pilot) -> list[str]:
     return lines
 
 
+MAX_RETIRED_CAREERS = 128
+CAREER_FINALES = {
+    "legend": {"label": "Frontier Legend", "requirement": "Retained top career rank", "tier": None,
+               "closing": "Freeport names a berth for your ship. Your next voyage begins with the freedom you earned."},
+    "trader": {"label": "Trade Guild Founder", "requirement": "50,000cr recorded known-cost market-sale margin", "tier": "cargo",
+               "closing": "You found an independent freight guild. Its first apprentices build a larger hold for your next ship."},
+    "explorer": {"label": "Atlas Keeper", "requirement": "All 48 systems charted", "tier": "scanner",
+                 "closing": "You leave a complete atlas with the frontier observatories. They equip your next ship to seek another sky."},
+    "combat": {"label": "Frontier Warden", "requirement": "50 recorded combat victories", "tier": "weapon",
+               "closing": "You train the next frontier watch. A proven weapon fit accompanies you beyond the old patrol routes."},
+}
+
+
+def career_accomplishments(save: SaveData) -> dict[str, int]:
+    ledger = save.trading_ledger
+    return {"trader": ledger.sales_revenue-ledger.sales_cost, "explorer": len(save.discovered), "combat": save.pilot.kills}
+
+
+def career_path_lines(save: SaveData) -> list[str]:
+    progress = career_accomplishments(save)
+    stages = {"trader": ((5000,20000,50000), ("Beginning","Broker","Guild Merchant","Founder")),
+              "explorer": ((12,30,GALAXY_SYSTEM_COUNT), ("Local","Scout","Pathfinder","Cartographer")),
+              "combat": ((5,20,50), ("Unproven","Escort","Defender","Ace"))}
+    labels = {key:names[sum(progress[key] >= mark for mark in marks)] for key,(marks,names) in stages.items()}
+    return [f"Trader ({labels['trader']}): {progress['trader']:+,}cr known-cost market margin; stages 5,000 / 20,000 / 50,000cr.",
+            "Market margin excludes deliveries, unknown-cost receipts and other income. It is before operating costs, not total career profit.",
+            f"Explorer ({labels['explorer']}): {progress['explorer']}/{GALAXY_SYSTEM_COUNT} systems charted; stages 12 / 30 / all systems.",
+            f"Combat ({labels['combat']}): {progress['combat']} combat victories; stages 5 / 20 / 50.",
+            "Paths are independent. Reach a final stage for its career conclusion and starting equipment; [R] Finale shows the terms."]
+
+
+def career_finale_blocker(save: SaveData, finale: str) -> str | None:
+    if finale not in CAREER_FINALES: return "Choose a listed career conclusion."
+    if save.pending_travel is not None: return "Finish the current journey first."
+    if len(save.retired_careers) >= MAX_RETIRED_CAREERS:
+        return f"Career archive full ({MAX_RETIRED_CAREERS} dossiers). Retirement is unavailable; this career can continue."
+    progress = career_accomplishments(save)
+    ready = career_rank_index(save.pilot) == len(RANKS)-1 if finale == "legend" else progress[finale] >= {"trader":50000,"explorer":GALAXY_SYSTEM_COUNT,"combat":50}[finale]
+    return None if ready else "Requires " + CAREER_FINALES[finale]["requirement"] + "."
+
+
+def finish_career(save: SaveData, finale: str) -> SaveData:
+    """Validate the deliberate ending; archive and reset share one saved payload."""
+    if blocker := career_finale_blocker(save, finale): raise ValueError(blocker)
+    dossier = {"version":1, "number":save.pilot.retirements+1, "seed":save.seed,
+               "started":save.pilot.career_started, "ended":time.strftime("%Y-%m-%d"), "finale":finale,
+               "rank":career_rank_index(save.pilot), "ship":save.ship.hull_class, "days":save.turn,
+               "credits":save.pilot.credits, "kills":save.pilot.kills, "missions":save.pilot.missions_completed,
+               "charted":len(save.discovered), "market_margin":career_accomplishments(save)["trader"],
+               "highlights":list(save.pilot.highlights)}
+    fresh = retire_pilot(save)
+    fresh.retired_careers = [dict(item, highlights=list(item["highlights"])) for item in save.retired_careers] + [dossier]
+    info = CAREER_FINALES[finale]
+    if info["tier"] is not None: setattr(fresh.ship, info["tier"] + "_tier", 1)
+    fresh.pilot.log = [f"Retired as {info['label']} (retirement #{fresh.pilot.retirements}); a new career begins."]
+    fresh.pilot.highlights = [info["closing"]]
+    return fresh
+
+
+def career_dossier_lines(save: SaveData) -> list[str]:
+    lines = [f"{len(save.retired_careers)}/{MAX_RETIRED_CAREERS} archived careers; newest first.",
+             "Earlier retirements without dossiers remain counted; their details are not reconstructed."]
+    if not save.retired_careers: return lines + ["No career dossiers recorded yet."]
+    for item in reversed(save.retired_careers):
+        info = CAREER_FINALES[item["finale"]]
+        lines += [f"Career #{item['number']}: {info['label']}. {item['started'] or 'Unknown start'} to {item['ended']}.",
+                  f"Seed {item['seed']}; {item['days']} days; {RANKS[item['rank']][1]}; {item['ship']}.",
+                  f"Final credits {item['credits']:,}cr; market margin {item['market_margin']:+,}cr; {item['charted']}/{GALAXY_SYSTEM_COUNT} charted; {item['kills']} victories; {item['missions']} missions.", info["closing"]]
+        lines.extend("* " + entry for entry in item["highlights"])
+    return lines
+
+
+def career_finale_lines(save: SaveData, selected: str) -> list[str]:
+    lines = ["Choose how this career ends. Selection alone changes nothing."] + career_path_lines(save)
+    for index, (finale, info) in enumerate(CAREER_FINALES.items(), 1):
+        lines.append(f"[{index}] {info['label']}{' [SELECTED]' if finale == selected else ''}: {career_finale_blocker(save, finale) or 'Available.'}")
+    info = CAREER_FINALES[selected]
+    credits = 1200 + (save.pilot.retirements+1)*RETIREMENT_STARTING_CREDITS_BONUS
+    gear = f"{info['tier'].title()} tier 1" if info["tier"] else "ordinary starting modules"
+    lines += ["Selected ending: " + info["closing"],
+              f"New Game+: a fresh galaxy, Shuttle with {gear}, full starting hull/fuel and {credits:,}cr including the accumulated retirement bonus.",
+              "Current cargo, contracts, faction/crew/story progress and career rank reset. Display style, lifetime score, retirement count and dossiers remain.",
+              f"Archive space: {len(save.retired_careers)}/{MAX_RETIRED_CAREERS}. The full current dossier and new career save together before acknowledgement.",
+              "[S] Retire opens the final confirmation. [B] Back retains this career."]
+    return lines
+
+
 def check_rank_up(world: World) -> str | None:
     """Capture durable action milestones before another action can spend them."""
     pilot = world.save.pilot
@@ -3368,21 +3485,11 @@ RETIREMENT_STARTING_CREDITS_BONUS = 500
 
 
 def retire_pilot(old_save: SaveData) -> SaveData:
-    """New Game+, available once a pilot reaches the top rank
-    (`RANKS`'s own last entry -- see `screen_status`'s own eligibility
-    check). Reuses `_new_career` almost entirely -- a genuinely fresh
-    run: new seed (a different galaxy to explore, not the same map
-    memorized), fresh ship/credits/reputation/notoriety/kills/missions,
-    an empty log. Deliberately not a "New Game+ carries most things
-    forward" design -- `retirements` (incremented) and its own small,
-    cumulative starting-credit bonus are the *only* things that survive
-    the reset, the "legacy" this feature is actually about; everything
-    else restarting is what makes it a real new run rather than the same
-    character continuing under a different name. The display preference also
-    survives as presentation configuration, separate from gameplay progress."""
+    """Base fresh-run constructor; finish_career validates and archives UI endings."""
     retirements = old_save.pilot.retirements + 1
     new_save = _new_career(old_save.pilot.handle)
     new_save.display_style = old_save.display_style
+    new_save.retired_careers = [dict(item, highlights=list(item["highlights"])) for item in old_save.retired_careers]
     new_save.best_credits = max(old_save.best_credits, old_save.pilot.credits)
     new_save.pilot.retirements = retirements
     new_save.pilot.credits += retirements * RETIREMENT_STARTING_CREDITS_BONUS
@@ -3591,9 +3698,8 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     _write_bytes_atomic(path, json.dumps(data).encode("utf-8"))
 
 
-def write_save(save_dir: Path, user_id: int, save: SaveData) -> None:
-    """Retain the preceding readable checkpoint under the pilot session lease."""
-    path = _save_path(save_dir, user_id)
+def _encode_career_checkpoint(save: SaveData) -> bytes:
+    """Use the same byte/schema envelope for preflight and actual persistence."""
     new = json.dumps(save.to_dict()).encode("utf-8")
     try:
         if len(new) > MAX_SAVE_BYTES:
@@ -3601,6 +3707,13 @@ def write_save(save_dir: Path, user_id: int, save: SaveData) -> None:
         _decode_career(new)
     except ResumeError as exc:
         raise SaveError("Refusing to write an invalid career checkpoint.") from exc
+    return new
+
+
+def write_save(save_dir: Path, user_id: int, save: SaveData) -> None:
+    """Retain the preceding readable checkpoint under the pilot session lease."""
+    path = _save_path(save_dir, user_id)
+    new = _encode_career_checkpoint(save)
     try:
         old = _read_save_bytes(path)
     except FileNotFoundError:
@@ -5838,7 +5951,7 @@ def screen_missions(p: Palette, world: World) -> None:
 def pilot_record_lines(world: World, section: str = "O") -> list[str]:
     """Complete retained records, without display truncation or state changes."""
     pilot, ship = world.save.pilot, world.save.ship
-    lines = ["Views: [O]Pilot [C]Jobs [H]Log"]
+    lines = ["Views: [O]Pilot [C]Jobs [H]Log [D]Dossiers"]
     if section == "C":
         lines.append(f"Active Contracts & Missions: {len(world.save.active_missions)}. Full terms, tracking and routes: station [B] Mission Board.")
         for mission in world.save.active_missions:
@@ -5849,6 +5962,7 @@ def pilot_record_lines(world: World, section: str = "O") -> list[str]:
             lines.append(f"#{mission.id} {kind}: {mission.description}. Target: {target.name} ({target.x},{target.y}); {deadline}; reward {reward}cr.")
         if not world.save.active_missions: lines.append("No active missions.")
         return lines
+    if section == "D": return career_dossier_lines(world.save)
     if section == "H":
         lines.append(f"Career highlights: {len(pilot.highlights)} retained; newest first.")
         lines.extend(f"* {entry}" for entry in reversed(pilot.highlights))
@@ -5875,19 +5989,47 @@ def pilot_record_lines(world: World, section: str = "O") -> list[str]:
     event = world.save.active_event
     if event: lines.append(f"Economy event: {event['description']} ({event['turns_remaining']} day(s) left).")
     lines.append(f"[C] Jobs: {len(world.save.active_missions)} active. [H] Log: {len(pilot.highlights)} highlights, {len(pilot.log)} log entries.")
-    if career_rank(pilot) == RANKS[-1][1]:
-        lines.append("[R] Retire ends this career and begins a new one; confirmation required.")
+    lines.append("[R] Finale shows endings and New Game+ terms. [D] Dossiers shows archived careers.")
+    lines += career_path_lines(world.save)
     return lines
+
+
+def screen_career_finale(p: Palette, world: World) -> str | None:
+    selected = next((key for key in CAREER_FINALES if career_finale_blocker(world.save, key) is None), "legend")
+    page, result = 0, None
+    while True:
+        lines = ([result] if result else []) + career_finale_lines(world.save, selected)
+        key, page, count = _draw_service_page(p, "Career Finale", lines, "[1-4]Choose [S]Retire [<>]Page [B]Back: ", page)
+        if key in ("B", "Q"): return result
+        if key == ">": page = min(page+1,count-1); continue
+        if key == "<": page = max(page-1,0); continue
+        if key in ("1", "2", "3", "4"): selected, page = list(CAREER_FINALES)[int(key)-1], 0; continue
+        if key != "S": continue
+        if blocker := career_finale_blocker(world.save, selected): result, page = blocker, 0; continue
+        try:
+            fresh = World(finish_career(world.save, selected))
+            fresh.checkpoint()
+            fresh.save.best_credits = max(fresh.save.best_credits, fresh.save.pilot.credits)
+            _encode_career_checkpoint(fresh.save)
+        except SaveError:
+            result, page = "Retirement unavailable: the archived career cannot fit a valid save. Current career retained.", 0
+            continue
+        if not confirm(f"End this career as {CAREER_FINALES[selected]['label']} and begin New Game+?", p):
+            result, page = "Retirement cancelled; current career retained.", 0; continue
+        world.reset(fresh.save)
+        world.pending_promotions.extend(fresh.pending_promotions)
+        world.checkpoint()
+        out_line(); out_line("A new career begins.")
+        return "A new career begins."
 
 
 def screen_status(p: Palette, world: World) -> None:
     section, page, result = "O", 0, None
     cache = {}
     while True:
-        eligible = career_rank(world.save.pilot) == RANKS[-1][1]
-        footer = "[<>]Page [O/C/H]View " if _OUTPUT_WIDTH < 30 else "[<]Prev [>]Next [O]Pilot [C]Jobs [H]Log "
-        footer += ("[R]Retire " if eligible else "") + "[B]Back: "
-        title = "Pilot Record: " + {"O":"Overview", "C":"Contracts", "H":"History"}[section]
+        footer = "[<>]Page [O/C/H/D]View " if _OUTPUT_WIDTH < 30 else "[<]Prev [>]Next [O]Pilot [C]Jobs [H]Log [D]Dossiers "
+        footer += "[R]Finale [B]Back: "
+        title = "Pilot Record: " + {"O":"Overview", "C":"Contracts", "H":"History", "D":"Dossiers"}[section]
         if section not in cache:
             lines = pilot_record_lines(world, section)
             if result: lines.insert(0, "Result: " + result)
@@ -5896,14 +6038,14 @@ def screen_status(p: Palette, world: World) -> None:
         if key in ("B", "Q", " "): return
         if key == ">": page = min(page + 1, count - 1)
         elif key == "<": page = max(0, page - 1)
-        elif key in ("O", "C", "H"): section, page = key, 0
-        elif key == "R" and eligible:
-            if confirm("This ends your current career for good and begins a new one. Retire?", p):
-                world.reset(retire_pilot(world.save))
-                world.checkpoint()
-                out_line(); out_line(f"{p.accent}{BOLD}A new career begins.{RESET}")
-                return
-            result, page, cache = "Retirement cancelled; current career retained.", 0, {}
+        elif key in ("O", "C", "H", "D"): section, page = key, 0
+        elif key == "R":
+            previous = world.save.pilot.retirements
+            response = screen_career_finale(p, world)
+            if world.save.pilot.retirements != previous: return
+            if response is not None: result = response
+            page, cache = 0, {}
+
 
 
 def hall_of_fame_lines(entries: list[dict], user_id: int) -> list[str]:
