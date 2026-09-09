@@ -9911,6 +9911,7 @@ def test_named_crew_roster_keeps_personality_progress_and_costs_without_writes(m
     world._checkpoint = lambda w: pytest.fail("Crew browsing checkpointed")
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert "[1-3]Task" in " ".join(vr._ANSI_RE.sub("",frame).split())
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
@@ -10057,6 +10058,323 @@ def test_archive_preview_and_result_report_effective_standing(ending, concord, b
     assert world.event_rng.getstate() == rng
 
 
+# Personal assignments use existing combat/chart totals and delivery accounting.
+def _world_with_crew_task(role, *, ready=False):
+    world = _world_with_named_crew(role, 5)
+    vr.accept_crew_assignment(world, role)
+    if ready:
+        if role == "gunner": world.save.pilot.kills += 1
+        elif role == "engineer":
+            world.save.cargo = {"machinery": 3}; world.save.cargo_basis = {"machinery": [[3, 300]]}
+            world.save.trading_ledger.since_day = world.save.turn
+        else:
+            for system in [s for s in world.galaxy if not s.discovered][:3]: system.discovered = True
+        world.save.current_system = vr.crew_assignment_destination(world, role)
+        world.here.discovered = True
+    world.save.discovered = [system.id for system in world.galaxy if system.discovered]
+    return world
+
+
+@pytest.mark.parametrize("role", list(vr.CREW_ROLES))
+def test_personal_crew_task_preview_does_not_create_records_or_draw_rng(role):
+    import copy
+    world = _world_with_seed(42)
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    lines = " ".join(vr.crew_assignment_lines(world, role))
+    assert vr.crew_name(world, role) in lines and str(vr.CREW_ASSIGNMENTS[role]["reward"]) in lines
+    assert "five paid jumps" in lines and "no deposit" in lines and "wages" in lines
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("role", list(vr.CREW_ROLES))
+def test_personal_crew_task_completion_pays_once_and_retains_personal_memory(role):
+    import copy
+    world = _world_with_crew_task(role, ready=True)
+    credits, missions = world.save.pilot.credits, world.save.pilot.missions_completed
+    reputation, paid, rng = copy.deepcopy(world.save.pilot.reputation), world.save.ship.crew_records[role]["paid_jumps"], world.event_rng.getstate()
+    result = vr.complete_crew_assignment(world, role)
+    assert "Personal assignment complete" in result
+    assert world.save.pilot.credits == credits + vr.CREW_ASSIGNMENTS[role]["reward"]
+    assert world.save.pilot.missions_completed == missions + 1
+    assert any(vr.crew_name(world, role) in line for line in world.save.pilot.highlights)
+    assert world.save.pilot.reputation == reputation and world.save.ship.crew_records[role]["paid_jumps"] == paid
+    assert world.event_rng.getstate() == rng
+    assert vr.CREW_ASSIGNMENTS[role]["closing"] in vr.crew_assignment_lines(world, role)
+    before = copy.deepcopy(world.save.to_dict())
+    for operation in (vr.accept_crew_assignment, vr.complete_crew_assignment):
+        with pytest.raises(ValueError, match="already complete"): operation(world, role)
+        assert world.save.to_dict() == before
+    assert not vr.crew_assignment_recap(world)
+
+
+@pytest.mark.parametrize("role", list(vr.CREW_ROLES))
+@pytest.mark.parametrize("fault", ["unhired", "recruit", "pending", "wrong_location", "unfinished"])
+def test_personal_crew_task_invalid_handover_is_atomic(role, fault):
+    import copy
+    world = _world_with_crew_task(role, ready=True)
+    if fault == "unhired": setattr(world.save.ship, f"has_{role}", False)
+    elif fault == "recruit": world.save.ship.crew_records[role]["paid_jumps"] = 4
+    elif fault == "pending": world.save.pending_travel = {"phase": "departed"}
+    elif fault == "wrong_location": world.save.current_system = 0
+    elif role == "gunner": world.save.pilot.kills = 0
+    elif role == "engineer": world.save.cargo["machinery"] = 2; world.save.cargo_basis = {}
+    else:
+        for system in world.galaxy: system.discovered = False
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    with pytest.raises(ValueError): vr.complete_crew_assignment(world, role)
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("role", list(vr.CREW_ROLES))
+def test_personal_crew_task_rehire_keeps_baseline_and_acceptance_is_not_repeatable(role):
+    import copy
+    world = _world_with_crew_task(role)
+    task = copy.deepcopy(vr.crew_assignment_record(world, role))
+    vr.dismiss_crew(world, role)
+    if role == "gunner": world.save.pilot.kills += 1
+    elif role == "navigator":
+        for system in [s for s in world.galaxy if not s.discovered][:3]: system.discovered = True
+    else: world.save.cargo["machinery"] = 3
+    vr.hire_crew(world, role)
+    assert vr.crew_assignment_record(world, role) == task
+    before = copy.deepcopy(world.save.to_dict())
+    with pytest.raises(ValueError, match="already active"): vr.accept_crew_assignment(world, role)
+    assert world.save.to_dict() == before
+    world.save.current_system = vr.crew_assignment_destination(world, role)
+    vr.complete_crew_assignment(world, role)
+    assert vr.crew_assignment_record(world, role)["state"] == "complete"
+
+
+@pytest.mark.parametrize("remaining", [0, 1, 2, 3, 10])
+def test_navigator_personal_task_acceptance_is_possible_for_mature_charts(remaining):
+    world = _world_with_named_crew("navigator", 5)
+    for system in world.galaxy: system.discovered = system.id < len(world.galaxy) - remaining
+    vr.accept_crew_assignment(world, "navigator")
+    task = vr.crew_assignment_record(world, "navigator")
+    assert task["baseline"] == len(world.galaxy) - remaining and task["required"] == min(3, remaining)
+    if remaining == 0: assert "atlas is complete" in " ".join(vr.crew_assignment_lines(world, "navigator"))
+    for system in [s for s in world.galaxy if not s.discovered][:task["required"]]: system.discovered = True
+    world.save.current_system = vr.crew_assignment_destination(world, "navigator")
+    vr.complete_crew_assignment(world, "navigator")
+    assert task["state"] == "complete"
+
+
+@pytest.mark.parametrize("unknown", [0, 1, 3])
+def test_engineer_personal_task_uses_delivery_fifo_and_gross_reward(unknown):
+    world = _world_with_crew_task("engineer", ready=True)
+    world.save.cargo = {"machinery": 4}
+    world.save.cargo_basis = {"machinery": [[4 - unknown, (4 - unknown) * 100]]}
+    before = world.save.pilot.credits
+    vr.complete_crew_assignment(world, "engineer")
+    ledger = world.save.trading_ledger
+    assert world.save.cargo == {"machinery": 1} and world.save.cargo_basis == {"machinery": [[1, 100]]}
+    assert ledger.delivery_revenue == 900 - unknown * 300 and ledger.uncosted_deliveries == unknown * 300
+    assert ledger.delivery_cost == (3 - unknown) * 100 and ledger.cargo_loss_cost == 0
+    assert world.save.pilot.credits == before + 900
+
+
+@pytest.mark.parametrize("task", [None, [], {}, {"version": 2, "state": "active", "baseline": 0, "required": 1},
+    {"version": True, "state": "active", "baseline": 0, "required": 1},
+    {"version": 1, "state": "other", "baseline": 0, "required": 1},
+    {"version": 1, "state": "active", "baseline": -1, "required": 1},
+    {"version": 1, "state": "active", "baseline": 1, "required": 1},
+    {"version": 1, "state": "active", "baseline": 0, "required": 2},
+    {"version": 1, "state": "active", "baseline": 0, "required": True},
+    {"version": 1, "state": "complete", "baseline": 0, "required": 1},
+    {"version": 1, "state": "active", "baseline": 0, "required": 1, "extra": 1}])
+def test_invalid_personal_crew_assignment_preserves_original_file(tmp_path, task):
+    import json
+    world = _world_with_crew_task("gunner")
+    world.save.ship.crew_records["gunner"]["assignment"] = task
+    path = tmp_path / "77.json"; path.write_text(json.dumps(world.save.to_dict()), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(vr.ResumeError): vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("style", ["auto", "plain"])
+@pytest.mark.parametrize("role", list(vr.CREW_ROLES))
+def test_personal_crew_task_pages_keep_complete_terms_and_leave_no_writes(monkeypatch, width, height, style, role):
+    import copy,re
+    world = _world_with_crew_task(role)
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height); monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    output, frames, bodies = io.StringIO(), [], []
+    world._checkpoint = lambda w: pytest.fail("Task browsing checkpointed")
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert len(frame.splitlines()) <= height and all(vr._visible_width(row) <= width for row in frame.splitlines())
+        assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+        page, count = map(int, re.search(r"Crew task.*?(\d+)/(\d+)", frame, re.S).groups())
+        plain = vr._ANSI_RE.sub("", frame)
+        body = re.sub(r"^[\s>]*Crew task\s+[\d,]+cr\s+\d+/\d+\s*", "", plain).split("[C/R/B]Act")[0]
+        bodies.append(body)
+        return "B" if page == count else ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): assert vr.screen_crew_assignment(vr.Palette(False), world, role) is None
+    text = " ".join(" ".join(bodies).split())
+    assert text == " ".join(" ".join(vr.crew_assignment_lines(world, role)).split())
+    assert vr.crew_name(world, role) in text and "Reward:" in text and "Ordinary travel fuel" in text
+    assert "five paid jumps" in text and "Work while they are away still counts" in text
+
+
+@pytest.mark.parametrize("role,index", [("gunner", 1), ("engineer", 2), ("navigator", 3)])
+@pytest.mark.parametrize("completing", [False, True])
+def test_real_personal_crew_task_saves_before_acknowledgement(tmp_path, role, index, completing):
+    world = _world_with_crew_task(role, ready=True) if completing else _world_with_named_crew(role, 5)
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    before, paid = world.save.pilot.credits, world.save.ship.crew_records[role]["paid_jumps"]
+    keys = f"YK{index}".encode() + (b"CY" if role == "engineer" else b"C") if completing else f"YK{index}A".encode()
+    ack = b"Personal assignment complete:" if completing else b"Personal assignment accepted:"
+    with _door_stopped_at(tmp_path, keys, ack):
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        task = saved.ship.crew_records[role]["assignment"]
+        assert task["state"] == ("complete" if completing else "active")
+        assert saved.pilot.credits == before + (vr.CREW_ASSIGNMENTS[role]["reward"] if completing else 0)
+        assert saved.ship.crew_records[role]["paid_jumps"] == paid
+        if completing and role == "engineer": assert not saved.cargo and saved.trading_ledger.delivery_cost == 300
+
+
+@pytest.mark.parametrize("role", list(vr.CREW_ROLES))
+def test_personal_crew_task_save_failure_stops_before_result(monkeypatch, role):
+    world = _world_with_crew_task(role, ready=True); output = io.StringIO()
+    keys = iter("CY" if role == "engineer" else "C"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    def fail(current):
+        assert "Personal assignment complete:" not in output.getvalue()
+        raise vr.SaveError()
+    world._checkpoint = fail
+    with contextlib.redirect_stdout(output), pytest.raises(vr.SaveError): vr.screen_crew_assignment(vr.Palette(False), world, role)
+
+
+def test_personal_crew_engineer_task_real_route_and_handover(monkeypatch, tmp_path):
+    world = _world_with_named_crew("engineer", 5)
+    world.save.cargo = {"machinery": 3}; world.save.cargo_basis = {"machinery": [[3, 300]]}; world.save.trading_ledger.since_day = world.save.turn
+    destination = vr.crew_assignment_destination(world, "engineer"); path = vr.bfs_path(world.by_id, world.here.id, destination)
+    start_turn, start_credits = world.save.turn, world.save.pilot.credits
+    keys = iter("AR" + "J" * len(path) + "BCYB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys)); monkeypatch.setattr(world.event_rng, "random", lambda: 0.99)
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    with contextlib.redirect_stdout(io.StringIO()): vr.screen_crew_assignment(vr.Palette(False), world, "engineer")
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert saved.current_system == destination and saved.turn == start_turn + len(path)
+    assert saved.pilot.credits == start_credits + 900 - len(path) * vr.CREW_ROLES["engineer"]["wage"]
+    assert not saved.cargo and saved.trading_ledger.delivery_cost == 300
+    assert saved.ship.crew_records["engineer"]["assignment"]["state"] == "complete"
+
+
+def test_personal_navigator_task_progress_uses_real_area_survey():
+    world = _world_with_crew_task("navigator"); world.save.ship.scanner_tier = 1
+    baseline = vr.crew_assignment_record(world, "navigator")["baseline"]
+    fuel, turn, rng = world.save.ship.fuel, world.save.turn, world.event_rng.getstate()
+    vr.perform_survey(world)
+    have, need = vr.crew_assignment_progress(world, "navigator")
+    assert have == sum(system.discovered for system in world.galaxy) - baseline and have >= need
+    assert world.save.ship.fuel == fuel - 2 and world.save.turn == turn and world.event_rng.getstate() == rng
+
+
+def test_personal_crew_task_recap_and_retirement():
+    world = _world_with_crew_task("gunner")
+    for lines in (vr.pilot_recap(world), vr.station_deck_lines(world)):
+        assert any("Crew task:" in line and vr.crew_name(world, "gunner") in line for line in lines)
+    assert vr.retire_pilot(world.save).ship.crew_records == {}
+
+
+@pytest.mark.parametrize("role,index", [("gunner", 1), ("engineer", 2), ("navigator", 3)])
+@pytest.mark.parametrize("commands", [b"", b">?<BQQ", b"BQQ"])
+def test_real_personal_crew_task_back_and_eof_preserve_career(tmp_path, role, index, commands):
+    import json,os,subprocess
+    world = _world_with_crew_task(role)
+    (tmp_path / "door_info.json").write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 40, "terminal_height": 12}), encoding="utf-8")
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    path = tmp_path / "77.json"; original = path.read_bytes()
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=f"YK{index}".encode() + commands,
+                            capture_output=True, timeout=10, env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path),
+                            NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")))
+    assert result.returncode == 0 and not result.stderr
+    assert b"Crew task" in result.stdout and path.read_bytes() == original
+
+
+def test_personal_engineer_handover_refusal_keeps_career(monkeypatch, tmp_path):
+    world = _world_with_crew_task("engineer", ready=True)
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    before = (tmp_path / "77.json").read_bytes()
+    keys = iter("CNB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()): assert vr.screen_crew_assignment(vr.Palette(False), world, "engineer") is None
+    assert (tmp_path / "77.json").read_bytes() == before and world.save.cargo == {"machinery": 3}
+
+
+@pytest.mark.parametrize("role", list(vr.CREW_ROLES))
+@pytest.mark.parametrize("fault", ["unhired", "recruit", "pending"])
+def test_personal_crew_task_rejected_acceptance_is_atomic(role, fault):
+    import copy
+    world = _world_with_named_crew(role, 5)
+    if fault == "unhired": vr.dismiss_crew(world, role)
+    elif fault == "recruit": world.save.ship.crew_records[role]["paid_jumps"] = 4
+    else: world.save.pending_travel = {"phase": "departed"}
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    with pytest.raises(ValueError): vr.accept_crew_assignment(world, role)
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+
+def test_personal_gunner_task_counts_actual_combat_once_after_reload(monkeypatch, tmp_path):
+    world, pirate = _world_with_pending_fight()
+    pending = world.save.pending_travel; world.save.pending_travel = None
+    world.save.pilot.credits = 100000
+    vr.hire_crew(world, "gunner"); world.save.ship.crew_records["gunner"]["paid_jumps"] = 5
+    vr.accept_crew_assignment(world, "gunner"); world.save.pending_travel = pending
+    world.save.ship.weapon_tier = 4; world.save.ship.shield_tier = 3
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    monkeypatch.setattr(vr, "read_key", lambda: "F")
+    with contextlib.redirect_stdout(io.StringIO()): assert vr.screen_combat(vr.Palette(False), world, pirate) == "won"
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    resumed = vr.World(saved); before = saved.pilot.kills
+    assert before == 1 and vr.crew_assignment_progress(resumed, "gunner") == (1, 1)
+    with contextlib.redirect_stdout(io.StringIO()): assert vr.screen_combat(vr.Palette(False), resumed, pirate) == "won"
+    assert saved.pilot.kills == before and vr.crew_assignment_progress(resumed, "gunner") == (1, 1)
+
+
+@pytest.mark.parametrize("role", list(vr.CREW_ROLES))
+@pytest.mark.parametrize("complete", [False, True])
+def test_personal_crew_task_serialized_state_retains_exact_requirements(tmp_path, role, complete):
+    import json
+    world = _world_with_crew_task(role, ready=True)
+    if complete: vr.complete_crew_assignment(world, role)
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    expected = json.loads(json.dumps(world.save.to_dict()))
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert saved.to_dict() == expected
+    resumed = vr.World(saved)
+    if complete:
+        with pytest.raises(ValueError, match="already complete"): vr.complete_crew_assignment(resumed, role)
+    else:
+        vr.complete_crew_assignment(resumed, role)
+        assert vr.crew_assignment_record(resumed, role)["state"] == "complete"
+
+
+@pytest.mark.parametrize("role", list(vr.CREW_ROLES))
+def test_personal_crew_task_has_no_contract_slot_or_deadline(role):
+    world = _world_with_named_crew(role, 5)
+    world.save.active_missions = [vr.Mission(index + 1, "bounty", "Existing", 500, 0, 1, pirate_tier=1) for index in range(vr.MAX_ACTIVE_MISSIONS)]
+    vr.accept_crew_assignment(world, role)
+    world.save.turn += 100
+    vr.check_mission_completions(world)
+    assert vr.crew_assignment_record(world, role)["state"] == "active"
+    assert len(world.save.active_missions) == vr.MAX_ACTIVE_MISSIONS
+
+
+@pytest.mark.parametrize("patch", [{"baseline": 49}, {"baseline": True}, {"required": 4}, {"required": 0}, {"state": "complete"}])
+def test_invalid_personal_navigator_task_preserves_career(tmp_path, patch):
+    import json
+    world = _world_with_crew_task("navigator")
+    world.save.ship.crew_records["navigator"]["assignment"].update(patch)
+    path = tmp_path / "77.json"; path.write_text(json.dumps(world.save.to_dict()), encoding="utf-8")
+    original = path.read_bytes()
+    with pytest.raises(vr.ResumeError): vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == original
+
+
 @pytest.mark.parametrize("route_kind", ["general", "archive"])
 def test_general_route_map_keeps_independent_tracked_objective_and_route_end(monkeypatch, route_kind):
     import copy
@@ -10117,3 +10435,18 @@ def test_promoted_navigator_survey_terms_match_actual_range_without_writes(paid,
     distances=vr.bfs_hops(world.by_id,world.here.id)
     assert set(vr.survey_candidates(world))=={sid for sid,hops in distances.items() if hops<=3+actual and not world.by_id[sid].discovered}
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+
+
+@pytest.mark.parametrize("role", list(vr.CREW_ROLES))
+@pytest.mark.parametrize("paid", [5,15,30])
+def test_personal_crew_roster_retained_experience_unlocks_on_rehire(role,paid):
+    import copy
+    world=_world_with_named_crew(role,paid)
+    vr.dismiss_crew(world,role)
+    before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate()
+    assert "available after rehiring" in " ".join(vr.crew_roster_lines(world))
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+    vr.hire_crew(world,role)
+    assert vr.crew_assignment_blocker(world,role) is None
+    vr.accept_crew_assignment(world,role)
+    assert vr.crew_assignment_record(world,role)["state"]=="active"

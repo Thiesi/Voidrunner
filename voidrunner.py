@@ -695,6 +695,18 @@ CREW_CANDIDATES = {
                   ("Noor Ash", "Marks safe harbors first and distant mysteries second.")],
 }
 CREW_SERVICE_LEVELS = ((0, "Recruit"), (5, "Seasoned"), (15, "Veteran"), (30, "Ace"))
+CREW_ASSIGNMENTS = {
+    "gunner": {"title": "Lessons for the convoy", "workshop": "cargo", "reward": 600,
+               "request": "Iona trains convoy crews. Bring her a new combat recording so the next pilot has a better chance of coming home.",
+               "closing": "Iona turns the recording into a drill. Your specialist stays to answer the trainees' questions."},
+    "engineer": {"title": "Keep the lights on", "workshop": "engine", "reward": 900,
+                 "request": "Oren's old station pumps need spares. Three Machinery will keep the homes above his workshop supplied.",
+                 "closing": "The pump room settles into a steady hum. Your specialist calls home before you leave."},
+    "navigator": {"title": "Charts worth sharing", "workshop": "scanner", "reward": 700,
+                  "request": "Dr. Parn keeps a public atlas. Bring new chart entries, or your complete atlas, so other crews can find safe routes.",
+                  "closing": "Dr. Parn credits your chart. Your specialist points out a route they once thought impossible."},
+}
+
 
 
 # hull class -> base cargo/fuel/hull, before any tier upgrades are added
@@ -1322,7 +1334,7 @@ def _validate_save_document(data: dict) -> None:
     require(isinstance(crew_records, dict) and set(crew_records) <= set(CREW_ROLES), "crew records")
     for role, member in crew_records.items():
         require(isinstance(member, dict), "crew member")
-        if set(member) - {"version", "identity", "paid_jumps"}:
+        if set(member) - {"version", "identity", "paid_jumps", "assignment"}:
             raise UnsupportedSave("The saved crew record contains unsupported fields.")
         if type(member.get("version")) is int and member["version"] != 1:
             raise UnsupportedSave("The saved crew record uses an unsupported version.")
@@ -1406,6 +1418,23 @@ def _validate_save_document(data: dict) -> None:
         system(sid, "chart system")
     require(len(discovered) == len(set(discovered)), "chart systems")
     require(memory_ids <= set(discovered), "market observations outside the chart")
+    for role, member in crew_records.items():
+        if "assignment" not in member: continue
+        task = member["assignment"]
+        require(isinstance(task, dict), "crew assignment")
+        _reject_unknown_save_fields(task, {"version", "state", "baseline", "required"}, "crew assignment")
+        if type(task.get("version")) is int and task["version"] != 1:
+            raise UnsupportedSave("The saved crew assignment uses an unsupported version.")
+        require(type(task.get("version")) is int and task["version"] == 1, "crew assignment version")
+        require(task.get("state") in ("active", "complete"), "crew assignment state")
+        require(member["paid_jumps"] >= 5, "crew assignment service")
+        total = pilot.get("kills", 0) if role == "gunner" else len(discovered) if role == "navigator" else 0
+        integer(task.get("baseline"), "crew assignment baseline", maximum=total)
+        expected = min(3, GALAXY_SYSTEM_COUNT - task["baseline"]) if role == "navigator" else 1 if role == "gunner" else 3
+        integer(task.get("required"), "crew assignment requirement", minimum=expected, maximum=expected)
+        if task["state"] == "complete" and role != "engineer":
+            require(total - task["baseline"] >= task["required"], "crew assignment completion")
+
     drift = data.get("market_drift", {})
     require(isinstance(drift, dict), "market drift")
     seen = set()
@@ -3633,6 +3662,7 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
         lines.append(f"Tracked {kind}: {mission_bearing(world, mission)}; {deadline}. [C] Chart, then [R] contract route.")
     if world.save.flags.get("archive_v1_started") and not archive_finished(world):
         lines.append(f"Archive: {archive_objective(world)} [N] Contacts / Route.")
+    lines += crew_assignment_recap(world)
     actions = ["[M] Commodity Market", "[Y] Engineering Yard", "[B] Mission Board",
                "[C] Navigation Chart", "[S] Pilot Status", "[H] Hall of Fame",
                "[G] Pilot Guide", "[N] Archive Contacts", "[T] Trading Ledger", "[O] Display Options", "[Q] Disembark & Save"]
@@ -4739,6 +4769,14 @@ def crew_roster_lines(world: World) -> list[str]:
         progress = (f"{paid}/{CREW_SERVICE_LEVELS[level + 1][0]} paid jumps to {CREW_SERVICE_LEVELS[level + 1][1]}"
                     if level + 1 < len(CREW_SERVICE_LEVELS) else "service mastery reached")
         lines.append(f"{CREW_SERVICE_LEVELS[level][1]}: {progress}.")
+        task = crew_assignment_record(world, role)
+        if task is not None:
+            state = task["state"]
+        elif level >= 1:
+            state = "available" if hired else "available after rehiring"
+        else:
+            state = "unlocks after hiring and five paid jumps"
+        lines.append(f"[{index + 1}]Task: {CREW_ASSIGNMENTS[role]['title']}; {state}.")
     lines.extend([
         "Specialists earn wages on every jump, including detours.",
         "Promotions follow 5, 15 and 30 paid jumps. Rehiring keeps recorded experience; earlier unrecorded service is unknown.",
@@ -4747,9 +4785,121 @@ def crew_roster_lines(world: World) -> list[str]:
     return lines
 
 
+def crew_assignment_record(world: World, role: str) -> dict | None:
+    return world.save.ship.crew_records.get(role, {}).get("assignment")
+
+
+def crew_assignment_total(world: World, role: str) -> int:
+    if role == "gunner": return world.save.pilot.kills
+    if role == "navigator": return sum(system.discovered for system in world.galaxy)
+    return 0
+
+
+def crew_assignment_destination(world: World, role: str) -> int:
+    return specialist_stations(world)[CREW_ASSIGNMENTS[role]["workshop"]]
+
+
+def crew_assignment_progress(world: World, role: str) -> tuple[int, int]:
+    task = crew_assignment_record(world, role)
+    if task is None:
+        total = crew_assignment_total(world, role)
+        return (world.save.cargo.get("machinery", 0), 3) if role == "engineer" else (0, min(3, len(world.galaxy) - total) if role == "navigator" else 1)
+    progress = world.save.cargo.get("machinery", 0) if role == "engineer" else crew_assignment_total(world, role) - task["baseline"]
+    return max(0, progress), task["required"]
+
+
+def crew_assignment_blocker(world: World, role: str, *, completing: bool = False) -> str | None:
+    if role not in CREW_ASSIGNMENTS: return "Choose a listed specialist."
+    if world.save.pending_travel is not None: return "Finish the current journey first."
+    if not getattr(world.save.ship, f"has_{role}"): return "Hire this specialist before accepting or completing their task."
+    if crew_level(world.save.ship, role) < 1: return "This specialist shares their assignment after five paid jumps."
+    task = crew_assignment_record(world, role)
+    if task is not None and task["state"] == "complete": return "This personal assignment is already complete."
+    if not completing: return "This personal assignment is already active." if task is not None else None
+    if task is None: return "Accept this assignment first."
+    if world.here.id != crew_assignment_destination(world, role): return "Visit the named workshop before handing over the work."
+    have, need = crew_assignment_progress(world, role)
+    if have < need: return f"Objective incomplete: {have}/{need}."
+    return None
+
+
+def accept_crew_assignment(world: World, role: str) -> str:
+    blocker = crew_assignment_blocker(world, role)
+    if blocker: raise ValueError(blocker)
+    _, required = crew_assignment_progress(world, role)
+    world.save.ship.crew_records[role]["assignment"] = {
+        "version": 1, "state": "active", "baseline": crew_assignment_total(world, role), "required": required}
+    message = f"Personal assignment accepted: {CREW_ASSIGNMENTS[role]['title']}."
+    world.save.pilot.note(message)
+    return message
+
+
+def complete_crew_assignment(world: World, role: str) -> str:
+    blocker = crew_assignment_blocker(world, role, completing=True)
+    if blocker: raise ValueError(blocker)
+    task, info = crew_assignment_record(world, role), CREW_ASSIGNMENTS[role]
+    if role == "engineer": _dispose_cargo(world, "machinery", task["required"], proceeds=info["reward"], kind="delivery")
+    world.save.pilot.credits += info["reward"]
+    world.save.pilot.missions_completed += 1
+    task["state"] = "complete"
+    message = f"Personal assignment complete: {info['title']}. +{info['reward']}cr."
+    world.save.pilot.note(message)
+    world.save.pilot.highlight(f"Helped {crew_name(world, role)}: {info['title']}.")
+    return message
+
+
+def crew_assignment_lines(world: World, role: str) -> list[str]:
+    info, task = CREW_ASSIGNMENTS[role], crew_assignment_record(world, role)
+    lines = [f"{crew_name(world, role)}: {info['title']}."]
+    if task is not None and task["state"] == "complete":
+        return lines + [info["closing"], "Assignment complete. Rewards cannot be claimed again."]
+    target = world.by_id[crew_assignment_destination(world, role)]
+    have, need = crew_assignment_progress(world, role)
+    objective = (f"New combat recordings: {have}/{need}. Defeat one opponent after acceptance." if role == "gunner" else
+                 f"Machinery aboard: {have}/{need}. Handover consumes {need} units, including goods promised to other contracts." if role == "engineer" else
+                 f"New chart entries: {have}/{need}. Chart {need} new systems after acceptance." if need else
+                 "Your atlas is complete; deliver it for archival review.")
+    lines += [f"Reward: {info['reward']}cr and one completed mission, once.",
+              objective, f"Deliver to {WORKSHOPS[info['workshop']]['name']} at {target.name} ({target.x},{target.y}).",
+              info["request"],
+              "Optional: no deposit, deadline or contract-slot cost. Ordinary travel fuel, wages and risks apply.",
+              "Requires this specialist hired with five paid jumps. Dismissal keeps progress; rehiring costs the usual fee. Work while they are away still counts."]
+    if role == "engineer": lines.append("The reward is gross: subtract material acquisition, travel and wage costs. The delivery ledger records material costs.")
+    blocker = crew_assignment_blocker(world, role, completing=task is not None)
+    lines.append(blocker or ("[C] Complete here." if task is not None else "[A] Accept assignment."))
+    return lines
+
+
+def crew_assignment_recap(world: World) -> list[str]:
+    return [f"Crew task: {crew_name(world, role)} - {info['title']}. [Y] Yard / [K] Crew / [{index + 1}] Task."
+            for index, (role, info) in enumerate(CREW_ASSIGNMENTS.items())
+            if (task := crew_assignment_record(world, role)) is not None and task["state"] == "active"]
+
+
+def screen_crew_assignment(p: Palette, world: World, role: str) -> str | None:
+    page, result = 0, None
+    while True:
+        task = crew_assignment_record(world, role)
+        actions = "" if task is not None and task["state"] == "complete" else "C/R/" if task is not None else "A/R/"
+        lines = ([result] if result else []) + crew_assignment_lines(world, role)
+        key, page, count = _draw_service_page(p, f"Crew task {world.save.pilot.credits:,}cr", lines, f"[{actions}B]Act [<>]Page: ", page)
+        if key in ("B", "Q"): return result
+        if key == ">": page = min(page + 1, count - 1); continue
+        if key == "<": page = max(0, page - 1); continue
+        if not key or key not in actions.split("/"): continue
+        if key == "R":
+            _screen_auto_route(p, world, destination=crew_assignment_destination(world, role)); page = 0; continue
+        blocker = crew_assignment_blocker(world, role, completing=key == "C")
+        if blocker: result, page = blocker, 0; continue
+        if key == "C" and role == "engineer" and not confirm("Hand over 3 Machinery, including any promised to contracts, for 900cr?", p): continue
+        result = complete_crew_assignment(world, role) if key == "C" else accept_crew_assignment(world, role)
+        world.checkpoint()
+        page = 0
+
+
 def screen_crew(p: Palette, world: World) -> None:
     page, result = 0, None
-    footer = f"[<>]Page [A-{LETTERS[len(CREW_ROLES)-1]}]Crew [Q]Back: "
+    footer = f"[<>]Page [A-{LETTERS[len(CREW_ROLES)-1]}]Crew [1-3]Task [Q]Back: "
     while True:
         lines = crew_roster_lines(world)
         if result: lines.insert(0, "Result: " + result)
@@ -4758,6 +4908,10 @@ def screen_crew(p: Palette, world: World) -> None:
         if key == ">": page = min(page + 1, count - 1); continue
         if key == "<": page = max(0, page - 1); continue
         roles = list(CREW_ROLES)
+        if key in ("1", "2", "3"):
+            response = screen_crew_assignment(p, world, roles[int(key) - 1])
+            if response is not None: result, page = response, 0
+            continue
         if key in LETTERS[:len(roles)]:
             response = _toggle_crew(p, world, roles[LETTERS.index(key)])
             if response is not None: result, page = response, 0
@@ -5072,6 +5226,7 @@ def pilot_recap(world: World) -> list[str]:
         lines.append("No contract tracked. Use the Mission Board to inspect and track your jobs.")
     if save.flags.get("archive_v1_started") and not archive_finished(world):
         lines.append(f"Archive: {archive_objective(world)} [N] Archive Contacts.")
+    lines += crew_assignment_recap(world)
     return [_mission_plain(line) for line in lines]
 
 
