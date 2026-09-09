@@ -683,6 +683,20 @@ CREW_ROLES: dict[str, dict] = {
     "engineer": {"label": "Engineer", "hire_cost": 200, "wage": 2, "effect": "-25% fuel, round up (min 1)"},
     "navigator": {"label": "Navigator", "hire_cost": 600, "wage": 10, "effect": "+1 scan range"},
 }
+CREW_CANDIDATES = {
+    "gunner": [("Nia Voss", "Cool under pressure; remembers every convoy."),
+               ("Jax Sera", "Counts shots carefully and always keeps an exit in sight."),
+               ("Tavi Renn", "Quiet until trouble arrives; protective of the whole crew.")],
+    "engineer": [("Ada Flint", "Hears a tired bearing before the diagnostic console does."),
+                 ("Lev Orin", "Labels every spare part, including the improvised ones."),
+                 ("Mika Sol", "Collects old drive manuals and dislikes waste.")],
+    "navigator": [("Eli Quill", "Keeps paper star charts beside the digital ones."),
+                  ("Sana Reed", "Finds patterns in noise and stories in empty sectors."),
+                  ("Noor Ash", "Marks safe harbors first and distant mysteries second.")],
+}
+CREW_SERVICE_LEVELS = ((0, "Recruit"), (5, "Seasoned"), (15, "Veteran"), (30, "Ace"))
+
+
 # hull class -> base cargo/fuel/hull, before any tier upgrades are added
 # on top (cargo_capacity/fuel_capacity/hull_hp_max below still add
 # +8/+8/+35 per tier regardless of class -- only the base changes).
@@ -880,6 +894,7 @@ class Ship:
     has_gunner: bool = False
     has_engineer: bool = False
     has_navigator: bool = False
+    crew_records: dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -1303,6 +1318,17 @@ def _validate_save_document(data: dict) -> None:
         integer(ship.get(key + "_tier", 0), key + " tier", maximum=upgrade["max_tier"])
     for key in ("has_gunner", "has_engineer", "has_navigator"):
         require(type(ship.get(key, False)) is bool, key)
+    crew_records = ship.get("crew_records", {})
+    require(isinstance(crew_records, dict) and set(crew_records) <= set(CREW_ROLES), "crew records")
+    for role, member in crew_records.items():
+        require(isinstance(member, dict), "crew member")
+        if set(member) - {"version", "identity", "paid_jumps"}:
+            raise UnsupportedSave("The saved crew record contains unsupported fields.")
+        if type(member.get("version")) is int and member["version"] != 1:
+            raise UnsupportedSave("The saved crew record uses an unsupported version.")
+        require(type(member.get("version")) is int and member["version"] == 1, "crew version")
+        integer(member.get("identity"), "crew identity", maximum=len(CREW_CANDIDATES[role]) - 1)
+        integer(member.get("paid_jumps"), "crew service", maximum=CREW_SERVICE_LEVELS[-1][0])
     vessel = Ship.from_dict(ship)
     integer(ship["fuel"], "fuel", maximum=fuel_capacity(vessel))
     integer(ship["hull_hp"], "hull health", maximum=hull_hp_max(vessel))
@@ -1765,10 +1791,47 @@ def bfs_hops(by_id: dict[int, GalaxySystem], start_id: int) -> dict[int, int]:
     return dist
 
 
+def crew_identity(world: World, role: str) -> int:
+    record = world.save.ship.crew_records.get(role)
+    if record is not None: return record["identity"]
+    return random.Random(f"crew-v1:{world.save.seed}:{role}").randrange(len(CREW_CANDIDATES[role]))
+
+
+def crew_name(world: World, role: str) -> str:
+    return CREW_CANDIDATES[role][crew_identity(world, role)][0]
+
+
+def crew_level(ship: Ship, role: str) -> int:
+    paid = ship.crew_records.get(role, {}).get("paid_jumps", 0)
+    return max(index for index, (threshold, _) in enumerate(CREW_SERVICE_LEVELS) if paid >= threshold)
+
+
+def _ensure_crew_record(world: World, role: str) -> dict:
+    return world.save.ship.crew_records.setdefault(role, {"version": 1, "identity": crew_identity(world, role), "paid_jumps": 0})
+
+
+def gunner_bonus(ship: Ship) -> int:
+    return 3 + crew_level(ship, "gunner") if ship.has_gunner else 0
+
+
+def engineer_discount(ship: Ship) -> int:
+    return 25 + 5 * crew_level(ship, "engineer") if ship.has_engineer else 0
+
+
+def navigator_bonus(ship: Ship) -> int:
+    return 1 + crew_level(ship, "navigator") if ship.has_navigator else 0
+
+
+def crew_effect(role: str, level: int) -> str:
+    if role == "gunner": return f"+{3 + level} combat damage per hit"
+    if role == "engineer": return f"-{25 + 5 * level}% base fuel, saving rounded up (min 1 burned)"
+    return f"+{1 + level} survey hops"
+
+
 def fuel_cost_for_jump(a: GalaxySystem, b: GalaxySystem, ship: Ship | None = None) -> int:
     cost = max(1, round(_distance(a, b) / 6))
     if ship is not None and ship.has_engineer:
-        cost = max(1, cost - (cost + 3) // 4)
+        cost = max(1, cost - (cost * engineer_discount(ship) + 99) // 100)
     return cost
 
 
@@ -2636,7 +2699,7 @@ def tactical_round(world: World, pirate: Pirate, tactics: dict, action: str) -> 
         raise ValueError("This exchange is already over.")
     ship = world.save.ship
     intent = tactical_intent(tactics)
-    raw = world.event_rng.randint(9, 14) + ship.weapon_tier * 4 + (3 if ship.has_gunner else 0)
+    raw = world.event_rng.randint(9, 14) + ship.weapon_tier * 4 + gunner_bonus(ship)
     damage = max(1, raw * TACTICAL_INTENTS[intent][0] // 100)
     if action == "G": damage = max(1, damage * 55 // 100)
     pirate.hp = max(0, pirate.hp - damage)
@@ -2665,7 +2728,7 @@ def fight_round(world: World, pirate: Pirate) -> tuple[int, int, list[str]]:
     rng = world.event_rng
     ship = world.save.ship
     lines = []
-    dmg_to_pirate = rng.randint(5, 10) + ship.weapon_tier * 4 + (3 if ship.has_gunner else 0)
+    dmg_to_pirate = rng.randint(5, 10) + ship.weapon_tier * 4 + gunner_bonus(ship)
     pirate.hp = max(0, pirate.hp - dmg_to_pirate)
     lines.append(f"You hit the {pirate.name} for {dmg_to_pirate} damage.")
     if pirate.hp > 0:
@@ -2904,26 +2967,29 @@ def rescue_stranded_pilot(world: World) -> str:
 
 
 def pay_crew_wages(world: World) -> list[str]:
-    """Deducts each hired crew member's per-turn wage -- called once per
-    hop in `screen_travel`, the same cadence as the turn counter itself.
-    A crew member whose wage can't be afforded resigns automatically
-    (never drives credits negative, matching this file's own "never a
-    dead end" consequence philosophy -- see `destroy_ship`/
-    `rescue_stranded_pilot`) rather than being carried forward as debt."""
+    """Resolve one departure's salaries and bounded recorded service, in role order."""
     ship = world.save.ship
-    messages: list[str] = []
+    messages = []
     for role, info in CREW_ROLES.items():
-        if not getattr(ship, f"has_{role}"):
-            continue
+        if not getattr(ship, f"has_{role}"): continue
         wage = info["wage"]
         if world.save.pilot.credits >= wage:
             world.save.pilot.credits -= wage
             _ledger(world).wages += wage
+            record = _ensure_crew_record(world, role)
+            before = crew_level(ship, role)
+            record["paid_jumps"] = min(CREW_SERVICE_LEVELS[-1][0], record["paid_jumps"] + 1)
+            after = crew_level(ship, role)
+            if after > before:
+                message = f"{crew_name(world, role)}, your {info['label']}, is now {CREW_SERVICE_LEVELS[after][1]}. {crew_effect(role, after)}."
+                world.save.pilot.note(message)
+                world.save.pilot.highlight(message)
+                messages.append(message)
         else:
             setattr(ship, f"has_{role}", False)
-            msg = f"Your {info['label']} resigns -- you can't cover their wages."
-            world.save.pilot.note(msg)
-            messages.append(msg)
+            message = f"Your {info['label']} resigns -- you can't cover their wages. {crew_name(world, role)} keeps their recorded experience for rehiring."
+            world.save.pilot.note(message)
+            messages.append(message)
     return messages
 
 
@@ -3585,7 +3651,7 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
                       f"System: {here.name} ({here.x},{here.y}). Sector: {sector_for(here)}.",
                       f"Commitments: {len(world.save.active_missions)} contract(s); {len(world.save.active_futures)} futures order(s).",
                       f"Progress: {sum(system.discovered for system in world.galaxy)}/{len(world.galaxy)} systems charted; {pilot.kills} raiders defeated; {pilot.missions_completed} missions completed."])
-        crew = [info["label"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
+        crew = [f"{crew_name(world, role)} ({info['label']}, {CREW_SERVICE_LEVELS[crew_level(ship, role)][1]})" for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
         lines.append("Crew: " + (", ".join(crew) if crew else "none") + ".")
     return lines
 
@@ -4660,18 +4726,30 @@ def screen_shipyard(p: Palette, world: World) -> None:
 
 
 def crew_roster_lines(world: World) -> list[str]:
-    lines = ["Specialists earn wages on every jump, including detours."]
+    lines = []
     for index, (role, info) in enumerate(CREW_ROLES.items()):
         hired = getattr(world.save.ship, f"has_{role}")
         status = "HIRED" if hired else "Available"
+        level = crew_level(world.save.ship, role)
+        name, personality = CREW_CANDIDATES[role][crew_identity(world, role)]
         price = f"{info['wage']}cr/jump" if hired else f"hire {info['hire_cost']}cr + {info['wage']}cr/jump"
-        lines.append(f"[{LETTERS[index]}] {info['label']}: {status}; {price}. Benefit: {info['effect']}")
+        lines.append(f"[{LETTERS[index]}] {info['label']}: {status}; {name}. {price}. Benefit: {crew_effect(role, level)}.")
+        lines.append(f"{name}: {personality}")
+        paid = world.save.ship.crew_records.get(role, {}).get("paid_jumps", 0)
+        progress = (f"{paid}/{CREW_SERVICE_LEVELS[level + 1][0]} paid jumps to {CREW_SERVICE_LEVELS[level + 1][1]}"
+                    if level + 1 < len(CREW_SERVICE_LEVELS) else "service mastery reached")
+        lines.append(f"{CREW_SERVICE_LEVELS[level][1]}: {progress}.")
+    lines.extend([
+        "Specialists earn wages on every jump, including detours.",
+        "Promotions follow 5, 15 and 30 paid jumps. Rehiring keeps recorded experience; earlier unrecorded service is unknown.",
+        "Engine promotions affect the following jump's fuel.",
+    ])
     return lines
 
 
 def screen_crew(p: Palette, world: World) -> None:
     page, result = 0, None
-    footer = f"[<]Prev [>]Next [A-{LETTERS[len(CREW_ROLES)-1]}]Hire/dismiss [Q]Back: "
+    footer = f"[<>]Page [A-{LETTERS[len(CREW_ROLES)-1]}]Crew [Q]Back: "
     while True:
         lines = crew_roster_lines(world)
         if result: lines.insert(0, "Result: " + result)
@@ -4685,27 +4763,46 @@ def screen_crew(p: Palette, world: World) -> None:
             if response is not None: result, page = response, 0
 
 
-def _toggle_crew(p: Palette, world: World, role: str) -> str | None:
-    ship = world.save.ship
+def hire_crew(world: World, role: str) -> str:
+    if role not in CREW_ROLES: raise ValueError("Choose a listed crew role.")
+    if world.save.pending_travel is not None: raise ValueError("Finish the current journey first.")
+    if getattr(world.save.ship, f"has_{role}"): raise ValueError("This specialist is already hired.")
     info = CREW_ROLES[role]
-    if getattr(ship, f"has_{role}"):
-        if confirm(f"Dismiss your {info['label']}?", p):
-            setattr(ship, f"has_{role}", False)
-            world.checkpoint()
-            out_line(f"{p.muted}{info['label']} dismissed.{RESET}")
-            return f"{info['label']} dismissed."
-        return
-    if world.save.pilot.credits < info["hire_cost"]:
-        out_line(f"{p.wrong}Need {info['hire_cost']}cr to hire a {info['label']}.{RESET}")
-        return f"Need {info['hire_cost']}cr to hire a {info['label']}."
-    if not confirm(f"Hire a {info['label']} for {info['hire_cost']}cr "
-                    f"(+{info['wage']}cr/jump ongoing wage)?", p):
-        return
+    if world.save.pilot.credits < info["hire_cost"]: raise ValueError(f"Need {info['hire_cost']}cr to hire a {info['label']}.")
+    _ensure_crew_record(world, role)
     world.save.pilot.credits -= info["hire_cost"]
-    setattr(ship, f"has_{role}", True)
+    setattr(world.save.ship, f"has_{role}", True)
+    message = f"{info['label']} hired. {crew_name(world, role)} earns {info['wage']}cr/jump."
+    world.save.pilot.note(message)
+    return message
+
+
+def dismiss_crew(world: World, role: str) -> str:
+    if role not in CREW_ROLES: raise ValueError("Choose a listed crew role.")
+    if world.save.pending_travel is not None: raise ValueError("Finish the current journey first.")
+    if not getattr(world.save.ship, f"has_{role}"): raise ValueError("This specialist is not hired.")
+    setattr(world.save.ship, f"has_{role}", False)
+    message = f"{CREW_ROLES[role]['label']} dismissed. {crew_name(world, role)} keeps their recorded experience."
+    world.save.pilot.note(message)
+    return message
+
+
+def _toggle_crew(p: Palette, world: World, role: str) -> str | None:
+    info = CREW_ROLES[role]
+    name = crew_name(world, role)
+    if getattr(world.save.ship, f"has_{role}"):
+        if not confirm(f"Dismiss {name}, your {info['label']}? Recorded experience is retained.", p): return
+        message = dismiss_crew(world, role)
+    else:
+        if world.save.pilot.credits < info["hire_cost"]:
+            message = f"Need {info['hire_cost']}cr to hire a {info['label']}."
+            out_line(f"{p.wrong}{message}{RESET}")
+            return message
+        if not confirm(f"Hire {name} as {info['label']} for {info['hire_cost']}cr (+{info['wage']}cr/jump ongoing wage)?", p): return
+        message = hire_crew(world, role)
     world.checkpoint()
-    out_line(f"{p.correct}{info['label']} hired.{RESET}")
-    return f"{info['label']} hired; {info['wage']}cr/jump ongoing wage."
+    out_line(f"{p.correct}{message}{RESET}")
+    return message
 
 
 def _buy_upgrade(p: Palette, world: World, key: str) -> str | None:
@@ -5165,6 +5262,8 @@ def navigation_budget_lines(world: World, path: list[int], *, public_target: int
     if not feasible:
         lines.append("INFEASIBLE on the current shortest route; do not rely on its fuel budget.")
     lines += legs
+    if world.save.ship.has_engineer and crew_level(world.save.ship, "engineer") < 3:
+        lines.append("Fuel budget uses current crew skill; a promotion can reduce later jumps' fuel cost.")
     lines.append("Budget assumes retained crew and 6cr/unit refuelling. Cargo, repairs, encounters, detours and other income/spending are excluded.")
     return [_mission_plain(line) for line in lines]
 
@@ -5357,7 +5456,7 @@ def pilot_record_lines(world: World, section: str = "O") -> list[str]:
         rep = pilot.reputation.get(faction, 0)
         label = "Allied" if rep >= 10 else ("Friendly" if rep >= 4 else ("Hostile" if rep <= -5 else "Neutral"))
         lines.append(f"{FACTION_LABEL[faction]} standing: {rep:+d} ({label}).")
-    crew = [info["label"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
+    crew = [f"{crew_name(world, role)} ({info['label']}, {CREW_SERVICE_LEVELS[crew_level(ship, role)][1]})" for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
     wages = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}"))
     lines.append("Crew: " + (", ".join(crew) if crew else "none") + f"; {wages}cr/jump.")
     discovered = sum(system.discovered for system in world.galaxy)
@@ -5527,7 +5626,7 @@ def screen_chart(p: Palette, world: World) -> int | None:
 
 
 def survey_candidates(world: World) -> list[int]:
-    range_hops = 2 + world.save.ship.scanner_tier + (1 if world.save.ship.has_navigator else 0)
+    range_hops = 2 + world.save.ship.scanner_tier + navigator_bonus(world.save.ship)
     hops = bfs_hops(world.by_id, world.save.current_system)
     return sorted((sid for sid, h in hops.items() if h <= range_hops and not world.by_id[sid].discovered),
                   key=lambda sid: (hops[sid], sid))
@@ -5536,12 +5635,12 @@ def survey_candidates(world: World) -> list[int]:
 def survey_terms(world: World) -> list[str]:
     candidates = set(survey_candidates(world))
     fuel = world.save.ship.fuel
-    radius = 2 + world.save.ship.scanner_tier + (1 if world.save.ship.has_navigator else 0)
+    radius = 2 + world.save.ship.scanner_tier + navigator_bonus(world.save.ship)
     label = "[S] Survey" if candidates and fuel >= 2 and world.save.ship.scanner_tier > 0 else "Survey"
     lines = [f"{label}: 2 fuel; {fuel} aboard." + (" Tank empties." if fuel == 2 else "")]
     lines += [f"Range: {radius} connection hops; {len(candidates)} new contacts.",
               "Chart all contacts in range, including station, economy and danger. No day or wages pass.",
-              "Navigator extends range by one hop. Surveying creates no remote price quotes."]
+              f"Navigator bonus: +{navigator_bonus(world.save.ship)} connection hops. Surveying creates no remote price quotes."]
     contracts = [m for m in world.save.active_missions if m.kind == "scan" and m.target_system in candidates and not mission_expired(world, m)]
     if contracts: lines.append(f"Active surveys in range: {len(contracts)}; gross payout {sum(m.reward for m in contracts):,}cr.")
     if world.save.ship.scanner_tier == 0: lines.insert(0, "Scanner required; surveying unavailable.")
@@ -6381,7 +6480,7 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                      "Blackwake +2 if accepted; refusal draws enemy fire. " + ("Available." if pilot.credits >= cost else "UNAFFORDABLE; bribe unavailable."))
     if details:
         lines += [f"Shields Tier {ship.shield_tier}: reduce incoming damage by {ship.shield_tier * 3}, minimum 1.",
-                  f"Weapons Tier {ship.weapon_tier}: +{ship.weapon_tier * 4} damage; gunner bonus +{3 if ship.has_gunner else 0}.",
+                  f"Weapons Tier {ship.weapon_tier}: +{ship.weapon_tier * 4} damage; gunner bonus +{gunner_bonus(ship)}.",
                   f"Notoriety {pilot.notoriety}. " + ("Destroying this patrol: notoriety +3, Concord -10, Blackwake +3; no salvage."
                   if patrol else "Destroying this pirate earns salvage; Concord +2, Blackwake -1.")]
     return lines
