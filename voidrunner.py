@@ -4640,6 +4640,7 @@ def mission_details(world: World, mission: Mission) -> list[str]:
         if target.discovered:
             lines.append("BLOCKED SURVEY: target already charted. Revisiting cannot complete it; abandon an active contract to free its slot.")
         lines.append("Survey: newly chart this target by arriving or discovering it with your scanner. No cargo required.")
+        lines.append("Area surveys require a scanner and cost 2 fuel; they chart all new contacts within 2 + scanner tier + navigator bonus hops without advancing the day.")
         lines.append("Accepting or tracking the bearing does not chart the system.")
     elif mission.kind == "bounty":
         lines.append(f"Combat: intercept a tier {mission.pirate_tier} raider at the target. Escape leaves the bounty active; destruction fails it.")
@@ -5222,7 +5223,9 @@ def screen_chart(p: Palette, world: World) -> int | None:
         if key == "<": page = max(0, page - 1); continue
         mission = tracked_mission(world)
         if key == "S" and world.save.ship.scanner_tier > 0:
-            result, page = _do_scan(p, world), 0
+            scan_result = _do_scan(p, world)
+            if scan_result is not None: result = scan_result
+            page = 0
             continue
         if key == "R" and mission is not None:
             screen_mission_navigation(p, world, mission, active=True)
@@ -5246,22 +5249,65 @@ def screen_chart(p: Palette, world: World) -> int | None:
         return dest_id
 
 
-def _do_scan(p: Palette, world: World) -> str:
+def survey_candidates(world: World) -> list[int]:
     range_hops = 2 + world.save.ship.scanner_tier + (1 if world.save.ship.has_navigator else 0)
     hops = bfs_hops(world.by_id, world.save.current_system)
-    candidates = [sid for sid, h in hops.items() if h <= range_hops and not world.by_id[sid].discovered]
-    if not candidates:
-        out_line(f"{p.muted}Long-range sensors find nothing new nearby.{RESET}")
-        return "Long-range sensors find nothing new nearby."
-    target = world.event_rng.choice(candidates)
-    world.by_id[target].discovered = True
+    return sorted((sid for sid, h in hops.items() if h <= range_hops and not world.by_id[sid].discovered),
+                  key=lambda sid: (hops[sid], sid))
+
+
+def survey_terms(world: World) -> list[str]:
+    candidates = set(survey_candidates(world))
+    fuel = world.save.ship.fuel
+    radius = 2 + world.save.ship.scanner_tier + (1 if world.save.ship.has_navigator else 0)
+    label = "[S] Survey" if candidates and fuel >= 2 and world.save.ship.scanner_tier > 0 else "Survey"
+    lines = [f"{label}: 2 fuel; {fuel} aboard." + (" Tank empties." if fuel == 2 else "")]
+    lines += [f"Range: {radius} connection hops; {len(candidates)} new contacts.",
+              "Chart all contacts in range, including station, economy and danger. No day or wages pass.",
+              "Navigator extends range by one hop. Surveying creates no remote price quotes."]
+    contracts = [m for m in world.save.active_missions if m.kind == "scan" and m.target_system in candidates and not mission_expired(world, m)]
+    if contracts: lines.append(f"Active surveys in range: {len(contracts)}; gross payout {sum(m.reward for m in contracts):,}cr.")
+    if world.save.ship.scanner_tier == 0: lines.insert(0, "Scanner required; surveying unavailable.")
+    elif fuel < 2: lines.insert(0, "Insufficient fuel: surveying unavailable.")
+    elif not candidates: lines.insert(0, "Area already charted: no new contacts; no charge.")
+    lines.append("[B] Back: leave without surveying.")
+    return lines
+
+
+def perform_survey(world: World) -> tuple[str, list[str]]:
+    if world.save.pending_travel is not None: raise ValueError("Finish the current journey before surveying.")
+    if world.save.ship.scanner_tier == 0: raise ValueError("A scanner is required.")
+    if world.save.ship.fuel < 2: raise ValueError("Surveying requires two fuel.")
+    candidates = survey_candidates(world)
+    if not candidates: raise ValueError("No new contacts in range; no fuel spent.")
+    world.save.ship.fuel -= 2
+    report = []
+    for sid in candidates:
+        system = world.by_id[sid]
+        system.discovered = True
+        report.append(f"{system.name}: {system.station_name}; {system.economy}; danger {system.danger}/5.")
+        report += check_mission_completions(world, just_discovered=sid)
     world.sync_discovered()
-    completed = check_mission_completions(world, just_discovered=target)
-    world.checkpoint()
-    out_line(f"{p.correct}Sensor contact! {world.by_id[target].name} is now on your chart.{RESET}")
-    for msg in completed:
-        out_line(f"{p.gold}{msg}{RESET}")
-    return " ".join([f"Sensor contact! {world.by_id[target].name} is now on your chart."] + completed)
+    summary = f"Survey complete: {len(candidates)} systems charted; 2 fuel spent."
+    world.save.pilot.note(summary)
+    return summary, report
+
+
+def _do_scan(p: Palette, world: World) -> str | None:
+    page, result, report = 0, None, []
+    while True:
+        can_scan = world.save.ship.scanner_tier > 0 and world.save.ship.fuel >= 2 and bool(survey_candidates(world))
+        lines = ([f"Result: {result}"] + report if result else []) + survey_terms(world)
+        action, page, count = _draw_service_page(p, f"Survey {world.save.pilot.credits:,}cr", lines,
+            "[S/B]Act [<>]Page: " if can_scan else "[B]Back [<>]Page: ", page)
+        if action in ("B", "Q"): return result
+        if action == ">": page = min(page + 1, count - 1); continue
+        if action == "<": page = max(0, page - 1); continue
+        if action != "S" or not can_scan: continue
+        result, report = perform_survey(world)
+        world.checkpoint()
+        page = 0
+
 
 
 def map_bounds(sector: int | None) -> tuple[int, int, int, int]:

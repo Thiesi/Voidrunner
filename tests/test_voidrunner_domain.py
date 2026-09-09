@@ -5144,9 +5144,11 @@ def test_chart_retained_scan_result_is_checkpointed_before_disconnect(tmp_path):
     world=_world_with_seed(42);world.save.ship.scanner_tier=1
     world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
     before=set(world.save.discovered)
-    with _door_stopped_at(tmp_path,b"CS",b"Result: Sensor contact!"):
+    expected=set(vr.survey_candidates(world))
+    with _door_stopped_at(tmp_path,b"CSS",b"Result: Survey complete"):
         saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
-        assert len(set(saved.discovered)-before)==1 and saved.turn==0
+        assert set(saved.discovered)-before==expected and saved.turn==0
+        assert saved.ship.fuel == world.save.ship.fuel - 2
 
 
 @pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
@@ -5563,7 +5565,8 @@ def test_scan_checkpoint_contains_discovery_and_mission_reward(tmp_path, monkeyp
                   if hops <= 3 and not world.by_id[sid].discovered)
     world.save.active_missions = [vr.Mission(1, "scan", "Survey", 500, 0, target)]
     world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
-    monkeypatch.setattr(world.event_rng, "choice", lambda choices: target)
+    keys = iter(["S", "B"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()):
         vr._do_scan(vr.Palette(False), world)
     saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
@@ -9012,6 +9015,121 @@ def test_squadron_target_order_has_profile_dependent_tradeoffs(monkeypatch, lead
             total += 400 - world.save.ship.hull_hp
         damage.append(total)
     assert (damage[1] < damage[0]) == prefer_switch
+
+
+@pytest.mark.parametrize("seed", [42, 150])
+@pytest.mark.parametrize("tier,navigator", [(1, False), (1, True), (2, False), (2, True)])
+def test_area_survey_charts_exact_range_without_time_or_rng(seed, tier, navigator):
+    import copy
+    world = _world_with_seed(seed); world.save.ship.scanner_tier = tier; world.save.ship.has_navigator = navigator
+    world.sync_discovered()
+    hops = vr.bfs_hops(world.by_id, world.save.current_system)
+    before = set(world.save.discovered)
+    expected = {sid for sid, distance in hops.items() if distance <= 2 + tier + navigator and sid not in before}
+    rng, turn, fuel, credits = world.event_rng.getstate(), world.save.turn, world.save.ship.fuel, world.save.pilot.credits
+    observations = copy.deepcopy(world.save.market_memory)
+    summary, report = vr.perform_survey(world)
+    assert set(world.save.discovered) - before == expected
+    assert world.save.ship.fuel == fuel - 2 and world.save.turn == turn and world.save.pilot.credits == credits
+    assert world.event_rng.getstate() == rng and world.save.market_memory == observations
+    assert str(len(expected)) in summary
+    for sid in expected:
+        system = world.by_id[sid]
+        assert any(system.name in row and system.station_name in row and system.economy in row and f"danger {system.danger}/5" in row for row in report)
+    saved = copy.deepcopy(world.save.to_dict())
+    with pytest.raises(ValueError): vr.perform_survey(world)
+    assert world.save.to_dict() == saved
+
+
+@pytest.mark.parametrize("fault", ["scanner", "fuel", "charted", "journey"])
+def test_unavailable_survey_changes_nothing(fault):
+    import copy
+    world = _world_with_seed(42); world.save.ship.scanner_tier = 1
+    if fault == "scanner": world.save.ship.scanner_tier = 0
+    elif fault == "fuel": world.save.ship.fuel = 1
+    elif fault == "charted":
+        for system in world.galaxy: system.discovered = True
+        world.sync_discovered()
+    else: world.save.pending_travel = {"unfinished": True}
+    saved, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    with pytest.raises(ValueError): vr.perform_survey(world)
+    assert world.save.to_dict() == saved and world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("deadline", [-1, 0, 1])
+def test_area_survey_completes_all_matching_contracts_with_inclusive_deadlines(deadline):
+    world = _world_with_seed(42); world.save.ship.scanner_tier = 1
+    targets = vr.survey_candidates(world)[:2]
+    world.save.active_missions = [vr.Mission(i, "scan", f"Survey {i}", 100, 0, sid, deadline_turn=deadline)
+                                  for i, sid in enumerate(targets, 1)]
+    _, report = vr.perform_survey(world)
+    assert world.save.active_missions == []
+    assert world.save.pilot.credits == (1200 if deadline < 0 else 1400)
+    assert world.save.pilot.missions_completed == (0 if deadline < 0 else 2)
+    assert sum("Mission complete" in row for row in report) == (0 if deadline < 0 else 2)
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("style", ["auto", "plain"])
+@pytest.mark.parametrize("fuel", [2, 24])
+def test_survey_terms_before_and_after_scanning_fit_and_browsing_is_read_only(monkeypatch, width, height, style, fuel):
+    import copy,re
+    world = _world_with_seed(42); world.save.ship.scanner_tier = 1; world.save.ship.fuel = fuel
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    for surveyed in (False, True):
+        if surveyed: vr.perform_survey(world)
+        saved, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+        out = io.StringIO(); frames = []
+        def choose():
+            frame = out.getvalue(); out.seek(0); out.truncate(0); frames.append(frame)
+            assert len(frame.splitlines()) <= height
+            assert all(vr._visible_width(row) <= width for row in frame.splitlines())
+            assert world.save.to_dict() == saved and world.event_rng.getstate() == rng
+            if len(frames) == 1 and not surveyed and fuel == 2: assert "Tank empties" in " ".join(frame.split())
+            page, count = map(int, re.search(r"Survey.*?(\d+)/(\d+)", frame, re.S).groups())
+            if page == count: return "B"
+            return ">"
+        monkeypatch.setattr(vr, "read_key", choose)
+        world._checkpoint = lambda w: pytest.fail("Read-only survey view checkpointed")
+        with contextlib.redirect_stdout(out): assert vr._do_scan(vr.Palette(False), world) is None
+
+
+@pytest.mark.parametrize("commands", [b"CSBQ", b"CS", b"CS?><BQ"])
+def test_real_survey_back_paging_and_eof_preserve_career(tmp_path, commands):
+    import json,os,subprocess
+    world = _world_with_seed(42); world.save.ship.scanner_tier = 1
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    original = (tmp_path / "77.json").read_bytes()
+    info = tmp_path / "door_info.json"; info.write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 40, "terminal_height": 12}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+    assert result.returncode == 0 and not result.stderr and b"Survey 1,200cr" in result.stdout
+    assert (tmp_path / "77.json").read_bytes() == original
+
+
+def test_survey_report_retains_every_contact_and_result_after_invalid_input(monkeypatch):
+    import re
+    world = _world_with_seed(42); world.save.ship.scanner_tier = 1
+    targets = vr.survey_candidates(world)
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 20); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 10)
+    out = io.StringIO(); frames = []; chose = False; invalid = False
+    def choose():
+        nonlocal chose, invalid
+        frame = out.getvalue(); out.seek(0); out.truncate(0); frames.append(frame)
+        assert len(frame.splitlines()) <= 10
+        assert all(vr._visible_width(row) <= 20 for row in frame.splitlines())
+        if not chose: chose = True; return "S"
+        if not invalid: invalid = True; return "?"
+        page, count = map(int, re.search(r"Survey.*?(\d+)/(\d+)", frame, re.S).groups())
+        return "B" if page == count else ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(out): result = vr._do_scan(vr.Palette(False), world)
+    text = " ".join(" ".join(frames).split())
+    assert "Survey complete" in result
+    for sid in targets: assert world.by_id[sid].name in text and world.by_id[sid].station_name in text
+    assert world.save.ship.fuel == 22
 
 
 
