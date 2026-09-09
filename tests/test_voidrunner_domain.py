@@ -5174,10 +5174,10 @@ def test_score_pages_retain_all_twenty_pilots_and_fields_without_reloading(tmp_p
     path=tmp_path/"leaderboard.json";path.write_text(json.dumps(records),encoding="utf-8");original_bytes=path.read_bytes()
     world=_world_with_seed(42);before=world.save.to_dict()
     output=io.StringIO();frames=[];loads=[];builds=[]
-    original_load=vr.load_hall_of_fame;original_pages=vr._service_pages
+    original_load=vr._load_score_records;original_pages=vr._service_pages
     def load(directory):loads.append(directory);return original_load(directory)
     def pages(*args):builds.append(1);return original_pages(*args)
-    monkeypatch.setattr(vr,"load_hall_of_fame",load);monkeypatch.setattr(vr,"_service_pages",pages)
+    monkeypatch.setattr(vr,"_load_score_records",load);monkeypatch.setattr(vr,"_service_pages",pages)
     def choose():
         frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0);frames.append(frame)
         assert len(frame.splitlines())<=height
@@ -5232,7 +5232,7 @@ def test_screen_hall_of_fame_records_are_complete_and_width_safe(monkeypatch):
         vr.screen_hall_of_fame(vr.Palette(truecolor=False), world, save_dir, 1)
     text = " ".join(vr._ANSI_RE.sub("", buf.getvalue()).split())
     assert "SixteenCharHandl" in text and "999,999cr" in text
-    assert "[YOU]" in text and "raiders defeated 120" in text
+    assert "[YOU]" in text and "combat victories 120" in text
     assert "missions 88" in text and "retirements 3" in text
     assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
@@ -11357,6 +11357,211 @@ def test_personal_crew_roster_retained_experience_unlocks_on_rehire(role,paid):
     assert vr.crew_assignment_record(world,role)["state"]=="active"
 
 
+@pytest.mark.parametrize("finale,category,metric", [("trader","trading","market_margin"),("explorer","exploration","charted"),("combat","combat","kills")])
+def test_achievement_scores_retain_actual_career_after_retirement_and_restart(tmp_path,finale,category,metric):
+    world=_finale_world(finale); world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
+    before=vr.achievement_ranking(vr._load_score_records(tmp_path),category)[0]
+    world.reset(vr.finish_career(world.save,finale)); world.checkpoint()
+    loaded,_,_=vr.load_or_create_save(tmp_path,77,"Tester"); vr.persist(vr.World(loaded),tmp_path,77)
+    entries=vr._load_score_records(tmp_path); ranked=vr.achievement_ranking(entries,category)
+    assert ranked[0][metric]==before[metric] and ranked[0]["number"]==1 and ranked[0]["seed"]==before["seed"]
+    assert ranked[0]["finale"]==finale and len(entries[0]["achievements"]["careers"])==2
+    assert entries[0]["achievements"]["careers"][-1]["number"]==2
+    assert vr.achievement_ranking(entries,"careers")[0]["retirements"]==1
+
+
+def test_achievement_scores_failed_retirement_projection_repairs_from_saved_dossiers(tmp_path,monkeypatch):
+    world=_finale_world("combat"); world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
+    score=tmp_path/"scores"/"77.json"; original=score.read_bytes(); replace=vr.os.replace
+    world.reset(vr.finish_career(world.save,"combat"))
+    def fail(source,target):
+        if target.parent.name=="scores":raise OSError("optional score write failed")
+        return replace(source,target)
+    with monkeypatch.context() as patch:
+        patch.setattr(vr.os,"replace",fail); world.checkpoint()
+    assert score.read_bytes()==original
+    loaded,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert loaded.retired_careers[0]["kills"]==50 and loaded.pilot.kills==0
+    vr.persist(vr.World(loaded),tmp_path,77)
+    rows=vr.achievement_ranking(vr._load_score_records(tmp_path),"combat")
+    assert len(rows)==1 and rows[0]["kills"]==50 and rows[0]["finale"]=="combat"
+
+
+def test_achievement_ranking_reads_pilots_outside_wealth_top_twenty(tmp_path):
+    import json
+    for uid in range(1,26):
+        save=vr._new_career(f"Pilot-{uid}"); save.pilot.credits=uid*1000; save.pilot.kills=100 if uid==1 else uid
+        vr.update_hall_of_fame(tmp_path,uid,save)
+    paths=list((tmp_path/"scores").glob("*.json")); before={p:p.read_bytes() for p in paths}
+    assert 1 not in {entry["user_id"] for entry in vr.load_hall_of_fame(tmp_path)}
+    assert vr.achievement_ranking(vr._load_score_records(tmp_path),"combat")[0]["user_id"]==1
+    assert len(vr.achievement_ranking(vr._load_score_records(tmp_path),"combat"))==20
+    assert len(paths)==25 and {p:p.read_bytes() for p in paths}==before
+
+
+def test_achievement_summary_retains_every_dossier_at_capacity_and_legacy_gaps(tmp_path):
+    save=vr._new_career("Veteran"); save.pilot.retirements=7
+    for _ in range(vr.MAX_RETIRED_CAREERS):
+        save.pilot.kills=50; save=vr.finish_career(save,"combat")
+    vr.write_save(tmp_path,77,save); vr.update_hall_of_fame(tmp_path,77,save)
+    loaded,_,_=vr.load_or_create_save(tmp_path,77,"Veteran")
+    record=vr._load_score_records(tmp_path)[0]; careers=record["achievements"]["careers"]
+    assert len(careers)==129 and [c["number"] for c in careers]==list(range(8,137))
+    assert len(loaded.retired_careers)==128 and record["retirements"]==135
+    assert [row["number"] for row in vr.achievement_ranking([record],"combat")]==list(range(8,28))
+    assert "135 completed careers; 128 recorded conclusions" in " ".join(vr.achievement_lines([record],"careers",77))
+
+
+def test_achievement_legacy_scores_never_fabricate_per_career_metrics(tmp_path):
+    import json
+    legacy={"user_id":77,"handle":"Legacy","best_credits":10000,"retirements":9,"kills":80}
+    path=tmp_path/"leaderboard.json"; path.write_text(json.dumps([legacy]),encoding="utf-8"); original=path.read_bytes()
+    entries=vr._load_score_records(tmp_path)
+    assert vr.achievement_ranking(entries,"wealth")[0]["best_credits"]==10000
+    assert vr.achievement_ranking(entries,"careers")[0]["retirements"]==9
+    for category in ("trading","exploration","combat"):
+        assert vr.achievement_ranking(entries,category)==[]
+        assert "Older score files" in " ".join(vr.achievement_lines(entries,category,77))
+    assert path.read_bytes()==original
+
+
+@pytest.mark.parametrize("fault", ["version","extra","record_extra"])
+def test_achievement_future_score_summary_survives_current_checkpoint(tmp_path,fault):
+    import json
+    world=_world_with_seed(42); vr.persist(world,tmp_path,77); path=tmp_path/"scores"/"77.json"
+    data=json.loads(path.read_text(encoding="utf-8"))
+    if fault=="version":data["achievements"]["version"]=2
+    elif fault=="extra":data["achievements"]["future"]=True
+    else:data["achievements"]["careers"][0]["future"]=True
+    path.write_text(json.dumps(data),encoding="utf-8"); before=path.read_bytes()
+    world.save.pilot.credits+=10;vr.persist(world,tmp_path,77)
+    assert path.read_bytes()==before and vr.achievement_ranking(vr._load_score_records(tmp_path),"combat")==[]
+    loaded,_,_=vr.load_or_create_save(tmp_path,77,"Tester");assert loaded.pilot.credits==1210
+
+
+@pytest.mark.parametrize("fault", ["summary_null","records_null","records_scalar","empty","many","record_null","boolean","negative","margin_bool","charted","sequence","finale","ended","started"])
+def test_achievement_malformed_optional_summaries_do_not_break_scores_or_checkpoint(tmp_path,fault):
+    import json
+    world=_world_with_seed(42);vr.persist(world,tmp_path,77);path=tmp_path/"scores"/"77.json"
+    data=json.loads(path.read_text(encoding="utf-8")); summary=data["achievements"]; record=summary["careers"][0]
+    if fault=="summary_null":data["achievements"]=None
+    elif fault=="records_null":summary["careers"]=None
+    elif fault=="records_scalar":summary["careers"]=3
+    elif fault=="empty":summary["careers"]=[]
+    elif fault=="many":summary["careers"]=[record]*130
+    elif fault=="record_null":summary["careers"]=[None]
+    elif fault=="boolean":record["kills"]=True
+    elif fault=="negative":record["kills"]=-1
+    elif fault=="margin_bool":record["market_margin"]=False
+    elif fault=="charted":record["charted"]=49
+    elif fault=="sequence":record["number"]=3
+    elif fault=="finale":record["finale"]="combat"
+    elif fault=="ended":record["ended"]="yesterday"
+    else:record["started"]=[]
+    path.write_text(json.dumps(data),encoding="utf-8")
+    assert "achievements" not in vr._load_score_records(tmp_path)[0]
+    vr.persist(world,tmp_path,77)
+    assert vr._load_score_records(tmp_path)[0]["achievements"]["careers"][0]["number"]==1
+
+
+@pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("style", list(vr.DISPLAY_STYLES))
+def test_achievement_category_pages_keep_snapshot_complete_terms_and_all_navigation(tmp_path,monkeypatch,width,height,style):
+    import re
+    world=_finale_world("combat");world.save.trading_ledger.sales_revenue=52000;world.save.discovered=list(range(48))
+    world.save=vr.finish_career(world.save,"combat");vr.update_hall_of_fame(tmp_path,77,world.save)
+    record_path=tmp_path/"scores"/"77.json"; before=record_path.read_bytes(); entries=vr._load_score_records(tmp_path)
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height);monkeypatch.setattr(vr,"_OUTPUT_STYLE",style)
+    output=io.StringIO(); bodies={c:[] for c in vr.SCORE_CATEGORIES}; category=0; loads=[]
+    original=vr._load_score_records
+    def load(directory):loads.append(1);return original(directory)
+    monkeypatch.setattr(vr,"_load_score_records",load)
+    def choose():
+        nonlocal category
+        frame=output.getvalue();output.seek(0);output.truncate(0)
+        assert len(frame.splitlines())<=height and all(vr._visible_width(row)<=width for row in frame.splitlines())
+        plain=vr._ANSI_RE.sub("",frame)
+        assert "[1-5]View" in " ".join(plain.split()) and "[B]Back:" in " ".join(plain.split())
+        match=re.search(r"(\d+)/(\d+)",plain);page,count=map(int,match.groups())
+        bodies[list(vr.SCORE_CATEGORIES)[category]].append(plain[match.end():].split("[1-5]View")[0])
+        if page<count:return "N"
+        category+=1;return str(category+1) if category<5 else "B"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_hall_of_fame(vr.Palette(False),world,tmp_path,77)
+    assert loads==[1] and record_path.read_bytes()==before
+    for category,parts in bodies.items():
+        text=" ".join(" ".join(parts).split())
+        for line in vr.achievement_lines(entries,category,77):assert " ".join(line.split()) in text
+
+
+@pytest.mark.parametrize("commands", [b"H2345",b"H2N3NP4N5NBQ"])
+def test_real_achievement_category_browsing_keeps_career_and_score_bytes(tmp_path,commands):
+    import json,os,subprocess
+    world=_finale_world("combat");world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    paths=[tmp_path/"77.json",tmp_path/"scores"/"77.json"];before={p:p.read_bytes() for p in paths}
+    info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,timeout=10,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
+    assert result.returncode==0 and not result.stderr and b"[1-5]View" in result.stdout
+    assert {p:p.read_bytes() for p in paths}==before
+
+
+@pytest.mark.parametrize("revenue,cost,expected", [(7000,2000,5000),(1000,2000,-1000),(2000,2000,0)])
+def test_achievement_trading_uses_known_market_margin_without_delivery_or_operating_costs(tmp_path,revenue,cost,expected):
+    world=_world_with_seed(42);ledger=world.save.trading_ledger
+    ledger.sales_revenue=revenue;ledger.sales_cost=cost;ledger.uncosted_sales=80000
+    ledger.delivery_revenue=60000;ledger.delivery_cost=9000;ledger.uncosted_deliveries=20000
+    ledger.fuel_spend=300;ledger.wages=400;world.save.pilot.credits=250000
+    vr.update_hall_of_fame(tmp_path,77,world.save); entries=vr._load_score_records(tmp_path)
+    assert entries[0]["achievements"]["careers"][0]["market_margin"]==expected
+    ranked=vr.achievement_ranking(entries,"trading")
+    assert len(ranked)==int(expected>0)
+    if ranked:assert ranked[0]["market_margin"]==5000
+
+
+def test_achievement_score_summary_over_old_64k_limit_survives_restart(tmp_path):
+    save=vr._new_career("Archivist")
+    for _ in range(10):
+        save.pilot.career_started="A"*4096;save.pilot.kills=50
+        save=vr.finish_career(save,"combat");save.retired_careers[-1]["ended"]="B"*4096
+    vr.write_save(tmp_path,77,save);vr.update_hall_of_fame(tmp_path,77,save)
+    path=tmp_path/"scores"/"77.json"
+    assert 65536<path.stat().st_size<vr.MAX_SAVE_BYTES
+    records=vr._load_score_records(tmp_path)
+    assert len(records[0]["achievements"]["careers"])==11
+    assert len(vr.achievement_ranking(records,"combat"))==10
+
+
+@pytest.mark.parametrize("width,height", [(40,12),(80,24)])
+@pytest.mark.parametrize("category", ["trading","exploration","combat","careers"])
+def test_achievement_first_page_shows_ranked_pilot_before_long_counting_rules(tmp_path,monkeypatch,width,height,category):
+    world=_finale_world("combat");world.save.trading_ledger.sales_revenue=50000
+    world.save=vr.finish_career(world.save,"combat");world.save.pilot.handle="VisiblePilot"
+    vr.update_hall_of_fame(tmp_path,77,world.save)
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    output=io.StringIO();keys=iter([str(list(vr.SCORE_CATEGORIES).index(category)+1),"B"])
+    def choose():
+        key=next(keys)
+        if key=="B":assert "VisiblePilot" in output.getvalue()
+        output.seek(0);output.truncate(0);return key
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_hall_of_fame(vr.Palette(False),world,tmp_path,77)
+
+
+@pytest.mark.parametrize("retired", [False,True])
+def test_achievement_unchanged_checkpoint_after_restart_never_replaces_files(tmp_path,monkeypatch,retired):
+    world=_finale_world("combat")
+    if retired:world.reset(vr.finish_career(world.save,"combat"))
+    vr.persist(world,tmp_path,77)
+    paths=[tmp_path/"77.json",tmp_path/"scores"/"77.json"]
+    before={p:(p.read_bytes(),p.stat().st_mtime_ns,p.stat().st_ino) for p in paths}
+    loaded,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    def replaced(*args):pytest.fail("Unchanged checkpoint replaced a file")
+    monkeypatch.setattr(vr.os,"replace",replaced)
+    vr.persist(vr.World(loaded),tmp_path,77)
+    assert {p:(p.read_bytes(),p.stat().st_mtime_ns,p.stat().st_ino) for p in paths}==before
+
+
 @pytest.mark.parametrize("key", ["P","W"])
 @pytest.mark.parametrize("commands", [b"",b"B",b">?<B",b"JNB"])
 def test_real_faction_browsing_does_not_replace_score_after_input(tmp_path,key,commands):
@@ -11545,3 +11750,72 @@ def test_career_finale_size_preflight_precedes_confirmation_and_keeps_legacy_car
     assert result and "Retirement unavailable" in result and "Current career retained" in result
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng and (tmp_path/"77.json").read_bytes()==raw
     saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester");assert saved.pilot.retirements==0
+
+
+@pytest.mark.parametrize("seed", [-1,-(2**63)])
+@pytest.mark.parametrize("retired", [False,True])
+def test_achievement_signed_seed_survives_ranking_restart_and_unchanged_checkpoint(tmp_path,monkeypatch,seed,retired):
+    save=_finale_world("combat").save;save.seed=seed
+    save.trading_ledger.sales_revenue=5000;save.trading_ledger.since_day=0
+    world=vr.World(save);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    if retired:world.reset(vr.finish_career(world.save,"combat"));world.checkpoint()
+    entries=vr._load_score_records(tmp_path)
+    for category in ("trading","exploration","combat"):
+        assert any(row["seed"]==seed for row in vr.achievement_ranking(entries,category))
+    saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    restored=vr.World(saved);restored._checkpoint=lambda w:vr.persist(w,tmp_path,77)
+    monkeypatch.setattr(vr.os,"replace",lambda *args:pytest.fail("Unchanged signed-seed score rewritten"))
+    restored.checkpoint()
+
+
+@pytest.mark.parametrize("version", [None,False,True,"1",1.0,0,-1,"missing"])
+def test_achievement_malformed_version_repairs_from_authoritative_save(tmp_path,version):
+    import json
+    world=_world_with_seed(42);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    path=tmp_path/"scores"/"77.json";data=json.loads(path.read_text(encoding="utf-8"))
+    if version=="missing":data["achievements"].pop("version")
+    else:data["achievements"]["version"]=version
+    path.write_text(json.dumps(data),encoding="utf-8")
+    assert "achievements" not in vr._load_score_records(tmp_path)[0]
+    world.checkpoint()
+    assert vr._load_score_records(tmp_path)[0]["achievements"]==vr.score_achievements(world.save)
+    assert type(json.loads(path.read_text(encoding="utf-8"))["achievements"]["version"]) is int
+
+
+@pytest.mark.parametrize("source,total,current", [("legacy",9,0),("score",9,0),("legacy",9,12)])
+def test_achievement_retirement_totals_survive_legacy_projection_restart_and_next_finale(tmp_path,source,total,current):
+    import json
+    record={"user_id":77,"handle":"Legacy","best_credits":10000,"retirements":total,"kills":80}
+    path=tmp_path/"leaderboard.json" if source=="legacy" else tmp_path/"scores"/"77.json"
+    path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps([record] if source=="legacy" else record),encoding="utf-8")
+    world=_finale_world();world.save.pilot.retirements=current;world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    expected=max(total,current);saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert saved.pilot.retirements==expected and saved.retired_careers==[] and saved.pilot.credits==1200
+    entries=vr._load_score_records(tmp_path);assert vr.achievement_ranking(entries,"careers")[0]["retirements"]==expected
+    assert entries[0]["achievements"]["careers"][0]["number"]==expected+1
+    assert vr.achievement_ranking(entries,"combat")==[]
+    world=vr.World(saved,checkpoint=lambda w:vr.persist(w,tmp_path,77));world.reset(vr.finish_career(world.save,"legend"));world.checkpoint()
+    again,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert again.pilot.retirements==expected+1 and again.retired_careers[0]["number"]==expected+1
+    assert vr._load_score_records(tmp_path)[0]["achievements"]["careers"][-1]["number"]==expected+2
+
+
+
+def test_achievement_readonly_snapshot_preserves_legacy_total_before_projection_repair(tmp_path):
+    import json
+    world=_world_with_seed(42);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    legacy=tmp_path/"leaderboard.json";legacy.write_text(json.dumps([{"user_id":77,"handle":"Legacy","best_credits":10000,"retirements":9}]),encoding="utf-8")
+    paths=[legacy,tmp_path/"77.json",tmp_path/"scores"/"77.json"];before={p:p.read_bytes() for p in paths}
+    entries=vr._load_score_records(tmp_path)
+    assert vr.achievement_ranking(entries,"careers")[0]["retirements"]==9 and "achievements" not in entries[0]
+    assert {p:p.read_bytes() for p in paths}==before
+    world.checkpoint();entry=vr._load_score_records(tmp_path)[0]
+    assert entry["retirements"]==9 and entry["achievements"]["careers"][-1]["number"]==10
+
+
+def test_achievement_invalid_lifetime_total_cannot_poison_the_career_save(tmp_path):
+    import json
+    path=tmp_path/"leaderboard.json";path.write_text(json.dumps([{"user_id":77,"handle":"Invalid","best_credits":10000,"retirements":2**63}]),encoding="utf-8")
+    world=_world_with_seed(42);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert saved.pilot.retirements==0 and vr._load_score_records(tmp_path)[0]["retirements"]==0
