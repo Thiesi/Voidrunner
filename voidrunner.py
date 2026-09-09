@@ -1427,6 +1427,11 @@ def _validate_save_document(data: dict) -> None:
                 "opening assignment progress")
     if flags.get("opening_assignment_completed"):
         require(flags.get("opening_assignment_taken") is True, "opening assignment progress")
+    if flags.get("archive_v1_recovered"):
+        require(flags.get("archive_v1_started") is True and flags.get("landmark_investigated") is True, "archive recovery")
+    require(not (flags.get("archive_v1_public") and flags.get("archive_v1_private")), "archive ending")
+    if flags.get("archive_v1_public") or flags.get("archive_v1_private"):
+        require(flags.get("archive_v1_recovered") is True, "archive completion")
     event = data.get("active_event")
     if event is not None:
         event_fields = {"economy", "commodity", "direction", "turns_remaining", "description"}
@@ -3554,9 +3559,11 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
         kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
         deadline = "no deadline" if mission.deadline_turn is None else f"due day {mission.deadline_turn}"
         lines.append(f"Tracked {kind}: {mission_bearing(world, mission)}; {deadline}. [C] Chart, then [R] contract route.")
+    if world.save.flags.get("archive_v1_started") and not archive_finished(world):
+        lines.append(f"Archive: {archive_objective(world)} [N] Contacts / Route.")
     actions = ["[M] Commodity Market", "[Y] Engineering Yard", "[B] Mission Board",
                "[C] Navigation Chart", "[S] Pilot Status", "[H] Hall of Fame",
-               "[G] Pilot Guide", "[T] Trading Ledger", "[O] Display Options", "[Q] Disembark & Save"]
+               "[G] Pilot Guide", "[N] Archive Contacts", "[T] Trading Ledger", "[O] Display Options", "[Q] Disembark & Save"]
     if landmark_available_here(world): actions.append(f"[L] {world.landmark['label']}")
     if concord_commission_available(world): actions.append("[P] Privateer Commission")
     if blackwake_made_available(world): actions.append("[W] Welcome to the Wake")
@@ -3609,7 +3616,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
         if choice == ">": page = min(page + 1, count - 1)
         elif choice == "<": page = max(0, page - 1)
         elif choice == "X": expanded, page = not expanded, 0
-        elif choice in "MYBCSHGTQLDPWO" and len(choice) == 1:
+        elif choice in "MYBCSHGTQLDPWON" and len(choice) == 1:
             return choice
 
 
@@ -3664,18 +3671,162 @@ def screen_dump_contraband(p: Palette, world: World) -> None:
     out_line(f"{p.muted}{result}{RESET}")
 
 
-def screen_landmark(p: Palette, world: World) -> None:
+ARCHIVE_RECORDS = {
+    "the Derelict Ark": [
+        "The Ark's final manifest names the people who opened the cryo-pods, not the company that owned them. They left together in the lifeboats.",
+        "Mara's annotation: Freeport's oldest families may finally learn which ship brought their grandparents home.",
+    ],
+    "the Silent Cathedral": [
+        "A handwritten evacuation order lies beside the frozen console. The congregation carried its transmitter to a shelter; the silence was a rescue, not a disappearance.",
+        "Mara's annotation: the missing names belong in a living community's history, not a list of the dead.",
+    ],
+    "the Shattered Yard": [
+        "The containment warnings were acknowledged and overridden before the accident. The surviving shift ledger contradicts the report that blamed the dock crews.",
+        "Mara's annotation: the families deserve a record that does not mistake a warning for a confession.",
+    ],
+    "the Long Watch": [
+        "The listening post recorded unregistered rescue corridors long after the authorities declared them empty. Its final operator kept the beacons lit for whoever still needed them.",
+        "Mara's annotation: a public edition can preserve the rescue story while protecting the passengers' names.",
+    ],
+}
+
+
+def archive_finished(world: World) -> bool:
+    return bool(world.save.flags.get("archive_v1_public") or world.save.flags.get("archive_v1_private"))
+
+
+def archive_objective(world: World) -> str:
+    return ("Return the record to Freeport." if world.save.flags.get("archive_v1_recovered") else
+            f"Recover the record at {world.by_id[world.landmark['system_id']].name}.")
+
+
+def archive_destination(world: World) -> int:
+    return world.landmark["system_id"] if world.save.flags.get("archive_v1_started") and not world.save.flags.get("archive_v1_recovered") else 0
+
+
+def investigate_landmark(world: World) -> list[str]:
+    if world.save.pending_travel is not None: raise ValueError("Finish the current journey first.")
+    if not landmark_available_here(world): raise ValueError("This site has no unclaimed salvage here.")
     landmark = world.landmark
-    out_line()
-    out_line(f"{p.accent}{BOLD}{landmark['label']}{RESET}")
-    out_line(f"  {landmark['flavor']}")
     world.save.flags["landmark_investigated"] = True
     world.save.pilot.credits += landmark["reward_credits"]
     world.save.pilot.note(f"Investigated {landmark['label']} (+{landmark['reward_credits']}cr)")
     world.save.pilot.highlight(f"Investigated {landmark['label']} (+{landmark['reward_credits']}cr).")
-    world.checkpoint()
-    out_line(f"{p.gold}Salvage recovered: +{landmark['reward_credits']}cr{RESET}")
-    pause(p)
+    lines = [f"Salvage recovered: +{landmark['reward_credits']}cr."]
+    if world.save.flags.get("archive_v1_started"):
+        world.save.flags["archive_v1_recovered"] = True
+        lines += ["Archive record recovered. Return to Mara at Freeport."] + ARCHIVE_RECORDS[landmark["label"]]
+    else: lines.append("An intact record remains. Mara Venn at Freeport may know its value. [N] Archive Contacts.")
+    return lines
+
+
+def archive_standing_terms(world: World, public: bool) -> str:
+    concord = world.save.pilot.reputation.get(FACTION_CONCORD, 0)
+    delta = min(100, concord + 5) - concord if public else max(-100, concord - 2) - concord
+    if public: return f"Concord {delta:+d}"
+    blackwake = world.save.pilot.reputation.get(FACTION_BLACKWAKE, 0)
+    return f"Blackwake {min(100, blackwake + 5) - blackwake:+d}; Concord {delta:+d}"
+
+
+def archive_action(world: World, action: str) -> list[str]:
+    flags = world.save.flags
+    if world.save.pending_travel is not None: raise ValueError("Finish the current journey first.")
+    if archive_finished(world): raise ValueError("This archive assignment is already complete.")
+    if action == "A":
+        if world.here.id != 0 or flags.get("archive_v1_started"): raise ValueError("Mara can offer a new assignment at Freeport.")
+        flags["archive_v1_started"] = True
+        world.save.pilot.note("Accepted Mara Venn's archive assignment.")
+        return ["Archive assignment accepted. Recover the site's record, then return to Freeport."]
+    if action == "I":
+        if not flags.get("archive_v1_started") or flags.get("archive_v1_recovered") or world.here.id != world.landmark["system_id"]:
+            raise ValueError("Travel to the archive site before recovering its record.")
+        if not flags.get("landmark_investigated"): return investigate_landmark(world)
+        flags["archive_v1_recovered"] = True
+        world.save.pilot.note("Transcribed the landmark's archive record; salvage was already claimed.")
+        return ["Archive record recovered; no second salvage payment."] + ARCHIVE_RECORDS[world.landmark["label"]]
+    if action not in ("P", "S") or not flags.get("archive_v1_recovered") or world.here.id != 0:
+        raise ValueError("Return the recovered record to Freeport first.")
+    public = action == "P"
+    standing = archive_standing_terms(world, public)
+    flags["archive_v1_public" if public else "archive_v1_private"] = True
+    reward = 500 if public else 1500
+    world.save.pilot.credits += reward
+    adjust_reputation(world, FACTION_CONCORD, 5 if public else -2)
+    if not public: adjust_reputation(world, FACTION_BLACKWAKE, 5)
+    world.save.pilot.missions_completed += 1
+    ending = "preserved the archive for Freeport" if public else "sold the archive to Kest Rel"
+    world.save.pilot.note(f"Archive complete: {ending} (+{reward}cr).")
+    world.save.pilot.highlight(f"Archive: {ending}.")
+    return [f"Archive complete: +{reward}cr. {standing}.",
+            "Mara: Now the families can read their own history." if public else
+            "Kest Rel: The sealed copy is safe with me. Mara keeps only your account of the journey."]
+
+
+def archive_lines(world: World) -> list[str]:
+    flags = world.save.flags
+    target = world.by_id[world.landmark["system_id"]]
+    lines = ["Mara Venn, Freeport's archive keeper, collects the histories that shipping ledgers leave out."]
+    if archive_finished(world):
+        lines += (["Mara remembers your public edition. Families have begun adding names to the archive."] if flags.get("archive_v1_public") else
+                  ["Kest Rel holds the sealed record. Mara preserves your travel account, but the source remains private."])
+        return lines + ["Assignment complete. Rewards cannot be claimed again."]
+    lines += ["Optional assignment: no deadline, deposit or contract-slot cost. Ordinary fuel, wages and travel risks apply.",
+              f"At current standing: public preservation pays 500cr; {archive_standing_terms(world, True)}. Private sale pays 1,500cr; {archive_standing_terms(world, False)}. Standing stays within -100 to 100."]
+    if not flags.get("archive_v1_recovered"):
+        lines.append("Landmark salvage already claimed; transcribing the record pays no additional salvage." if flags.get("landmark_investigated") else
+                     f"Unclaimed landmark salvage: +{world.landmark['reward_credits']:,}cr once when investigating.")
+    if not flags.get("archive_v1_started"):
+        lines += [f"Site: {world.landmark['label']} near {target.name} ({target.x},{target.y}). Visiting the site is required; scanning it is not enough.",
+                  "[A] Accept at Freeport." if world.here.id == 0 else "Meet Mara at Freeport to accept. [R] Route there."]
+    elif not flags.get("archive_v1_recovered"):
+        lines += [f"Recover the record at {target.name} ({target.x},{target.y}).",
+                  "[I] Recover record here." if world.here.id == target.id else "[R] Route to the site; accepting its bearing does not chart it."]
+    else:
+        lines += ARCHIVE_RECORDS[world.landmark["label"]]
+        lines += ["Mara offers a public edition; broker Kest Rel offers a private sale. Choose once on return to Freeport.",
+                  "[P] Publish / [S] Sell privately." if world.here.id == 0 else "[R] Return to Freeport with the record."]
+    return lines
+
+
+def screen_archive(p: Palette, world: World) -> None:
+    page, result = 0, []
+    while True:
+        flags = world.save.flags
+        actions = ""
+        if not archive_finished(world):
+            if not flags.get("archive_v1_started") and world.here.id == 0: actions = "A/"
+            elif flags.get("archive_v1_recovered") and world.here.id == 0: actions = "P/S/"
+            elif flags.get("archive_v1_started") and not flags.get("archive_v1_recovered") and world.here.id == world.landmark["system_id"]: actions = "I/"
+            else: actions = "R/"
+        action, page, count = _draw_service_page(p, f"Archive {world.save.pilot.credits:,}cr", result + archive_lines(world),
+                                                f"[{actions}B]Act [<>]Page: ", page)
+        if action in ("B", "Q"): return
+        if action == ">": page = min(page + 1, count - 1); continue
+        if action == "<": page = max(0, page - 1); continue
+        if not action or action not in actions.split("/"): continue
+        if action == "R":
+            _screen_auto_route(p, world, destination=archive_destination(world)); page = 0
+            continue
+        result = archive_action(world, action)
+        world.checkpoint()
+        page = 0
+
+
+def screen_landmark(p: Palette, world: World) -> None:
+    page, result = 0, []
+    while True:
+        available = landmark_available_here(world)
+        lines = result + [world.landmark["flavor"], f"Unclaimed salvage: {world.landmark['reward_credits']}cr." if available else "Salvage already claimed or unavailable here."]
+        action, page, count = _draw_service_page(p, world.landmark["label"], lines,
+                                                "[I]Investigate [B]Back [<>]Page: " if available else "[B]Back [<>]Page: ", page)
+        if action in ("B", "Q"): return
+        if action == ">": page = min(page + 1, count - 1); continue
+        if action == "<": page = max(0, page - 1); continue
+        if action == "I" and available:
+            result = investigate_landmark(world)
+            world.checkpoint()
+            page = 0
+
 
 
 def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
@@ -4698,6 +4849,8 @@ def pilot_recap(world: World) -> list[str]:
         lines.append(f"Plan: {mission.description}; {deadline}.")
     else:
         lines.append("No contract tracked. Use the Mission Board to inspect and track your jobs.")
+    if save.flags.get("archive_v1_started") and not archive_finished(world):
+        lines.append(f"Archive: {archive_objective(world)} [N] Archive Contacts.")
     return [_mission_plain(line) for line in lines]
 
 
@@ -5320,16 +5473,20 @@ def map_bounds(sector: int | None) -> tuple[int, int, int, int]:
             ((row + 1) * 50 + SECTOR_ROWS - 1) // SECTOR_ROWS - 1)
 
 
+def map_goal(world: World, public_target: int | None) -> int | None:
+    mission = tracked_mission(world)
+    return mission.target_system if mission is not None else public_target
+
+
 def map_label(world: World, sid: int, public_target: int | None) -> str:
     station = world.by_id[sid]
-    name = station.name if station.discovered or sid == public_target else "Uncharted"
+    name = station.name if station.discovered or sid in (public_target, map_goal(world, public_target)) else "Uncharted"
     return f"{name} ({station.x},{station.y})"
 
 
 def map_system_ids(world: World, path: list[int], public_target: int | None) -> set[int]:
     ids = {s.id for s in world.galaxy if s.discovered} | set(path) | {world.here.id}
-    if public_target is not None:
-        ids.add(public_target)
+    ids.update(target for target in (public_target, map_goal(world, public_target)) if target is not None)
     return ids
 
 
@@ -5366,7 +5523,7 @@ def spatial_map_grid(world: World, path: list[int], *, public_target: int | None
     for sid, position in positions.items(): cells.setdefault(position, []).append(sid)
     for (x, y), occupants in cells.items():
         if world.here.id in occupants: marker = "@"
-        elif public_target in occupants: marker = "!"
+        elif map_goal(world, public_target) in occupants: marker = "!"
         elif path and path[-1] in occupants: marker = "X"
         elif len(occupants) > 1: marker = "+"
         elif occupants[0] in path: marker = "*"
@@ -5387,7 +5544,7 @@ def map_list_lines(world: World, path: list[int], public_target: int | None) -> 
         if not stations: continue
         lines.append("Sector: " + sector)
         for station in stations:
-            markers = ("@" if station.id == world.here.id else "") + ("!" if station.id == public_target else "") + ("*" if station.id in path else "") + ("X" if path and station.id == path[-1] else "")
+            markers = ("@" if station.id == world.here.id else "") + ("!" if station.id == map_goal(world, public_target) else "") + ("*" if station.id in path else "") + ("X" if path and station.id == path[-1] else "")
             details = f"{station.economy}, danger {station.danger}" if station.discovered else "uncharted; danger unknown"
             distance = "here" if station.id == world.here.id else f"{hops[station.id]} jumps"
             lines.append(f"{markers or 'o'} {map_label(world, station.id, public_target)}: {details}; {distance}.")
@@ -5398,7 +5555,10 @@ def map_inspection_lines(world: World, sid: int, path: list[int], public_target:
     station = world.by_id[sid]
     lines = [map_label(world, sid, public_target), "Sector: " + sector_for(station)]
     if sid == world.here.id: lines.append("Current position.")
-    if sid == public_target: lines.append("Contract objective; public bearing does not chart it.")
+    if tracked_mission(world) is not None and sid == map_goal(world, public_target):
+        lines.append("Tracked contract objective; public bearing does not chart it.")
+    elif sid == public_target:
+        lines.append("Public route destination; this bearing does not chart it.")
     if sid in path:
         legs = [str(i) for i, target in enumerate(path, 1) if target == sid]
         lines.append("Plotted arrival leg(s): " + ", ".join(legs))
@@ -5481,7 +5641,10 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
 
 def prepare_route_jump(world: World, destination: int) -> int:
     """Validate a named destination and one leg without changing career state."""
-    if type(destination) is not int or destination not in world.by_id or not world.by_id[destination].discovered:
+    if type(destination) is not int or destination not in world.by_id:
+        raise MissionError("Choose a charted destination first.")
+    archive_bearing = world.save.flags.get("archive_v1_started") and destination == world.landmark["system_id"]
+    if not world.by_id[destination].discovered and not archive_bearing:
         raise MissionError("Choose a charted destination first.")
     if world.save.pending_travel is not None:
         raise MissionError("Finish the interrupted journey first.")
@@ -5606,7 +5769,7 @@ def _screen_auto_route(p: Palette, world: World, *, destination: int | None = No
             if selected is not None:
                 destination, result, page, pages = selected, None, 0, None
         elif key == "V":
-            screen_galaxy_map(p, world, path=path)
+            screen_galaxy_map(p, world, path=path, public_target=destination)
         elif key == "J":
             try:
                 hop = prepare_route_jump(world, destination)
@@ -6482,8 +6645,12 @@ def main() -> int:
                 screen_status(p, world)
             elif choice == "H":
                 screen_hall_of_fame(p, world, save_dir, user_id)
+            elif choice == "N":
+                screen_archive(p, world)
+                continue
             elif choice == "L" and landmark_available_here(world):
                 screen_landmark(p, world)
+                continue
             elif choice == "D" and has_contraband(world):
                 screen_dump_contraband(p, world)
             elif choice == "P" and concord_commission_available(world):
