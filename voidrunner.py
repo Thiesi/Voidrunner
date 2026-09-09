@@ -1187,6 +1187,7 @@ class SaveData:
     trading_ledger: TradingLedger = field(default_factory=TradingLedger)
     market_memory: dict[int, dict[str, dict]] = field(default_factory=dict)
     market_depth: dict[int, dict[str, dict[str, int]]] = field(default_factory=dict)
+    faction_stories: dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -1218,6 +1219,7 @@ class SaveData:
             "trading_ledger": dataclasses.asdict(self.trading_ledger),
             "market_memory": {str(sid): quotes for sid, quotes in self.market_memory.items()},
             "market_depth": {str(sid): goods for sid, goods in self.market_depth.items()},
+            **({"faction_stories": self.faction_stories} if self.faction_stories else {}),
         }
 
     @classmethod
@@ -1257,6 +1259,7 @@ class SaveData:
                            for sid, quotes in d.get("market_memory", {}).items()},
             market_depth={int(sid): {c: dict(pool) for c, pool in goods.items()}
                           for sid, goods in d.get("market_depth", {}).items()},
+            faction_stories={faction: dict(story) for faction, story in d.get("faction_stories", {}).items()},
         )
 
 
@@ -1434,6 +1437,21 @@ def _validate_save_document(data: dict) -> None:
         if task["state"] == "complete" and role != "engineer":
             require(total - task["baseline"] >= task["required"], "crew assignment completion")
 
+    stories = data.get("faction_stories", {})
+    require(isinstance(stories, dict) and set(stories) <= set(FACTIONS), "faction stories")
+    for faction, story in stories.items():
+        require(isinstance(story, dict), "faction story")
+        _reject_unknown_save_fields(story, {"version", "stage", "choice"}, "faction story")
+        if type(story.get("version")) is int and story["version"] != 1:
+            raise UnsupportedSave("The saved faction story uses an unsupported version.")
+        require(type(story.get("version")) is int and story["version"] == 1, "faction story version")
+        require(story.get("stage") in ("accepted", "evidence", "committed", "complete"), "faction story stage")
+        if story["stage"] in ("committed", "complete"):
+            require(story.get("choice") in ("hardline", "aid"), "faction story choice")
+            if faction == FACTION_BLACKWAKE and story["choice"] == "hardline":
+                if not economies: economies = {system.id: system.economy for system in generate_galaxy(data["seed"])}
+                require("Haven" in economies.values(), "faction story Haven")
+        else: require("choice" not in story, "premature faction story choice")
     drift = data.get("market_drift", {})
     require(isinstance(drift, dict), "market drift")
     seen = set()
@@ -2837,6 +2855,178 @@ FACTION_MEMBERSHIPS = {
 }
 
 
+FACTION_STORIES = {
+    FACTION_CONCORD: {
+        "title": "The Missing Dispatch", "workshop": "cargo",
+        "intro": "Edda Ro has a missing medical convoy and a dispatch ledger nobody will sign. Iona Rusk at Rivet House kept a copy.",
+        "evidence": "Iona's copy names the diverted supplies and the official who ordered it. The patients at Far Lantern still need medicine; an immediate prosecution would seal the evidence.",
+        "hardline": {"label": "File for prosecution", "target": "home", "commodity": None, "quantity": 0, "reward": 1800,
+                     "standing": {FACTION_CONCORD: 18, FACTION_BLACKWAKE: -12},
+                     "closing": "Edda files the case. The official is arrested and the ledger sealed. Concord praises your testimony; Rook's contacts stop answering questions about the convoy."},
+        "aid": {"label": "Put patients first", "target": "scanner", "commodity": "medicine", "quantity": 2, "reward": 1500,
+                "standing": {FACTION_CONCORD: 12, FACTION_BLACKWAKE: 6},
+                "closing": "Dr. Parn opens the clinic's supply locker. Edda keeps the inquiry alive without sealing the ledger, and local carriers agree to bring the next shipment."},
+    },
+    FACTION_BLACKWAKE: {
+        "title": "The Broken Toll", "workshop": "engine",
+        "intro": "Rook Talan says an unauthorized toll is trapping independent crews. Oren Vale at Tuning Fork has the receipts and the damaged transponder.",
+        "evidence": "Oren traces the toll to a Cartel captain using a false beacon. Rook can arm a crew to remove the captain, or Dr. Parn can build a public beacon that makes the toll useless.",
+        "hardline": {"label": "Arm the enforcement crew", "target": "haven", "commodity": "weapons", "quantity": 1, "reward": 2100,
+                     "standing": {FACTION_BLACKWAKE: 18, FACTION_CONCORD: -12},
+                     "closing": "Rook's crew takes the false beacon offline. The toll ends under Cartel control. Concord records the weapons transfer and warns independent captains about the new patrols."},
+        "aid": {"label": "Build a public beacon", "target": "scanner", "commodity": "electronics", "quantity": 3, "reward": 1500,
+                "standing": {FACTION_BLACKWAKE: 12, FACTION_CONCORD: 6},
+                "closing": "The new beacon broadcasts a free corridor. Oren tunes the first transponder, Rook withdraws the toll collector, and Concord publishes the route."},
+    },
+}
+
+
+def faction_story_haven(world: World) -> int | None:
+    candidates = sorted(system.id for system in world.galaxy if system.economy == "Haven")
+    return random.Random(f"faction-stories-v1:{world.save.seed}").choice(candidates) if candidates else None
+
+
+def faction_story_target(world: World, faction: str, choice: str | None = None) -> int | None:
+    info = FACTION_STORIES[faction]
+    if choice is None: return specialist_stations(world)[info["workshop"]]
+    target = info[choice]["target"]
+    return 0 if target == "home" else faction_story_haven(world) if target == "haven" else specialist_stations(world)[target]
+
+
+def faction_story_destination(world: World, faction: str) -> int | None:
+    story = world.save.faction_stories.get(faction, {})
+    return faction_story_target(world, faction, story.get("choice"))
+
+
+def faction_story_bearings(world: World) -> set[int]:
+    return {destination for faction, story in world.save.faction_stories.items()
+            if story["stage"] != "complete" and (destination := faction_story_destination(world, faction)) is not None}
+
+
+def faction_standing_terms(world: World, changes: dict[str, int]) -> str:
+    terms = []
+    for faction, amount in changes.items():
+        before = world.save.pilot.reputation.get(faction, 0)
+        effective = max(-100, min(100, before + amount)) - before
+        terms.append(f"{FACTION_LABEL[faction]} {effective:+d}")
+    return "; ".join(terms)
+
+
+def faction_story_completion_blocker(world: World, faction: str) -> str | None:
+    if world.save.pending_travel is not None: return "Finish the current journey first."
+    story = world.save.faction_stories.get(faction)
+    if story is None or story["stage"] != "committed": return "Choose a course after collecting evidence first."
+    if world.here.id != faction_story_destination(world, faction): return "Visit the chosen ending's destination first."
+    ending = FACTION_STORIES[faction][story["choice"]]
+    if ending["commodity"] is not None and world.save.cargo.get(ending["commodity"], 0) < ending["quantity"]:
+        return f"Need {ending['quantity']} {COMMODITIES[ending['commodity']]['label']} in your hold."
+    return None
+
+
+def faction_story_action(world: World, faction: str, action: str) -> str:
+    if faction not in FACTION_STORIES: raise ValueError("Choose a listed faction case.")
+    if world.save.pending_travel is not None: raise ValueError("Finish the current journey first.")
+    info, story = FACTION_STORIES[faction], world.save.faction_stories.get(faction)
+    if story is None and action == "A":
+        world.save.faction_stories[faction] = {"version": 1, "stage": "accepted"}
+        result = f"Case accepted: {info['title']}."
+    elif story is not None and story["stage"] == "accepted" and action == "I":
+        if world.here.id != faction_story_target(world, faction): raise ValueError("Visit the case workshop before investigating.")
+        story["stage"] = "evidence"
+        result = f"Evidence recovered: {info['evidence']}"
+    elif story is not None and story["stage"] == "evidence" and action in ("H", "A"):
+        choice = "hardline" if action == "H" else "aid"
+        if faction_story_target(world, faction, choice) is None: raise ValueError("No Haven is available for armed enforcement; the public beacon remains available.")
+        story.update(stage="committed", choice=choice)
+        result = f"Course chosen: {info[choice]['label']}. This choice is final."
+    elif story is not None and story["stage"] == "committed" and action == "C":
+        ending = info[story["choice"]]
+        if blocker := faction_story_completion_blocker(world, faction): raise ValueError(blocker)
+        commodity, quantity = ending["commodity"], ending["quantity"]
+        terms = faction_standing_terms(world, ending["standing"])
+        if commodity is not None: _dispose_cargo(world, commodity, quantity, proceeds=ending["reward"], kind="delivery")
+        world.save.pilot.credits += ending["reward"]
+        for group, amount in ending["standing"].items(): adjust_reputation(world, group, amount)
+        world.save.pilot.missions_completed += 1
+        story["stage"] = "complete"
+        result = f"Case complete: {info['title']}. +{ending['reward']:,}cr; {terms}."
+        world.save.pilot.highlight(f"{info['title']}: {ending['label']}.")
+    else: raise ValueError("That action is unavailable at this case stage; completed cases cannot pay again.")
+    world.save.pilot.note(result)
+    return result
+
+
+def faction_story_ending_lines(world: World, faction: str, choice: str, *, selectable: bool = True) -> list[str]:
+    ending = FACTION_STORIES[faction][choice]
+    target = faction_story_target(world, faction, choice)
+    if target is None: return ["Hardline unavailable: no Haven exists for the enforcement handover. The public beacon remains available."]
+    destination = world.by_id[target]
+    commodity, quantity = ending["commodity"], ending["quantity"]
+    cargo = (f"Deliver {quantity} {COMMODITIES[commodity]['label']}; {world.save.cargo.get(commodity, 0)} aboard. Consumes goods, including cargo promised to other contracts." if commodity else "Deliver the evidence; no cargo consumed.")
+    selector = ("[H] " if choice == "hardline" else "[A] ") if selectable else ""
+    lines = [f"{selector}{ending['label']}: {ending['reward']:,}cr gross.",
+             f"Destination: {destination.name} ({destination.x},{destination.y}). {cargo}",
+             f"At current standing: {faction_standing_terms(world, ending['standing'])}. Standing stays within -100..100."]
+    if commodity is not None and not COMMODITIES[commodity]["legal"]:
+        lines.append("Contraband: procure at a Haven; intermediate non-Haven arrivals can trigger customs.")
+    return lines
+
+
+def faction_story_lines(world: World, faction: str) -> list[str]:
+    info, story = FACTION_STORIES[faction], world.save.faction_stories.get(faction)
+    lines = [f"{FACTION_LABEL[faction]}: {info['title']}."]
+    if story is not None and story["stage"] == "complete":
+        return lines + [info[story["choice"]]["closing"], "Case complete. Reward and recognition cannot be claimed again."]
+    lines += [info["intro"] if story is None or story["stage"] == "accepted" else info["evidence"],
+              "Optional: no membership, entry fee, deadline or contract-slot requirement. Ordinary travel fuel, wages and cargo costs apply."]
+    if story is not None and story["stage"] == "committed":
+        lines += ["Chosen course is final; [C] Complete at its destination."] + faction_story_ending_lines(world, faction, story["choice"], selectable=False)
+        if blocker := faction_story_completion_blocker(world, faction): lines.append(blocker)
+    else:
+        lines.append("After investigating, choose one ending; the choice is final.")
+        for choice in ("hardline", "aid"):
+            lines += faction_story_ending_lines(world, faction, choice,
+                                                selectable=story is not None and story["stage"] == "evidence")
+        target = world.by_id[faction_story_target(world, faction)]
+        lines.append(f"Evidence: {WORKSHOPS[info['workshop']]['name']} at {target.name} ({target.x},{target.y}).")
+        lines.append("[A] Accept the case." if story is None else "[I] Investigate at the workshop." if story["stage"] == "accepted" else "Choose an available ending with the action bar.")
+    lines.append("Case rewards pay once, without a commission bonus; one completed mission and a career highlight. Subtract procurement and travel from gross pay.")
+    return lines
+
+
+def faction_story_recap(world: World) -> list[str]:
+    return [f"Case: {FACTION_STORIES[faction]['title']} ({story['stage']}). [{ 'P' if faction == FACTION_CONCORD else 'W'}] Contacts / [S] Story."
+            for faction, story in world.save.faction_stories.items() if story["stage"] != "complete"]
+
+
+def screen_faction_story(p: Palette, world: World, faction: str) -> str | None:
+    page, result = 0, None
+    while True:
+        story = world.save.faction_stories.get(faction)
+        stage = story["stage"] if story is not None else None
+        actions = {None: "A/", "accepted": "I/R/", "evidence": "H/A/", "committed": "C/R/", "complete": ""}[stage]
+        if stage == "evidence" and faction_story_target(world, faction, "hardline") is None:
+            actions = "A/"
+        lines = ([result] if result else []) + faction_story_lines(world, faction)
+        key, page, count = _draw_service_page(p, f"Case {world.save.pilot.credits:,}cr", lines, _detail_action_bar(actions, {"A": "Aid" if stage == "evidence" else "Accept", "I": "Investigate", "H": "Hardline", "C": "Complete", "R": "Route"}), page)
+        if key in ("B", "Q"): return result
+        if key == ">": page = min(page + 1, count - 1); continue
+        if key == "<": page = max(0, page - 1); continue
+        if not key or key not in actions.split("/"): continue
+        if key == "R":
+            _screen_auto_route(p, world, destination=faction_story_destination(world, faction)); page = 0; continue
+        if key == "C":
+            if blocker := faction_story_completion_blocker(world, faction): result, page = blocker, 0; continue
+            ending = FACTION_STORIES[faction][story["choice"]]
+            if ending["commodity"] is not None:
+                question = f"Hand over {ending['quantity']} {COMMODITIES[ending['commodity']]['label']}, including any promised to contracts, for {ending['reward']:,}cr?"
+                if not confirm(question, p): continue
+        try: result = faction_story_action(world, faction, key)
+        except ValueError as exc: result, page = str(exc), 0; continue
+        world.checkpoint()
+        page = 0
+
+
 def faction_perk_active(world: World, faction: str) -> bool:
     info = FACTION_MEMBERSHIPS[faction]
     return bool(getattr(world.save.pilot, info["field"]) and world.save.pilot.reputation.get(faction, 0) > FACTION_PERK_SUSPEND_AT)
@@ -2876,7 +3066,7 @@ def faction_contact_lines(world: World, faction: str) -> list[str]:
              f"Joining requires {info['threshold']} standing and grants {info['grant']:,}cr once. No entry fee.",
              f"Perk suspended at {FACTION_PERK_SUSPEND_AT} standing or below; automatically restored above it. Membership stays, with no second grant.",
              "Dual membership is allowed. Each faction judges its own standing independently. Membership does not clear notoriety or fines.",
-             info["intro"]]
+             info["intro"], f"[S] Story: {FACTION_STORIES[faction]['title']}."]
     if blocker := faction_join_blocker(world, faction): lines.append(blocker)
     else: lines.append("[J] Join after final confirmation.")
     return lines
@@ -2888,10 +3078,15 @@ def _screen_faction_contact(p: Palette, world: World, faction: str) -> None:
         available = faction_join_blocker(world, faction) is None
         lines = ([result] if result else []) + faction_contact_lines(world, faction)
         action, page, count = _draw_service_page(p, f"{FACTION_LABEL[faction].split()[0]} {world.save.pilot.credits:,}cr", lines,
-                                                "[J]Join [B]Back [<>]Page: " if available else "[B]Back [<>]Page: ", page)
+                                                "[J]Join [S]Story [B]Back [<>]Page: " if available else "[S]Story [B]Back [<>]Page: ", page)
         if action in ("B", "Q"): return
         if action == ">": page = min(page + 1, count - 1); continue
         if action == "<": page = max(0, page - 1); continue
+        if action == "S":
+            response = screen_faction_story(p, world, faction)
+            if response is not None: result = response
+            page = 0
+            continue
         if action != "J" or not available: continue
         info = FACTION_MEMBERSHIPS[faction]
         if not confirm(f"Join {info['label']} with a one-time {info['grant']:,}cr grant?", p): continue
@@ -3701,6 +3896,7 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
     if world.save.flags.get("archive_v1_started") and not archive_finished(world):
         lines.append(f"Archive: {archive_objective(world)} [N] Contacts / Route.")
     lines += crew_assignment_recap(world)
+    lines += faction_story_recap(world)
     actions = ["[M] Commodity Market", "[Y] Engineering Yard", "[B] Mission Board",
                "[C] Navigation Chart", "[S] Pilot Status", "[H] Hall of Fame",
                "[G] Pilot Guide", "[N] Archive Contacts", "[T] Trading Ledger", "[O] Display Options", "[Q] Disembark & Save"]
@@ -3938,7 +4134,7 @@ def screen_archive(p: Palette, world: World) -> None:
             elif flags.get("archive_v1_started") and not flags.get("archive_v1_recovered") and world.here.id == world.landmark["system_id"]: actions = "I/"
             else: actions = "R/"
         action, page, count = _draw_service_page(p, f"Archive {world.save.pilot.credits:,}cr", result + archive_lines(world),
-                                                f"[{actions}B]Act [<>]Page: ", page)
+                                                _detail_action_bar(actions, {"A": "Accept", "I": "Investigate", "P": "Publish", "S": "Sell", "R": "Route"}), page)
         if action in ("B", "Q"): return
         if action == ">": page = min(page + 1, count - 1); continue
         if action == "<": page = max(0, page - 1); continue
@@ -4743,6 +4939,11 @@ def shipyard_lines(world: World) -> list[str]:
     return lines
 
 
+def _detail_action_bar(actions: str, labels: dict[str, str]) -> str:
+    """Keep every available action and the harmless exit explicit on all pages."""
+    return "".join(f"[{key}]{labels[key]} " for key in actions.split("/") if key) + "[B]Back [<>]Page: "
+
+
 def _service_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
     capacity = max(len(rows) for rows in _trade_pages(lines, title, footer))
     pages = [[]]
@@ -4919,7 +5120,7 @@ def screen_crew_assignment(p: Palette, world: World, role: str) -> str | None:
         task = crew_assignment_record(world, role)
         actions = "" if task is not None and task["state"] == "complete" else "C/R/" if task is not None else "A/R/"
         lines = ([result] if result else []) + crew_assignment_lines(world, role)
-        key, page, count = _draw_service_page(p, f"Crew task {world.save.pilot.credits:,}cr", lines, f"[{actions}B]Act [<>]Page: ", page)
+        key, page, count = _draw_service_page(p, f"Crew task {world.save.pilot.credits:,}cr", lines, _detail_action_bar(actions, {"A": "Accept", "C": "Complete", "R": "Route"}), page)
         if key in ("B", "Q"): return result
         if key == ">": page = min(page + 1, count - 1); continue
         if key == "<": page = max(0, page - 1); continue
@@ -5266,6 +5467,7 @@ def pilot_recap(world: World) -> list[str]:
     if save.flags.get("archive_v1_started") and not archive_finished(world):
         lines.append(f"Archive: {archive_objective(world)} [N] Archive Contacts.")
     lines += crew_assignment_recap(world)
+    lines += faction_story_recap(world)
     return [_mission_plain(line) for line in lines]
 
 
@@ -5869,7 +6071,7 @@ def _do_scan(p: Palette, world: World) -> str | None:
         can_scan = world.save.ship.scanner_tier > 0 and world.save.ship.fuel >= 2 and bool(survey_candidates(world))
         lines = ([f"Result: {result}"] + report if result else []) + survey_terms(world)
         action, page, count = _draw_service_page(p, f"Survey {world.save.pilot.credits:,}cr", lines,
-            "[S/B]Act [<>]Page: " if can_scan else "[B]Back [<>]Page: ", page)
+            "[S]Survey [B]Back [<>]Page: " if can_scan else "[B]Back [<>]Page: ", page)
         if action in ("B", "Q"): return result
         if action == ">": page = min(page + 1, count - 1); continue
         if action == "<": page = max(0, page - 1); continue
@@ -6062,7 +6264,8 @@ def prepare_route_jump(world: World, destination: int) -> int:
         raise MissionError("Choose a charted destination first.")
     archive_bearing = world.save.flags.get("archive_v1_started") and destination == world.landmark["system_id"]
     workshop_bearing = destination in specialist_stations(world).values()
-    if not world.by_id[destination].discovered and not archive_bearing and not workshop_bearing:
+    case_bearing = destination in faction_story_bearings(world)
+    if not world.by_id[destination].discovered and not archive_bearing and not workshop_bearing and not case_bearing:
         raise MissionError("Choose a charted destination first.")
     if world.save.pending_travel is not None:
         raise MissionError("Finish the interrupted journey first.")

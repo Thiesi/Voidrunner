@@ -9085,6 +9085,7 @@ def test_survey_terms_before_and_after_scanning_fit_and_browsing_is_read_only(mo
         out = io.StringIO(); frames = []
         def choose():
             frame = out.getvalue(); out.seek(0); out.truncate(0); frames.append(frame)
+            assert "[B]Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
             assert len(frame.splitlines()) <= height
             assert all(vr._visible_width(row) <= width for row in frame.splitlines())
             assert world.save.to_dict() == saved and world.event_rng.getstate() == rng
@@ -9314,6 +9315,7 @@ def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, st
     world._checkpoint = lambda w: pytest.fail("Browsing archive wrote a checkpoint")
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert "[B]Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
@@ -9321,9 +9323,12 @@ def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, st
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): vr.screen_archive(vr.Palette(False), world)
-    rows = [vr._ANSI_RE.sub("", row).strip() for frame in frames for row in frame.splitlines()]
-    text = " ".join(row for row in rows if row and row not in (">", "<") and not re.fullmatch(r"\d+/\d+", row) and not row.startswith("Archive ") and "Act" not in row and "[<>]Page:" not in row)
-    for line in vr.archive_lines(world): assert " ".join(line.split()) in text
+    bodies=[]
+    for frame in frames:
+        plain=vr._ANSI_RE.sub("",frame)
+        body=plain[re.search(r"Archive.*?\d+/\d+",plain,re.S).end():]
+        bodies.append(re.split(r"\[[A-Z]\](?:Accept|Investigate|Publish|Sell|Route|Back)",body)[0])
+    assert " ".join(" ".join(bodies).split())==" ".join(" ".join(vr.archive_lines(world)).split())
 
 
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
@@ -10201,11 +10206,12 @@ def test_personal_crew_task_pages_keep_complete_terms_and_leave_no_writes(monkey
     world._checkpoint = lambda w: pytest.fail("Task browsing checkpointed")
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert "[B]Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
         assert len(frame.splitlines()) <= height and all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         page, count = map(int, re.search(r"Crew task.*?(\d+)/(\d+)", frame, re.S).groups())
         plain = vr._ANSI_RE.sub("", frame)
-        body = re.sub(r"^[\s>]*Crew task\s+[\d,]+cr\s+\d+/\d+\s*", "", plain).split("[C/R/B]Act")[0]
+        body = re.sub(r"^[\s>]*Crew task\s+[\d,]+cr\s+\d+/\d+\s*", "", plain).split("[C]Complete")[0]
         bodies.append(body)
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -10448,7 +10454,7 @@ def test_faction_contact_pages_preserve_all_terms_without_writes(monkeypatch, fa
         match = re.search(r"[\d,]+cr\s+(\d+)/(\d+)", plain); assert match
         page, count = map(int, match.groups())
         body = re.sub(r"^[\s>]*\w+\s+[\d,]+cr\s+\d+/\d+\s*", "", plain)
-        bodies.append(re.split(r"\[(?:J|B)\](?:Join|Back)", body)[0])
+        bodies.append(re.split(r"\[(?:J|S|B)\](?:Join|Story|Back)", body)[0])
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -10549,6 +10555,268 @@ def test_faction_customs_resume_keeps_resolved_inspection_after_standing_changes
     assert visits == ([destination.id] if inspect else []) and resumed.save.pending_travel is None
 
 
+# Optional faction cases use real travel and existing cargo accounting.
+def _faction_case_world(faction, stage="idle", choice="aid"):
+    world = _world_with_seed(42)
+    if stage != "idle": vr.faction_story_action(world, faction, "A")
+    if stage in ("accepted", "evidence", "committed", "complete"):
+        world.save.current_system = vr.faction_story_target(world, faction)
+        world.here.discovered = True
+    if stage in ("evidence", "committed", "complete"):
+        vr.faction_story_action(world, faction, "I")
+    if stage in ("committed", "complete"):
+        vr.faction_story_action(world, faction, "H" if choice == "hardline" else "A")
+        world.save.current_system = vr.faction_story_destination(world, faction)
+        world.here.discovered = True
+        ending = vr.FACTION_STORIES[faction][choice]
+        if ending["commodity"]:
+            world.save.cargo = {ending["commodity"]: ending["quantity"]}
+            world.save.cargo_basis = {ending["commodity"]: [[ending["quantity"], 100 * ending["quantity"]]]}
+            world.save.trading_ledger.since_day = world.save.turn
+    if stage == "complete": vr.faction_story_action(world, faction, "C")
+    return world
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+@pytest.mark.parametrize("choice", ["hardline", "aid"])
+def test_faction_case_four_endings_pay_once_without_membership_or_slots(faction, choice):
+    import copy
+    world = _faction_case_world(faction, "committed", choice)
+    world.save.active_missions = [vr.Mission(i+1, "bounty", "Existing", 500, 0, 1, pirate_tier=1) for i in range(vr.MAX_ACTIVE_MISSIONS)]
+    missions = copy.deepcopy(world.save.active_missions)
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    ending = vr.FACTION_STORIES[faction][choice]
+    result = vr.faction_story_action(world, faction, "C")
+    assert "Case complete:" in result and f"{ending['reward']:,}cr" in result
+    assert world.save.pilot.credits == before["pilot"]["credits"] + ending["reward"]
+    assert world.save.pilot.missions_completed == 1
+    assert world.save.pilot.reputation == ending["standing"]
+    assert world.save.faction_stories[faction] == {"version": 1, "stage": "complete", "choice": choice}
+    assert not world.save.cargo and not world.save.cargo_basis
+    assert world.save.active_missions == missions and world.save.turn == before["turn"]
+    assert world.save.ship.fuel == before["ship"]["fuel"] and world.event_rng.getstate() == rng
+    assert not world.save.pilot.has_concord_commission and not world.save.pilot.has_blackwake_made
+    assert vr.FACTION_STORIES[faction][choice]["closing"] in vr.faction_story_lines(world, faction)
+    assert not vr.faction_story_recap(world)
+    complete = copy.deepcopy(world.save.to_dict())
+    for action in "ACHIR":
+        with pytest.raises(ValueError): vr.faction_story_action(world, faction, action)
+        assert world.save.to_dict() == complete
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+@pytest.mark.parametrize("stage,action,fault", [("idle", "I", "none"), ("accepted", "I", "location"), ("evidence", "C", "none"), ("committed", "H", "none"), ("committed", "C", "location"), ("committed", "C", "cargo"), ("committed", "C", "travel")])
+def test_faction_case_rejected_actions_preserve_every_effect(faction, stage, action, fault):
+    import copy
+    world = _faction_case_world(faction, stage)
+    if fault == "location": world.save.current_system = (world.save.current_system + 1) % len(world.galaxy)
+    if fault == "cargo": world.save.cargo.clear(); world.save.cargo_basis.clear()
+    if fault == "travel": world.save.pending_travel = {"phase": "arrival"}
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    with pytest.raises(ValueError): vr.faction_story_action(world, faction, action)
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+@pytest.mark.parametrize("choice", ["hardline", "aid"])
+@pytest.mark.parametrize("standing", [-100, 99, 100])
+def test_faction_case_previews_show_effective_capped_standing(faction, choice, standing):
+    world = _faction_case_world(faction, "committed", choice)
+    world.save.pilot.reputation = {group: standing for group in vr.FACTIONS}
+    expected = {group: max(-100, min(100, standing + amount)) for group, amount in vr.FACTION_STORIES[faction][choice]["standing"].items()}
+    preview = " ".join(vr.faction_story_lines(world, faction))
+    result = vr.faction_story_action(world, faction, "C")
+    assert world.save.pilot.reputation == expected
+    for group, after in expected.items():
+        assert f"{vr.FACTION_LABEL[group]} {after-standing:+d}" in preview
+        assert f"{vr.FACTION_LABEL[group]} {after-standing:+d}" in result
+
+
+@pytest.mark.parametrize("unknown", [0, 1, 3])
+def test_faction_case_material_handover_uses_fifo_and_separates_unknown_cost(unknown):
+    world = _faction_case_world(vr.FACTION_BLACKWAKE, "committed")
+    world.save.cargo = {"electronics": 5}
+    world.save.cargo_basis = {"electronics": [[5-unknown, (5-unknown)*100]]}
+    vr.faction_story_action(world, vr.FACTION_BLACKWAKE, "C")
+    ledger = world.save.trading_ledger
+    assert world.save.cargo == {"electronics": 2}
+    assert ledger.delivery_cost == (3-unknown)*100
+    assert ledger.delivery_revenue == 1500-unknown*500 and ledger.uncosted_deliveries == unknown*500
+    assert ledger.cargo_loss_cost == ledger.sales_cost == 0
+
+
+def test_faction_case_no_haven_disables_only_armed_ending_without_rng_or_mutation():
+    import copy
+    world = _faction_case_world(vr.FACTION_BLACKWAKE, "evidence")
+    for system in world.galaxy:
+        if system.economy == "Haven": system.economy = "Industrial"
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    assert "no Haven" in " ".join(vr.faction_story_lines(world, vr.FACTION_BLACKWAKE))
+    with pytest.raises(ValueError, match="No Haven"): vr.faction_story_action(world, vr.FACTION_BLACKWAKE, "H")
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+    vr.faction_story_action(world, vr.FACTION_BLACKWAKE, "A")
+    assert world.save.faction_stories[vr.FACTION_BLACKWAKE]["choice"] == "aid"
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+@pytest.mark.parametrize("stage", ["idle", "accepted", "evidence", "committed", "complete"])
+def test_faction_case_roundtrip_preserves_exact_state_and_legacy_absence(tmp_path, faction, stage):
+    import json
+    world = _faction_case_world(faction, stage)
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    expected = json.loads(json.dumps(world.save.to_dict()))
+    saved, fresh, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not fresh and saved.to_dict() == expected
+    assert ("faction_stories" in expected) == (stage != "idle")
+
+
+@pytest.mark.parametrize("record", [None, [], {"x": {}}, {"concord": {}}, {"concord": {"version": True, "stage": "accepted"}}, {"concord": {"version": 1, "stage": "bad"}}, {"concord": {"version": 1, "stage": "accepted", "choice": "aid"}}, {"concord": {"version": 1, "stage": "committed"}}, {"concord": {"version": 1, "stage": "complete", "choice": "bad"}}])
+def test_faction_case_invalid_state_preserves_original_career(tmp_path, record):
+    import json
+    world = _world_with_seed(42); data = world.save.to_dict(); data["faction_stories"] = record
+    path = tmp_path / "77.json"; raw = json.dumps(data).encode(); path.write_bytes(raw)
+    with pytest.raises(vr.ResumeError): vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("record", [{"version": 2, "stage": "accepted"}, {"version": 1, "stage": "accepted", "future": True}])
+def test_faction_case_future_state_is_not_downgraded(tmp_path, record):
+    import json
+    data = _world_with_seed(42).save.to_dict(); data["faction_stories"] = {"concord": record}
+    path = tmp_path / "77.json"; raw = json.dumps(data).encode(); path.write_bytes(raw)
+    with pytest.raises(vr.UnsupportedSave): vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+@pytest.mark.parametrize("stage", ["idle", "accepted", "evidence", "committed", "complete"])
+@pytest.mark.parametrize("width,height,style", [(20, 10, "plain"), (40, 12, "auto"), (80, 24, "auto")])
+def test_faction_case_pages_preserve_full_terms_without_writes(monkeypatch, faction, stage, width, height, style):
+    import copy,re
+    world = _faction_case_world(faction, stage)
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height); monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    output, bodies = io.StringIO(), []
+    world._checkpoint = lambda w: pytest.fail("Case browsing checkpointed")
+    monkeypatch.setattr(vr, "confirm", lambda *args: pytest.fail("Browsing opened a confirmation"))
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0)
+        assert "[B]Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
+        assert len(frame.splitlines()) <= height and all(vr._visible_width(row) <= width for row in frame.splitlines())
+        plain = vr._ANSI_RE.sub("", frame)
+        page, count = map(int, re.search(r"[\d,]+cr\s+(\d+)/(\d+)", plain).groups())
+        body = re.sub(r"^[\s>]*Case\s+[\d,]+cr\s+\d+/\d+\s*", "", plain)
+        bodies.append(re.split(r"\[[A-Z]\](?:Accept|Aid|Investigate|Hardline|Complete|Route|Back)", body)[0])
+        assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+        return "B" if page == count else ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): assert vr.screen_faction_story(vr.Palette(False), world, faction) is None
+    assert " ".join(" ".join(bodies).split()) == " ".join(" ".join(vr.faction_story_lines(world, faction)).split())
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+@pytest.mark.parametrize("stage,keys,ack,next_stage", [("idle", "A", "Case accepted:", "accepted"), ("accepted", "I", "Evidence recovered:", "evidence"), ("evidence", "H", "Course chosen:", "committed"), ("committed", "CY", "Case complete:", "complete")])
+def test_faction_case_real_process_kill_retains_each_acknowledged_stage(tmp_path, faction, stage, keys, ack, next_stage):
+    world = _faction_case_world(faction, stage)
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    commands = ("P" if faction == vr.FACTION_CONCORD else "W") + "S" + keys
+    with _door_stopped_at(tmp_path, commands.encode(), ack.encode()):
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert saved.faction_stories[faction]["stage"] == next_stage
+        assert saved.pilot.missions_completed == (1 if next_stage == "complete" else 0)
+        if next_stage == "complete": assert not saved.cargo and saved.trading_ledger.delivery_cost > 0
+
+
+@pytest.mark.parametrize("stage,keys,ack", [("idle", "A", "Case accepted:"), ("accepted", "I", "Evidence recovered:"), ("evidence", "H", "Course chosen:"), ("committed", "CY", "Case complete:")])
+def test_faction_case_checkpoint_failure_prevents_acknowledgement(monkeypatch, stage, keys, ack):
+    world = _faction_case_world(vr.FACTION_CONCORD, stage); output = io.StringIO()
+    commands = iter(keys); monkeypatch.setattr(vr, "read_key", lambda: next(commands))
+    def fail(current):
+        assert ack not in output.getvalue()
+        raise vr.SaveError()
+    world._checkpoint = fail
+    with contextlib.redirect_stdout(output), pytest.raises(vr.SaveError): vr.screen_faction_story(vr.Palette(False), world, vr.FACTION_CONCORD)
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+@pytest.mark.parametrize("choice", ["hardline", "aid"])
+def test_faction_case_real_route_completes_both_legs_with_ordinary_costs(monkeypatch, tmp_path, faction, choice):
+    world = _world_with_seed(42); ending = vr.FACTION_STORIES[faction][choice]
+    if ending["commodity"]: world.save.cargo = {ending["commodity"]: ending["quantity"]}
+    first, last = vr.faction_story_target(world, faction), vr.faction_story_target(world, faction, choice)
+    outward, onward = vr.bfs_path(world.by_id, 0, first), vr.bfs_path(world.by_id, first, last)
+    commands = iter("AR" + "J"*len(outward) + "BI" + ("H" if choice == "hardline" else "A") + "R" + "J"*len(onward) + "BC" + ("Y" if ending["commodity"] else "") + "B")
+    monkeypatch.setattr(vr, "read_key", lambda: next(commands)); monkeypatch.setattr(world.event_rng, "random", lambda: 0.99)
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    with contextlib.redirect_stdout(io.StringIO()): vr.screen_faction_story(vr.Palette(False), world, faction)
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert saved.current_system == last and saved.turn == len(outward) + len(onward)
+    expected_fuel = sum(vr.fuel_cost_for_jump(world.by_id[a], world.by_id[b], world.save.ship) for path in ([0] + outward, [first] + onward) for a, b in zip(path, path[1:]))
+    assert saved.ship.fuel == 24 - expected_fuel and expected_fuel > 0
+    assert saved.pilot.credits == 1200 + ending["reward"] and saved.pilot.missions_completed == 1
+    assert saved.faction_stories[faction]["stage"] == "complete" and saved.pending_travel is None
+    assert first in saved.discovered and last in saved.discovered
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+@pytest.mark.parametrize("stage,commands", [("idle", b""), ("idle", b">?<BBQ"), ("committed", b""), ("committed", b"CNBBQ"), ("complete", b"BBQ")])
+def test_faction_case_real_back_eof_and_refusal_preserve_career(tmp_path, faction, stage, commands):
+    import json,os,subprocess
+    world = _faction_case_world(faction, stage)
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 40, "terminal_height": 12}), encoding="utf-8")
+    original = (tmp_path / "77.json").read_bytes()
+    prefix = b"PS" if faction == vr.FACTION_CONCORD else b"WS"
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=prefix + commands,
+                            capture_output=True, timeout=10, env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)))
+    assert result.returncode == 0 and not result.stderr
+    assert b"Case " in result.stdout and (tmp_path / "77.json").read_bytes() == original
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+def test_faction_case_hostile_ending_suspends_opponent_perk_without_revoking_membership(faction):
+    world = _faction_case_world(faction, "committed", "hardline")
+    other = next(group for group in vr.FACTIONS if group != faction)
+    world.save.pilot.has_concord_commission = world.save.pilot.has_blackwake_made = True
+    world.save.pilot.reputation = {faction: 0, other: -40}
+    assert vr.faction_perk_active(world, other)
+    before = world.save.pilot.credits
+    vr.faction_story_action(world, faction, "C")
+    assert world.save.pilot.reputation[other] == -52 and not vr.faction_perk_active(world, other)
+    assert vr.faction_perk_active(world, faction)
+    assert world.save.pilot.has_concord_commission and world.save.pilot.has_blackwake_made
+    assert world.save.pilot.credits == before + vr.FACTION_STORIES[faction]["hardline"]["reward"]
+
+
+def test_faction_case_bearing_allows_only_active_haven_route_without_charting():
+    import copy
+    world = _faction_case_world(vr.FACTION_BLACKWAKE, "evidence")
+    target = vr.faction_story_target(world, vr.FACTION_BLACKWAKE, "hardline")
+    world.by_id[target].discovered = False
+    assert target not in vr.specialist_stations(world).values()
+    with pytest.raises(vr.MissionError, match="charted"): vr.prepare_route_jump(world, target)
+    vr.faction_story_action(world, vr.FACTION_BLACKWAKE, "H")
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    assert vr.prepare_route_jump(world, target) == vr.bfs_path(world.by_id, world.here.id, target)[0]
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng and not world.by_id[target].discovered
+    for lines in (vr.station_deck_lines(world), vr.pilot_recap(world)):
+        assert vr.FACTION_STORIES[vr.FACTION_BLACKWAKE]["title"] in " ".join(lines)
+    world.save.faction_stories[vr.FACTION_BLACKWAKE]["stage"] = "complete"
+    with pytest.raises(vr.MissionError, match="charted"): vr.prepare_route_jump(world, target)
+
+
+@pytest.mark.parametrize("fault", ["location", "cargo"])
+def test_faction_case_unavailable_handover_never_opens_confirmation(monkeypatch, fault):
+    world = _faction_case_world(vr.FACTION_CONCORD, "committed")
+    if fault == "location": world.save.current_system = 0
+    else: world.save.cargo.clear(); world.save.cargo_basis.clear()
+    keys = iter("CB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "confirm", lambda *args: pytest.fail("Unavailable handover opened confirmation"))
+    world._checkpoint = lambda w: pytest.fail("Unavailable handover checkpointed")
+    with contextlib.redirect_stdout(io.StringIO()): vr.screen_faction_story(vr.Palette(False), world, vr.FACTION_CONCORD)
+
+
 @pytest.mark.parametrize("route_kind", ["general", "archive"])
 def test_general_route_map_keeps_independent_tracked_objective_and_route_end(monkeypatch, route_kind):
     import copy
@@ -10577,6 +10845,7 @@ def test_general_route_map_keeps_independent_tracked_objective_and_route_end(mon
     assert "Public route destination" in " ".join(vr.map_inspection_lines(world, destination, path, destination))
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
     assert not world.by_id[target].discovered
+
 
 
 @pytest.mark.parametrize("stage", ["idle", "started"])
@@ -10657,3 +10926,68 @@ raise SystemExit(code)
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
     assert result.returncode==0 and result.stderr.strip()==b"REPLACED:0"
     assert (b"Edda Ro" if key=="P" else b"Rook Talan") in result.stdout
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+@pytest.mark.parametrize("stage", ["idle","accepted","evidence"])
+def test_faction_case_ending_selectors_only_appear_when_choice_is_available(faction,stage):
+    import copy
+    world=_faction_case_world(faction,stage);before=copy.deepcopy(world.save.to_dict());rng=world.event_rng.getstate()
+    lines=vr.faction_story_lines(world,faction)
+    for choice,key in [("hardline","H"),("aid","A")]:
+        label=vr.FACTION_STORIES[faction][choice]["label"]
+        row=next(line for line in lines if label+":" in line)
+        assert row.startswith(f"[{key}] ")==(stage=="evidence")
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+def test_faction_case_route_becomes_available_only_after_committing_ending(monkeypatch,faction):
+    import copy
+    world=_faction_case_world(faction,"evidence");before=copy.deepcopy(world.save.to_dict());rng=world.event_rng.getstate()
+    routes=[];checkpoints=[];world._checkpoint=lambda w:checkpoints.append(w.save.faction_stories[faction]["stage"])
+    output=io.StringIO();keys=iter("RARB")
+    def choose():
+        key=next(keys);frame=output.getvalue();output.seek(0);output.truncate(0)
+        if world.save.faction_stories[faction]["stage"]=="evidence":
+            assert "[R]Route" not in frame and world.save.to_dict()==before and world.event_rng.getstate()==rng
+        else:assert "[R]Route" in frame
+        return key
+    monkeypatch.setattr(vr,"read_key",choose)
+    monkeypatch.setattr(vr,"_screen_auto_route",lambda p,w,*,destination:routes.append(destination))
+    with contextlib.redirect_stdout(output):vr.screen_faction_story(vr.Palette(False),world,faction)
+    assert routes==[vr.faction_story_target(world,faction,"aid")] and checkpoints==["committed"]
+
+
+def test_faction_case_missing_haven_does_not_advertise_or_dispatch_hardline(monkeypatch):
+    world=_faction_case_world(vr.FACTION_BLACKWAKE,"evidence")
+    for system in world.galaxy:
+        if system.economy=="Haven":system.economy="Industrial"
+    keys=iter("HAB");output=io.StringIO();seen=[]
+    def choose():
+        key=next(keys);frame=output.getvalue();output.seek(0);output.truncate(0)
+        assert "[H]Hardline" not in frame
+        if key=="A":assert world.save.faction_stories[vr.FACTION_BLACKWAKE]["stage"]=="evidence"
+        return key
+    world._checkpoint=lambda w:seen.append(w.save.faction_stories[vr.FACTION_BLACKWAKE]["choice"])
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_faction_story(vr.Palette(False),world,vr.FACTION_BLACKWAKE)
+    assert seen==["aid"]
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+def test_faction_case_idle_route_is_unavailable_until_acceptance(monkeypatch,faction):
+    import copy
+    world=_faction_case_world(faction,"idle");before=copy.deepcopy(world.save.to_dict());rng=world.event_rng.getstate()
+    routes=[];checkpoints=[];world._checkpoint=lambda w:checkpoints.append(w.save.faction_stories[faction]["stage"])
+    output=io.StringIO();keys=iter("RARB")
+    def choose():
+        key=next(keys);frame=output.getvalue();output.seek(0);output.truncate(0)
+        if faction not in world.save.faction_stories:
+            assert "[R]Route" not in frame and world.save.to_dict()==before and world.event_rng.getstate()==rng
+        else:assert "[R]Route" in frame
+        return key
+    monkeypatch.setattr(vr,"read_key",choose)
+    monkeypatch.setattr(vr,"_screen_auto_route",lambda p,w,*,destination:routes.append(destination))
+    with contextlib.redirect_stdout(output):vr.screen_faction_story(vr.Palette(False),world,faction)
+    assert routes==[vr.faction_story_target(world,faction)] and checkpoints==["accepted"]
