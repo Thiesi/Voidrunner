@@ -1508,6 +1508,7 @@ def test_hull_refit_screen_declines_without_enough_credits(monkeypatch):
     world.save.pilot.credits = 100
     monkeypatch.setattr(vr, "confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not prompt")))
 
+    keys=iter("CB"); monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr._hull_refit_screen(vr.Palette(truecolor=False), world, "Freighter", 15_000)
@@ -1521,7 +1522,7 @@ def test_hull_refit_screen_declining_confirmation_makes_no_change(monkeypatch):
     world = _world_with_seed(31)
     world.save.pilot.credits = 20_000
 
-    monkeypatch.setattr(vr, "read_key", lambda: "N")
+    keys=iter("CNB"); monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     with contextlib.redirect_stdout(io.StringIO()):
         vr._hull_refit_screen(vr.Palette(truecolor=False), world, "Freighter", 15_000)
 
@@ -1535,7 +1536,7 @@ def test_hull_refit_screen_applies_the_refit_charges_credits_and_resets_hull_to_
     world.save.ship.hull_hp = 10  # damaged, below Shuttle's own max
     world.checkpoint()  # The existing 20,000cr balance has already been earned.
 
-    monkeypatch.setattr(vr, "read_key", lambda: "Y")
+    keys=iter("CY"); monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     before_log_len = len(world.save.pilot.log)
     with contextlib.redirect_stdout(io.StringIO()):
         vr._hull_refit_screen(vr.Palette(truecolor=False), world, "Freighter", 15_000)
@@ -1556,7 +1557,7 @@ def test_hull_refit_narrative_names_the_actual_previous_class_not_a_hardcoded_on
     world.save.ship.hull_class = "Cutter"
     world.save.pilot.credits = 50_000
 
-    monkeypatch.setattr(vr, "read_key", lambda: "Y")
+    keys=iter("CY"); monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr._hull_refit_screen(vr.Palette(truecolor=False), world, "Carrier", 45_000)
@@ -1571,7 +1572,7 @@ def test_shipyard_offers_two_refit_choices_from_shuttle_and_one_after_committing
     world = _world_with_seed(34)
     world.save.pilot.credits = 20_000
 
-    keys = iter(["G", "Y", "Q"])  # pick the first refit slot (Freighter), confirm, then leave
+    keys = iter(["G", "C", "Y", "Q"])  # pick the first refit slot (Freighter), commission, confirm, then leave
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -3297,6 +3298,7 @@ def test_hull_refit_records_a_highlight(monkeypatch):
     world.save.pilot.credits = 100_000
     monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
 
+    monkeypatch.setattr(vr,"read_key",lambda:"C")
     with contextlib.redirect_stdout(io.StringIO()):
         vr._hull_refit_screen(vr.Palette(truecolor=False), world, "Freighter", 5000)
 
@@ -5264,7 +5266,7 @@ def test_screen_customs_large_contraband_stash_has_complete_width_safe_terms(mon
 def test_service_actions_retain_result_and_updated_credit_heading(monkeypatch,action):
     world=_world_with_seed(309); world.save.pilot.credits=20_000
     world.save.ship.fuel=0; world.save.ship.hull_hp-=1
-    sequence={"upgrade":"AYQ","fuel":"RQ","repair":"PYQ","crew":"AYQ","refit":"GYQ","rejected":"AQ"}[action]
+    sequence={"upgrade":"AYQ","fuel":"RQ","repair":"PYQ","crew":"AYQ","refit":"GCYQ","rejected":"AQ"}[action]
     if action=="rejected": world.save.pilot.credits=0
     keys=iter(sequence); monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     monkeypatch.setattr(vr,"read_line_raw",lambda **kw:"1")
@@ -11209,6 +11211,134 @@ def test_promoted_navigator_survey_terms_match_actual_range_without_writes(paid,
     assert f"Range: {3+actual} connection hops" in terms
     distances=vr.bfs_hops(world.by_id,world.here.id)
     assert set(vr.survey_candidates(world))=={sid for sid,hops in distances.items() if hops<=3+actual and not world.by_id[sid].discovered}
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+
+
+@pytest.mark.parametrize("hull", list(vr.HULL_CLASSES))
+@pytest.mark.parametrize("condition,fraction,marks", [("Intact",1,0),("Scuffed",.75,1),("Damaged",.5,3),("Critical",.2,6)])
+def test_ship_portrait_damage_matches_real_hull_without_changing_ship(hull,condition,fraction,marks):
+    import copy
+    world=_world_with_seed(42); ship=world.save.ship; ship.hull_class=hull
+    ship.hull_hp=int(vr.hull_hp_max(ship)*fraction)
+    before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate(); registry=copy.deepcopy(vr.PORTRAITS)
+    large,compact,details,title=vr.viewport_content(world,"1")
+    assert title==hull and condition in details[0] and f"{ship.hull_hp}/{vr.hull_hp_max(ship)}" in details[0]
+    assert sum(row.count("x") for row in large)==marks
+    assert sum(row.count("x") for row in compact)==marks
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng and vr.PORTRAITS==registry
+
+
+@pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("style", list(vr.DISPLAY_STYLES))
+def test_every_portrait_has_distinct_complete_bounded_composition(monkeypatch,width,height,style):
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width); monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    monkeypatch.setattr(vr,"_OUTPUT_STYLE",style)
+    portraits=[art for category in vr.PORTRAITS.values() for art in category.values()]
+    assert len(portraits)==13
+    for layout in ("large","compact"):
+        assert len({tuple(art[layout]) for art in portraits})==13
+        assert all(row.isascii() and len(row)<=(38 if layout=="large" else 18) for art in portraits for row in art[layout])
+    for art in portraits:
+        details=["Real station information follows the complete portrait.", "Fuel 7/24; cargo 3/24 used."]
+        footer="[<>]Page [B]Back: "; title="Portrait"
+        pages=vr.portrait_pages(vr.Palette(True),art["large"],art["compact"],details,title,footer)
+        rendered=[]
+        for index,page in enumerate(pages):
+            monkeypatch.setattr(vr,"read_key",lambda:"B")
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                vr._draw_service_page(vr.Palette(True),title,[],footer,index,pages=pages)
+            frame=output.getvalue(); rendered.append(frame)
+            assert len(frame.splitlines())<=height
+            assert all(vr._visible_width(row)<=width for row in frame.splitlines())
+        chosen=art["large" if width>=40 and height>=16 else "compact"]
+        plain_pages=[[vr._ANSI_RE.sub("",row) for row in page] for page in pages]
+        assert sum(any(page[i:i+len(chosen)]==chosen for i in range(len(page))) for page in plain_pages)==1
+        text=" ".join(" ".join(row.split()) for page in plain_pages for row in page)
+        for detail in details:assert detail in text
+        output="".join(rendered)
+        if style in ("mono","plain"):assert "\x1b" not in output
+        elif style=="basic":assert "\x1b[" in output and "38;" not in output
+        else:assert "38;2;" in output
+        if style=="plain":assert output.isascii()
+
+
+@pytest.mark.parametrize("module", list(vr.WORKSHOPS))
+def test_station_portrait_uses_actual_economy_bearing_and_workshop(module):
+    world=_world_with_seed(42); world.save.current_system=vr.specialist_stations(world)[module]
+    large,compact,details,title=vr.viewport_content(world,"2"); here=world.here
+    assert large==vr.PORTRAITS["port"][here.economy]["large"] and title==here.economy
+    text=" ".join(details)
+    for value in (here.station_name,here.name,vr.sector_for(here),vr.WORKSHOPS[module]["owner"],vr.WORKSHOPS[module]["name"]):assert value in text
+    assert f"({here.x},{here.y})" in text and f"danger {here.danger}/5" in text
+
+
+@pytest.mark.parametrize("at_site,claimed", [(False,False),(True,False),(False,True),(True,True)])
+def test_discovery_portrait_requires_visit_or_recorded_investigation(at_site,claimed):
+    world=_world_with_seed(42)
+    if at_site:world.save.current_system=world.landmark["system_id"]
+    if claimed:world.save.flags["landmark_investigated"]=True
+    large,compact,details,_=vr.viewport_content(world,"3")
+    if at_site or claimed:
+        assert large==vr.PORTRAITS["site"][world.landmark["label"]]["large"] and compact
+        assert ("Salvage already claimed." if claimed else "Unclaimed salvage:") in " ".join(details)
+    else:assert not large and not compact and world.landmark["label"] not in " ".join(details)
+
+
+@pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("style", list(vr.DISPLAY_STYLES))
+def test_viewport_visits_every_view_and_page_without_writes(monkeypatch,width,height,style):
+    import copy,re
+    world=_world_with_seed(42); world.save.current_system=world.landmark["system_id"]
+    before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate()
+    world._checkpoint=lambda w:pytest.fail("Viewport wrote a save")
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width); monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height); monkeypatch.setattr(vr,"_OUTPUT_STYLE",style)
+    output=io.StringIO(); frames=[]; view=1
+    def choose():
+        nonlocal view
+        frame=output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert len(frame.splitlines())<=height and all(vr._visible_width(row)<=width for row in frame.splitlines())
+        page,count=map(int,re.search(r"(\d+)/(\d+)",vr._ANSI_RE.sub("",frame)).groups())
+        if page<count:return ">"
+        view+=1
+        return str(view) if view<=3 else "B"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_viewport(vr.Palette(False),world)
+    text=" ".join(vr._ANSI_RE.sub(""," ".join(frames)).split())
+    assert "Views:" in text and world.here.station_name in text and "Discovery" in text
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+
+
+@pytest.mark.parametrize("commands", [b"V",b"V23><BQ",b"YV23><BQ"])
+def test_real_viewport_browsing_preserves_career_bytes(tmp_path,commands):
+    import json,os,subprocess
+    world=_world_with_seed(42); world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
+    before=(tmp_path/"77.json").read_bytes()
+    info=tmp_path/"door_info.json"; info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,timeout=10,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
+    assert result.returncode==0 and not result.stderr and b"[1-3]View" in result.stdout
+    assert (tmp_path/"77.json").read_bytes()==before
+
+
+@pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])
+def test_refit_portrait_preview_pages_keep_terms_and_back_changes_nothing(monkeypatch,width,height):
+    import copy,re
+    world=_world_with_seed(42); world.save.pilot.credits=20000; world.save.ship.fuel=7
+    before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate()
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width); monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    world._checkpoint=lambda w:pytest.fail("Preview checkpointed")
+    monkeypatch.setattr(vr,"confirm",lambda *args:pytest.fail("Preview asked for confirmation"))
+    output=io.StringIO(); frames=[]
+    def choose():
+        frame=output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert len(frame.splitlines())<=height and all(vr._visible_width(row)<=width for row in frame.splitlines())
+        page,count=map(int,re.search(r"(\d+)/(\d+)",vr._ANSI_RE.sub("",frame)).groups())
+        return ">" if page<count else "B"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):assert vr._hull_refit_screen(vr.Palette(False),world,"Freighter",15000) is None
+    text=" ".join(vr._ANSI_RE.sub(""," ".join(frames)).split())
+    for term in ("15,000cr", "20,000cr", "Fuel stays at 7", "does not fill", "cannot be reversed"):
+        assert term in text
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 

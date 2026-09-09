@@ -4025,7 +4025,7 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
     lines += faction_story_recap(world)
     actions = ["[M] Commodity Market", "[Y] Engineering Yard", "[B] Mission Board",
                "[C] Navigation Chart", "[S] Pilot Status", "[H] Hall of Fame",
-               "[G] Pilot Guide", "[N] Archive Contacts", "[T] Trading Ledger", "[O] Display Options", "[Q] Disembark & Save"]
+               "[G] Pilot Guide", "[N] Archive Contacts", "[T] Trading Ledger", "[V] Viewport", "[O] Display Options", "[Q] Disembark & Save"]
     if landmark_available_here(world): actions.append(f"[L] {world.landmark['label']}")
     actions += ["[P] Concord Contacts", "[W] Blackwake Contacts"]
     row = ""
@@ -4075,7 +4075,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
         if choice == ">": page = min(page + 1, count - 1)
         elif choice == "<": page = max(0, page - 1)
         elif choice == "X": expanded, page = not expanded, 0
-        elif choice in "MYBCSHGTQLDPWON" and len(choice) == 1:
+        elif choice in "MYBCSHGTQLDPWONV" and len(choice) == 1:
             return choice
 
 
@@ -4271,13 +4271,293 @@ def screen_archive(p: Palette, world: World) -> None:
         page = 0
 
 
+# Authored native portraits: complete large and compact compositions.
+PORTRAITS = {
+    "ship": {
+        "Shuttle": {
+            "large": [
+                "             /\\",
+                "      ______/[]\\______",
+                "  <==|____  ____  ____|==>",
+                "         /_/    \\_\\",
+                "          v      v"
+            ],
+            "compact": [
+                "       /\\",
+                "  <===[__]=== >",
+                "      /__\\"
+            ]
+        },
+        "Freighter": {
+            "large": [
+                "       [==] [==] [==]",
+                "   ____|__|_|__|_|__|____",
+                "  /  []    FREIGHT    []  >",
+                "  \\____   ________   ____/",
+                "     [===]        [===]"
+            ],
+            "compact": [
+                "    [] [] []",
+                "  <=|______|=>",
+                "    ==    =="
+            ]
+        },
+        "Cutter": {
+            "large": [
+                "              /\\",
+                "             /||\\",
+                "          __/ || \\__",
+                "     <===/___/[]\\___\\===>",
+                "          \\__||||__/",
+                "             /__\\"
+            ],
+            "compact": [
+                "       /\\",
+                "  <===/[]\\===>",
+                "      |==|"
+            ]
+        },
+        "Carrier": {
+            "large": [
+                "      ____________________",
+                "  ___/ [::] [::] [::] [::] \\___",
+                " <  _    _________________   _  >",
+                "  \\| |==|  []  []  []  []  |==| |/",
+                "   |_|  |_________________|  |_|",
+                "      ===   ===   ===   ==="
+            ],
+            "compact": [
+                "  __[::][::]__",
+                " <|==[][][]==|>",
+                "   ==      =="
+            ]
+        }
+    },
+    "port": {
+        "Agricultural": {
+            "large": [
+                "          .----------.",
+                "        .'  Y  Y  Y   '.",
+                "       /  __|__|__|__   \\",
+                "  ====|  /  GREENHOUSE \\ |====",
+                "       \\ \\____________/ /",
+                "        '--------------'"
+            ],
+            "compact": [
+                "    .--Y-Y--.",
+                " ==( __|_|__ )==",
+                "    '-------'"
+            ]
+        },
+        "Industrial": {
+            "large": [
+                "       |--.          .--|",
+                "   ____|  |__________|  |____",
+                "  |  []   |  _    _  |   []  |",
+                "  |_______|_| |__| |_|_______|",
+                "       ===|  DOCKS  |===",
+                "          |_________|"
+            ],
+            "compact": [
+                "   |--.   .--|",
+                "  [|__|===|__|]",
+                "     [_____]"
+            ]
+        },
+        "Mining": {
+            "large": [
+                "         .  /\\  .",
+                "      . / \\/  \\/ \\ .",
+                "    ===|  CORE DRILL |===",
+                "       |____||______|",
+                "       /\\/\\ || /\\/\\",
+                "      /____\\||/____\\"
+            ],
+            "compact": [
+                "    /\\/\\/\\",
+                "  ==[__||__]==",
+                "    /__||__\\"
+            ]
+        },
+        "Tech": {
+            "large": [
+                "       \\  |  /     .",
+                "        \\ | /   .",
+                "         \\|/ .",
+                "      ____V____",
+                "  ===[  ARRAY  ]===",
+                "      |__|_|__|"
+            ],
+            "compact": [
+                "     \\ | /",
+                "  ===[\\|/]===",
+                "      [_]"
+            ]
+        },
+        "Haven": {
+            "large": [
+                "        .----.    __",
+                "     .-' [==] '-./__\\",
+                "    /   __    __    . \\",
+                "  ==|  /  \\__/  \\  .  |==",
+                "    \\  \\__DOCK__/    /",
+                "     '----.____.----'"
+            ],
+            "compact": [
+                "    .-.____.",
+                "  ==( [__] .)==",
+                "    '------'"
+            ]
+        }
+    },
+    "site": {
+        "the Derelict Ark": {
+            "large": [
+                "       __________________",
+                "    .-' [] [] [] [] [] [] '-.",
+                "  <|====  CRYO DECKS  ====|  >",
+                "    '-.________________.-'",
+                "          .    .   ."
+            ],
+            "compact": [
+                "   .----------.",
+                "  <|[][][][][]|>",
+                "   '----------'"
+            ]
+        },
+        "the Silent Cathedral": {
+            "large": [
+                "            /\\",
+                "       /\\  /||\\  /\\",
+                "      /||\\/ || \\/||\\",
+                "     |  /\\  /\\  /\\  |",
+                "     | |  ||  ||  | |",
+                "     |_|__||__||__|_|"
+            ],
+            "compact": [
+                "    /\\ /\\ /\\",
+                "   | || || |",
+                "   |_|__|__|"
+            ]
+        },
+        "the Shattered Yard": {
+            "large": [
+                "    |---.        .---|",
+                "    |   \\    *   /   |",
+                "  __|__  \\      /  __|__",
+                " | [ ] |   .  .   | [ ] |",
+                " |_____|  /    \\  |_____|",
+                "       .          ."
+            ],
+            "compact": [
+                "   |--.  .--|",
+                "  [_]  *  [_]",
+                "     .   ."
+            ]
+        },
+        "the Long Watch": {
+            "large": [
+                "     .       .       .",
+                "       \\     |     /",
+                "        \\____|____/",
+                "             |",
+                "        _____|_____",
+                "   ====[  LISTEN  ]====",
+                "        |_________|"
+            ],
+            "compact": [
+                "    \\__|__/",
+                "    ___|___",
+                "  ==[_____] =="
+            ]
+        }
+    }
+}
+
+
+def hull_condition(ship: Ship) -> str:
+    maximum = hull_hp_max(ship)
+    if ship.hull_hp * 5 <= maximum: return "Critical"
+    if ship.hull_hp * 2 <= maximum: return "Damaged"
+    return "Scuffed" if ship.hull_hp < maximum else "Intact"
+
+
+def ship_portrait(ship: Ship, layout: str) -> list[str]:
+    rows = [list(row) for row in PORTRAITS["ship"][ship.hull_class][layout]]
+    marks = {"Intact":0,"Scuffed":1,"Damaged":3,"Critical":6}[hull_condition(ship)]
+    positions = [(r,c) for r,row in enumerate(rows) for c,char in enumerate(row) if char in "_=#"]
+    count = min(marks,len(positions))
+    for index in range(count):
+        r,c = positions[index*len(positions)//count]; rows[r][c] = "x"
+    return ["".join(row) for row in rows]
+
+
+def portrait_pages(p: Palette, large: list[str], compact: list[str], details: list[str], title: str,
+                   footer: str, *, color: str | None = None, leading: list[str] | None = None) -> list[list[str]]:
+    """Keep one authored silhouette together; wrap and paginate ordinary prose."""
+    width = max(1,_OUTPUT_WIDTH-1)
+    art = list(large if _OUTPUT_WIDTH >= 40 and _OUTPUT_HEIGHT >= 16 else compact)
+    all_lines = (leading or []) + art + details
+    capacity = max(len(page) for page in _trade_pages(all_lines,title,footer))
+    if len(art)>capacity or any(_visible_width(row)>width for row in art): art=list(compact)
+    if len(art)>capacity or any(_visible_width(row)>width for row in art): art=[]
+    groups = [(_wrap_output(_mission_plain(line),width).split("\r\n"),False) for line in leading or []]
+    if art: groups.append((art,True))
+    groups += [(_wrap_output(_mission_plain(line),width).split("\r\n"),False) for line in details]
+    pages=[[]]
+    for rows,illustrated in groups:
+        if pages[-1] and len(pages[-1])+len(rows)>capacity:pages.append([])
+        for row in rows:
+            if len(pages[-1])==capacity:pages.append([])
+            pages[-1].append(f"{color or p.accent}{row}{RESET}" if illustrated else row)
+    return pages
+
+
+def viewport_content(world: World, view: str) -> tuple[list[str],list[str],list[str],str]:
+    ship,here=world.save.ship,world.here
+    if view=="1":
+        details=[f"Your {ship.hull_class}: {hull_condition(ship)}. Hull {ship.hull_hp}/{hull_hp_max(ship)}.",
+                 f"Fuel {ship.fuel}/{fuel_capacity(ship)}; cargo {sum(world.save.cargo.values())}/{cargo_capacity(ship)} used.",
+                 "Hull damage is marked with x shading. Capacity is separate from hull condition."]
+        return ship_portrait(ship,"large"),ship_portrait(ship,"compact"),details,ship.hull_class
+    if view=="2":
+        art=PORTRAITS["port"][here.economy]
+        details=[f"{here.station_name}: {here.economy}.",f"{here.name} ({here.x},{here.y}); {sector_for(here)}; danger {here.danger}/5."]
+        for module,sid in specialist_stations(world).items():
+            if sid==here.id:
+                info=WORKSHOPS[module];details.append(f"Specialist: {info['name']}; {info['owner']}.")
+        return art["large"],art["compact"],details,here.economy
+    if world.here.id==world.landmark["system_id"] or world.save.flags.get("landmark_investigated"):
+        art=PORTRAITS["site"][world.landmark["label"]]
+        details=[world.landmark["label"],world.landmark["flavor"],
+                 "Salvage already claimed." if world.save.flags.get("landmark_investigated") else f"Unclaimed salvage: {world.landmark['reward_credits']:,}cr."]
+        return art["large"],art["compact"],details,"Discovery"
+    return [],[],["No discovery portrait recorded. Visit a landmark to see its portrait."],"Discovery"
+
+
+def screen_viewport(p: Palette, world: World, view: str = "1") -> None:
+    page=0;footer="[1-3]View [<>]Page [B]Back: "
+    while True:
+        large,compact,details,title=viewport_content(world,view)
+        details += ["Views: [1] Ship, [2] Station, [3] Discovery."]
+        color = p.wrong if view=="1" and hull_condition(world.save.ship)=="Critical" else p.gold if view=="1" and hull_condition(world.save.ship)!="Intact" else p.accent
+        pages=portrait_pages(p,large,compact,details,title,footer,color=color)
+        key,page,count=_draw_service_page(p,title,[],footer,page,pages=pages)
+        if key in ("B","Q"):return
+        if key in ("1","2","3"):view,page=key,0
+        elif key==">":page=min(page+1,count-1)
+        elif key=="<":page=max(page-1,0)
+
+
 def screen_landmark(p: Palette, world: World) -> None:
     page, result = 0, []
     while True:
         available = landmark_available_here(world)
-        lines = result + [world.landmark["flavor"], f"Unclaimed salvage: {world.landmark['reward_credits']}cr." if available else "Salvage already claimed or unavailable here."]
-        action, page, count = _draw_service_page(p, world.landmark["label"], lines,
-                                                "[I]Investigate [B]Back [<>]Page: " if available else "[B]Back [<>]Page: ", page)
+        status = f"Unclaimed salvage: {world.landmark['reward_credits']}cr." if available else "Salvage already claimed or unavailable here."
+        footer = "[I]Investigate [B]Back [<>]Page: " if available else "[B]Back [<>]Page: "
+        large,compact,_,_=viewport_content(world,"3")
+        pages=portrait_pages(p,large,compact,[world.landmark["flavor"]],world.landmark["label"],footer,leading=result + [status])
+        action,page,count=_draw_service_page(p,world.landmark["label"],[],footer,page,pages=pages)
         if action in ("B", "Q"): return
         if action == ">": page = min(page + 1, count - 1); continue
         if action == "<": page = max(0, page - 1); continue
@@ -5093,7 +5373,7 @@ def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, pa
 
 def screen_shipyard(p: Palette, world: World) -> None:
     page, result = 0, None
-    footer = "[<]Prev [>]Next [R]Fuel [P]Repair [K]Crew [S]Specialists [Q]Back: "
+    footer = "[<]Prev [>]Next [R]Fuel [P]Repair [K]Crew [S]Specialists [V]Ship [Q]Back: "
     while True:
         lines = shipyard_lines(world)
         if result: lines.insert(0, "Result: " + result)
@@ -5101,6 +5381,7 @@ def screen_shipyard(p: Palette, world: World) -> None:
         if action == "Q": return
         if action == ">": page = min(page + 1, count - 1); continue
         if action == "<": page = max(0, page - 1); continue
+        if action == "V": screen_viewport(p,world); continue
         keys = list(UPGRADES)
         refits = HULL_REFITS[world.save.ship.hull_class]
         refit_keys = LETTERS[len(keys):len(keys) + len(refits)]
@@ -5391,28 +5672,33 @@ def _repair(p: Palette, world: World) -> str | None:
 
 
 def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -> str | None:
-    """One hull-class refit, generalized over `HULL_REFITS`'s own
-    branching ladder -- Shuttle owners see two independent calls of this
-    (Freighter or Cutter), Freighter/Cutter owners see one (Carrier),
-    Carrier owners see none. Never reversible, matching this refit's own
-    "permanent commissioning" tone -- there is no downgrade path."""
-    ship = world.save.ship
-    if world.save.pilot.credits < cost:
-        out_line(f"{p.wrong}Need {cost}cr for the {target_class} refit.{RESET}")
-        return f"Need {cost}cr for the {target_class} refit."
-    if not confirm(f"Commission a {target_class}-class refit for {cost}cr? "
-                    f"This is a permanent hull upgrade.", p):
-        return
-    previous_class = ship.hull_class
-    world.save.pilot.credits -= cost
-    ship.hull_class = target_class
-    ship.hull_hp = hull_hp_max(ship)
-    world.save.pilot.note(f"Commissioned a {target_class}-class hull refit.")
-    world.save.pilot.highlight(f"Commissioned a {target_class}-class hull refit.")
-    world.checkpoint()
-    out_line(f"{p.gold}{BOLD}Your {previous_class} is towed into drydock and emerges a {target_class}.{RESET}")
-    out_line(f"{p.gold}Cargo, hull, and fuel capacity all jump considerably.{RESET}")
-    return f"Commissioned a {target_class} hull for {cost}cr."
+    """Read-only commissioning preview, then deliberate action and confirmation."""
+    page,result=0,None;footer="[C]Commission [B]Back [<>]Page: "
+    while True:
+        ship=world.save.ship;preview=dataclasses.replace(ship,hull_class=target_class)
+        preview.hull_hp=hull_hp_max(preview)
+        details=[f"Refit preview: {ship.hull_class} to {target_class} for {cost:,}cr. Credits {world.save.pilot.credits:,}cr.",
+                 f"Hull restored to {hull_hp_max(preview)}. Cargo capacity {cargo_capacity(preview)}; fuel capacity {fuel_capacity(preview)}.",
+                 f"Existing cargo and modules stay. Fuel stays at {ship.fuel}; commissioning does not fill the larger tank.",
+                 "This permanent hull upgrade cannot be reversed. [C] Commission asks for final confirmation."]
+        if world.save.pilot.credits<cost:details.append(f"Need {cost}cr for the {target_class} refit.")
+        if world.save.pending_travel is not None:details.append("Finish the current journey first.")
+        pages=portrait_pages(p,ship_portrait(preview,"large"),ship_portrait(preview,"compact"),details,"Refit "+target_class,footer,leading=[result] if result else [])
+        key,page,count=_draw_service_page(p,"Refit "+target_class,[],footer,page,pages=pages)
+        if key in ("B","Q"):return result
+        if key==">":page=min(page+1,count-1);continue
+        if key=="<":page=max(page-1,0);continue
+        if key!="C":continue
+        if world.save.pending_travel is not None:result,page="Finish the current journey first.",0;continue
+        if world.save.pilot.credits<cost:result,page=f"Need {cost}cr for the {target_class} refit.",0;continue
+        if not confirm(f"Commission a {target_class}-class refit for {cost}cr? This is a permanent hull upgrade.",p):continue
+        previous_class=ship.hull_class
+        world.save.pilot.credits-=cost;ship.hull_class=target_class;ship.hull_hp=hull_hp_max(ship)
+        world.save.pilot.note(f"Commissioned a {target_class}-class hull refit.")
+        world.save.pilot.highlight(f"Commissioned a {target_class}-class hull refit.")
+        world.checkpoint()
+        out_line(f"{p.gold}{BOLD}Your {previous_class} is towed into drydock and emerges a {target_class}.{RESET}")
+        return f"Commissioned a {target_class} hull for {cost}cr."
 
 
 def _mission_plain(text) -> str:
@@ -7396,6 +7682,9 @@ def main() -> int:
             choice = screen_station_menu(p, world)
             if choice == "O":
                 screen_display_options(p, world)
+                continue
+            if choice == "V":
+                screen_viewport(p, world)
                 continue
             if choice == "T":
                 screen_trading_ledger(p, world)
