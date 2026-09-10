@@ -8546,7 +8546,7 @@ def test_tactical_brace_checkpoint_survives_real_kill_and_invalid_repeat(tmp_pat
     with _door_stopped_at(tmp_path, b"CAYG", b"Braced;"):
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         combat = saved.pending_travel["encounter"]["combat"]
-        assert combat["tactics"]["version"] == 1 and not combat["tactics"]["brace_ready"]
+        assert combat["tactics"]["version"] == vr.TACTICAL_RULESET_VERSION and not combat["tactics"]["brace_ready"]
         assert combat["tactics"]["step"] == 1 and 0 < combat["pirate"]["hp"] < combat["pirate"]["hp_max"]
     before = (tmp_path / "77.json").read_bytes()
     with _door_stopped_at(tmp_path, b"GI", b"Tactical Systems:"):
@@ -8976,6 +8976,21 @@ def test_invalid_squadron_formation_preserves_original_save(tmp_path, fault):
     before = path.read_bytes()
     with pytest.raises(vr.ResumeError): vr.load_or_create_save(tmp_path, 77, "Tester")
     assert path.read_bytes() == before
+
+
+def test_a_version_1_squadron_checkpoint_still_resumes_and_keeps_its_ruleset(tmp_path):
+    """A fight checkpointed under the old curve must not become unloadable."""
+    import json
+    world, pirates = _world_with_coordinated_squadron()
+    combat = world.save.pending_travel["encounter"]["combat"]
+    combat["tactics"] = vr.new_tactics(pirates[0], 1)
+    world.save.event_rng_state = world.event_rng.getstate()
+    (tmp_path / "77.json").write_text(json.dumps(world.save.to_dict()), encoding="utf-8")
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert saved.pending_travel["encounter"]["combat"]["tactics"]["version"] == 1
+    restored = vr.World(saved)
+    assert vr.switch_squadron_target(restored)  # swapping target inside the fight keeps the old curve
+    assert restored.save.pending_travel["encounter"]["combat"]["tactics"]["version"] == 1
 
 
 def test_target_selection_closes_after_engagement_without_effects(monkeypatch):
@@ -12380,3 +12395,47 @@ def test_legend_threshold_is_twice_void_baron_and_promotion_never_demotes():
     assert vr.check_rank_up(world) == "Legend of the Frontier"
     world.save.pilot.credits = 10
     assert vr.career_rank(world.save.pilot) == "Legend of the Frontier" and vr.check_rank_up(world) is None
+
+
+# --- #406: a versioned threat curve without a tier 2-to-3 cliff --------------------------
+
+
+def test_new_fights_use_ruleset_two_and_cached_fights_keep_their_curve():
+    world = _world_with_seed(42); pirate = vr.Pirate("Probe", 3, 65, 65)
+    tactics = vr.new_tactics(pirate)
+    assert tactics["version"] == 2 and vr.tactical_threat_bonus(tactics) == (0, 3, 6, 8, 34)
+    assert vr.tactical_threat_bonus({"version": 1}) == (0, 3, 6, 20, 55) and vr.tactical_threat_bonus(None) == (0, 3, 6, 20, 55)
+    ship = world.save.ship
+    v1 = vr._tactical_incoming_damage(ship, 3, "volley", 9, tactics={"version": 1})
+    v2 = vr._tactical_incoming_damage(ship, 3, "volley", 9, tactics={"version": 2})
+    assert v1 == 47 and v2 == 28 and v2 < v1
+
+
+def test_both_tactical_versions_load_and_others_are_unsupported():
+    world, pirate = _world_with_pending_fight(tactics={"version": 1, "profile": "Raider", "step": 0, "brace_ready": True})
+    vr.SaveData.from_dict(world.save.to_dict())
+    world.save.pending_travel["encounter"]["combat"]["tactics"]["version"] = 2
+    vr.SaveData.from_dict(world.save.to_dict())
+    world.save.pending_travel["encounter"]["combat"]["tactics"]["version"] = 3
+    with pytest.raises(vr.UnsupportedSave): vr.SaveData.from_dict(world.save.to_dict())
+
+
+def test_threat_curve_has_no_cliff_between_adjacent_tiers():
+    bonus = vr.TACTICAL_THREAT_BONUS_BY_VERSION[2]
+    assert bonus[:3] == vr.TACTICAL_THREAT_BONUS_BY_VERSION[1][:3]  # tiers 0-2 unchanged
+    assert bonus[3] - bonus[2] <= 3 and bonus[4] >= 4 * bonus[3]  # no cliff into tier 3; tier 4 still punishes
+
+
+def test_starter_shuttle_with_brace_survives_tier_three_more_often_than_not():
+    import random
+    wins = 0
+    for seed in range(200):
+        world = _world_with_seed(1); world.event_rng.seed(seed)
+        ship = world.save.ship; ship.hull_hp = vr.hull_hp_max(ship)
+        pirate = vr.Pirate(vr.PIRATE_NAMES[seed % len(vr.PIRATE_NAMES)], 3, 65, 65)
+        tactics = vr.new_tactics(pirate)
+        while pirate.hp > 0 and ship.hull_hp > 0:
+            action = "G" if vr.tactical_intent(tactics) == "volley" and tactics["brace_ready"] else "F"
+            vr.tactical_round(world, pirate, tactics, action)
+        wins += ship.hull_hp > 0
+    assert 70 <= wins <= 160, wins  # about a coin flip with Brace: survivable, not a walkover

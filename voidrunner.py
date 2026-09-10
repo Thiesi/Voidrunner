@@ -1048,7 +1048,7 @@ def _validate_tactics(value: dict) -> None:
     if not isinstance(value, dict): raise ValueError("invalid tactical state")
     _reject_unknown_save_fields(value, {"version", "profile", "step", "brace_ready"}, "tactical combat")
     if type(value.get("version")) is not int: raise ValueError("invalid tactical version")
-    if value["version"] != 1: raise UnsupportedSave("This fight uses an unsupported tactical ruleset.")
+    if value["version"] not in TACTICAL_THREAT_BONUS_BY_VERSION: raise UnsupportedSave("This fight uses an unsupported tactical ruleset.")
     if (type(value.get("profile")) is not str or value["profile"] not in TACTICAL_PROFILES
             or type(value.get("step")) is not int or not 0 <= value["step"] < 3
             or type(value.get("brace_ready")) is not bool):
@@ -1685,7 +1685,7 @@ def _validate_pending_travel_consistency(save: SaveData) -> None:
                 if any(combat["pirate"][key] != source[key] for key in ("name", "tier", "hp_max")):
                     raise ValueError("formation target mismatch")
                 if not formation["engaged"] and (combat["outcome"] is not None or combat["pirate"]["hp"] != source["hp"]
-                                                  or combat["tactics"] != new_tactics(Pirate(**source))):
+                                                  or combat["tactics"] != new_tactics(Pirate(**source), combat["tactics"]["version"])):
                     raise ValueError("formation acted before engagement")
         if warrant is not None:
             if travel["phase"] != "primary" or travel["primary"] != "bounty":
@@ -2772,12 +2772,27 @@ TACTICAL_PROFILES = {
 # Outgoing/incoming percentages; the displayed intent uses this same calculation.
 TACTICAL_INTENTS = {"attack": (100, 100), "volley": (100, 160),
                     "recover": (125, 35), "cover": (65, 65), "harry": (80, 75)}
-TACTICAL_THREAT_BONUS = (0, 3, 6, 20, 55)
+# Per-tier threat bonus by tactical ruleset version. Version 1 jumped from 6 to
+# 20 between tiers 2 and 3, which took a starting Shuttle from a 99% win with
+# Brace to 0% between adjacent danger ratings (issue #406). Version 2 keeps
+# tiers 0-2, sets tier 3 at 8 (a bracing Shuttle wins about half of them) and
+# tier 4 at 34 (a maxed Carrier still loses about 40% of its hull to a tier-4
+# squadron). A fight keeps the ruleset it started with.
+TACTICAL_THREAT_BONUS_BY_VERSION = {1: (0, 3, 6, 20, 55), 2: (0, 3, 6, 8, 34)}
+TACTICAL_RULESET_VERSION = 2
+TACTICAL_THREAT_BONUS = TACTICAL_THREAT_BONUS_BY_VERSION[TACTICAL_RULESET_VERSION]
 
 
-def new_tactics(pirate: Pirate) -> dict:
+def tactical_threat_bonus(tactics: dict | None) -> tuple[int, ...]:
+    return TACTICAL_THREAT_BONUS_BY_VERSION[tactics.get("version", 1) if tactics else 1]
+
+
+def new_tactics(pirate: Pirate, version: int = TACTICAL_RULESET_VERSION) -> dict:
+    """Opening tactical state. A fight keeps the ruleset it started under, so
+    resuming a checkpoint or switching squadron target inside one carries its
+    saved `version` rather than adopting the current one (issue #406 review)."""
     profile = list(TACTICAL_PROFILES)[sum(map(ord, pirate.name)) % len(TACTICAL_PROFILES)]
-    return {"version": 1, "profile": profile, "step": 0, "brace_ready": True}
+    return {"version": version, "profile": profile, "step": 0, "brace_ready": True}
 
 
 def tactical_intent(tactics: dict) -> str:
@@ -2800,7 +2815,7 @@ def switch_squadron_target(world: World) -> str:
     state["pirates"][0], state["pirates"][1] = state["pirates"][1], state["pirates"][0]
     pirate = Pirate(**state["pirates"][0])
     message = f"Target selected: {pirate.name}, tier {pirate.tier}."
-    combat.update(pirate=dataclasses.asdict(pirate), tactics=new_tactics(pirate), lines=[message])
+    combat.update(pirate=dataclasses.asdict(pirate), tactics=new_tactics(pirate, combat["tactics"]["version"]), lines=[message])
     return message
 
 
@@ -2818,8 +2833,9 @@ def squadron_terms(world: World) -> list[str]:
     return lines
 
 
-def _tactical_incoming_damage(ship: Ship, tier: int, intent: str, roll: int, *, braced: bool = False, cover: int = 0) -> int:
-    raw = roll + TACTICAL_THREAT_BONUS[tier]
+def _tactical_incoming_damage(ship: Ship, tier: int, intent: str, roll: int, *, braced: bool = False, cover: int = 0,
+                              tactics: dict | None = None) -> int:
+    raw = roll + tactical_threat_bonus(tactics)[tier]
     damage = max(1, (raw * TACTICAL_INTENTS[intent][1] + 99) // 100 - ship.shield_tier * 3)
     damage += cover
     return (damage + 3) // 4 if braced else damage
@@ -2827,7 +2843,8 @@ def _tactical_incoming_damage(ship: Ship, tier: int, intent: str, roll: int, *, 
 
 def tactical_retaliation(world: World, pirate: Pirate, tactics: dict, *, braced: bool = False) -> tuple[int, list[str]]:
     intent = tactical_intent(tactics)
-    damage = _tactical_incoming_damage(world.save.ship, pirate.tier, intent, world.event_rng.randint(4, 9), braced=braced, cover=squadron_cover(world))
+    damage = _tactical_incoming_damage(world.save.ship, pirate.tier, intent, world.event_rng.randint(4, 9), braced=braced,
+                                       cover=squadron_cover(world), tactics=tactics)
     world.save.ship.hull_hp = max(0, world.save.ship.hull_hp - damage)
     tactics["step"] = (tactics["step"] + 1) % 3
     return damage, [f"The {pirate.name} uses {intent} and hits you for {damage} damage."]
@@ -7625,10 +7642,10 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     ]
     if tactics is not None:
         intent = tactical_intent(tactics)
-        low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, cover=squadron_cover(world)) for roll in (4, 9))
+        low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, cover=squadron_cover(world), tactics=tactics) for roll in (4, 9))
         lines.append(f"{tactics['profile']} intent: {intent.upper()}; incoming {low}-{high} damage if it survives or you fail to disengage.")
         if tactics["brace_ready"]:
-            low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, braced=True, cover=squadron_cover(world)) for roll in (4, 9))
+            low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, braced=True, cover=squadron_cover(world), tactics=tactics) for roll in (4, 9))
             lines.append(f"[G] Brace: reduced shot (55%); incoming {low}-{high}. Fire recharges Brace.")
         else: lines.append("Brace recharging: fire once before using G again.")
         if details:
