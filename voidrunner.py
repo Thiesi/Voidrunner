@@ -5237,7 +5237,7 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choi
             pages.append(ordinary_page()); current = pages[-1]
         current["choices"].append(value)
         choice = len(current["choices"])
-        current["rows"].extend(f"[{choice}] {row}" for row in wrapped)
+        current["rows"].extend(keyed_rows(str(choice), wrapped))
     if len(pages) > 1 and not pages[-1]["rows"]: pages.pop()
     if not options and not notice_rows: pages[0]["rows"] = ["No observed destinations yet."]
     page = max(0, min(page_state.get("page", 0), len(pages) - 1)) if page_state is not None else 0
@@ -6584,7 +6584,7 @@ def screen_missions(p: Palette, world: World) -> None:
         capacity = max(1, _OUTPUT_HEIGHT - overhead)
         pages = [([], [])]  # rows, selectable contracts; continued rows stay selectable
         for mission, active, rows in wrapped:
-            for row in rows:
+            for part, row in enumerate(rows):
                 body, choices = pages[-1]
                 choice = next((i for i, (m, _) in enumerate(choices) if m is mission), None)
                 if len(body) >= capacity or (choice is None and len(choices) >= 9):
@@ -6594,7 +6594,8 @@ def screen_missions(p: Palette, world: World) -> None:
                 if choice is None:
                     choice = len(choices)
                     choices.append((mission, active))
-                body.append(f"[{choice + 1}] {row}")
+                    part = 0  # a continuation that opens a new page carries its key again
+                body.append(f"[{choice + 1}] {row}" if part == 0 else " " * len(f"[{choice + 1}] ") + row)
         page = min(page, len(pages) - 1)
         out_line()
         out_line(f"{p.gold}Contracts {page + 1}/{len(pages)}{RESET}")
@@ -6820,6 +6821,14 @@ def chart_entries(world: World, result: str | None = None) -> list[tuple[int | N
     return entries
 
 
+def keyed_rows(key: str, rows: list[str]) -> list[str]:
+    """One hotkey per entry: the first row carries `[K] `, continuation rows are
+    indented by the same width so a wrapped entry never reads as two entries
+    (issue #411). Selection still maps the key on every page the entry spans."""
+    prefix = f"[{key}] "
+    return [prefix + rows[0]] + [" " * len(prefix) + row for row in rows[1:]] if rows else []
+
+
 def _chart_pages(world: World, title: str, footer: str, result: str | None):
     entries = chart_entries(world, result)
     # Budget conservatively with one key prefix per wrapped continuation row.
@@ -6833,14 +6842,13 @@ def _chart_pages(world: World, title: str, footer: str, result: str | None):
         rows, choices = pages[-1]
         if rows and (len(rows) + len(paragraph) > capacity or letter in choices):
             pages.append(([], {}))
-        for row in paragraph:
+        for row in (keyed_rows(letter, paragraph) if sid is not None else paragraph):
             rows, choices = pages[-1]
             if len(rows) == capacity:
                 pages.append(([], {})); rows, choices = pages[-1]
             if sid is not None:
                 choices[letter] = sid
-                rows.append(f"[{letter}] {row}")
-            else: rows.append(row)
+            rows.append(row)
         if sid is not None: index += 1
     return pages
 

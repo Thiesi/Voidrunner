@@ -2882,8 +2882,8 @@ def test_destination_picker_keeps_wrapped_names_on_one_page(monkeypatch,title):
     containing=[frame for frame in frames if "Yellowstone" in frame or "Deep" in frame]
     assert len(containing)==1
     assert "Yellowstone" in containing[0] and "Deep" in containing[0]
-    choices=re.findall(r"\[(\d)\] (?:Yellowstone|Deep)",containing[0])
-    assert len(choices)==2 and choices[0]==choices[1]
+    keyed=re.findall(r"\[(\d)\] Yellowstone",containing[0])
+    assert len(keyed)==1 and re.search(r"^\s{4}Deep",containing[0],re.M)  # one key; the continuation is indented (#411)
     assert all(len(frame.splitlines())<=10 for frame in frames)
     assert all(vr._visible_width(line)<=20 for frame in frames for line in frame.splitlines())
 
@@ -12615,3 +12615,42 @@ def test_hop_report_is_bounded_and_the_deck_still_fits(monkeypatch):
         rows = [row for row in page.split("\r\n") if row]
         assert len(rows) <= height and all(vr._visible_width(row) <= width for row in rows)
         vr.report_hop(world, [f"line {i}" for i in range(20)])
+
+
+# --- #411: wrapped entries carry one hotkey ---------------------------------------------
+
+
+def test_keyed_rows_prefix_only_the_first_row():
+    assert vr.keyed_rows("B", ["Mirrorfall (76,4); Industrial;", "Danger 1; 1 fuel TRACKED NEXT."]) == \
+        ["[B] Mirrorfall (76,4); Industrial;", "    Danger 1; 1 fuel TRACKED NEXT."]
+    assert vr.keyed_rows("3", ["single"]) == ["[3] single"] and vr.keyed_rows("A", []) == []
+
+
+def test_chart_continuations_are_indented_and_still_selectable(monkeypatch):
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 24)
+    world = _world_with_seed(42); world.save.ship.fuel = 99
+    for sid in world.here.connections: world.by_id[sid].discovered = True
+    pages = vr._chart_pages(world, "Navigation", "[B]Back: ", None)
+    rows = [row for page in pages for row in page[0]]
+    keyed = [row for row in rows if row.startswith("[") and row[1] in vr.CHART_CONNECTION_LETTERS]
+    assert len(keyed) == len(world.here.connections)  # one key per destination, however many rows it wraps to
+    assert any(row.startswith("    ") for row in rows)  # at least one entry wrapped at 40 columns
+    key = vr.CHART_CONNECTION_LETTERS[0]
+    keys = iter([key, "Y"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert vr.screen_chart(vr.Palette(False), world) == sorted(world.here.connections)[0]
+
+
+def test_mission_board_and_picker_continuations_carry_one_key(monkeypatch):
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 30); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 24)
+    world, mission = _mission_details_world()
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_missions(vr.Palette(False), world)
+    rows = vr._ANSI_RE.sub("", output.getvalue()).split("\r\n")
+    assert sum(row.startswith("[1] OFFER") for row in rows) == 1 and any(row.startswith("    ") for row in rows)
+    keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._pick_trade_field("Pick", [("x", "a very long option label that certainly wraps at thirty columns wide")])
+    rows = vr._ANSI_RE.sub("", output.getvalue()).split("\r\n")
+    assert sum(row.startswith("[1] a very long") for row in rows) == 1 and any(row.startswith("    ") for row in rows)
