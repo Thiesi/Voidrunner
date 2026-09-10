@@ -488,6 +488,19 @@ def test_a_malformed_save_version_is_corruption_not_an_old_career(tmp_path, vers
     assert path.read_bytes() == json.dumps(data).encode("utf-8")
 
 
+def test_a_refused_career_that_cannot_be_read_reaches_the_caller_as_a_save_failure(tmp_path, monkeypatch):
+    """Storage can change between the refusal and the confirmation (#421 review)."""
+    import json
+
+    old = json.dumps(dict(_world_with_seed(42).save.to_dict(), schema_version=1)).encode()
+    (tmp_path / "77.json").write_bytes(old)
+    monkeypatch.setattr(vr, "_read_save_bytes", lambda path: (_ for _ in ()).throw(PermissionError("gone")))
+    with pytest.raises(vr.SaveError):
+        vr.replace_unsupported_career(tmp_path, 77, vr._new_career("Tester"))
+    assert (tmp_path / "77.json").read_bytes() == old
+    assert not list(tmp_path.glob("77.recovery-*.json"))
+
+
 def test_a_replacement_that_cannot_be_written_reaches_the_caller_as_a_save_failure(tmp_path, monkeypatch):
     """`main` translates `SaveError` here and nothing else (issue #421 review)."""
     import json

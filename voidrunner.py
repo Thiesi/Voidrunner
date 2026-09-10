@@ -3979,6 +3979,11 @@ def replace_unsupported_career(save_dir: Path, user_id: int, save: SaveData) -> 
         original = _read_save_bytes(path)
     except FileNotFoundError:
         original = None
+    except OSError as exc:
+        # Storage can change between the load that refused this career and the
+        # confirmation that replaces it. `main` translates `SaveError` here and
+        # nothing else, so an untranslated read is a traceback (#421 review).
+        raise SaveError("The refused career could not be read; nothing was replaced.") from exc
     if original is not None:
         if len(list(save_dir.glob(f"{user_id}.recovery-*.json"))) >= MAX_RECOVERY_COPIES:
             raise SaveError("Recovery copies are full; ask your SysOp to archive them.")
