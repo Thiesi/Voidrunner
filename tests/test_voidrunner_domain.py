@@ -1205,7 +1205,9 @@ def test_mission_navigation_pages_preserve_chart_and_career(monkeypatch, active,
     if active: vr.accept_mission(world, mission)
     for sid in vr.mission_route(world, mission): world.by_id[sid].discovered = False
     before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
-    monkeypatch.setattr(world, "checkpoint", lambda: pytest.fail("Route view saved"))
+    for boundary in ("checkpoint", "commit", "advance_station_state"):
+        # Every write path, not just the historical name (#417 review).
+        monkeypatch.setattr(world, boundary, lambda: pytest.fail("Route view saved"))
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
     output = io.StringIO(); frames=[]
     def choose():
@@ -6541,7 +6543,9 @@ def test_board_browsing_never_checkpoints_or_changes_state(monkeypatch):
     world.checkpoint()
     before = copy.deepcopy(world.save.to_dict())
     rng = world.event_rng.getstate()
-    monkeypatch.setattr(world, "checkpoint", lambda: pytest.fail("Browsing wrote the save"))
+    for boundary in ("checkpoint", "commit", "advance_station_state"):
+        # Every write path, not just the historical name (#417 review).
+        monkeypatch.setattr(world, boundary, lambda: pytest.fail("Browsing wrote the save"))
     monkeypatch.setattr(vr, "read_key", lambda: "Q")
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_missions(vr.Palette(False), world)
@@ -6568,7 +6572,9 @@ def test_unprepared_board_browsing_does_not_generate_or_expire(monkeypatch):
     world.save.turn = 5
     world.save.active_missions = [vr.Mission(1, "scan", "Expired", 500, 0, 1, deadline_turn=4)]
     before = copy.deepcopy(world.save.to_dict())
-    monkeypatch.setattr(world, "checkpoint", lambda: pytest.fail("Browsing wrote the save"))
+    for boundary in ("checkpoint", "commit", "advance_station_state"):
+        # Every write path, not just the historical name (#417 review).
+        monkeypatch.setattr(world, boundary, lambda: pytest.fail("Browsing wrote the save"))
     monkeypatch.setattr(vr, "read_key", lambda: "Q")
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_missions(vr.Palette(False), world)
@@ -6602,7 +6608,9 @@ def test_mission_preview_back_and_paging_are_read_only(monkeypatch):
     rng = world.event_rng.getstate()
     keys = iter("1NPBB")
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
-    monkeypatch.setattr(world, "checkpoint", lambda: pytest.fail("Preview saved"))
+    for boundary in ("checkpoint", "commit", "advance_station_state"):
+        # Every write path, not just the historical name (#417 review).
+        monkeypatch.setattr(world, boundary, lambda: pytest.fail("Preview saved"))
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         vr.screen_missions(vr.Palette(False), world)
@@ -7033,7 +7041,9 @@ def test_futures_draft_edit_and_back_write_nothing(monkeypatch):
     commands = iter("QTTB")
     monkeypatch.setattr(vr, "read_key", lambda: next(commands))
     monkeypatch.setattr(vr, "read_line_raw", lambda **kw: "3")
-    monkeypatch.setattr(world, "checkpoint", lambda: pytest.fail("Draft persisted"))
+    for boundary in ("checkpoint", "commit", "advance_station_state"):
+        # Every write path, not just the historical name (#417 review).
+        monkeypatch.setattr(world, boundary, lambda: pytest.fail("Draft persisted"))
     with contextlib.redirect_stdout(io.StringIO()):
         vr._screen_buy_futures(vr.Palette(False), world, "food")
     assert world.save.to_dict() == before
@@ -13097,6 +13107,26 @@ def test_precomputed_portrait_pages_also_paginate_against_the_shown_footer(monke
 
 
 # --- #417: a checkpoint is a persistence boundary, not a station tick -------------------
+
+
+def test_the_rescue_tow_prepares_the_station_it_tows_you_to(monkeypatch):
+    """Being towed home is a station transition, so Freeport's board is ready
+    when the deck draws it (issue #417 review)."""
+    world = _world_with_seed(42)
+    world.checkpoint()
+    destination = sorted(world.here.connections)[0]
+    world.save.current_system = destination
+    world.save.turn += vr.MISSION_BOARD_DAYS + 1  # the old board has expired
+    world.save.ship.fuel = 0
+    world.save.pilot.credits = 0
+    world.save.cargo = {}
+    assert vr.is_stranded(world)
+    keys = iter(["Q"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "pause", lambda p, msg=None: None)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_station_menu(vr.Palette(False), world)
+    assert world.save.current_system == 0
+    assert vr.posted_mission_offers(world)  # the board of the station just entered
 
 
 def test_a_commit_does_not_reroll_the_board_or_repair_ids():

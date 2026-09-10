@@ -4482,7 +4482,9 @@ def screen_station_menu(p: Palette, world: World) -> str:
         # that burned the last fuel with no encounter) in one place.
         out_line()
         rescued = rescue_stranded_pilot(world)
-        world.commit()
+        # The tow puts the pilot at Freeport: that is a station transition, so
+        # Freeport's board is prepared here rather than left stale (#417 review).
+        world.checkpoint()
         out_line(f"{p.wrong}{rescued}{RESET}")
         pause(p)
     if career_rank_index(world.save.pilot) > world.save.pilot.highest_rank_seen:
