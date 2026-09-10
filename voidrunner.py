@@ -73,6 +73,7 @@ import collections
 import contextlib
 import dataclasses
 import errno
+import functools
 import json
 import math
 import os
@@ -1079,11 +1080,26 @@ def _validate_combat_mission_snapshot(data: dict, kind: str) -> None:
             raise ValueError("invalid mission quantity or deadline")
 
 
+def _validate_versioned(value, fields: set[str], label: str, *, supported=(1,), unsupported: str) -> None:
+    """The shape every versioned sub-record shares (issue #419).
+
+    A malformed record is a `ValueError` -- the save is broken -- while a record
+    whose version this build does not know is an `UnsupportedSave`, which is a
+    different message to the caller: their career is fine, this build is too old.
+    Getting that distinction wrong is why the block was worth having once rather
+    than six times.
+    """
+    if not isinstance(value, dict): raise ValueError(f"invalid {label}")
+    _reject_unknown_save_fields(value, fields, label)
+    if type(value.get("version")) is not int or isinstance(value["version"], bool):
+        raise ValueError(f"invalid {label} version")
+    if value["version"] not in supported: raise UnsupportedSave(unsupported)
+
+
 def _validate_tactics(value: dict) -> None:
-    if not isinstance(value, dict): raise ValueError("invalid tactical state")
-    _reject_unknown_save_fields(value, {"version", "profile", "step", "brace_ready"}, "tactical combat")
-    if type(value.get("version")) is not int: raise ValueError("invalid tactical version")
-    if value["version"] not in TACTICAL_THREAT_BONUS_BY_VERSION: raise UnsupportedSave("This fight uses an unsupported tactical ruleset.")
+    _validate_versioned(value, {"version", "profile", "step", "brace_ready"}, "tactical combat",
+                        supported=tuple(TACTICAL_THREAT_BONUS_BY_VERSION),
+                        unsupported="This fight uses an unsupported tactical ruleset.")
     if (type(value.get("profile")) is not str or value["profile"] not in TACTICAL_PROFILES
             or type(value.get("step")) is not int or not 0 <= value["step"] < 3
             or type(value.get("brace_ready")) is not bool):
@@ -1091,19 +1107,15 @@ def _validate_tactics(value: dict) -> None:
 
 
 def _validate_warrant(value: dict) -> None:
-    if not isinstance(value, dict): raise ValueError("invalid bounty identification")
-    _reject_unknown_save_fields(value, {"version", "matches", "checked", "engaged"}, "bounty identification")
-    if type(value.get("version")) is not int: raise ValueError("invalid identification version")
-    if value["version"] != 1: raise UnsupportedSave("This bounty uses an unsupported identification format.")
+    _validate_versioned(value, {"version", "matches", "checked", "engaged"}, "bounty identification",
+                        unsupported="This bounty uses an unsupported identification format.")
     if any(type(value.get(key)) is not bool for key in ("matches", "checked", "engaged")):
         raise ValueError("invalid bounty identification")
 
 
 def _validate_formation(value: dict) -> None:
-    if not isinstance(value, dict): raise ValueError("invalid squadron formation")
-    _reject_unknown_save_fields(value, {"version", "engaged"}, "squadron formation")
-    if type(value.get("version")) is not int: raise ValueError("invalid formation version")
-    if value["version"] != 1: raise UnsupportedSave("This squadron uses unsupported formation rules.")
+    _validate_versioned(value, {"version", "engaged"}, "squadron formation",
+                        unsupported="This squadron uses unsupported formation rules.")
     if type(value.get("engaged")) is not bool: raise ValueError("invalid formation engagement")
 
 
@@ -1439,7 +1451,7 @@ def _validate_save_document(data: dict) -> None:
     depth = data.get("market_depth", {})
     require(isinstance(depth, dict) and len(depth) <= GALAXY_SYSTEM_COUNT, "market depth")
     depth_ids = set()
-    economies = {s.id: s.economy for s in generate_galaxy(data["seed"])} if depth else {}
+    economies = galaxy_economies(data["seed"]) if depth else ()
     for key, goods in depth.items():
         require(isinstance(key, str) and key.isascii() and key.isdecimal(), "stock station")
         sid = int(key)
@@ -1471,8 +1483,7 @@ def _validate_save_document(data: dict) -> None:
             require({"day", "buy", "sell"} <= set(quote), "remembered quote")
             require(("stock" in quote) == ("demand" in quote), "remembered quantities")
             if "stock" in quote:
-                if not economies:
-                    economies = {station.id: station.economy for station in generate_galaxy(data["seed"])}
+                economies = economies or galaxy_economies(data["seed"])
                 caps = market_depth_limits(economies[sid], commodity)
                 for quantity in ("stock", "demand"):
                     integer(quote[quantity], "remembered " + quantity, maximum=caps[quantity])
@@ -1515,8 +1526,8 @@ def _validate_save_document(data: dict) -> None:
         if story["stage"] in ("committed", "complete"):
             require(story.get("choice") in ("hardline", "aid"), "faction story choice")
             if faction == FACTION_BLACKWAKE and story["choice"] == "hardline":
-                if not economies: economies = {system.id: system.economy for system in generate_galaxy(data["seed"])}
-                require("Haven" in economies.values(), "faction story Haven")
+                economies = economies or galaxy_economies(data["seed"])
+                require("Haven" in economies, "faction story Haven")
         else: require("choice" not in story, "premature faction story choice")
     dossiers = data.get("retired_careers", [])
     require(isinstance(dossiers, list) and len(dossiers) <= MAX_RETIRED_CAREERS, "retired careers")
@@ -1619,10 +1630,9 @@ def _validate_save_document(data: dict) -> None:
             for sid in ids:
                 system(sid, "event station")
             require(len(set(ids)) == len(ids), "event region")
-            galaxy = generate_galaxy(data["seed"])
-            by_id = {station.id: station for station in galaxy}
-            hops = bfs_hops(by_id, ids[0])
-            require(all(by_id[sid].economy == event["economy"] and hops[sid] <= 2 for sid in ids), "event region")
+            economies = economies or galaxy_economies(data["seed"])
+            hops = galaxy_hops(data["seed"], ids[0])
+            require(all(economies[sid] == event["economy"] and 0 <= hops[sid] <= 2 for sid in ids), "event region")
 
 
 class World:
@@ -1797,6 +1807,31 @@ def _validate_pending_travel_consistency(save: SaveData) -> None:
 
 def _distance(a: GalaxySystem, b: GalaxySystem) -> float:
     return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2) ** 0.5
+
+
+@functools.lru_cache(maxsize=64)
+def galaxy_hops(seed: int, origin: int) -> tuple[int, ...]:
+    """Jump distance from `origin` to every station id, or -1 where unreachable.
+
+    Pure in the seed like the economies, and the last reason the validator had to
+    build a whole galaxy (issue #419).
+    """
+    by_id = {station.id: station for station in generate_galaxy(seed)}
+    hops = bfs_hops(by_id, origin)
+    return tuple(hops.get(sid, -1) for sid in range(GALAXY_SYSTEM_COUNT))
+
+
+@functools.lru_cache(maxsize=8)
+def galaxy_economies(seed: int) -> tuple[str, ...]:
+    """Station economies for a seed, indexed by station id.
+
+    `generate_galaxy` is a pure function of the seed, but it returns mutable
+    systems that every caller goes on to mark discovered, so the systems
+    themselves must never be shared. Economies cannot be mutated. Validating one
+    save asked for a galaxy up to three times while every commit validated twice,
+    so an acknowledged trade generated the galaxy six times (issue #419).
+    """
+    return tuple(station.economy for station in generate_galaxy(seed))
 
 
 def generate_galaxy(seed: int) -> list[GalaxySystem]:
@@ -4108,7 +4143,29 @@ def _read_score_json(path: Path, limit: int = MAX_SAVE_BYTES):
 
 
 def _legacy_scores(save_dir: Path) -> dict[int, dict]:
+    """Import the pre-`scores/` leaderboard.
+
+    The file is never rewritten, so once it has been *read* it is parsed once per
+    session rather than on every commit (issue #419). Only a successful read is
+    cached: an absent file, a transient `OSError` and a temporarily unreadable one
+    are indistinguishable here, and none of them may pin an empty result for the
+    session -- that would drop the legacy wealth and retirement floors and hand
+    out a wrong New Game+ bonus (issue #419 review).
+    """
+    cached = _LEGACY_SCORE_CACHE.get(save_dir)
+    if cached is not None:
+        return {user_id: dict(entry) for user_id, entry in cached.items()}
     data = _read_score_json(save_dir / "leaderboard.json", 2 * 1024 * 1024)
+    entries = _legacy_score_entries(data)
+    if data is not None:
+        _LEGACY_SCORE_CACHE[save_dir] = {user_id: dict(entry) for user_id, entry in entries.items()}
+    return entries
+
+
+_LEGACY_SCORE_CACHE: dict[Path, dict[int, dict]] = {}
+
+
+def _legacy_score_entries(data) -> dict[int, dict]:
     entries = {}
     for item in data if isinstance(data, list) else []:
         entry = _score_entry(item)

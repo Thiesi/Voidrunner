@@ -13265,3 +13265,47 @@ def test_paginate_keeps_groups_whole_splits_oversized_ones_and_never_repeats_a_l
 ])
 def test_page_step_clamps_at_both_ends_and_declines_other_keys(key, page, count, expected):
     assert vr.page_step(key, page, count) == expected
+
+
+# --- #419: validating a save no longer rebuilds the galaxy ------------------------------
+
+
+def test_a_commit_generates_no_galaxy_once_the_seed_is_known(monkeypatch, tmp_path):
+    """Every commit validated twice and each validation built the galaxy up to
+    three times, so one acknowledged trade cost six generations (issue #419).
+
+    The world persists for real here, so the commit runs `_encode_career_checkpoint`
+    and the validator rather than stopping at a `None` callback (#419 review).
+    """
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.save.active_event = {"economy": world.here.economy, "commodity": "food", "direction": "boom",
+                               "turns_remaining": 2, "description": "Prices spike across the region",
+                               "system_ids": [world.here.id]}
+    generated = []
+    real = vr.generate_galaxy
+    vr.galaxy_economies.cache_clear(); vr.galaxy_hops.cache_clear()
+    monkeypatch.setattr(vr, "generate_galaxy", lambda seed: (generated.append(seed), real(seed))[1])
+    world.checkpoint()
+    assert (tmp_path / "77.json").exists(), "the commit must have gone through persistence"
+    assert len(generated) <= 2, generated  # once per pure helper, however many validations run
+    generated.clear()
+    world.save.pilot.credits += 1
+    world.commit()
+    assert generated == []  # and never again for this seed
+    world.save.active_event = None
+    world.save.pilot.credits += 1
+    world.commit()
+    assert generated == []
+
+
+def test_the_pure_galaxy_caches_answer_from_the_seed_alone():
+    vr.galaxy_economies.cache_clear(); vr.galaxy_hops.cache_clear()
+    economies = vr.galaxy_economies(42)
+    galaxy = vr.generate_galaxy(42)
+    assert list(economies) == [station.economy for station in galaxy]
+    hops = vr.galaxy_hops(42, 0)
+    real = vr.bfs_hops({station.id: station for station in galaxy}, 0)
+    assert all(hops[sid] == real.get(sid, -1) for sid in range(vr.GALAXY_SYSTEM_COUNT))
+    galaxy[1].discovered = True  # mutating a generated galaxy cannot reach the caches
+    assert vr.galaxy_economies(42) is economies
