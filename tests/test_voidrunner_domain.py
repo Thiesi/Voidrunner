@@ -6077,15 +6077,30 @@ def test_fragmented_sequences_survive_timeout_without_command_suffixes():
         return next(events)
 
     reader = vr._DoorInput(read)
-    assert reader.read_key() == vr.ESCAPE_KEY
+    # The introducer arrives inside the reserved second timeout, so the fragmented
+    # arrow is absorbed whole and never reported as a lone Escape (issue #413 review):
+    # acting on that sentinel now cancels a field, so it must not name a partial key.
     assert reader.read_key() == vr.IGNORED_KEY
     assert reader.read_key() == vr.IGNORED_KEY
     assert reader.read_key() == "Z"
     # Once a partial key has timed out, wait for actual data instead of causing
     # an endless menu redraw every timeout interval.
-    assert timeouts == [None, vr._INPUT_TIMEOUT, None, vr._INPUT_TIMEOUT,
+    assert timeouts == [None, vr._INPUT_TIMEOUT, vr._INPUT_TIMEOUT, None,
                         vr._INPUT_TIMEOUT, None, vr._INPUT_TIMEOUT,
                         vr._INPUT_TIMEOUT, None]
+
+
+def test_a_late_arrow_suffix_cannot_cancel_what_the_caller_was_typing():
+    """A slow link fragments an arrow key; Escape cancels fields, so the sentinel
+    must not be reported until the reserved introducer window has passed (#413)."""
+    events = iter([b"\x1b", None, b"O", b"B", b"7"])
+    reader = vr._DoorInput(lambda timeout: next(events))
+    assert reader.read_key() == vr.IGNORED_KEY  # the whole delayed arrow, not an Escape
+    assert reader.read_key() == "7"
+    events = iter([b"\x1b", None, None, b"7"])
+    reader = vr._DoorInput(lambda timeout: next(events))
+    assert reader.read_key() == vr.ESCAPE_KEY  # nothing followed: a real, deliberate Escape
+    assert reader.read_key() == "7"
 
 
 def test_lone_escape_does_not_swallow_next_deliberate_command():
@@ -11886,11 +11901,11 @@ def test_chart_departure_confirms_cost_and_danger_as_the_last_keystroke(monkeypa
     keys = iter([vr.CHART_CONNECTION_LETTERS[0], answer, "B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         selected = vr.screen_chart(vr.Palette(False), world)
-    plain = vr._ANSI_RE.sub("", output.getvalue())
+    plain = " ".join(vr._ANSI_RE.sub("", output.getvalue()).split())
     cost = vr.fuel_cost_for_jump(world.here, world.by_id[dest], world.save.ship)
     name = world.by_id[dest].name if discovered else "an uncharted system"
     danger = f"danger {world.by_id[dest].danger}" if discovered else "danger unknown"
-    assert f"Depart for {name}? {cost} fuel, {danger}, one day passes. [Y/N]" in plain
+    assert f"Depart for {name}? {cost} fuel, {danger}, one day passes. [Y/N, Esc=No]" in plain
     if answer == "Y": assert selected == dest
     else: assert selected is None and "Departure cancelled; still docked." in plain
     assert world.save.to_dict() == before
@@ -12712,3 +12727,38 @@ def test_offer_page_one_points_to_accept_without_offering_it(monkeypatch):
     first = " ".join(frames[0].split())
     assert "[A] on last page." in first and "[A]ccept" not in first
     assert not world.save.active_missions  # A on page 1 did not accept
+
+
+# --- #413: Escape cancels prompts ---------------------------------------------------------
+
+
+def test_escape_answers_no_at_a_confirmation_and_ignores_unsupported_keys(monkeypatch):
+    keys = iter([vr.IGNORED_KEY, "\x1b[A", vr.ESCAPE_KEY])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr.confirm("Repair 57 hull for 228cr?", vr.Palette(False)) is False
+    assert "[Y/N, Esc=No]" in output.getvalue() and output.getvalue().rstrip().endswith("N")
+    keys = iter(["y"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert vr.confirm("Sure?", vr.Palette(False)) is True
+
+
+def test_escape_cancels_a_quantity_field_and_erases_the_typed_digits(monkeypatch):
+    keys = iter(["1", "2", vr.ESCAPE_KEY])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr.read_line_raw(max_len=5) == ""
+    assert output.getvalue().count("\x08 \x08") == 2
+    world = _world_with_seed(42); before = world.save.to_dict()
+    keys = iter(["P", "1", vr.ESCAPE_KEY]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr._trade_commodity(vr.Palette(False), world, "food") is None
+    assert "Enter or Esc cancels" in output.getvalue() and world.save.to_dict() == before
+
+
+def test_real_escape_at_the_departure_confirmation_keeps_the_pilot_docked(tmp_path):
+    world = _world_with_seed(42); world.save.ship.fuel = vr.fuel_capacity(world.save.ship)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77); world.checkpoint()
+    before = (tmp_path / "77.json").read_bytes()
+    with _door_stopped_at(tmp_path, b"C" + vr.CHART_CONNECTION_LETTERS[0].encode() + b"\x1b", b"Departure cancelled; still docked."):
+        assert (tmp_path / "77.json").read_bytes() == before

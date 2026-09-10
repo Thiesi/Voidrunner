@@ -420,7 +420,20 @@ class _DoorInput:
             if byte is None:
                 self.after_timeout = True
                 if self.mode == "escape":
+                    # Escape now cancels fields and confirmations (issue #413), so reporting
+                    # it is a decision, not a no-op: reserve one more timeout for a delayed
+                    # CSI/SS3 introducer first. Without it a fragmented arrow key on a slow
+                    # link erases a half-typed quantity or answers No (issue #413 review).
                     self.mode = "late_escape"
+                    follow = self.read_byte(_INPUT_TIMEOUT)
+                    if follow in (b"[", b"O"):
+                        self.mode = "csi" if follow == b"[" else "ss3"
+                        self.sequence.clear()
+                        continue
+                    if follow == b"":
+                        raise EOFError("stdin closed")
+                    if follow is not None:
+                        self.pending = follow  # a real key after a real Escape; do not lose it
                     return ESCAPE_KEY
                 return IGNORED_KEY
             if not byte:
@@ -568,6 +581,11 @@ def read_line_raw(max_len: int = 20, allowed=lambda c: "0" <= c <= "9") -> str:
     buf: list[str] = []
     while True:
         ch = read_key()
+        if ch == ESCAPE_KEY:
+            # Escape cancels the field (issue #413): erase what was typed and return empty.
+            out("\x08 \x08" * sum(_char_width(c) for c in buf))
+            out_line()
+            return ""
         if ch in ("\r", "\n"):
             out_line()
             return unicodedata.normalize("NFC", "".join(buf))
@@ -589,9 +607,14 @@ def read_line_raw(max_len: int = 20, allowed=lambda c: "0" <= c <= "9") -> str:
 
 
 def confirm(prompt: str, p: Palette) -> bool:
-    out_prompt(f"{p.muted}{prompt} [Y/N] {RESET}")
+    """Yes/No as the last keystroke before an irreversible action; Escape is No (issue #413)."""
+    out_prompt(f"{p.muted}{prompt} [Y/N, Esc=No] {RESET}")
     while True:
-        key = read_command()
+        key = read_key()
+        if key == ESCAPE_KEY:
+            out_line("N")
+            return False
+        key = key.upper() if len(key) == 1 and key.isascii() else IGNORED_KEY
         if key == "Y":
             out_line("Y")
             return True
@@ -5061,7 +5084,7 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
         if key == ">": page = min(page + 1, count - 1)
         elif key == "<": page = max(0, page - 1)
         elif key == "U":
-            out_prompt(f"Quantity (1-{cargo_capacity(world.save.ship)}, Enter keeps {quantity}): ")
+            out_prompt(f"Quantity (1-{cargo_capacity(world.save.ship)}; Enter or Esc keeps {quantity}): ")
             raw = read_line_raw(max_len=5)
             if raw:
                 chosen = int(raw) if raw.isascii() and raw.isdigit() else 0
@@ -5323,7 +5346,7 @@ def _edit_trade_route(world: World, initial: dict) -> dict | None:
             draft[field] = selected
 
     def quantity(draft):
-        out_prompt(f"Quantity 1-{cargo_capacity(world.save.ship)} (Enter keeps {draft['quantity']}): ")
+        out_prompt(f"Quantity 1-{cargo_capacity(world.save.ship)} (Enter or Esc keeps {draft['quantity']}): ")
         raw = read_line_raw(max_len=5)
         if not raw:
             return
@@ -5554,7 +5577,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
             result = "No room, credits or station stock."
             out_line(f"{p.wrong}{result}{RESET}")
             return result
-        out_prompt(f"{p.muted}Quantity (max {max_qty}, Enter to cancel): {RESET}")
+        out_prompt(f"{p.muted}Quantity (max {max_qty}; Enter or Esc cancels): {RESET}")
         raw = read_line_raw(max_len=5)
         qty = int(raw) if raw.isdigit() else 0
         qty = min(qty, max_qty)
@@ -5576,7 +5599,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
             result = f"Station demand is exhausted; replenishes {depth['demand_rate']}/day."
             out_line(f"{p.wrong}{result}{RESET}")
             return result
-        out_prompt(f"{p.muted}Quantity (have {have}, station buys {max_qty}, Enter to cancel): {RESET}")
+        out_prompt(f"{p.muted}Quantity (have {have}, station buys {max_qty}; Enter or Esc cancels): {RESET}")
         raw = read_line_raw(max_len=5)
         qty = int(raw) if raw.isdigit() else 0
         qty = min(qty, max_qty)
@@ -6028,7 +6051,7 @@ def _refuel(p: Palette, world: World) -> str | None:
     if max_qty <= 0:
         out_line(f"{p.wrong}Not enough credits to buy fuel (6cr/unit).{RESET}")
         return "Not enough credits to buy fuel (6cr/unit)."
-    out_prompt(f"{p.muted}Fuel to buy (max {max_qty}, 6cr/unit): {RESET}")
+    out_prompt(f"{p.muted}Fuel to buy (max {max_qty}, 6cr/unit; Enter or Esc cancels): {RESET}")
     raw = read_line_raw(max_len=4)
     qty = int(raw) if raw.isdigit() else 0
     qty = min(qty, max_qty)
