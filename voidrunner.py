@@ -3923,6 +3923,30 @@ def persist(world: World, save_dir: Path, user_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+BACK_KEY = "B"  # Back on every screen below the deck; never a live action anywhere.
+
+
+def choice_letters(reserved: str = "") -> list[str]:
+    """Selection letters for a list screen: never Back, never the screen's own hotkeys."""
+    return [c for c in LETTERS if c != BACK_KEY and c not in reserved]
+
+
+def letter_span(letters: list[str]) -> str:
+    """Compact footer form of a letter list: "A-H", "A,C-H" or "A/C/D"."""
+    if len(letters) <= 4:
+        return "/".join(letters)
+    runs: list[list[str]] = [[letters[0]]]
+    for letter in letters[1:]:
+        if ord(letter) == ord(runs[-1][-1]) + 1:
+            runs[-1].append(letter)
+        else:
+            runs.append([letter])
+    return ",".join(run[0] if len(run) == 1 else f"{run[0]}-{run[-1]}" for run in runs)
+
+
+MARKET_LETTERS = choice_letters("XQ")
+YARD_LETTERS = choice_letters("RPKSVUQ")
+CREW_LETTERS = choice_letters("Q")
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
@@ -4679,7 +4703,7 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
         event = world.save.active_event
         if event and event["commodity"] == commodity and system.id in economy_event_system_ids(world, event):
             tags.append("[CRASH]" if event["direction"] == "crash" else "[BOOM]")
-        lines.append(f"[{LETTERS[index]}] {COMMODITIES[commodity]['label']}: buy {buy}; sell {round(quote * SELL_SPREAD)}cr. "
+        lines.append(f"[{MARKET_LETTERS[index]}] {COMMODITIES[commodity]['label']}: buy {buy}; sell {round(quote * SELL_SPREAD)}cr. "
                      f"Stock {depth['stock']}; station buys {depth['demand']}; in hold {world.save.cargo.get(commodity, 0)}. "
                      + " ".join(tags or ["Normal"]))
     if any(not COMMODITIES[c]["legal"] for c in goods):
@@ -4693,9 +4717,9 @@ def screen_market(p: Palette, world: World) -> None:
         goods = LEGAL_COMMODITIES + [c for c in CONTRABAND_COMMODITIES if world.here.economy == "Haven" or world.save.cargo.get(c, 0) > 0]
         lines = market_catalog_lines(world, goods)
         if result: lines.insert(0, "Result: " + result)
-        footer = f"[<]Prev [>]Next [A-{LETTERS[len(goods)-1]}]Trade [X]Futures [Q]Back: "
+        footer = f"[<]Prev [>]Next [{letter_span(MARKET_LETTERS[:len(goods)])}]Trade [X]Futures [B]Back: "
         key, page, count = _draw_service_page(p, f"Market: {world.save.pilot.credits:,}cr", lines, footer, page)
-        if key == "Q": return
+        if key in ("B", "Q"): return
         if key == ">": page = min(page + 1, count - 1); continue
         if key == "<": page = max(0, page - 1); continue
         if key == "X":
@@ -4704,7 +4728,7 @@ def screen_market(p: Palette, world: World) -> None:
             if response is not None: result = response
             page = 0
             continue
-        idx = LETTERS.index(key) if key in LETTERS else -1
+        idx = MARKET_LETTERS.index(key) if key in MARKET_LETTERS else -1
         if 0 <= idx < len(goods):
             response = _trade_commodity(p, world, goods[idx])
             if response is not None: result, page = response, 0
@@ -4771,12 +4795,12 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
                  f"Goods {principal}cr + nonrefundable fee {fee}cr = {principal + fee}cr.",
                  "Full cargo space needed only at pickup. Cancellation refunds goods principal only; full holds leave orders waiting."]
         if result: lines.insert(0, "Result: " + result)
-        footer = "[<>]Page [Q]Qty [T]Term [S]Sign [B]Back: "
+        footer = "[<>]Page [U]Units [T]Term [S]Sign [B]Back: "
         key, page, count = _draw_service_page(p, f"Order {COMMODITIES[commodity]['label']}: {world.save.pilot.credits:,}cr", lines, footer, page)
-        if key == "B": return None
+        if key in ("B", "Q"): return None
         if key == ">": page = min(page + 1, count - 1)
         elif key == "<": page = max(0, page - 1)
-        elif key == "Q":
+        elif key == "U":
             out_prompt(f"Quantity (1-{cargo_capacity(world.save.ship)}, Enter keeps {quantity}): ")
             raw = read_line_raw(max_len=5)
             if raw:
@@ -5056,7 +5080,7 @@ def _edit_trade_route(world: World, initial: dict) -> dict | None:
          lambda d: pick(d, "destination", "Destination", destinations)),
         ("C", "Cargo", lambda d: COMMODITIES[d['commodity']]['label'],
          lambda d: pick(d, "commodity", "Cargo", [(c, v['label']) for c, v in COMMODITIES.items()])),
-        ("Q", "Quantity", lambda d: str(d['quantity']), quantity),
+        ("U", "Quantity", lambda d: str(d['quantity']), quantity),
         ("H", "Hold source", lambda d: "existing hold cargo" if d['use_hold'] else "buy new cargo here",
          lambda d: d.update(use_hold=not d['use_hold'])),
     ]
@@ -5239,7 +5263,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
              f"Credits: {world.save.pilot.credits}cr. Hold: {world.save.cargo.get(commodity, 0)} units.",
              f"Stock {depth['stock']} (+{depth['stock_rate']}/day); station buys {depth['demand']} (+{depth['demand_rate']}/day).",
              "Only jumps advance days. Reopening this screen does not replenish the market."]
-    footer = ("" if prohibited else "[B]uy ") + "[S]ell [N]ext [P]rev [Q]cancel: "
+    footer = ("" if prohibited else "[P]urchase ") + "[S]ell [<>]Page [B]ack: "
     title = f"{label} Exchange"
     pages = _trade_pages(lines, title, footer)
     page = 0
@@ -5251,15 +5275,15 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
         out_prompt(footer)
         action = read_command()
         out_line(action)
-        if action in ("B", "S"):
+        if action in ("P", "S"):
             break
-        if action == "Q":
+        if action in ("B", "Q"):
             return
-        if action == "N":
+        if action == ">":
             page = min(page + 1, len(pages) - 1)
-        elif action == "P":
+        elif action == "<":
             page = max(0, page - 1)
-    if action == "B":
+    if action == "P":
         if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
             result = "Station authorities prohibit the open purchase of contraband."
             out_line(f"{p.wrong}{result}{RESET}")
@@ -5429,13 +5453,13 @@ def shipyard_lines(world: World) -> list[str]:
         tier = getattr(ship, f"{key}_tier")
         status = "MAXED" if tier >= upgrade["max_tier"] else f"Tier {tier} -> {tier + 1}; {upgrade['cost'](tier):,}cr"
         if _OUTPUT_WIDTH >= 70:
-            lines.append(f"[{LETTERS[i]}] {upgrade['label']:<20} {status:<24} {upgrade['effect']}")
+            lines.append(f"[{YARD_LETTERS[i]}] {upgrade['label']:<20} {status:<24} {upgrade['effect']}")
         else:
-            lines.append(f"[{LETTERS[i]}] {upgrade['label']}: {status}. Benefit: {upgrade['effect']}")
+            lines.append(f"[{YARD_LETTERS[i]}] {upgrade['label']}: {status}. Benefit: {upgrade['effect']}")
     local = next((WORKSHOPS[key] for key, sid in specialist_stations(world).items() if sid == world.here.id), None)
     if local: lines.append(f"Local specialist: {local['name']}, {local['owner']}. [S] Specialists for material-supplied installations.")
     refits = HULL_REFITS[ship.hull_class]
-    for key, (target, cost) in zip(LETTERS[len(UPGRADES):], refits):
+    for key, (target, cost) in zip(YARD_LETTERS[len(UPGRADES):], refits):
         lines.append(f"[{key}] {target}-Class Refit: {cost:,}cr; permanent hull change.")
     if not refits: lines.append(f"Hull: best available class ({ship.hull_class}).")
     return lines
@@ -5471,23 +5495,23 @@ def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, pa
 
 def screen_shipyard(p: Palette, world: World) -> None:
     page, result = 0, None
-    footer = "[<]Prev [>]Next [R]Fuel [P]Repair [K]Crew [S]Specialists [V]Ship [Q]Back: "
+    footer = "[<]Prev [>]Next [R]Fuel [P]Repair [K]Crew [S]Specialists [V]Ship [B]Back: "
     while True:
         lines = shipyard_lines(world)
         if result: lines.insert(0, "Result: " + result)
         action, page, count = _draw_service_page(p, f"Engineering Yard: {world.save.pilot.credits:,}cr", lines, footer, page)
-        if action == "Q": return
+        if action in ("B", "Q"): return
         if action == ">": page = min(page + 1, count - 1); continue
         if action == "<": page = max(0, page - 1); continue
         if action == "V": screen_viewport(p,world); continue
         keys = list(UPGRADES)
         refits = HULL_REFITS[world.save.ship.hull_class]
-        refit_keys = LETTERS[len(keys):len(keys) + len(refits)]
+        refit_keys = YARD_LETTERS[len(keys):len(keys) + len(refits)]
         response = None
         if action in refit_keys:
             target, cost = refits[refit_keys.index(action)]
             response = _hull_refit_screen(p, world, target, cost)
-        elif action in LETTERS[:len(keys)]: response = _buy_upgrade(p, world, keys[LETTERS.index(action)])
+        elif action in YARD_LETTERS[:len(keys)]: response = _buy_upgrade(p, world, keys[YARD_LETTERS.index(action)])
         elif action == "R": response = _refuel(p, world)
         elif action == "P": response = _repair(p, world)
         elif action == "K": screen_crew(p, world)
@@ -5504,7 +5528,7 @@ def crew_roster_lines(world: World) -> list[str]:
         level = crew_level(world.save.ship, role)
         name, personality = CREW_CANDIDATES[role][crew_identity(world, role)]
         price = f"{info['wage']}cr/jump" if hired else f"hire {info['hire_cost']}cr + {info['wage']}cr/jump"
-        lines.append(f"[{LETTERS[index]}] {info['label']}: {status}; {name}. {price}. Benefit: {crew_effect(role, level)}.")
+        lines.append(f"[{CREW_LETTERS[index]}] {info['label']}: {status}; {name}. {price}. Benefit: {crew_effect(role, level)}.")
         lines.append(f"{name}: {personality}")
         paid = world.save.ship.crew_records.get(role, {}).get("paid_jumps", 0)
         progress = (f"{paid}/{CREW_SERVICE_LEVELS[level + 1][0]} paid jumps to {CREW_SERVICE_LEVELS[level + 1][1]}"
@@ -5640,12 +5664,12 @@ def screen_crew_assignment(p: Palette, world: World, role: str) -> str | None:
 
 def screen_crew(p: Palette, world: World) -> None:
     page, result = 0, None
-    footer = f"[<>]Page [A-{LETTERS[len(CREW_ROLES)-1]}]Crew [1-3]Task [Q]Back: "
+    footer = f"[<>]Page [1-3]Task [{letter_span(CREW_LETTERS[:len(CREW_ROLES)])}]Crew [B]ack: "
     while True:
         lines = crew_roster_lines(world)
         if result: lines.insert(0, "Result: " + result)
         key, page, count = _draw_service_page(p, f"Crew Roster: {world.save.pilot.credits:,}cr", lines, footer, page)
-        if key == "Q": return
+        if key in ("B", "Q"): return
         if key == ">": page = min(page + 1, count - 1); continue
         if key == "<": page = max(0, page - 1); continue
         roles = list(CREW_ROLES)
@@ -5653,8 +5677,8 @@ def screen_crew(p: Palette, world: World) -> None:
             response = screen_crew_assignment(p, world, roles[int(key) - 1])
             if response is not None: result, page = response, 0
             continue
-        if key in LETTERS[:len(roles)]:
-            response = _toggle_crew(p, world, roles[LETTERS.index(key)])
+        if key in CREW_LETTERS[:len(roles)]:
+            response = _toggle_crew(p, world, roles[CREW_LETTERS.index(key)])
             if response is not None: result, page = response, 0
 
 
@@ -5997,14 +6021,14 @@ def pilot_guide_lines(world: World) -> list[str]:
     else:
         lines.append("First Flight needs an affordable cargo and return-fuel budget while still at Freeport on day zero. The guide remains available anywhere.")
     lines += [
-        "1. Buy cargo: [M]arket, choose the commodity's letter, [B]uy, enter a quantity. Buying spends credits and needs free hold space. Enter with no quantity cancels.",
+        "1. Buy cargo: [M]arket, choose the commodity's letter, [P]urchase, enter a quantity. Buying spends credits and needs free hold space. Enter with no quantity cancels.",
         "2. Keep fuel: [Y]ard, [R]efuel. Each fuel unit costs 6 cr. Reserve enough for the outward and return jumps; keep credits for repairs and crew wages too.",
-        "3. Depart: [C]hart, select the destination's letter. A jump advances one day, uses fuel and charges wages. Browsing, trading and upgrades do not advance the day.",
+        "3. Depart: [C]hart, select the destination's letter, then confirm its fuel cost and danger. A jump advances one day, uses fuel and charges wages. Browsing, trading and upgrades do not advance the day.",
         "4. Deliver a contract by docking with its full cargo. Ordinary trading instead uses [M]arket, commodity letter, [S]ell. Sales pay less than the local buy quote; distant prices can change.",
-        "5. First upgrade: [Y]ard, [A] Cargo Bay Expansion adds 8 cargo spaces. [F] Hull Reinforcement adds 35 maximum hull. Keep travel money before investing.",
+        f"5. First upgrade: [Y]ard, [{YARD_LETTERS[list(UPGRADES).index('cargo')]}] Cargo Bay Expansion adds 8 cargo spaces. [{YARD_LETTERS[list(UPGRADES).index('hull')]}] Hull Reinforcement adds 35 maximum hull. Keep travel money before investing.",
         f"Your next cargo tier costs {UPGRADES['cargo']['cost'](world.save.ship.cargo_tier):,} cr." if world.save.ship.cargo_tier < UPGRADES['cargo']['max_tier'] else "Your cargo upgrades are complete.",
         "Danger is a risk rating, not a guarantee you can win a fight. Evasion can fail; bribes cost credits and can be refused. Read the encounter choices before acting.",
-        "[B]oard shows full contract terms, tracking and abandonment. [G]uide keeps this recap available. [Q] on the station deck saves and leaves the game.",
+        "The Mission Board ([B] on the station deck) shows full contract terms, tracking and abandonment. [G]uide keeps this recap available. On every other screen [B] is Back; [Q] on the station deck saves and leaves the game.",
     ]
     return lines
 
@@ -6508,7 +6532,7 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
 # collide with (and be permanently shadowed by) the "[G]o to" hotkey,
 # unlike "S"/"V" which sit late enough in the alphabet to never
 # realistically collide with any observed degree.
-CHART_RESERVED_LETTERS = "SGVRQ"
+CHART_RESERVED_LETTERS = BACK_KEY + "SGVRQ"
 CHART_CONNECTION_LETTERS = [c for c in LETTERS if c not in CHART_RESERVED_LETTERS]
 
 
@@ -6560,10 +6584,19 @@ def _chart_pages(world: World, title: str, footer: str, result: str | None):
     return pages
 
 
+def departure_terms(world: World, dest_id: int) -> str:
+    """The one irreversible chart action states its cost before the last keystroke."""
+    dest = world.by_id[dest_id]
+    cost = fuel_cost_for_jump(world.here, dest, world.save.ship)
+    name = dest.name if dest.discovered else "an uncharted system"
+    danger = f"danger {dest.danger}" if dest.discovered else "danger unknown"
+    return f"Depart for {name}? {cost} fuel, {danger}, one day passes."
+
+
 def screen_chart(p: Palette, world: World) -> int | None:
-    """Return a deliberately selected adjacent destination, or Back."""
+    """Return a deliberately selected and confirmed adjacent destination, or Back."""
     page, result = 0, None
-    footer = "[<]Prev [>]Next [Q]Back: " if _OUTPUT_WIDTH >= 30 else "[<] [>] [Q]Back: "
+    footer = "[<]Prev [>]Next [B]Back: " if _OUTPUT_WIDTH >= 30 else "[<] [>] [B]Back: "
     while True:
         title = f"Navigation: Fuel {world.save.ship.fuel}/{fuel_capacity(world.save.ship)}"
         pages = _chart_pages(world, title, footer, result)
@@ -6571,7 +6604,7 @@ def screen_chart(p: Palette, world: World) -> int | None:
         out_line(); out_line(f"{p.gold}{title} {page + 1}/{len(pages)}{RESET}")
         for row in pages[page][0]: out_line(row)
         out_prompt(footer); key = read_command(); out_line(key)
-        if key == "Q": return None
+        if key in ("B", "Q"): return None
         if key == ">": page = min(page + 1, len(pages) - 1); continue
         if key == "<": page = max(0, page - 1); continue
         mission = tracked_mission(world)
@@ -6598,6 +6631,9 @@ def screen_chart(p: Palette, world: World) -> int | None:
         cost = fuel_cost_for_jump(world.here, world.by_id[dest_id], world.save.ship)
         if world.save.ship.fuel < cost:
             result, page = f"Not enough fuel ({cost} needed, have {world.save.ship.fuel}).", 0
+            continue
+        if not confirm(departure_terms(world, dest_id), p):
+            result, page = "Departure cancelled; still docked.", 0
             continue
         return dest_id
 
@@ -7066,7 +7102,7 @@ def exploration_choice(p: Palette, world: World, title: str, lines: list[str], a
 def derelict_terms(world: World) -> list[str]:
     danger = encounter_danger(world)
     return [
-        "[B] Board: 70% salvage; 30% ambush.",
+        "[S] Salvage: board the hulk; 70% salvage, 30% ambush.",
         f"Drifting hulk. Sector danger {danger}/5; fuel {world.save.ship.fuel}/{fuel_capacity(world.save.ship)}.",
         f"Salvage recovers 60-{100 + max(0, danger) * 120}cr.",
         f"Ambush: one tier {max(0, danger - 1)}-{min(4, danger + 1)} opponent; ordinary combat choices and losses apply.",
@@ -7093,7 +7129,7 @@ def _encounter_derelict(p: Palette, world: World) -> None:
     if state.get("done"):
         return
     if "ambush" not in state:
-        action = exploration_choice(p, world, "Derelict", derelict_terms(world), "B/I")
+        action = exploration_choice(p, world, "Derelict", derelict_terms(world), "S/I")
         if action == "I":
             _encounter_result(p, world, state, ["You leave the derelict behind."])
             return
@@ -7451,7 +7487,7 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                      ("lose one unit of a random held commodity; failure draws fire."
                       if used else "hold empty; same chance as Evade."))
         cost = bribe_cost(pirate)
-        lines.append((f"[B] Bribe: " if pilot.credits >= cost else "Bribe unavailable: ") +
+        lines.append((f"[P] Pay bribe: " if pilot.credits >= cost else "Bribe unavailable: ") +
                      f"{cost}cr only if accepted (about {bribe_chance(world, pirate):.0%}); "
                      "Blackwake +2 if accepted; refusal draws enemy fire. " + ("Available." if pilot.credits >= cost else "UNAFFORDABLE; bribe unavailable."))
     if details:
@@ -7489,7 +7525,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
     page, details = 0, False
     while True:
         can_pay = world.save.pilot.credits >= (fine if patrol else bribe_cost(pirate))
-        actions = "F/E/S" if patrol and can_pay else "F/E" if patrol else "F/E/D/B" if can_pay else "F/E/D"
+        actions = "F/E/S" if patrol and can_pay else "F/E" if patrol else "F/E/D/P" if can_pay else "F/E/D"
         if tactics is not None and tactics["brace_ready"]: actions = actions.replace("F/", "F/G/")
         if warrant is not None and not warrant["engaged"]:
             if not warrant["checked"] and world.save.ship.fuel >= 1: actions += "/V"
@@ -7499,7 +7535,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         action, page, count = _draw_service_page(
             p, f"Combat {world.save.pilot.credits:,}cr",
             combat_display_lines(world, pirate, combat["lines"], patrol=patrol, details=details, tactics=tactics, warrant=warrant),
-            f"[{actions}]Act [Q]Info [< >]Page: ", page,
+            f"[{actions}]Act [I]Info [< >]Page: ", page,
         )
         if action == ">":
             page = min(page + 1, count - 1)
@@ -7507,7 +7543,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         if action == "<":
             page = max(0, page - 1)
             continue
-        if action == "Q":
+        if action == "I":
             details, page = not details, 0
             continue
         if action == "T" and formation is not None and not formation["engaged"]:
@@ -7525,7 +7561,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         lines = []
         outcome = None
         engaging = (action in ("F", "E") or (action == "G" and tactics is not None and tactics["brace_ready"])
-                    or (action == "D" and not patrol) or (action == "B" and not patrol and can_pay))
+                    or (action == "D" and not patrol) or (action == "P" and not patrol and can_pay))
         if warrant is not None and engaging: warrant["engaged"] = True
         if formation is not None and engaging: formation["engaged"] = True
         if action == "W" and warrant is not None and not warrant["engaged"]:
@@ -7574,7 +7610,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
                 else:
                     _, retaliation = tactical_retaliation(world, pirate, tactics)
                     lines += retaliation
-        elif action == "B" and not patrol and can_pay:
+        elif action == "P" and not patrol and can_pay:
             cost = bribe_cost(pirate)
             if world.event_rng.random() < bribe_chance(world, pirate):
                 world.save.pilot.credits -= cost
@@ -7624,7 +7660,7 @@ def customs_display_lines(world: World) -> list[str]:
     return [
         f"Concord customs detects {quantity} units of unauthorized contraband.",
         "[S] Surrender: lose all contraband, pay no fine. Concord standing improves by 1 up to its limit; notoriety stays unchanged.",
-        ("[B] Bribe: " if credits >= cost else "Bribe unavailable: ") +
+        ("[P] Pay bribe: " if credits >= cost else "Bribe unavailable: ") +
         f"offer {cost}cr; 60% acceptance. Pay only if accepted, keep all cargo, and leave standing/notoriety unchanged.",
         f"If refused: all contraband is confiscated. Fine {fine}cr, capped at your credits ({min(credits, fine)}cr now); no debt.",
         f"Refusal lowers Concord standing by 5 down to its limit and adds {NOTORIETY_PER_CUSTOMS_BUST} notoriety.",
@@ -7634,9 +7670,9 @@ def customs_display_lines(world: World) -> list[str]:
 def resolve_customs(world: World, action: str) -> list[str]:
     """Validate before RNG/effects; the caller checkpoints completion and result."""
     quantity, cost, fine = customs_quote(world)
-    if action not in ("S", "B"):
+    if action not in ("S", "P"):
         raise ValueError("Choose a displayed action. No cargo has been surrendered.")
-    if action == "B":
+    if action == "P":
         if world.save.pilot.credits < cost:
             raise ValueError(f"Insufficient credits: bribe requires {cost}cr. No cargo or credits changed.")
         if world.event_rng.random() < 0.6:
@@ -7666,7 +7702,7 @@ def screen_customs(p: Palette, world: World) -> None:
         lines = customs_display_lines(world)
         if result: lines.insert(0, result)
         can_pay = world.save.pilot.credits >= customs_quote(world)[1]
-        footer = "[S]Surrender [B]Bribe [<>]Page: " if can_pay else "[S]Surrender [<>]Page: "
+        footer = "[S]Surrender [P]Pay bribe [<>]Page: " if can_pay else "[S]Surrender [<>]Page: "
         action, page, count = _draw_service_page(p, f"Customs {world.save.pilot.credits:,}cr", lines, footer, page)
         if action == ">": page = min(page + 1, count - 1)
         elif action == "<": page = max(0, page - 1)

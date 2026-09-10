@@ -404,7 +404,7 @@ def test_trade_route_editing_fields_and_cancelling_is_read_only(monkeypatch):
         vr.remember_local_market(world)
     world.save.current_system = 0
     before = copy.deepcopy(world.save.to_dict())
-    commands = iter("ED2C2QHHSB")
+    commands = iter("ED2C2UHHSB")
     monkeypatch.setattr(vr, "read_key", lambda: next(commands))
     monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: "2")
     with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -414,7 +414,7 @@ def test_trade_route_editing_fields_and_cancelling_is_read_only(monkeypatch):
     assert world.save.to_dict() == before
 
 
-@pytest.mark.parametrize("commands", [b"TMBRBBQ", b"TR", b"TREQ3\nBBBQ", b"TREQ3\n"])
+@pytest.mark.parametrize("commands", [b"TMBRBBQ", b"TR", b"TREU3\nBBBQ", b"TREU3\n"])
 def test_real_market_memory_and_route_back_or_eof_preserve_career(tmp_path, commands):
     import json
     import os
@@ -441,14 +441,14 @@ def test_real_market_memory_is_saved_after_trade_and_arrival_before_acknowledgem
     world.event_rng.seed(0)
     world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
     world.checkpoint()
-    key = vr.LETTERS[vr.LEGAL_COMMODITIES.index("food")].encode()
-    with _door_stopped_at(tmp_path, b"M" + key + b"B2\n", b"Bought 2x"):
+    key = vr.MARKET_LETTERS[vr.LEGAL_COMMODITIES.index("food")].encode()
+    with _door_stopped_at(tmp_path, b"M" + key + b"P2\n", b"Bought 2x"):
         bought, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert bought.market_memory[0]["food"]["buy"] == vr.price_for(vr.World(bought), 0, "food")
     destination = sorted(world.here.connections)[0]
     jump_key = vr.CHART_CONNECTION_LETTERS[0].encode()
     marker = ("Station Services: " + world.by_id[destination].station_name).encode()
-    with _door_stopped_at(tmp_path, b"C" + jump_key, marker):
+    with _door_stopped_at(tmp_path, b"C" + jump_key + b"Y", marker):
         arrived, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert arrived.current_system == destination and arrived.pending_travel is None
         assert arrived.market_memory[destination]["food"]["day"] == 1
@@ -536,7 +536,7 @@ def test_trading_ledger_records_real_loss_paths(monkeypatch, loss):
     elif loss == "destroy":
         vr.destroy_ship(world)
     else:
-        monkeypatch.setattr(vr, "read_key", lambda: "S" if loss == "customs" else "B")
+        monkeypatch.setattr(vr, "read_key", lambda: "S" if loss == "customs" else "P")
         monkeypatch.setattr(world.event_rng, "random", lambda: 0.99)
         monkeypatch.setattr(vr, "pause", lambda p: None)
         with contextlib.redirect_stdout(io.StringIO()):
@@ -643,8 +643,8 @@ def test_trading_ledger_real_purchases_and_sales_survive_kill_without_duplicate_
     world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
     world.checkpoint()
     cost = 3 * vr.price_for(world, 0, "food")
-    key = vr.LETTERS[vr.LEGAL_COMMODITIES.index("food")].encode()
-    with _door_stopped_at(tmp_path, b"M" + key + b"B3\n", b"Bought 3x"):
+    key = vr.MARKET_LETTERS[vr.LEGAL_COMMODITIES.index("food")].encode()
+    with _door_stopped_at(tmp_path, b"M" + key + b"P3\n", b"Bought 3x"):
         bought, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert bought.cargo_basis == {"food": [[3, cost]]}
         assert bought.market_depth[0]["food"] == {"day": 0, "stock": 45, "demand": 96}
@@ -750,7 +750,7 @@ def test_trade_route_draft_rejection_keeps_edits_until_apply(monkeypatch):
     world, destination = _world_with_market_memory()
     initial = dict(destination=destination, commodity="food", quantity=1, use_hold=False)
     before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
-    keys = iter("QHSHS")
+    keys = iter("UHSHS")
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: "3")
     with contextlib.redirect_stdout(io.StringIO()) as output: result = vr._edit_trade_route(world, initial)
@@ -883,7 +883,7 @@ def test_market_depth_malformed_state_preserves_original_file(tmp_path, depth):
     assert path.read_bytes() == original
 
 
-@pytest.mark.parametrize("commands,buying", [(["B"], True), (["S"], False)])
+@pytest.mark.parametrize("commands,buying", [(["P"], True), (["S"], False)])
 def test_market_depth_exhausted_pool_reports_reason_without_quantity_prompt(monkeypatch, commands, buying):
     import contextlib, io
     world = _world_with_seed(42); world.save.cargo = {"food": 3}
@@ -908,7 +908,7 @@ def test_market_depth_commodity_details_fit_every_page_without_replenishing(monk
         frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
         match = re.search(r"Refined Metals Exchange (\d+)/(\d+)", " ".join(frame.split()))
         assert match and len(frames) < 100
-        return "Q" if match[1] == match[2] else "N"
+        return "Q" if match[1] == match[2] else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): vr._trade_commodity(vr.Palette(False), world, "metals")
     assert "Stock 3 (+6/day)" in " ".join(" ".join(frames).split())
@@ -1135,7 +1135,7 @@ def test_real_economy_opportunity_back_eof_and_route_selection_leave_career_unch
 def test_real_regional_news_is_saved_before_announcement_and_survives_kill(tmp_path):
     world = _world_with_seed(42); world.event_rng.seed(31)
     world._checkpoint = lambda current: vr.persist(current, tmp_path, 77); world.checkpoint()
-    with _door_stopped_at(tmp_path, b"C" + vr.CHART_CONNECTION_LETTERS[0].encode(), b"Galaxy news:"):
+    with _door_stopped_at(tmp_path, b"C" + vr.CHART_CONNECTION_LETTERS[0].encode() + b"Y", b"Galaxy news:"):
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert saved.active_event and 1 <= len(saved.active_event["system_ids"]) <= 3
         event = dict(saved.active_event)
@@ -1572,7 +1572,7 @@ def test_shipyard_offers_two_refit_choices_from_shuttle_and_one_after_committing
     world = _world_with_seed(34)
     world.save.pilot.credits = 20_000
 
-    keys = iter(["G", "C", "Y", "Q"])  # pick the first refit slot (Freighter), commission, confirm, then leave
+    keys = iter([vr.YARD_LETTERS[len(vr.UPGRADES)], "C", "Y", "Q"])  # first refit slot (Freighter), commission, confirm, leave
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -2185,7 +2185,7 @@ def test_derelict_board_success_grants_credits_and_logs():
     world = _world_with_seed(54)
     before_credits = world.save.pilot.credits
     before_log_len = len(world.save.pilot.log)
-    vr.read_key = lambda: "B"
+    vr.read_key = lambda: "S"
     world.event_rng.random = lambda: 0.0  # always the salvage-success branch
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -2197,7 +2197,7 @@ def test_derelict_board_success_grants_credits_and_logs():
 
 def test_derelict_board_trap_triggers_combat(monkeypatch):
     world = _world_with_seed(55)
-    vr.read_key = lambda: "B"
+    vr.read_key = lambda: "S"
     world.event_rng.random = lambda: 0.99  # always the trap branch
 
     calls = []
@@ -2313,7 +2313,7 @@ def test_customs_bribe_refused_raises_notoriety(monkeypatch):
     world.save.cargo["narcotics"] = 5
     world.save.pilot.credits = 10_000
     monkeypatch.setattr(world.event_rng, "random", lambda: 0.99)  # affordable but refused
-    vr.read_key = lambda: "B"
+    vr.read_key = lambda: "P"
 
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_customs(vr.Palette(truecolor=False), world)
@@ -2337,7 +2337,7 @@ def test_customs_successful_bribe_does_not_raise_notoriety():
     world.save.cargo["narcotics"] = 5
     world.save.pilot.credits = 10_000
     world.event_rng.random = lambda: 0.0  # always the bribe-succeeds branch
-    vr.read_key = lambda: "B"
+    vr.read_key = lambda: "P"
 
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_customs(vr.Palette(truecolor=False), world)
@@ -4087,7 +4087,7 @@ def test_shipyard_crew_row_letter_never_collides_with_an_upgrade_row():
     same screen -- two different things both labeled "[C]" on one
     prompt, the exact ambiguity this file's own `refit_keys` comment
     already documents fixing once before."""
-    upgrade_row_letters = set(vr.LETTERS[: len(vr.UPGRADES)])
+    upgrade_row_letters = set(vr.YARD_LETTERS[: len(vr.UPGRADES)])
     assert "K" not in upgrade_row_letters
 
 
@@ -4127,7 +4127,7 @@ def test_chart_screen_reserves_sgv_and_never_assigns_them_to_a_connection(monkey
         assert letter not in vr.CHART_CONNECTION_LETTERS[:8]
 
     eighth_letter = vr.CHART_CONNECTION_LETTERS[7]
-    keys = iter([eighth_letter])
+    keys = iter([eighth_letter, "Y"])
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()):
         dest = vr.screen_chart(vr.Palette(truecolor=False), world)
@@ -4465,7 +4465,7 @@ def test_futures_draft_and_order_pages_fit_and_preserve_all_terms(monkeypatch,wi
 
 def test_futures_invalid_quantity_retains_draft_without_saving(monkeypatch):
     world=_world_with_seed(42);before=world.save.to_dict()
-    keys=iter(["Q","Q","B"]);values=iter(["3","not a number"])
+    keys=iter(["U","U","B"]);values=iter(["3","not a number"])
     monkeypatch.setattr(vr,"read_key",lambda:next(keys));monkeypatch.setattr(vr,"read_line_raw",lambda **kw:next(values))
     with contextlib.redirect_stdout(io.StringIO()) as output:vr._screen_buy_futures(vr.Palette(False),world,"food")
     text=output.getvalue()
@@ -4473,7 +4473,7 @@ def test_futures_invalid_quantity_retains_draft_without_saving(monkeypatch):
     assert world.save.to_dict()==before
 
 
-@pytest.mark.parametrize("commands",[b"MX1>Q3\rTTBBQ",b"MX1>",b"MX1Q\rBBQ",b"MX1SNBBQ"])
+@pytest.mark.parametrize("commands",[b"MX1>U3\rTTBBQ",b"MX1>",b"MX1U\rBBQ",b"MX1SNBBQ"])
 def test_real_responsive_futures_draft_back_cancel_and_eof_preserve_career(tmp_path,commands):
     import json,os,subprocess
     world=_world_with_seed(42)
@@ -4534,7 +4534,7 @@ def test_buy_futures_rejects_invalid_duration_without_mutation():
 def test_screen_buy_futures_creates_a_contract_on_confirmation(monkeypatch):
     world = _world_with_seed(178)
     world.save.pilot.credits = 100_000
-    keys = iter("QS")
+    keys = iter("US")
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     monkeypatch.setattr(vr, "read_line_raw", lambda **kw: "10")
     monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
@@ -4831,7 +4831,7 @@ def test_service_pages_retain_all_terms_and_fit_terminal(monkeypatch,width,heigh
         plain=" ".join(vr._ANSI_RE.sub("",frame).split())
         match=re.search(r"(?:Engineering Yard|Crew Roster): 100,000cr (\d+)/(\d+)",plain)
         assert match and len(frames)<200
-        assert "[Q]Back" in plain
+        assert "[B]Back" in plain or "[B]ack" in plain
         return "Q" if match[1]==match[2] else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):
@@ -4911,7 +4911,7 @@ def test_market_catalog_pages_preserve_goods_quotes_and_telemetry(monkeypatch,wi
         assert len(frame.splitlines())<=height
         assert all(vr._visible_width(line)<=width for line in frame.splitlines())
         plain=" ".join(frame.split())
-        assert "[Q]Back:" in plain and "[X]Futures" in plain and "1,200cr" in plain
+        assert "[B]Back:" in plain and "[X]Futures" in plain and "1,200cr" in plain
         page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
         return "Q" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
@@ -4923,7 +4923,7 @@ def test_market_catalog_pages_preserve_goods_quotes_and_telemetry(monkeypatch,wi
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
-@pytest.mark.parametrize("key",list("ABCDE"))
+@pytest.mark.parametrize("key",list("ACDEF"))
 def test_market_commodity_keys_keep_identity_after_paging(monkeypatch,key):
     monkeypatch.setattr(vr,"_OUTPUT_WIDTH",40);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",12)
     world=_world_with_seed(42);selected=[]
@@ -4931,13 +4931,13 @@ def test_market_commodity_keys_keep_identity_after_paging(monkeypatch,key):
     monkeypatch.setattr(vr,"read_key",lambda:next(commands))
     monkeypatch.setattr(vr,"_trade_commodity",lambda p,w,c:selected.append(c))
     with contextlib.redirect_stdout(io.StringIO()):vr.screen_market(vr.Palette(False),world)
-    assert selected==[vr.LEGAL_COMMODITIES[vr.LETTERS.index(key)]]
+    assert selected==[vr.LEGAL_COMMODITIES[vr.MARKET_LETTERS.index(key)]]
 
 
 def test_market_retains_trade_result_through_cancelled_quantity(monkeypatch):
     world=_world_with_seed(42);saved=[]
     world._checkpoint=lambda current:saved.append(current.save.to_dict())
-    commands=iter(["A","B","A","B","Q"]);quantities=iter(["1",""])
+    commands=iter(["A","P","A","P","Q"]);quantities=iter(["1",""])
     monkeypatch.setattr(vr,"read_key",lambda:next(commands))
     monkeypatch.setattr(vr,"read_line_raw",lambda **kw:next(quantities))
     with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_market(vr.Palette(False),world)
@@ -4948,13 +4948,13 @@ def test_market_retains_trade_result_through_cancelled_quantity(monkeypatch):
 
 def test_prohibited_commodity_details_hide_buy_and_reject_unadvertised_purchase(monkeypatch):
     world=_world_with_seed(42);world.save.cargo={"weapons":1};before=world.save.to_dict()
-    monkeypatch.setattr(vr,"read_key",lambda:"B")
+    monkeypatch.setattr(vr,"read_key",lambda:"P")
     with contextlib.redirect_stdout(io.StringIO()) as output:result=vr._trade_commodity(vr.Palette(False),world,"weapons")
-    assert "Buy prohibited" in output.getvalue() and "[B]uy" not in output.getvalue()
+    assert "Buy prohibited" in output.getvalue() and "[P]urchase" not in output.getvalue()
     assert "prohibit" in result and world.save.to_dict()==before
 
 
-@pytest.mark.parametrize("commands",[b"M><AQ Q".replace(b" ",b""),b"M><",b"MAB\rQ",b"MXBQ"])
+@pytest.mark.parametrize("commands",[b"M><AQ Q".replace(b" ",b""),b"M><",b"MAP\rQ",b"MXBQ"])
 def test_real_market_catalog_browsing_cancel_and_eof_preserve_career(tmp_path,commands):
     import json,os,subprocess
     world=_world_with_seed(42)
@@ -4972,7 +4972,7 @@ def test_market_retained_trade_result_is_durable_before_disconnect(tmp_path,acti
     world=_world_with_seed(42)
     if action=="sell":world.save.cargo={"food":2}
     world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
-    command=b"MAB1\r" if action=="buy" else b"MAS1\r"
+    command=b"MAP1\r" if action=="buy" else b"MAS1\r"
     marker=b"Result: Bought 1x Food" if action=="buy" else b"Result: Sold 1x Food"
     with _door_stopped_at(tmp_path,command,marker):
         saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
@@ -5104,7 +5104,7 @@ def test_navigation_chart_pages_preserve_all_connections_and_career(monkeypatch,
         frame=output.getvalue();frames.append(frame);output.seek(0);output.truncate(0)
         plain=" ".join(vr._ANSI_RE.sub("",frame).split())
         match=re.search(r"Navigation: Fuel 24/24 (\d+)/(\d+)",plain);assert match and len(frames)<300
-        assert "[Q]Back" in plain
+        assert "[B]Back" in plain
         return "Q" if match[1]==match[2] else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output): assert vr.screen_chart(vr.Palette(False),world) is None
@@ -5130,6 +5130,7 @@ def test_navigation_chart_selects_last_connection_beyond_one_alphabet(monkeypatc
     output=io.StringIO();seen=[]
     def choose():
         frame=vr._ANSI_RE.sub("",output.getvalue());seen.append(frame);output.seek(0);output.truncate(0)
+        if "Depart for FINAL?" in frame: return "Y"
         match=re.search(r"\[([A-Z])\] FINAL",frame)
         if match:
             assert match[1] not in vr.CHART_RESERVED_LETTERS
@@ -5406,7 +5407,7 @@ def test_status_bar_separator_is_79_columns():
 @pytest.mark.parametrize(
     "commands,ack,field,expected",
     [
-        (b"MAB1\r", b"Bought 1x Food", "cargo.food", 1),
+        (b"MAP1\r", b"Bought 1x Food", "cargo.food", 1),
         (b"YAY", b"Cargo Bay Expansion upgraded", "ship.cargo_tier", 1),
         (b"YKAY", b"Gunner hired", "ship.has_gunner", True),
         (b"YR2\r", b"Refueled 2 units", "ship.fuel", 22),
@@ -5490,7 +5491,7 @@ def test_failed_station_checkpoint_never_announces_purchase(monkeypatch):
         raise OSError("disk full")
 
     world._checkpoint = fail_save
-    monkeypatch.setattr(vr, "read_key", lambda: "B")
+    monkeypatch.setattr(vr, "read_key", lambda: "P")
     monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: "1")
     output = io.StringIO()
     with contextlib.redirect_stdout(output), pytest.raises(vr.SaveError):
@@ -5514,7 +5515,7 @@ def test_save_failure_stops_main_without_success_or_more_actions(tmp_path, monke
             pass
 
     output = Terminal()
-    keys = iter(["M", "A", "B", " ", "Q"])
+    keys = iter(["M", "A", "P", " ", "Q"])
     with monkeypatch.context() as patch:
         patch.setattr(vr.sys, "stdout", output)
         patch.setattr(vr, "_load_door_info", lambda: {"handle": "Tester", "user_id": 77})
@@ -5648,8 +5649,8 @@ def test_failed_atomic_replace_preserves_previous_save_and_removes_own_temp(tmp_
         ("pirate", 2, "F", "Raider contact"),
         ("squadron", 45, "F", "squadron contact: 2"),
         ("squadron_switch", 45, "T", "Target selected"),
-        ("salvage", 26, "B", "Salvaged a derelict"),
-        ("ambush", 160, "B", "weren't as dead"),
+        ("salvage", 26, "S", "Salvaged a derelict"),
+        ("ambush", 160, "S", "weren't as dead"),
         ("distress", 8, "H", "Grateful survivors"),
         ("tip", 9, "F", "trader's data burst"),
         ("ignore_derelict", 26, "?I", "leave the derelict"),
@@ -5661,7 +5662,7 @@ def test_failed_atomic_replace_preserves_previous_save_and_removes_own_temp(tmp_
         ("bounty_loss", 0, "F", "Bounty failed"),
         ("bounty_escape", 0, "E", "escape"),
         ("bounty_dump", 0, "D", "dump cargo"),
-        ("bounty_bribe", 0, "B", "peels off"),
+        ("bounty_bribe", 0, "P", "peels off"),
         ("escorts", 0, "F", "Convoy delivered safely"),
         ("escort_loss", 0, "F", "Escort contract failed"),
         ("patrol_win", 9, "F", "Concord will not forget"),
@@ -5669,7 +5670,7 @@ def test_failed_atomic_replace_preserves_previous_save_and_removes_own_temp(tmp_
         ("patrol_surrender", 9, "S", "Notoriety cleared"),
         ("patrol_evade", 9, "EEEEEEEE", "break contact and escape"),
         ("customs_surrender", 4, "FS", "surrender 2 units"),
-        ("customs_bribe", 4, "FB", "changes hands quietly"),
+        ("customs_bribe", 4, "FP", "changes hands quietly"),
     ],
 )
 def test_every_travel_checkpoint_resumes_to_the_same_career(
@@ -5803,7 +5804,7 @@ def _door_stopped_at(tmp_path, commands: bytes, acknowledgement: bytes):
         proc.stderr.close()
 
 
-@pytest.mark.parametrize("commands", [b"CAF", b"CRJF", b"CGD1JF"])
+@pytest.mark.parametrize("commands", [b"CAYF", b"CRJF", b"CGD1JF"])
 def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkeypatch, commands):
     import json
 
@@ -5830,7 +5831,7 @@ def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkey
     assert saved["ship"]["fuel"] < initial["ship"]["fuel"]
 
     # A fresh executable must resume the opponent, not reveal a station menu.
-    with _door_stopped_at(tmp_path, b"Q", b"Tactical Systems:") as output:
+    with _door_stopped_at(tmp_path, b"I", b"Tactical Systems:") as output:
         assert b"Resuming your interrupted journey" in output
         assert b"Freeport Anchorage" not in output
         assert json.loads((tmp_path / "77.json").read_text(encoding="utf-8")) == saved
@@ -6751,7 +6752,8 @@ def test_tracked_chart_hint_identifies_the_actual_destination_key(monkeypatch, d
     world.by_id[first].discovered = discovered
     world.save.ship.fuel = 100
     key = vr.CHART_CONNECTION_LETTERS[sorted(world.here.connections).index(first)]
-    monkeypatch.setattr(vr, "read_key", lambda: key)
+    keys = iter([key, "Y"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         dest = vr.screen_chart(vr.Palette(False), world)
@@ -6856,7 +6858,7 @@ def test_repeated_one_unit_contraband_recycling_cannot_unlock_membership(monkeyp
     monkeypatch.setattr(vr, "read_line_raw", lambda **kw: "1")
     with contextlib.redirect_stdout(io.StringIO()):
         for _ in range(38):
-            monkeypatch.setattr(vr, "read_key", lambda: "B")
+            monkeypatch.setattr(vr, "read_key", lambda: "P")
             vr._trade_commodity(vr.Palette(False), world, "weapons")
             monkeypatch.setattr(vr, "read_key", lambda: "S")
             vr._trade_commodity(vr.Palette(False), world, "weapons")
@@ -7170,7 +7172,7 @@ def test_pilot_lease_releases_and_acknowledged_trade_survives(tmp_path, end):
     import subprocess
 
     vr.write_save(tmp_path, 77, _world_with_seed(42).save)
-    with _live_voidrunner(tmp_path, commands=b"MAB1\r", acknowledgement=b"Bought 1x Food") as (proc, env):
+    with _live_voidrunner(tmp_path, commands=b"MAP1\r", acknowledgement=b"Bought 1x Food") as (proc, env):
         if end == "kill":
             proc.kill()
         elif end == "quit":
@@ -7870,13 +7872,13 @@ def test_real_first_flight_survives_kills_through_acceptance_purchase_delivery_a
     with _door_stopped_at(tmp_path, b"GO" + b"N" * 10 + b"A", b"First Flight accepted and tracked"):
         accepted, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert accepted.active_missions[0].opening_assignment and accepted.tracked_mission_id == offer.id
-    market_key = vr.LETTERS[vr.LEGAL_COMMODITIES.index(offer.commodity)].encode()
-    with _door_stopped_at(tmp_path, b"M" + market_key + b"B3\n", b"Bought 3x"):
+    market_key = vr.MARKET_LETTERS[vr.LEGAL_COMMODITIES.index(offer.commodity)].encode()
+    with _door_stopped_at(tmp_path, b"M" + market_key + b"P3\n", b"Bought 3x"):
         bought, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert bought.cargo[offer.commodity] == 3 and bought.pilot.credits == 1200 - cargo_cost
         assert bought.cargo_basis == {offer.commodity: [[3, cargo_cost]]}
     jump_key = vr.CHART_CONNECTION_LETTERS[sorted(world.here.connections).index(offer.target_system)].encode()
-    with _door_stopped_at(tmp_path, b"C" + jump_key, b"Mission complete: First Flight:"):
+    with _door_stopped_at(tmp_path, b"C" + jump_key + b"Y", b"Mission complete: First Flight:"):
         delivered, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert delivered.flags["opening_assignment_completed"]
         assert delivered.pilot.credits == 1200 - cargo_cost + offer.reward
@@ -8219,7 +8221,7 @@ def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch,
         frames.append(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
-        assert "[Q]Info" in frame and "[< >]Page:" in frame
+        assert "[I]Info" in frame and "[< >]Page:" in frame
         if not state["fired"]:
             state["fired"] = True
             return "F"
@@ -8232,7 +8234,7 @@ def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch,
         if page < count: return ">"
         if not state["details"]:
             state["details"] = True
-            return "Q"
+            return "I"
         raise EOFError
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output), pytest.raises(EOFError):
@@ -8285,7 +8287,7 @@ def test_unaffordable_customs_bribe_is_harmless_and_keeps_inspection_pending(mon
     def choose():
         if not calls:
             calls.append(1)
-            return "B"
+            return "P"
         assert world.save.to_dict() == before
         assert world.event_rng.getstate() == rng
         raise EOFError
@@ -8356,7 +8358,7 @@ def _world_waiting_at_customs():
     return world
 
 
-@pytest.mark.parametrize("commands,credits", [(b">", 10_000), (b"B>", 0), (b"?<>", 0)])
+@pytest.mark.parametrize("commands,credits", [(b">", 10_000), (b"P>", 0), (b"?<>", 0)])
 def test_real_customs_browsing_and_rejected_bribe_preserve_pending_save(tmp_path, commands, credits):
     import json, os, subprocess
     world = _world_waiting_at_customs()
@@ -8373,7 +8375,7 @@ def test_real_customs_browsing_and_rejected_bribe_preserve_pending_save(tmp_path
     assert result.returncode == 0 and not result.stderr
     assert b"Resuming your interrupted journey" in result.stdout and b"Customs" in result.stdout
     assert b"Command Deck" not in result.stdout
-    if b"B" in commands: assert b"Insufficient credits" in result.stdout
+    if b"P" in commands: assert b"Insufficient credits" in result.stdout
     assert (tmp_path / "77.json").read_bytes() == before
 
 
@@ -8385,7 +8387,7 @@ def test_customs_result_checkpoint_and_replay_do_not_repeat_effects(tmp_path, de
     world.event_rng.seed(0 if decision == "refused" else 1)
     vr.persist(world, tmp_path, 77)
     marker = b"You surrender" if decision == "surrender" else b"changes hands quietly" if decision == "accepted" else b"Bribe refused"
-    command = b">S" if decision == "surrender" else b">B"
+    command = b">S" if decision == "surrender" else b">P"
     with _door_stopped_at(tmp_path, command, marker):
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert saved.pending_travel["encounter"]["done"]
@@ -8511,7 +8513,7 @@ def test_tactical_intent_displayed_damage_range_matches_resolution(monkeypatch, 
     assert tactics["step"] == (step + 1) % 3
 
 
-@pytest.mark.parametrize("action", ["E", "B"])
+@pytest.mark.parametrize("action", ["E", "P"])
 def test_failed_tactical_disengagement_uses_and_advances_visible_intent(monkeypatch, action):
     tactics = {"version": 1, "profile": "Raider", "step": 1, "brace_ready": True}
     world, pirate = _world_with_pending_fight(tactics=tactics)
@@ -8535,13 +8537,13 @@ def test_tactical_brace_checkpoint_survives_real_kill_and_invalid_repeat(tmp_pat
     destination = sorted(world.here.connections)[0]
     world.save.active_missions = [vr.Mission(1, "bounty", "Intercept raider", 500, 0, destination, pirate_tier=2)]
     world.checkpoint(); vr.persist(world, tmp_path, 77)
-    with _door_stopped_at(tmp_path, b"CAG", b"Braced;"):
+    with _door_stopped_at(tmp_path, b"CAYG", b"Braced;"):
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         combat = saved.pending_travel["encounter"]["combat"]
         assert combat["tactics"]["version"] == 1 and not combat["tactics"]["brace_ready"]
         assert combat["tactics"]["step"] == 1 and 0 < combat["pirate"]["hp"] < combat["pirate"]["hp_max"]
     before = (tmp_path / "77.json").read_bytes()
-    with _door_stopped_at(tmp_path, b"GQ", b"Tactical Systems:"):
+    with _door_stopped_at(tmp_path, b"GI", b"Tactical Systems:"):
         assert (tmp_path / "77.json").read_bytes() == before
 
 
@@ -8828,7 +8830,7 @@ def test_derelict_reward_and_opponent_match_destination_terms(monkeypatch, dange
     travel["encounter"] = {"kind": "derelict"}
     world.by_id[travel["destination"]].danger = danger
     world.here.danger = (danger + 2) % 5
-    monkeypatch.setattr(vr, "read_key", lambda: "B")
+    monkeypatch.setattr(vr, "read_key", lambda: "S")
     monkeypatch.setattr(world.event_rng, "random", lambda: 0.99 if ambush else 0.0)
     monkeypatch.setattr(world.event_rng, "randint", lambda low, high: high)
     pirates = []
@@ -9146,7 +9148,7 @@ def test_review_combat_info_keeps_exchange_before_tactical_heading(monkeypatch, 
     world = _world_with_seed(42); pirate = vr.Pirate("Raider", 0, 50, 50)
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
     lines = vr.combat_display_lines(world, pirate, ["Your last shot hit."], patrol=False, details=True)
-    pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/B]Act [Q]Info [< >]Page: ")
+    pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/P]Act [I]Info [< >]Page: ")
     assert pages[0][0] == "Last exchange:"
     assert lines.index("Your last shot hit.") < lines.index("Tactical Systems:")
 
@@ -9217,7 +9219,7 @@ def test_real_exchange_text_starts_on_first_combat_page(monkeypatch, width, heig
     _, _, result = vr.fight_round(world, pirate)
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
     lines = vr.combat_display_lines(world, pirate, result, patrol=False, details=details)
-    pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/B]Act [Q]Info [< >]Page: ")
+    pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/P]Act [I]Info [< >]Page: ")
     assert len(pages[0]) > 1 and result[0].split()[0] in " ".join(pages[0][1:])
     text = " ".join(" ".join(row for page in pages for row in page).split())
     for entry in result: assert " ".join(entry.split()) in text
@@ -9227,7 +9229,7 @@ def test_real_exchange_text_starts_on_first_combat_page(monkeypatch, width, heig
 def test_peaceful_combat_action_discloses_its_standing_gain(patrol):
     world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 1, 50, 50)
     lines = vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True)
-    action = next(row for row in lines if row.startswith("[S]" if patrol else "[B]"))
+    action = next(row for row in lines if row.startswith("[S]" if patrol else "[P]"))
     assert ("Concord +2" if patrol else "Blackwake +2") in action
 
 
@@ -9947,7 +9949,7 @@ def test_real_paid_service_promotion_is_saved_before_ack_and_not_replayed(tmp_pa
     world = _world_with_named_crew(role, 4)
     world.event_rng.seed(100)
     world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
-    with _door_stopped_at(tmp_path, b"CA", b"is now Seasoned"):
+    with _door_stopped_at(tmp_path, b"CAY", b"is now Seasoned"):
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert saved.ship.crew_records[role]["paid_jumps"] == 5 and saved.turn == 5
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"IQQ", capture_output=True, timeout=10,
@@ -9981,7 +9983,7 @@ def test_crew_service_survives_every_serialized_departure_checkpoint(monkeypatch
         assert restored.save.ship.crew_records[role]["paid_jumps"] == 5
 
 
-@pytest.mark.parametrize("role,letter", [("gunner", b"A"), ("engineer", b"B"), ("navigator", b"C")])
+@pytest.mark.parametrize("role,letter", [("gunner", b"A"), ("engineer", b"C"), ("navigator", b"D")])
 def test_real_hire_records_the_previewed_identity_before_ack(tmp_path, role, letter):
     world = _world_with_seed(42); world.save.pilot.credits = 100_000
     world.save.pilot.highest_rank_seen = len(vr.RANKS) - 1
@@ -10894,7 +10896,7 @@ def test_career_rank_checkpoint_retains_reward_before_next_spend(tmp_path, thres
     assert vr.check_rank_up(world) is None
 
 
-@pytest.mark.parametrize("commands,marker", [(b"MAS1\rAB1\r",b"Result: Bought 1x Food"), (b"MAS1\r",b"Result: Sold 1x Food")])
+@pytest.mark.parametrize("commands,marker", [(b"MAS1\rAP1\r",b"Result: Bought 1x Food"), (b"MAS1\r",b"Result: Sold 1x Food")])
 def test_career_rank_real_nested_market_peak_survives_kill(tmp_path, commands, marker):
     world = _world_with_seed(42); world.save.pilot.credits = 4999; world.save.cargo = {"food":1}
     world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
@@ -10903,7 +10905,7 @@ def test_career_rank_real_nested_market_peak_survives_kill(tmp_path, commands, m
         saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
         assert saved.pilot.highest_rank_seen == 1
         assert vr.career_rank(saved.pilot) == "Independent Trader"
-        if b"AB" in commands: assert saved.pilot.credits < 5000
+        if b"AP" in commands: assert saved.pilot.credits < 5000
         else: assert saved.pilot.credits >= 5000
 
 
@@ -11819,3 +11821,76 @@ def test_achievement_invalid_lifetime_total_cannot_poison_the_career_save(tmp_pa
     world=_world_with_seed(42);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
     saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
     assert saved.pilot.retirements==0 and vr._load_score_records(tmp_path)[0]["retirements"]==0
+
+
+# --- #400: one Back key, never a live action; chart departure confirms -------------
+
+
+@pytest.mark.parametrize("screen", ["market", "shipyard", "crew", "chart"])
+def test_b_is_back_on_every_letter_list_screen_and_writes_nothing(monkeypatch, screen):
+    world = _world_with_seed(42); before = world.save.to_dict(); rng = world.event_rng.getstate()
+    world._checkpoint = lambda current: pytest.fail("Back must not checkpoint")
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
+    draw = {"market": vr.screen_market, "shipyard": vr.screen_shipyard, "crew": vr.screen_crew, "chart": vr.screen_chart}[screen]
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        result = draw(vr.Palette(False), world)
+    plain = vr._ANSI_RE.sub("", output.getvalue())
+    assert ("[B]Back" in plain or "[B]ack" in plain) and "[Q]Back" not in plain and result is None
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+def test_selection_letters_never_include_back_or_a_screen_hotkey():
+    for letters, reserved in ((vr.MARKET_LETTERS, "XQ"), (vr.YARD_LETTERS, "RPKSVUQ"), (vr.CREW_LETTERS, "Q"),
+                              (vr.CHART_CONNECTION_LETTERS, vr.CHART_RESERVED_LETTERS)):
+        assert vr.BACK_KEY not in letters and not set(reserved) & set(letters)
+    assert vr.letter_span(vr.CREW_LETTERS[:3]) == "A/C/D" and vr.letter_span(vr.MARKET_LETTERS[:7]) == "A,C-H"
+    assert vr.letter_span([]) == "" and vr.letter_span(["A"]) == "A"
+
+
+def test_old_second_connection_letter_no_longer_departs(monkeypatch):
+    world = _world_with_seed(42); world.save.ship.fuel = 99
+    assert len(world.here.connections) >= 2 and "B" not in vr.CHART_CONNECTION_LETTERS
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr.screen_chart(vr.Palette(False), world) is None
+    assert "Depart for" not in output.getvalue()
+
+
+@pytest.mark.parametrize("answer,discovered", [("N", True), ("Y", True), ("Y", False)])
+def test_chart_departure_confirms_cost_and_danger_as_the_last_keystroke(monkeypatch, answer, discovered):
+    world = _world_with_seed(42); world.save.ship.fuel = 99; before = world.save.to_dict()
+    dest = sorted(world.here.connections)[0]; world.by_id[dest].discovered = discovered
+    keys = iter([vr.CHART_CONNECTION_LETTERS[0], answer, "B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        selected = vr.screen_chart(vr.Palette(False), world)
+    plain = vr._ANSI_RE.sub("", output.getvalue())
+    cost = vr.fuel_cost_for_jump(world.here, world.by_id[dest], world.save.ship)
+    name = world.by_id[dest].name if discovered else "an uncharted system"
+    danger = f"danger {world.by_id[dest].danger}" if discovered else "danger unknown"
+    assert f"Depart for {name}? {cost} fuel, {danger}, one day passes. [Y/N]" in plain
+    if answer == "Y": assert selected == dest
+    else: assert selected is None and "Departure cancelled; still docked." in plain
+    assert world.save.to_dict() == before
+
+
+def test_combat_b_is_harmless_and_p_pays_the_bribe(monkeypatch):
+    world, pirate = _world_with_pending_fight()
+    world.save.pilot.credits = 10_000; credits = world.save.pilot.credits
+    monkeypatch.setattr(world.event_rng, "random", lambda: 0.0)  # bribe accepted
+    keys = iter(["B", "P"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        outcome = vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=False)
+    plain = vr._ANSI_RE.sub("", output.getvalue())
+    assert outcome == "escaped" and "[P] Pay bribe:" in plain and "[I]Info" in plain and "[Q]Info" not in plain
+    assert world.save.pilot.credits == credits - vr.bribe_cost(pirate)
+
+
+def test_customs_b_is_rejected_as_undisplayed_and_p_bribes(monkeypatch):
+    world = _world_with_seed(42); world.save.cargo = {"weapons": 2}; world.save.pilot.credits = 10_000
+    monkeypatch.setattr(world.event_rng, "random", lambda: 0.0)
+    keys = iter(["B", "P"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with pytest.raises(ValueError): vr.resolve_customs(world, "B")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_customs(vr.Palette(False), world)
+    plain = vr._ANSI_RE.sub("", output.getvalue())
+    assert "Choose a displayed action" in plain and "[P]Pay bribe" in plain and "changes hands quietly" in plain
