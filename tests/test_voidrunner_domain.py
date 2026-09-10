@@ -8269,7 +8269,8 @@ def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch,
         frames.append(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
-        assert "[I]Info" in frame and "[<>]Page:" in frame
+        # A one-page screen drops its paging tokens (#412); the counter is the oracle.
+        assert "[I]Info" in frame and ("[<>]Page:" in frame or "/1" in frame)
         if not state["fired"]:
             state["fired"] = True
             return "F"
@@ -8375,7 +8376,7 @@ def test_customs_pages_keep_complete_terms_without_mutation(monkeypatch, width, 
         frames.append(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
-        assert "[S]Surrender" in frame and "[<>]Page:" in frame
+        assert "[S]Surrender" in frame and ("[<>]Page:" in frame or "/1" in frame)
         if not credits: assert "[B]" not in frame
         plain = vr._ANSI_RE.sub("", frame)
         content.append(re.search(r"\d+/\d+\r\n(.*?)\r\n\[S\]Surrender", plain, re.S).group(1))
@@ -8913,9 +8914,11 @@ def _world_with_exploration_choice(kind):
 def test_real_exploration_browsing_and_disconnect_preserve_pending_save(tmp_path, kind):
     world = _world_with_exploration_choice(kind); vr.persist(world, tmp_path, 77)
     path = tmp_path / "77.json"; before = path.read_bytes()
-    with _door_stopped_at(tmp_path, b">?<", b"Page: <") as output:
+    with _door_stopped_at(tmp_path, b">?<", b": <") as output:
         # This echo exists only after both navigation keys and invalid input were read.
-        assert b"Page: >" in output and b"Page: ?" in output and b"Page: <" in output
+        # The prompt itself is matched by its trailing colon, because a one-page screen
+        # drops its paging tokens and no longer ends in "Page: " (#412).
+        assert b": >" in output and b": ?" in output and b": <" in output
         assert path.read_bytes() == before
 
 
@@ -12965,3 +12968,129 @@ def test_wording_uses_singular_forms_and_names_the_offer_refresh():
         vr.read_key = lambda: "B"
         vr.screen_missions(vr.Palette(False), world)
     assert re.search(r"New offers on day \d+", output.getvalue()) and "Refresh day" not in output.getvalue()
+
+
+# --- #412 review: the single-page footer has to reach the screens that use it -----------
+
+
+@pytest.mark.parametrize("footer,expected", [
+    ("[<]Prev [>]Next [X]Expand [Q]Exit: ", "[X]Expand [Q]Exit: "),
+    ("[S]Story [B]Back [<>]Page: ", "[S]Story [B]Back: "),
+    ("[<>]Page [O/C/H/D]View [R]Finale [B]Back: ", "[O/C/H/D]View [R]Finale [B]Back: "),
+    ("[F]Fire [E]Evade [I]Info [<>]Page: ", "[F]Fire [E]Evade [I]Info: "),
+    ("[R]oute [N]ext [P]rev [B]ack", "[R]oute [B]ack"),
+    ("[1-9] Details [N]ext [P]rev [B]ack > ", "[1-9] Details [B]ack > "),
+    ("[A]ccept [N]ext [P]rev [B]ack: ", "[A]ccept [B]ack: "),
+    ("[1-5]View [N]Next [P]Prev [B]Back: ", "[1-5]View [B]Back: "),  # the Hall of Fame spelling
+    ("[E]dit draft [B]ack: ", "[E]dit draft [B]ack: "),
+])
+def test_single_page_footers_drop_every_spelling_of_the_paging_tokens(footer, expected):
+    """The literal table missed every colon-terminated bar, which is most of them."""
+    assert vr.single_page_footer(footer, 1) == expected
+    assert vr.single_page_footer(footer, 2) == footer
+    assert "[<" not in vr.single_page_footer(footer, 1)
+    assert "  " not in vr.single_page_footer(footer, 1) and " :" not in vr.single_page_footer(footer, 1)
+
+
+def test_a_screen_that_fits_without_paging_tokens_is_one_page(monkeypatch):
+    """Counting pages against the longer footer split screens that fit (#412 review):
+    at 40 columns the market's own bar wraps to two rows and its shortened form to
+    one, so the page that was two rows short of fitting now fits."""
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 24)
+    footer = "[<]Prev [>]Next [A,C-J]Trade [X]Futures [B]Back: "
+    rows = lambda text: len(vr._wrap_output(text, 39).split("\r\n"))
+    assert rows(footer) > rows(vr.single_page_footer(footer, 1))
+    capacity = len(vr._service_pages(["row"] * 200, "Title", footer)[0])
+    assert len(vr._service_pages(["row"] * (capacity + 1), "Title", footer)) == 1
+    assert len(vr._service_pages(["row"] * (capacity + 4), "Title", footer)) > 1
+
+
+def test_contract_details_stop_advertising_paging_on_a_single_page(monkeypatch):
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 200)
+    world, mission = _mission_details_world()
+    keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_mission_details(vr.Palette(False), world, mission, active=False)
+    text = vr._ANSI_RE.sub("", output.getvalue())
+    assert "Contract #" in text and "1/1" in text
+    assert "[N]ext" not in text and "[P]rev" not in text
+    assert "[A]ccept contract" in text and "[R]oute" in text
+
+
+def test_a_tagged_market_row_still_fits_one_line(monkeypatch):
+    """`Illegal [CRASH]` on a Haven contraband row overflowed 80 columns (#412 review)."""
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80)
+    world = _world_with_seed(303)
+    haven = next(s for s in world.galaxy if s.economy == "Haven")
+    world.save.current_system = haven.id; haven.discovered = True
+    contraband = vr.CONTRABAND_COMMODITIES[0]
+    world.save.active_event = {"economy": haven.economy, "commodity": contraband, "direction": "crash",
+                               "turns_remaining": 4, "description": "Prices collapse"}
+    world.save.cargo = {contraband: 7}
+    rows = [row for row in vr.market_catalog_lines(world, [contraband]) if row.startswith("[")]
+    assert rows and all(vr._visible_width(row) <= 79 for row in rows)
+    assert "Illegal" in rows[0] and ("[CRASH]" in rows[0] or "[BOOM]" in rows[0])
+    depth = {"stock": 96, "demand": 48}
+    head = "[J] Narcotics: buy 1200cr; sell 1100cr."
+    assert vr._market_row(head, depth, 7, []) == head + " Stock 96; demand 48; hold 7."
+    tagged = vr._market_row(head, depth, 7, ["Illegal", "[CRASH]"])
+    assert tagged == head + " Hold 7. Illegal [CRASH]"  # depth gives way first, the hold last
+    assert vr._visible_width(tagged) <= 79
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 20)  # too narrow for any form: keep everything and wrap
+    narrow = [row for row in vr.market_catalog_lines(world, [contraband]) if row.startswith("[")]
+    assert "Stock" in narrow[0] and "hold 7" in narrow[0]
+
+
+def test_first_flight_names_its_acceptance_action_on_every_page(monkeypatch):
+    """The first screen of the game must not hide its one action (#412 review)."""
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 24)
+    world = _world_with_seed(42)
+    offer = vr.opening_assignment_offer(world)
+    assert offer is not None
+    frames = []
+    output = io.StringIO()
+    def choose():
+        frames.append(output.getvalue()); output.seek(0); output.truncate(0)
+        return "N" if len(frames) == 1 else "B"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output):
+        assert vr._screen_opening_offer(vr.Palette(False), world, offer) is False
+    plain = [vr._ANSI_RE.sub("", frame) for frame in frames]
+    assert len(plain) > 1 and "[A] on last page." in plain[0]
+    assert "[A]ccept contract" in plain[-1]
+    assert all(len(frame.splitlines()) <= 24 for frame in plain)
+
+
+def test_a_blocked_survey_does_not_advertise_scanning(monkeypatch):
+    """"Revisiting cannot complete it" and "scanning may avoid travel" cannot both hold."""
+    world = _world_with_seed(42)
+    target = next(s for s in world.galaxy if s.id != 0)
+    mission = vr.Mission(9, "scan", "Survey the drift", 250, 0, target.id)
+    world.save.active_missions = [mission]
+    target.discovered = False
+    open_text = " ".join(vr.mission_details(world, mission))
+    assert "Survey scanning may avoid travel." in open_text and "BLOCKED SURVEY" not in open_text
+    target.discovered = True
+    world.sync_discovered()
+    blocked = " ".join(vr.mission_details(world, mission))
+    assert "BLOCKED SURVEY" in blocked
+    assert "Survey scanning may avoid travel." not in blocked
+    assert "Area surveys require a scanner" not in blocked
+
+
+@pytest.mark.parametrize("width,height", [(20, 12), (40, 12), (80, 24)])
+def test_precomputed_portrait_pages_also_paginate_against_the_shown_footer(monkeypatch, width, height):
+    """The viewport builds its pages ahead of `_draw_service_page`, so it needs the
+    same single-page retry (issue #412 review)."""
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    world = _world_with_seed(42)
+    large, compact, details, title = vr.viewport_content(world, "1")
+    footer = "[1-4]View [<]Prev [>]Next [B]Back: "
+    pages = vr.portrait_pages(vr.Palette(False), large, compact, details, title, footer)
+    shortened = vr.single_page_footer(footer, 1)
+    assert shortened != footer
+    if len(pages) == 1:
+        # It fits: it must be the layout measured against the bar that will be shown.
+        assert pages == vr._portrait_pages_for(vr.Palette(False), large, compact, details, title, shortened)
+    else:
+        assert len(vr._portrait_pages_for(vr.Palette(False), large, compact, details, title, shortened)) > 1

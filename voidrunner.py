@@ -4893,7 +4893,17 @@ def ship_portrait(ship: Ship, layout: str) -> list[str]:
 
 def portrait_pages(p: Palette, large: list[str], compact: list[str], details: list[str], title: str,
                    footer: str, *, color: str | None = None, leading: list[str] | None = None) -> list[list[str]]:
-    """Keep one authored silhouette together; wrap and paginate ordinary prose."""
+    """Keep one authored silhouette together; wrap and paginate ordinary prose.
+
+    Paged against the bar the caller will see, so a portrait that fits once the
+    paging tokens are dropped is one page (issue #412 review)."""
+    return _paginate_against_shown_footer(
+        lambda bar: _portrait_pages_for(p, large, compact, details, title, bar, color=color, leading=leading),
+        footer)
+
+
+def _portrait_pages_for(p: Palette, large: list[str], compact: list[str], details: list[str], title: str,
+                        footer: str, *, color: str | None = None, leading: list[str] | None = None) -> list[list[str]]:
     width = max(1,_OUTPUT_WIDTH-1)
     art = list(large if _OUTPUT_WIDTH >= 40 and _OUTPUT_HEIGHT >= 16 else compact)
     all_lines = (leading or []) + art + details
@@ -4967,6 +4977,26 @@ def screen_landmark(p: Palette, world: World) -> None:
 
 
 
+def _market_row(head: str, depth: dict, held: int, tags: list[str]) -> str:
+    """One commodity, one row.
+
+    Price and tags are what the row exists for, so they never go. The depth
+    figures give way first -- they are on the depth screen -- and the hold count
+    only as a last resort, because it is what tells the caller whether there is
+    anything here to sell (issue #412 review). Nothing is truncated mid-word: a
+    terminal too narrow for even the shortest form keeps the whole row and wraps.
+    """
+    trailer = (" " + " ".join(tags)) if tags else ""
+    optional = [f" Stock {depth['stock']}; demand {depth['demand']}; hold {held}.",
+                f" Hold {held}.",
+                ""]
+    rows = [head + detail + trailer for detail in optional]
+    for row in rows:
+        if _visible_width(row) <= max(1, _OUTPUT_WIDTH - 1):
+            return row
+    return rows[0]  # too narrow for any form: keep the whole row and let it wrap (#404)
+
+
 def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
     system = world.here
     lines = [f"Commodity Market: {system.station_name}",
@@ -4981,9 +5011,9 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
         event = world.save.active_event
         if event and event["commodity"] == commodity and system.id in economy_event_system_ids(world, event):
             tags.append("[CRASH]" if event["direction"] == "crash" else "[BOOM]")
-        lines.append(f"[{MARKET_LETTERS[index]}] {COMMODITIES[commodity]['label']}: buy {buy}; sell {round(quote * SELL_SPREAD)}cr. "
-                     f"Stock {depth['stock']}; demand {depth['demand']}; hold {world.save.cargo.get(commodity, 0)}."
-                     + (" " + " ".join(tags) if tags else ""))
+        lines.append(_market_row(f"[{MARKET_LETTERS[index]}] {COMMODITIES[commodity]['label']}: "
+                                 f"buy {buy}; sell {round(quote * SELL_SPREAD)}cr.",
+                                 depth, world.save.cargo.get(commodity, 0), tags))
     if any(not COMMODITIES[c]["legal"] for c in goods):
         lines.append(f"Blackwake: +1 standing per new {CONTRABAND_STANDING_STEP}cr net contraband trading gain; purchases count against gains.")
     return lines
@@ -5768,7 +5798,29 @@ def _detail_action_bar(actions: str, labels: dict[str, str]) -> str:
     return "".join(f"[{key}]{labels[key]} " for key in actions.split("/") if key) + "[B]Back [<>]Page: "
 
 
+def _paginate_against_shown_footer(build, footer: str):
+    """Paginate against the action bar the caller will actually see.
+
+    Measuring against the longer footer split screens that fit once the paging
+    tokens are gone -- and then displayed the shortened bar anyway. Every
+    group-aware paginator goes through here, including the ones that hand their
+    pages to `_draw_service_page` ready-made (issue #412 review)."""
+    pages = build(footer)
+    if len(pages) > 1:
+        shortened = single_page_footer(footer, 1)
+        if shortened != footer:
+            candidate = build(shortened)
+            if len(candidate) == 1:
+                return candidate
+    return pages
+
+
 def _service_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
+    """Group-aware paging against the bar the caller will see."""
+    return _paginate_against_shown_footer(lambda bar: _service_pages_for(lines, title, bar), footer)
+
+
+def _service_pages_for(lines: list[str], title: str, footer: str) -> list[list[str]]:
     capacity = max(len(rows) for rows in _trade_pages(lines, title, footer))
     pages = [[]]
     for line in lines:
@@ -5781,17 +5833,29 @@ def _service_pages(lines: list[str], title: str, footer: str) -> list[list[str]]
     return pages
 
 
-_PAGING_TOKENS = ("[<]Prev [>]Next ", "[<>]Page ", "[< >]Page ", "[<] [>] ")
+# Footers spell paging several ways and end either with a space, the prompt's
+# own colon or " > ", so the tokens are matched by shape rather than by exact
+# text: a literal table missed every colon-terminated bar, which is most of them
+# (issue #412 review).
+_PAGING_PATTERN = re.compile(r"\[<\]\s*Prev\s+\[>\]\s*Next"
+                             r"|\[N\](?:ext|Next)\s+\[P\](?:rev(?:ious)?|Prev)"
+                             r"|\[P\](?:rev(?:ious)?|Prev)\s+\[N\](?:ext|Next)"
+                             r"|\[<\s*>\]\s*Page"
+                             r"|\[<\]\s*\[>\]")
 
 
 def single_page_footer(footer: str, count: int) -> str:
     """Drop Prev/Next from a one-page screen's action bar; the page counter stays
-    (it is the paging oracle for readers and scripted tests alike)."""
+    (it is the paging oracle for readers and scripted tests alike). The remaining
+    prompt is re-normalised so it never keeps a doubled space or a stranded
+    colon."""
     if count > 1:
         return footer
-    for token in _PAGING_TOKENS:
-        footer = footer.replace(token, "")
-    return footer
+    stripped = _PAGING_PATTERN.sub(" ", footer)
+    if stripped == footer:
+        return footer
+    stripped = re.sub(r"\s+", " ", stripped).replace(" :", ":").replace(" >", " >").strip()
+    return stripped + " " if footer.endswith(" ") else stripped
 
 
 def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, page: int, *, pages: list[list[str]] | None = None) -> tuple[str, int, int]:
@@ -6274,9 +6338,10 @@ def mission_details(world: World, mission: Mission) -> list[str]:
     elif mission.kind == "scan":
         if target.discovered:
             lines.append("BLOCKED SURVEY: target already charted. Revisiting cannot complete it; abandon an active contract to free its slot.")
-        lines.append("Survey: newly chart this target by arriving or discovering it with your scanner. No cargo required.")
-        lines.append("Area surveys require a scanner and cost 2 fuel; they chart all new contacts within 2 + scanner tier + navigator bonus hops without advancing the day.")
-        lines.append("Accepting or tracking the bearing does not chart the system.")
+        else:
+            lines.append("Survey: newly chart this target by arriving or discovering it with your scanner. No cargo required.")
+            lines.append("Area surveys require a scanner and cost 2 fuel; they chart all new contacts within 2 + scanner tier + navigator bonus hops without advancing the day.")
+            lines.append("Accepting or tracking the bearing does not chart the system.")
     elif mission.kind == "bounty":
         lines.append(f"Combat: intercept a tier {mission.pirate_tier} raider at the target. Escape leaves the bounty active; destruction fails it.")
         lines.append("At interception, [V] verifies identity for one fuel before engaging; [W] withdraws. A mistaken-identity kill adds notoriety and harms Concord standing; a confirmed mismatch can be closed without a payout.")
@@ -6306,7 +6371,7 @@ def mission_details(world: World, mission: Mission) -> list[str]:
     ])
     if wage:
         lines.append("Budget keeps current crew wages and assumes refuelling stops.")
-    if mission.kind == "scan":
+    if mission.kind == "scan" and not target.discovered:
         lines.append("Survey scanning may avoid travel.")
     if any(not world.by_id[sid].discovered for sid in path):
         lines.append("Remote danger remains unknown until charted.")
@@ -6401,14 +6466,16 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
               "Payment covers the quoted three units, round-trip fuel and current crew wages plus 200 cr. Detours, repairs, encounters and later prices can change your result.",
               "No deadline. This uses one active-contract slot. Abandonment closes First Flight for this career; the guide stays available.",
               "After acceptance, use [M]arket to buy the goods, [Y]ard to refuel if needed, then [C]hart to jump to the named station."]
-    pages = _mission_text_pages(lines, overhead=5)
+    pages = _mission_text_pages(lines, overhead=6)  # one row reserved for the acceptance pointer
     page = 0
     while True:
         out_line()
         out_line(f"First Flight {page + 1}/{len(pages)}")
         for line in pages[page]:
             out_line(line)
-        out_prompt(("[A]ccept " if page == len(pages) - 1 else "") + "[N]ext [P]rev [B]ack: ")
+        # The first screen of the game must not hide its one action (issue #412 review).
+        out_line("[A]ccept contract" if page == len(pages) - 1 else "[A] on last page.")
+        out_prompt(single_page_footer(("[A]ccept " if page == len(pages) - 1 else "") + "[N]ext [P]rev [B]ack: ", len(pages)))
         key = read_command_at_prompt()
         if key in ("B", "Q"):
             return False
@@ -6618,7 +6685,7 @@ def screen_mission_details(p: Palette, world: World, mission: Mission, *, active
         out_line(f"{p.gold}Contract #{mission.id} {page + 1}/{len(pages)}{RESET}")
         for row in pages[page]:
             out_line(row)
-        actions = "[R]oute [N]ext [P]rev [B]ack"
+        actions = single_page_footer("[R]oute [N]ext [P]rev [B]ack", len(pages))
         if active:
             toggle = "Untrack" if world.save.tracked_mission_id == mission.id else "Track"
             out_line(f"[T] {toggle}")
@@ -6931,6 +6998,11 @@ def keyed_rows(key: str, rows: list[str]) -> list[str]:
 
 
 def _chart_pages(world: World, title: str, footer: str, result: str | None):
+    """Paged against the bar the caller will see (issue #412 review)."""
+    return _paginate_against_shown_footer(lambda bar: _chart_pages_for(world, title, bar, result), footer)
+
+
+def _chart_pages_for(world: World, title: str, footer: str, result: str | None):
     entries = chart_entries(world, result)
     # Budget conservatively with one key prefix per wrapped continuation row.
     wrapped = [(sid, _wrap_output(_mission_plain(text), max(1, _OUTPUT_WIDTH - 5)).split("\r\n")) for sid, text in entries]
