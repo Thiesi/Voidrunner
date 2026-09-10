@@ -13094,3 +13094,74 @@ def test_precomputed_portrait_pages_also_paginate_against_the_shown_footer(monke
         assert pages == vr._portrait_pages_for(vr.Palette(False), large, compact, details, title, shortened)
     else:
         assert len(vr._portrait_pages_for(vr.Palette(False), large, compact, details, title, shortened)) > 1
+
+
+# --- #417: a checkpoint is a persistence boundary, not a station tick -------------------
+
+
+def test_a_commit_does_not_reroll_the_board_or_repair_ids():
+    """A nested menu saving its own action must not run turn processing (#417)."""
+    import copy
+    world = _world_with_seed(42)
+    world.checkpoint()
+    board = copy.deepcopy(world.save.mission_boards)
+    world.save.mission_boards[world.save.current_system]["offers"] = []
+    world.save.turn += 3  # the board is stale: only a turn boundary may replace it
+    world.commit()
+    assert world.save.mission_boards[world.save.current_system]["offers"] == []
+    world.advance_station_state()
+    assert world.save.mission_boards[world.save.current_system]["offers"]
+    assert world.save.mission_boards.keys() == board.keys()
+
+
+def test_turn_processing_writes_nothing_and_committing_writes_once():
+    world = _world_with_seed(42)
+    writes = []
+    world._checkpoint = lambda current: writes.append(current.save.turn)
+    world.advance_station_state()
+    assert writes == []  # pure domain work
+    world.commit()
+    assert writes == [world.save.turn]
+    world.checkpoint()
+    assert len(writes) == 2  # a turn boundary is exactly one of each
+
+
+def test_a_rank_reached_by_an_action_is_captured_by_its_own_commit():
+    """Rank capture belongs to the action, not to the turn: the credits that
+    earned it can be spent before the next station tick (#417)."""
+    world = _world_with_seed(42)
+    world.save.pilot.credits = RANK_THRESHOLD = vr.RANKS[1][0]
+    world.commit()
+    assert world.save.pilot.highest_rank_seen == 1 and world.pending_promotions
+    world.pending_promotions.clear()
+    world.save.pilot.credits = 0
+    world.commit()
+    assert world.save.pilot.highest_rank_seen == 1 and not world.pending_promotions
+    assert RANK_THRESHOLD > 0
+
+
+def test_a_failed_commit_never_announces_the_rank_it_did_not_save():
+    world = _world_with_seed(42)
+    def refuse(current):
+        raise OSError("disk full")
+    world._checkpoint = refuse
+    world.save.pilot.credits = vr.RANKS[1][0]
+    with pytest.raises(vr.SaveError):
+        world.commit()
+    assert world.pending_promotions == []
+
+
+def test_a_docked_commit_re_observes_the_market_it_just_traded_in():
+    """Buying moves this station's stock and price; the caller watched it move."""
+    world = _world_with_seed(42)
+    world.checkpoint()
+    before = dict(world.save.market_memory[0]["food"])
+    vr._consume_market_depth(world, "food", 10, buying=True)  # a purchase moves the pool
+    world.commit()
+    assert world.save.market_memory[0]["food"]["stock"] == before["stock"] - 10
+    world.save.pending_travel = {"version": 1, "origin": 0, "destination": 1, "was_discovered": True,
+                                 "destroyed": False, "phase": "primary", "primary": "random",
+                                 "bounty": None, "escorts": [], "escort_index": 0, "encounter": {}}
+    vr._consume_market_depth(world, "food", 5, buying=True)
+    world.commit()  # mid-journey there is no local market to observe
+    assert world.save.market_memory[0]["food"]["stock"] == before["stock"] - 10

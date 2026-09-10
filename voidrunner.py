@@ -1635,21 +1635,42 @@ class World:
         self._checkpoint = checkpoint
         self.reset(save)
 
-    def checkpoint(self) -> None:
-        """Commit a completed action before acknowledging it to the caller.
+    def advance_station_state(self) -> None:
+        """Turn processing: what happens because the day or the station changed.
 
-        The executable binds storage; domain-only worlds need no filesystem.
-        A failed commit stops the UI rather than acknowledging unsaved progress.
-        Resetting a career preserves this binding.
+        Expiring contracts, repairing duplicate ids and preparing this station's
+        offer board are properties of *when and where* the career is, not of the
+        action a caller just finished, and they were only reached because every
+        commit ran them (issue #417). They now happen where a turn actually
+        begins -- launch, docking, and a fresh career after retirement -- so a
+        nested menu committing a purchase can no longer reroll the board behind
+        the caller. Pure domain work: nothing here touches storage.
         """
-        self.sync_discovered()
-        promoted = check_rank_up(self)
         if self.save.pending_travel is None:
             expire_missions(self)
             _normalize_mission_ids(self.save)
             generate_mission_board(self)
-            remember_local_market(self)
+
+    def commit(self) -> None:
+        """Persist a completed action before acknowledging it to the caller.
+
+        The executable binds storage; domain-only worlds need no filesystem.
+        A failed commit stops the UI rather than acknowledging unsaved progress.
+        Resetting a career preserves this binding.
+
+        Two pieces of domain state belong to the completed action rather than to
+        the turn, and so stay here. A rank reached by an action is captured
+        before a later action can spend the credits that earned it, and is
+        announced only once the save holding it succeeded. The local market is
+        re-observed because a docked caller who just traded has just watched
+        this market's stock and price move.
+        """
+        self.sync_discovered()
+        promoted = check_rank_up(self)
+        remember_local_market(self)  # no-op mid-journey; `remember_local_market` checks
         if tracked_mission(self) is None:
+            # A contract that ended mid-journey must not leave a dangling id in
+            # the document this commit is about to write.
             self.save.tracked_mission_id = None
         self.save.event_rng_state = self.event_rng.getstate()
         if self.save.pending_travel is not None:
@@ -1661,6 +1682,12 @@ class World:
                 raise SaveError("The completed action could not be saved.") from exc
         if promoted:
             self.pending_promotions.append(promoted)
+
+    def checkpoint(self) -> None:
+        """A turn boundary: process the turn, then commit it. Retained under its
+        old name so every existing caller and test keeps its meaning."""
+        self.advance_station_state()
+        self.commit()
 
     def reset(self, save: SaveData) -> None:
         """Re-derives every galaxy-shaped attribute from `save` in
@@ -3220,7 +3247,7 @@ def screen_faction_story(p: Palette, world: World, faction: str) -> str | None:
                 if not confirm(question, p): continue
         try: result = faction_story_action(world, faction, key)
         except ValueError as exc: result, page = str(exc), 0; continue
-        world.checkpoint()
+        world.commit()
         page = 0
 
 
@@ -3304,7 +3331,7 @@ def _screen_faction_contact(p: Palette, world: World, faction: str) -> None:
         info = FACTION_MEMBERSHIPS[faction]
         if not confirm(f"Join {info['label']} with a one-time {info['grant']:,}cr grant?", p): continue
         result = join_faction(world, faction)
-        world.checkpoint()
+        world.commit()
         page = 0
 
 
@@ -4446,7 +4473,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
     completed = settle_futures_contracts(world)
     completed += check_mission_completions(world)
     if completed:
-        world.checkpoint()
+        world.commit()
     if is_stranded(world):
         # Checked here, not only right after the action that could cause
         # it -- this is the outer loop's own home base, reached after
@@ -4455,11 +4482,11 @@ def screen_station_menu(p: Palette, world: World) -> str:
         # that burned the last fuel with no encounter) in one place.
         out_line()
         rescued = rescue_stranded_pilot(world)
-        world.checkpoint()
+        world.commit()
         out_line(f"{p.wrong}{rescued}{RESET}")
         pause(p)
     if career_rank_index(world.save.pilot) > world.save.pilot.highest_rank_seen:
-        world.checkpoint()
+        world.checkpoint()  # a rank earned since the last tick is noticed and saved here
     completed[0:0] = [f"Promoted to {title}; rank retained for this career." for title in world.pending_promotions]
     world.pending_promotions.clear()
     completed[0:0] = world.hop_report
@@ -4505,7 +4532,7 @@ def screen_display_options(p: Palette, world: World) -> None:
         elif len(key) == 1 and "1" <= key <= "4":
             style = styles[int(key) - 1]
             changed = select_display_style(world, style)
-            if changed: world.checkpoint()
+            if changed: world.commit()
             apply_display_style(style)
             label = "Display saved" if changed else "Already using"
             result, page = f"{label}: {DISPLAY_STYLES[style]}.", 0
@@ -4525,7 +4552,7 @@ def screen_dump_contraband(p: Palette, world: World) -> None:
     if not confirm("Dump it all now?", p):
         return
     result = dump_all_contraband(world)
-    world.checkpoint()
+    world.commit()
     out_line(f"{p.muted}{result}{RESET}")
 
 
@@ -4666,7 +4693,7 @@ def screen_archive(p: Palette, world: World) -> None:
             _screen_auto_route(p, world, destination=archive_destination(world)); page = 0
             continue
         result = archive_action(world, action)
-        world.checkpoint()
+        world.commit()
         page = 0
 
 
@@ -4972,7 +4999,7 @@ def screen_landmark(p: Palette, world: World) -> None:
         if action == "<": page = max(0, page - 1); continue
         if action == "I" and available:
             result = investigate_landmark(world)
-            world.checkpoint()
+            world.commit()
             page = 0
 
 
@@ -5090,7 +5117,7 @@ def _screen_futures_order(p: Palette, world: World, contract: FuturesContract) -
                 except TradeError as exc:
                     result, page = str(exc), 0
                     continue
-                world.checkpoint()
+                world.commit()
                 out_line(message)
                 return message
             result, page = "Cancellation declined; order retained.", 0
@@ -5131,7 +5158,7 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
                 except TradeError as exc:
                     result, page = str(exc), 0
                     continue
-                world.checkpoint()
+                world.commit()
                 out_line(f"{p.correct}{message}{RESET}")
                 return message
             result, page = "Signing cancelled; order draft retained.", 0
@@ -5629,7 +5656,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
         if qty <= 0:
             return
         result = trade_cargo(world, commodity, qty, buying=True)
-        world.checkpoint()
+        world.commit()
         out_line(f"{p.correct}{result}{RESET}")
         out_line(f"Credits remaining: {world.save.pilot.credits}cr. Cost recorded in [T] Trading Ledger.")
         return result
@@ -5651,7 +5678,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
         if qty <= 0:
             return
         result = trade_cargo(world, commodity, qty, buying=False)
-        world.checkpoint()
+        world.commit()
         out_line(f"{p.correct}{result}{RESET}")
         out_line(f"Credits now: {world.save.pilot.credits}cr. Margin recorded in [T] Trading Ledger.")
         return result
@@ -5750,7 +5777,7 @@ def screen_workshop(p: Palette, world: World, key: str) -> str | None:
             quote = workshop_quote(world, key)
             if confirm(f"Install {UPGRADES[key]['label']} tier {quote['tier']} for {quote['credits']}cr and {quote['quantity']} {COMMODITIES[quote['commodity']]['label']}? Materials are consumed.", p):
                 result = install_workshop_module(world, key)
-                world.checkpoint()
+                world.commit()
                 page = 0
 
 
@@ -6053,7 +6080,7 @@ def screen_crew_assignment(p: Palette, world: World, role: str) -> str | None:
         if blocker: result, page = blocker, 0; continue
         if key == "C" and role == "engineer" and not confirm("Hand over 3 Machinery, including any promised to contracts, for 900cr?", p): continue
         result = complete_crew_assignment(world, role) if key == "C" else accept_crew_assignment(world, role)
-        world.checkpoint()
+        world.commit()
         page = 0
 
 
@@ -6114,7 +6141,7 @@ def _toggle_crew(p: Palette, world: World, role: str) -> str | None:
             return message
         if not confirm(f"Hire {name} as {info['label']} for {info['hire_cost']}cr (+{info['wage']}cr/jump ongoing wage)?", p): return
         message = hire_crew(world, role)
-    world.checkpoint()
+    world.commit()
     out_line(f"{p.correct}{message}{RESET}")
     return message
 
@@ -6134,7 +6161,7 @@ def _buy_upgrade(p: Palette, world: World, key: str) -> str | None:
         return
     world.save.pilot.credits -= cost
     setattr(ship, f"{key}_tier", tier + 1)
-    world.checkpoint()
+    world.commit()
     out_line(f"{p.correct}{u['label']} upgraded to tier {tier + 1}.{RESET}")
     return f"{u['label']} upgraded to tier {tier + 1} for {cost}cr."
 
@@ -6160,7 +6187,7 @@ def _refuel(p: Palette, world: World) -> str | None:
     world.save.pilot.credits -= cost
     _ledger(world).fuel_spend += cost
     ship.fuel += qty
-    world.checkpoint()
+    world.commit()
     out_line(f"{p.correct}Refueled {qty} units for {cost}cr.{RESET}")
     return f"Refueled {qty} units for {cost}cr."
 
@@ -6184,7 +6211,7 @@ def _repair(p: Palette, world: World) -> str | None:
         return
     world.save.pilot.credits -= cost
     ship.hull_hp += missing
-    world.checkpoint()
+    world.commit()
     out_line(f"{p.correct}Hull repaired to {ship.hull_hp}/{hull_hp_max(ship)}.{RESET}")
     return f"Hull repaired to {ship.hull_hp}/{hull_hp_max(ship)} for {cost}cr."
 
@@ -6214,7 +6241,7 @@ def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -
         world.save.pilot.credits-=cost;ship.hull_class=target_class;ship.hull_hp=hull_hp_max(ship)
         world.save.pilot.note(f"Commissioned a {target_class}-class hull refit.")
         world.save.pilot.highlight(f"Commissioned a {target_class}-class hull refit.")
-        world.checkpoint()
+        world.commit()
         out_line(f"{p.gold}{BOLD}Your {previous_class} is towed into drydock and emerges a {target_class}.{RESET}")
         return f"Commissioned a {target_class} hull for {cost}cr."
 
@@ -6490,7 +6517,7 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
                 out_line(str(exc))
                 pause(p)
                 return False
-            world.checkpoint()
+            world.commit()
             report_hop(world, [f"First Flight accepted and tracked. Next: {_opening_next_step(world, offer)}"])
             return True
 
@@ -6655,9 +6682,9 @@ def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, act
             except MissionError as exc:
                 result, page, pages = str(exc), 0, None
                 continue
-            world.checkpoint()
+            world.commit()
             screen_travel(p, world, destination)
-            world.checkpoint()
+            world.commit()
             result = f"Last hop: arrived at {world.here.name}. Review the route before another jump."
             if world.save.current_system != destination:
                 result = f"Travel diverted to {world.here.name}; the route has been recalculated."
@@ -6709,19 +6736,19 @@ def screen_mission_details(p: Palette, world: World, mission: Mission, *, active
             try:
                 if not active and key == "A" and page == len(pages) - 1:
                     accept_mission(world, mission)
-                    world.checkpoint()
+                    world.commit()
                     out_line(f"{p.correct}Accepted: {_mission_plain(mission.description)}{RESET}")
                     pause(p)
                     return
                 if active and key == "T":
                     track_mission(world, None if world.save.tracked_mission_id == mission.id else mission.id)
-                    world.checkpoint()
+                    world.commit()
                     out_line("Tracking updated.")
                     pause(p)
                 elif active and key == "D":
                     if confirm("Abandon this contract? Forfeit its reward; keep cargo, no fee.", p):
                         message = abandon_mission(world, mission.id)
-                        world.checkpoint()
+                        world.commit()
                         out_line(_mission_plain(message))
                         pause(p)
                         return
@@ -6856,7 +6883,7 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
             result, page = "Retirement cancelled; current career retained.", 0; continue
         world.reset(fresh.save)
         world.pending_promotions.extend(fresh.pending_promotions)
-        world.checkpoint()
+        world.commit()
         out_line(); out_line("A new career begins.")
         return "A new career begins."
 
@@ -7136,7 +7163,7 @@ def _do_scan(p: Palette, world: World) -> str | None:
         if action == "<": page = max(0, page - 1); continue
         if action != "S" or not can_scan: continue
         result, report = perform_survey(world)
-        world.checkpoint()
+        world.commit()
         page = 0
 
 
@@ -7464,7 +7491,7 @@ def _screen_auto_route(p: Palette, world: World, *, destination: int | None = No
                 result, page, pages = str(exc), 0, None
                 continue
             screen_travel(p, world, hop)
-            world.checkpoint()
+            world.commit()
             result = f"Last hop: arrived at {world.here.name}. Review before another jump."
             if world.here.id != hop:
                 result = f"Travel diverted to {world.here.name}; route recalculated."
@@ -7495,7 +7522,7 @@ def _show_result(p: Palette, world: World, lines: list[str]) -> None:
 def _encounter_result(p: Palette, world: World, state: dict, lines: list[str]) -> None:
     """Commit both effects and completion before revealing their result."""
     state.update(done=True, result=lines)
-    world.checkpoint()
+    world.commit()
     _show_result(p, world, lines)
 
 
@@ -7516,7 +7543,7 @@ def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySyste
             state["index"] = 0
             if len(state["pirates"]) == 2:
                 state["formation"] = {"version": 1, "engaged": False}
-        world.checkpoint()
+        world.commit()
     kind = state["kind"]
     if kind == "pirate":
         pirates = state["pirates"]
@@ -7531,7 +7558,7 @@ def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySyste
             state.pop("combat", None)
             if outcome != "won":
                 state["index"] = len(pirates)
-            world.checkpoint()
+            world.commit()
         _encounter_result(p, world, state, [])
     elif kind == "derelict":
         _encounter_derelict(p, world)
@@ -7602,7 +7629,7 @@ def _encounter_derelict(p: Palette, world: World) -> None:
             _encounter_result(p, world, state, [f"Salvage recovered: {reward}cr."])
             return
         state["ambush"] = dataclasses.asdict(generate_pirate(world, danger=encounter_danger(world)))
-        world.checkpoint()
+        world.commit()
     out_line(f"{p.wrong}The wreck's defenses weren't as dead as they looked!{RESET}")
     screen_combat(p, world, Pirate(**state["ambush"]))
     _encounter_result(p, world, state, [])
@@ -7671,7 +7698,7 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
             if travel is not None:
                 travel["escort_index"] = index
                 travel["encounter"] = {}
-            world.checkpoint()
+            world.commit()
             report_hop(world, [message])
             out_line(f"{p.wrong}{message}{RESET}")
             if world.ship_destroyed_this_hop:
@@ -7680,7 +7707,7 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
         state = _travel_encounter(world)
         if "pirate" not in state:
             state["pirate"] = dataclasses.asdict(generate_pirate(world, tier=mission.pirate_tier))
-            world.checkpoint()
+            world.commit()
         pirate = Pirate(**state["pirate"])
         out_line(f"{p.wrong}Raiders ambush the convoy you're escorting -- the {pirate.name} closes in.{RESET}")
         outcome = screen_combat(p, world, pirate)
@@ -7708,7 +7735,7 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
         if travel is not None:
             travel["escort_index"] = index
             travel["encounter"] = {}
-        world.checkpoint()
+        world.commit()
         _show_result(p, world, lines)
         if world.ship_destroyed_this_hop:
             break
@@ -7754,7 +7781,7 @@ def _resolve_bounty(p: Palette, world: World, travel: dict) -> None:
         message = record_mission_loss(world, bounty, "expired")
         travel["phase"] = "escorts"
         travel["encounter"] = {}
-        world.checkpoint()
+        world.commit()
         report_hop(world, [message])
         out_line(f"{p.wrong}{message}{RESET}")
         return
@@ -7762,7 +7789,7 @@ def _resolve_bounty(p: Palette, world: World, travel: dict) -> None:
     if "pirate" not in state:
         state["pirate"] = dataclasses.asdict(generate_pirate(world, tier=bounty.pirate_tier))
         state["warrant"] = new_bounty_warrant(world, bounty)
-        world.checkpoint()
+        world.commit()
     pirate = Pirate(**state["pirate"])
     out_line(f"{p.wrong}Your bounty target, the {pirate.name}, is waiting.{RESET}")
     outcome = screen_combat(p, world, pirate)
@@ -7795,7 +7822,7 @@ def _resolve_bounty(p: Palette, world: World, travel: dict) -> None:
     # and advances phase. A restart in between cannot repeat loot or the fight.
     travel["phase"] = "escorts"
     travel["encounter"] = {}
-    world.checkpoint()
+    world.commit()
     _show_result(p, world, lines)
 
 
@@ -7839,7 +7866,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
             "escorts": [m.to_dict() for m in world.save.active_missions if m.kind == "escort"],
             "escort_index": 0, "encounter": {},
         }
-        world.checkpoint()
+        world.commit()
         world.hop_report = []
         _show_result(p, world, lines)
     dest_id = travel["destination"]
@@ -7854,7 +7881,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
                 _resolve_random_travel_encounter(p, world, dest)
             travel["phase"] = "escorts"
             travel["encounter"] = {}
-            world.checkpoint()
+            world.commit()
     if travel["phase"] == "escorts":
         # If an escort fight destroyed the ship, its cached result still needs
         # consuming (contract failure). If a prior encounter did, skip escorts.
@@ -7862,7 +7889,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
             _resolve_escort_missions(p, world, dest_id)
         travel["phase"] = "arrival"
         travel["encounter"] = {}
-        world.checkpoint()
+        world.commit()
     if travel["phase"] == "arrival":
         lines = []
         inspect = False
@@ -7877,11 +7904,14 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
                 inspect = world.event_rng.random() < chance
         travel["phase"] = "customs"
         travel["encounter"] = {"inspect": inspect}
-        world.checkpoint()
+        world.commit()
         _show_result(p, world, lines)
     if travel["encounter"].get("inspect"):
         screen_customs(p, world)
     world.save.pending_travel = None
+    # Docking is the station tick: a day has passed and the place has changed, so
+    # contracts expire, this station's board is prepared and its market is
+    # remembered here rather than on whichever nested menu commits next (#417).
     world.checkpoint()
     out_line()
 
@@ -7895,7 +7925,7 @@ def screen_notoriety_patrol(p: Palette, world: World) -> None:
     state = _travel_encounter(world)
     if "pirate" not in state:
         state["pirate"] = dataclasses.asdict(generate_concord_patrol(world))
-        world.checkpoint()
+        world.commit()
     patrol = Pirate(**state["pirate"])
     report_hop(world, [f"A Concord patrol vessel, the {patrol.name}, intercepted you."])
     out_line(f"{p.wrong}A Concord patrol vessel, the {patrol.name}, intercepts you -- "
@@ -7998,7 +8028,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             "pirate": dataclasses.asdict(pirate), "outcome": None, "lines": [], "tactics": new_tactics(pirate),
             "hull_before": world.save.ship.hull_hp,
         }
-        world.checkpoint()
+        world.commit()
     else:
         pirate = Pirate(**combat["pirate"])
         if combat["outcome"] is not None:
@@ -8042,14 +8072,14 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             continue
         if action == "T" and formation is not None and not formation["engaged"]:
             switch_squadron_target(world)
-            world.checkpoint()
+            world.commit()
             pirate = Pirate(**combat["pirate"])
             tactics = combat["tactics"]
             page = 0
             continue
         if action == "V" and warrant is not None and not warrant["engaged"] and not warrant["checked"] and world.save.ship.fuel >= 1:
             combat["lines"] = [verify_bounty_identity(world, warrant)]
-            world.checkpoint()
+            world.commit()
             page = 0
             continue
         lines = []
@@ -8134,7 +8164,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             lines.append(destroy_ship(world, patrol=patrol, hull_before=hull_before))
             outcome = "destroyed"
         combat.update(pirate=dataclasses.asdict(pirate), outcome=outcome, lines=lines)
-        world.checkpoint()
+        world.commit()
         page = 0
         if outcome is not None:
             report_hop(world, lines)
@@ -8338,7 +8368,7 @@ def main() -> int:
         else:
             out_line(f"{p.muted}Welcome back, {save.pilot.handle}. Day {save.turn}.{RESET}")
         world = World(save, checkpoint=lambda current: persist(current, save_dir, user_id))
-        world.checkpoint()
+        world.checkpoint()  # the launch tick prepares the station this career opens at
         if is_new:
             out_line("Start at [G] Pilot Guide for an optional first delivery and flight instructions.")
         elif world.save.pending_travel is None:
@@ -8395,12 +8425,12 @@ def main() -> int:
                 screen_blackwake_made(p, world)
                 continue
             elif choice == "Q":
-                world.checkpoint()
+                world.commit()
                 out_line(f"{p.muted}Docking clamps engaged. Fly safe, {world.save.pilot.handle}.{RESET}")
                 return 0
             else:
                 continue
-            world.checkpoint()
+            world.commit()
     except PilotBusy:
         out_line(f"{p.gold}This pilot already has an active Voidrunner session, or save maintenance is in progress. "
                  f"Close that session or wait for maintenance to finish, then try again.{RESET}")
@@ -8428,7 +8458,7 @@ def main() -> int:
     except EOFError:
         try:
             if world is not None:
-                world.checkpoint()
+                world.commit()
         except SaveError:
             return 1
         return 0
