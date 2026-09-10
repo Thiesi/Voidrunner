@@ -12563,3 +12563,55 @@ def test_repair_screen_charges_the_discounted_rate_and_yard_shows_it(monkeypatch
     assert world.save.pilot.credits == 980 and world.save.ship.hull_hp == vr.hull_hp_max(world.save.ship)
     assert "at 2cr/HP" in " ".join(vr.shipyard_lines(world)) and "discounts repairs" in " ".join(vr.shipyard_lines(world))
     assert "repairs 2cr/HP instead of 4" in vr.crew_effect("engineer", 2)
+
+
+# --- #410: travel results are retained on the next deck page ---------------------------
+
+
+def _deck_page(world, monkeypatch, width=80, height=24):
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr.screen_station_menu(vr.Palette(False), world) == "Q"
+    return vr._ANSI_RE.sub("", output.getvalue())
+
+
+def test_arrival_narration_is_retained_as_deck_results_then_cleared(monkeypatch):
+    world = _world_with_seed(42); world.save.ship.fuel = 99
+    dest = sorted(world.here.connections)[0]; world.by_id[dest].discovered = False; world.sync_discovered()
+    monkeypatch.setattr(world.event_rng, "random", lambda: 0.99)  # no encounter, no inspection
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(False), world, dest)
+    assert f"New system charted: {world.by_id[dest].name}." in world.hop_report
+    page = _deck_page(world, monkeypatch)
+    assert f"Result: Jumping to the unknown..." in page and f"Result: New system charted: {world.by_id[dest].name}." in page
+    assert world.hop_report == [] and "Result:" not in _deck_page(world, monkeypatch)
+
+
+def test_encounter_and_combat_outcomes_join_the_hop_report(monkeypatch):
+    world, mission = _escort_world("won")
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: "won")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._resolve_escort_missions(vr.Palette(False), world, mission.target_system)
+    assert any(line.startswith("Convoy delivered safely! +") for line in world.hop_report)
+    world = _world_with_seed(42); state = {}
+    world.save.pending_travel = {"version": 1, "origin": 0, "destination": 1, "was_discovered": True, "destroyed": False,
+        "phase": "primary", "primary": "random", "bounty": None, "escorts": [], "escort_index": 0, "encounter": state}
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._encounter_result(vr.Palette(False), world, state, ["Salvage recovered: 90cr."])
+    assert world.hop_report == ["Salvage recovered: 90cr."]
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._resolve_random_travel_encounter(vr.Palette(False), world, world.by_id[1])  # replay after a restart
+    assert world.hop_report == ["Salvage recovered: 90cr."] * 2
+
+
+def test_hop_report_is_bounded_and_the_deck_still_fits(monkeypatch):
+    world = _world_with_seed(42)
+    vr.report_hop(world, [f"line {i}" for i in range(20)])
+    assert world.hop_report == [f"line {i}" for i in range(12, 20)]
+    vr.report_hop(world, [f"line {i}" for i in range(20)])
+    for width, height in ((80, 24), (40, 24)):
+        page = _deck_page(world, monkeypatch, width, height)
+        rows = [row for row in page.split("\r\n") if row]
+        assert len(rows) <= height and all(vr._visible_width(row) <= width for row in rows)
+        vr.report_hop(world, [f"line {i}" for i in range(20)])

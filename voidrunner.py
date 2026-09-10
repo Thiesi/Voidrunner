@@ -1651,6 +1651,9 @@ class World:
         _validate_pending_travel_consistency(save)
         self.save = save
         self.pending_promotions: list[str] = []
+        # Narration of the current hop, retained for the next deck page (issue #410).
+        # Transient: rebuilt from what the hop prints; never persisted.
+        self.hop_report: list[str] = []
         if save.pending_travel is None:
             _normalize_mission_ids(save)
         self.galaxy: list[GalaxySystem] = generate_galaxy(save.seed)
@@ -4436,6 +4439,8 @@ def screen_station_menu(p: Palette, world: World) -> str:
         world.checkpoint()
     completed[0:0] = [f"Promoted to {title}; rank retained for this career." for title in world.pending_promotions]
     world.pending_promotions.clear()
+    completed[0:0] = world.hop_report
+    world.hop_report = []
     page, expanded = 0, False
     while True:
         lines = station_deck_lines(world, expanded=expanded)
@@ -7284,19 +7289,32 @@ def _travel_encounter(world: World) -> dict:
     return travel["encounter"] if travel is not None else {}
 
 
+HOP_REPORT_LINES = 8
+
+
+def report_hop(world: World, lines) -> None:
+    """Retain hop narration for the deck; the newest lines win when the hop is long."""
+    world.hop_report.extend(_mission_plain(line) for line in lines if line)
+    del world.hop_report[:-HOP_REPORT_LINES]
+
+
+def _show_result(p: Palette, world: World, lines: list[str]) -> None:
+    report_hop(world, lines)
+    for line in lines:
+        out_line(f"{p.gold}{line}{RESET}")
+
+
 def _encounter_result(p: Palette, world: World, state: dict, lines: list[str]) -> None:
     """Commit both effects and completion before revealing their result."""
     state.update(done=True, result=lines)
     world.checkpoint()
-    for line in lines:
-        out_line(f"{p.gold}{line}{RESET}")
+    _show_result(p, world, lines)
 
 
 def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySystem) -> None:
     state = _travel_encounter(world)
     if state.get("done"):
-        for line in state.get("result", []):
-            out_line(f"{p.gold}{line}{RESET}")
+        _show_result(p, world, state.get("result", []))
         return
     if "kind" not in state:
         kind = "none"
@@ -7426,8 +7444,7 @@ def _encounter_market_tip(p: Palette, world: World, dest: GalaxySystem) -> None:
     """Remember the revealed quote with the encounter result; RNG order is unchanged."""
     state = _travel_encounter(world)
     if state.get("done"):
-        for line in state.get("result", []):
-            out_line(f"{p.gold}{line}{RESET}")
+        _show_result(p, world, state.get("result", []))
         return
     hops = bfs_hops(world.by_id, dest.id)
     candidates = [sid for sid, h in hops.items() if 1 <= h <= 4 and world.by_id[sid].discovered]
@@ -7467,6 +7484,7 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
                 travel["escort_index"] = index
                 travel["encounter"] = {}
             world.checkpoint()
+            report_hop(world, [message])
             out_line(f"{p.wrong}{message}{RESET}")
             if world.ship_destroyed_this_hop:
                 break
@@ -7503,8 +7521,7 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
             travel["escort_index"] = index
             travel["encounter"] = {}
         world.checkpoint()
-        for line in lines:
-            out_line(f"{p.gold}{line}{RESET}")
+        _show_result(p, world, lines)
         if world.ship_destroyed_this_hop:
             break
 
@@ -7550,6 +7567,7 @@ def _resolve_bounty(p: Palette, world: World, travel: dict) -> None:
         travel["phase"] = "escorts"
         travel["encounter"] = {}
         world.checkpoint()
+        report_hop(world, [message])
         out_line(f"{p.wrong}{message}{RESET}")
         return
     state = _travel_encounter(world)
@@ -7590,8 +7608,7 @@ def _resolve_bounty(p: Palette, world: World, travel: dict) -> None:
     travel["phase"] = "escorts"
     travel["encounter"] = {}
     world.checkpoint()
-    for line in lines:
-        out_line(f"{p.gold}{line}{RESET}")
+    _show_result(p, world, lines)
 
 
 def screen_travel(p: Palette, world: World, dest_id: int) -> None:
@@ -7635,8 +7652,8 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
             "escort_index": 0, "encounter": {},
         }
         world.checkpoint()
-        for line in lines:
-            out_line(f"{p.gold}{line}{RESET}")
+        world.hop_report = []
+        _show_result(p, world, lines)
     dest_id = travel["destination"]
     dest = world.by_id[dest_id]
     if travel["phase"] == "primary":
@@ -7673,8 +7690,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         travel["phase"] = "customs"
         travel["encounter"] = {"inspect": inspect}
         world.checkpoint()
-        for line in lines:
-            out_line(f"{p.gold}{line}{RESET}")
+        _show_result(p, world, lines)
     if travel["encounter"].get("inspect"):
         screen_customs(p, world)
     world.save.pending_travel = None
@@ -7693,6 +7709,7 @@ def screen_notoriety_patrol(p: Palette, world: World) -> None:
         state["pirate"] = dataclasses.asdict(generate_concord_patrol(world))
         world.checkpoint()
     patrol = Pirate(**state["pirate"])
+    report_hop(world, [f"A Concord patrol vessel, the {patrol.name}, intercepted you."])
     out_line(f"{p.wrong}A Concord patrol vessel, the {patrol.name}, intercepts you -- "
               f"your transponder flags as wanted.{RESET}")
     _screen_combat_session(p, world, patrol, patrol=True)
@@ -7781,6 +7798,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
     else:
         pirate = Pirate(**combat["pirate"])
         if combat["outcome"] is not None:
+            report_hop(world, combat["lines"])
             for line in combat["lines"]: out_line(f"  {line}")
             return combat["outcome"]
     warrant = encounter.get("warrant")
@@ -7910,6 +7928,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         world.checkpoint()
         page = 0
         if outcome is not None:
+            report_hop(world, lines)
             for line in lines: out_line(f"  {line}")
             return outcome
 
@@ -7961,8 +7980,7 @@ def resolve_customs(world: World, action: str) -> list[str]:
 def screen_customs(p: Palette, world: World) -> None:
     state = _travel_encounter(world)
     if state.get("done"):
-        for line in state.get("result", []):
-            out_line(f"{p.gold}{line}{RESET}")
+        _show_result(p, world, state.get("result", []))
         return
     page, result = 0, None
     while True:
