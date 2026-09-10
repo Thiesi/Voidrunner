@@ -10889,7 +10889,7 @@ def test_career_rank_views_keep_earned_title_after_spending(index):
     assert world.save.to_dict() == before
 
 
-@pytest.mark.parametrize("threshold,index", [(5000,1),(20000,2),(75000,3),(250000,4)])
+@pytest.mark.parametrize("threshold,index", [(5000,1),(20000,2),(75000,3),(150000,4)])
 def test_career_rank_checkpoint_retains_reward_before_next_spend(tmp_path, threshold, index):
     world = _world_with_seed(42); world._checkpoint = lambda w: vr.persist(w,tmp_path,77)
     world.save.pilot.credits = threshold; world.checkpoint()
@@ -10915,7 +10915,7 @@ def test_career_rank_real_nested_market_peak_survives_kill(tmp_path, commands, m
         else: assert saved.pilot.credits >= 5000
 
 
-@pytest.mark.parametrize("credits,expected", [(0,0),(4999,0),(5000,1),(19999,1),(20000,2),(74999,2),(75000,3),(249999,3),(250000,4)])
+@pytest.mark.parametrize("credits,expected", [(0,0),(4999,0),(5000,1),(19999,1),(20000,2),(74999,2),(75000,3),(149999,3),(150000,4)])
 def test_career_rank_current_funds_support_legacy_rank_without_writes(credits, expected):
     import copy
     world = _world_with_seed(42); world.save.pilot.credits = credits; world.save.best_credits = 1000000
@@ -12369,3 +12369,14 @@ def test_stacked_title_fields_and_wordmark_wrap_instead_of_trimming(monkeypatch)
             vr.screen_title(vr.Palette(False), {"node_name": "N", "handle": "P"})
         box = _box_rows(output.getvalue())
         assert box and {vr._visible_width(row) for row in box} == {vr._box_outer_width()}
+# --- #405: the top rank sits within reach of the last purchase -----------------------------
+
+
+def test_legend_threshold_is_twice_void_baron_and_promotion_never_demotes():
+    thresholds = dict((name, value) for value, name in vr.RANKS)
+    assert thresholds["Legend of the Frontier"] == 2 * thresholds["Void Baron"] == 150_000
+    world = _world_with_seed(42)
+    world.save.pilot.credits = 160_000; world.save.pilot.highest_rank_seen = 3
+    assert vr.check_rank_up(world) == "Legend of the Frontier"
+    world.save.pilot.credits = 10
+    assert vr.career_rank(world.save.pilot) == "Legend of the Frontier" and vr.check_rank_up(world) is None

@@ -742,7 +742,12 @@ RANKS = [
     (5_000, "Independent Trader"),
     (20_000, "Merchant Captain"),
     (75_000, "Void Baron"),
-    (250_000, "Legend of the Frontier"),
+    # 150,000, not 250,000: every ship purchase and the trader finale are
+    # done by roughly day 45 of a greedy career, and the old top rank sat
+    # about ninety more identical jumps beyond Void Baron with nothing left
+    # to buy (issue #405). Earned ranks are retained, so lowering the bar
+    # only promotes; it never demotes an existing career.
+    (150_000, "Legend of the Frontier"),
 ]
 
 SYSTEM_NAMES = [
