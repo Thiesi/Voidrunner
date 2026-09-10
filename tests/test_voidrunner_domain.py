@@ -2123,8 +2123,8 @@ def test_destroy_ship_clears_cargo_and_returns_player_to_freeport_with_full_hull
     assert world.save.cargo == {}
     assert world.save.current_system == 0
     assert world.save.ship.hull_hp == vr.hull_hp_max(world.save.ship)
-    assert world.save.pilot.credits < 1200  # salvage fee charged
-    assert world.save.pilot.notoriety == 0  # any ship loss wipes wanted status
+    assert world.save.pilot.credits == 1200 - vr.salvage_fee(world.save.ship)  # salvage fee charged
+    assert world.save.pilot.notoriety == 7  # a raider kill does not clear wanted status (#402)
 
 
 # -- travel encounter variety -------------------------------------------
@@ -2478,6 +2478,7 @@ def test_notoriety_patrol_win_raises_notoriety_further_and_flips_reputation(monk
 def test_notoriety_patrol_loss_wipes_notoriety_via_destroy_ship(monkeypatch):
     world = _world_with_seed(82)
     world.save.pilot.notoriety = 10
+    world.save.pilot.credits = 100_000
     vr.read_key = lambda: "F"
 
     def _one_shot_loss(world, patrol):
@@ -12041,3 +12042,115 @@ def test_order_screens_show_stock_after_reservation(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr._screen_futures_order(vr.Palette(False), world, world.save.active_futures[0])
     assert "10 units reserved from that station's stock; cancelling returns them." in " ".join(output.getvalue().split())
+
+
+# --- #402: destruction is dearer than repair; only a patrol kill clears notoriety ----
+
+
+@pytest.mark.parametrize("hull_class", list(vr.HULL_REFITS))
+@pytest.mark.parametrize("hull_tier", [0, vr.UPGRADES["hull"]["max_tier"]])
+def test_salvage_fee_exceeds_a_full_repair_for_every_hull(hull_class, hull_tier):
+    world = _world_with_seed(42)
+    world.save.ship.hull_class, world.save.ship.hull_tier = hull_class, hull_tier
+    world.save.ship.hull_hp = 1
+    full_repair = (vr.hull_hp_max(world.save.ship) - 1) * 4
+    assert vr.salvage_fee(world.save.ship) > full_repair
+
+
+def test_raider_destruction_keeps_notoriety_and_patrol_destruction_clears_it():
+    world = _world_with_seed(42); world.save.pilot.notoriety = 9
+    world.save.pilot.credits = 100_000
+    assert "Notoriety" not in vr.destroy_ship(world) and world.save.pilot.notoriety == 9
+    world.save.pilot.notoriety = 9
+    assert "Notoriety cleared" in vr.destroy_ship(world, patrol=True) and world.save.pilot.notoriety == 0
+
+
+def test_combat_session_passes_the_patrol_flag_to_destruction(monkeypatch):
+    for patrol, expected in ((False, 5), (True, 0)):
+        world, pirate = _world_with_pending_fight()
+        world.save.pilot.notoriety = 5; world.save.ship.hull_hp = 1
+        world.save.pilot.credits = 100_000
+        monkeypatch.setattr(vr, "read_key", lambda: "F")
+        monkeypatch.setattr(vr, "tactical_round", lambda w, p, t, a: (0, 0, ["they fire"]) if not setattr(w.save.ship, "hull_hp", 0) else None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=patrol) == "destroyed"
+        assert world.save.pilot.notoriety == expected
+
+
+def test_underfunded_destruction_never_creates_debt_and_buys_only_the_hull_it_pays_for():
+    world = _world_with_seed(42); ship = world.save.ship; maximum = vr.hull_hp_max(ship)
+    world.save.pilot.credits = 100; ship.hull_hp = 10
+    message = vr.destroy_ship(world)
+    assert world.save.pilot.credits == 0 and ship.hull_hp == maximum // 4 + (maximum - maximum // 4) * 100 // vr.salvage_fee(ship) < maximum
+    assert "the tug patched what 100cr covers" in message
+    for paid in range(0, vr.salvage_fee(ship)):
+        assert maximum // 4 <= vr.salvage_hull(ship, paid) < maximum  # never full until the whole fee is paid
+    ship.hull_hp = 1
+    vr.destroy_ship(world)
+    assert world.save.pilot.credits == 0 and ship.hull_hp == maximum // 4 and world.save.current_system == 0
+    world.save.pilot.credits = vr.salvage_fee(ship); vr.destroy_ship(world)
+    assert ship.hull_hp == maximum and world.save.pilot.credits == 0
+
+
+def test_destruction_is_never_cheaper_per_hull_point_than_repair():
+    world = _world_with_seed(42); ship = world.save.ship; maximum = vr.hull_hp_max(ship)
+    for credits in (0, 40, 100, 200, 1000):
+        ship.hull_hp = 10; world.save.pilot.credits = credits
+        repaired = 10 + min(maximum - 10, credits // 4)
+        vr.destroy_ship(world)
+        assert ship.hull_hp <= repaired + maximum // 4 or credits >= vr.salvage_fee(ship)  # the only free hull is the flyable quarter floor
+
+
+def test_the_tow_never_hands_back_more_hull_than_the_fight_started_with():
+    """A broke pilot at 10/400 cannot buy the quarter-hull floor by dying."""
+    world = _world_with_seed(42); ship = world.save.ship
+    ship.hull_class, ship.hull_tier = "Carrier", vr.UPGRADES["hull"]["max_tier"]
+    maximum = vr.hull_hp_max(ship)
+    assert maximum // 4 > 10  # the floor would otherwise be a free upgrade
+    world.save.pilot.credits = 0
+    vr.destroy_ship(world, hull_before=10)
+    assert ship.hull_hp == 10
+    for credits in (0, 20, 200, 1000):
+        for before in (1, 10, maximum // 4, maximum):
+            ship.hull_hp = before; world.save.pilot.credits = credits
+            repaired = before + min(maximum - before, credits // 4)  # the yard charges four credits a hull point
+            vr.destroy_ship(world, hull_before=before)
+            assert ship.hull_hp <= repaired  # dying is never a cheaper repair than the yard
+
+
+def test_a_patrol_kill_clears_notoriety_only_once_the_fine_is_paid_too():
+    """Surrender stays the cheap way out of a wanted status (#402 review)."""
+    world = _world_with_seed(42); ship = world.save.ship
+    fee = vr.salvage_fee(ship)
+    world.save.pilot.notoriety = 20
+    fine = vr.notoriety_fine_cost(20)
+    assert fine > fee  # the exploit only exists because the fee is bounded
+    world.save.pilot.credits = fee + fine - 1
+    message = vr.destroy_ship(world, patrol=True)
+    assert world.save.pilot.notoriety == 20 and world.save.pilot.credits == 0
+    assert f"The {fine}cr fine went unpaid" in message
+    assert "unpaid" in world.save.pilot.log[-1]
+    ship.hull_hp = 1; world.save.pilot.credits = fee + fine
+    message = vr.destroy_ship(world, patrol=True)
+    assert world.save.pilot.notoriety == 0 and world.save.pilot.credits == 0
+    assert "Notoriety cleared" in message and ship.hull_hp == vr.hull_hp_max(ship)
+
+
+def test_combat_screen_discloses_the_salvage_fee_when_hull_is_low():
+    world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 1, 50, 50)
+    fee = vr.salvage_fee(world.save.ship)
+    world.save.ship.hull_hp = vr.hull_hp_max(world.save.ship)
+    calm = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
+    assert f"{fee}cr salvage fee" not in calm
+    assert "notoriety stays" in " ".join(vr.combat_display_lines(world, pirate, [], patrol=False, details=True))
+    world.save.pilot.notoriety = 6
+    patrol_details = " ".join(vr.combat_display_lines(world, pirate, [], patrol=True, details=True))
+    assert f"collects your {vr.notoriety_fine_cost(6)}cr fine and clears notoriety only once both are paid" in patrol_details
+    world.save.pilot.notoriety = 0
+    world.save.ship.hull_hp = 10
+    low = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
+    assert f"LOW HULL: one third of maximum hull or less. Destruction: {fee}cr salvage fee" in low
+    world.save.pilot.credits = 30
+    low = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
+    assert "Destruction: 30cr salvage fee" in low and f"hull patched to {vr.salvage_hull(world.save.ship, 30)}/{vr.hull_hp_max(world.save.ship)}" in low
+    assert f"destruction costs {fee}cr salvage" in " ".join(vr.station_deck_lines(world))

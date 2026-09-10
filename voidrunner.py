@@ -1111,9 +1111,11 @@ def _load_pending_travel(value: dict | None) -> dict | None:
                 pirates.append(state[key])
         if "combat" in state:
             combat = state["combat"]
-            _reject_unknown_save_fields(combat, {"pirate", "outcome", "lines", "tactics"}, "combat")
+            _reject_unknown_save_fields(combat, {"pirate", "outcome", "lines", "tactics", "hull_before"}, "combat")
             if "tactics" in combat:
                 _validate_tactics(combat["tactics"])
+            if "hull_before" in combat and (type(combat["hull_before"]) is not int or combat["hull_before"] <= 0):
+                raise ValueError("invalid combat")
             pirates.append(combat["pirate"])
             if (combat["outcome"] not in (None, "won", "escaped", "destroyed", "reported")
                     or not isinstance(combat["lines"], list)
@@ -3181,29 +3183,78 @@ def screen_blackwake_made(p: Palette, world: World) -> None:
     _screen_faction_contact(p, world, FACTION_BLACKWAKE)
 
 
-def destroy_ship(world: World) -> str:
-    """Ship destruction has real consequences -- lost cargo, a credit
-    penalty, and a tow back home -- but is never a dead end. A door
-    game with no way back from one bad fight is a needlessly hostile
-    interaction, not a difficulty setting.
+SALVAGE_FEE_BASE = 200
 
-    Also wipes notoriety unconditionally, for any cause of destruction
-    (an ordinary pirate as much as a Concord Patrol) -- a generic "near-
-    death wipes your wanted status, fresh start" rule is simpler and
-    easier to explain than a patrol-specific special case, and reads
-    fine narratively either way: word doesn't travel from a wreck."""
+
+def salvage_fee(ship: Ship) -> int:
+    """Always dearer than repairing before the fight: a full repair from zero
+    costs four credits per hull point, so the fee is that plus a fixed base."""
+    return SALVAGE_FEE_BASE + hull_hp_max(ship) * 4
+
+
+def salvage_hull(ship: Ship, paid: int, hull_before: int | None = None) -> int:
+    """Hull after a tow: full only when the fee is paid in full; otherwise the
+    flyable quarter of maximum plus the share of the rest that the paid fraction
+    of the fee buys, which stays below maximum until the whole fee is paid
+    (issue #402 review).
+
+    `hull_before` is the hull the ship carried into the fight. The tug patches;
+    it never upgrades. The free floor never rises above what was already there,
+    so a wreck cannot hand a broke pilot more hull than they flew in with, and
+    the paid share still buys less hull than the same credits buy at the yard
+    (issue #402 review round 3)."""
+    maximum = hull_hp_max(ship)
+    fee = salvage_fee(ship)
+    if paid >= fee:
+        return maximum
+    floor = max(1, maximum // 4)
+    if hull_before is not None:
+        floor = max(1, min(floor, hull_before))
+    return floor + (maximum - floor) * max(0, paid) // fee
+
+
+def destroy_ship(world: World, *, patrol: bool = False, hull_before: int | None = None) -> str:
+    """Ship destruction has real consequences -- lost cargo, a salvage fee
+    scaled to the hull, and a tow back home -- but is never a dead end. A
+    door game with no way back from one bad fight is a needlessly hostile
+    interaction, not a difficulty setting. The fee is capped at credits on
+    hand, so it never creates debt (issue #402).
+
+    A Concord patrol collects the outstanding notoriety fine on top of the
+    salvage fee and closes the file only when both are paid. A raider kill
+    never touches notoriety. Surrendering is therefore always the cheaper
+    way out of a wanted status: it costs the fine alone and keeps the cargo
+    (issue #402 review round 3).
+
+    A pilot who cannot pay the whole fee gets the hull the fee covers: a
+    quarter of maximum plus the paid fraction of the rest, always short of
+    full hull, so an empty account buys a flyable ship, not a repair. That
+    floor never rises above `hull_before`, the hull the ship carried into
+    the fight, so seeking destruction is never a free repair."""
+    ship = world.save.ship
     lost_cargo = sum(world.save.cargo.values())
     for commodity, quantity in list(world.save.cargo.items()):
         _dispose_cargo(world, commodity, quantity)
-    penalty = min(world.save.pilot.credits, 200 + world.save.ship.hull_tier * 50)
+    fee = salvage_fee(ship)
+    fine = notoriety_fine_cost(world.save.pilot.notoriety) if patrol else 0
+    due = fee + fine
+    penalty = min(world.save.pilot.credits, due)
     world.save.pilot.credits -= penalty
-    world.save.ship.hull_hp = hull_hp_max(world.save.ship)
+    towards_fee = min(penalty, fee)
+    ship.hull_hp = salvage_hull(ship, towards_fee, hull_before)
     world.save.current_system = 0
-    world.save.pilot.notoriety = 0
+    cleared = patrol and penalty >= due
+    if cleared:
+        world.save.pilot.notoriety = 0
     world.ship_destroyed_this_hop = True
-    world.save.pilot.note("Ship destroyed -- salvage tug towed you back to Freeport.")
+    world.save.pilot.note(f"Ship destroyed -- salvage tug towed you back to Freeport ({penalty}cr charged)."
+                          + (" Concord closed your file." if cleared
+                             else f" Concord logged the unpaid {fine}cr fine." if patrol else ""))
     return (f"Your ship is destroyed! {lost_cargo} units of cargo lost, "
-            f"a {penalty}cr salvage fee charged. You wake up at Freeport Anchorage.")
+            f"a {penalty}cr salvage fee charged. You wake up at Freeport Anchorage"
+            + (f" with hull {ship.hull_hp}/{hull_hp_max(ship)}: the tug patched what {towards_fee}cr covers." if towards_fee < fee else ".")
+            + ("" if not patrol else " Notoriety cleared." if cleared
+               else f" The {fine}cr fine went unpaid, so your notoriety stands."))
 
 
 def customs_check_chance(system: GalaxySystem) -> float:
@@ -4159,7 +4210,7 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
     if costs and ship.fuel < min(costs):
         lines.append(f"LOW FUEL: no connected jump affordable in fuel; minimum {min(costs)}. [Y] Refuel at 6cr/unit.")
     if ship.hull_hp * 5 <= hull_hp_max(ship):
-        lines.append("CRITICAL HULL: [Y] repair before risking another encounter.")
+        lines.append(f"CRITICAL HULL: [Y] repair before risking another encounter; destruction costs {salvage_fee(ship)}cr salvage.")
     if wage:
         lines.append(f"Crew wages: {wage}cr/jump." + (" LOW CASH: next wages exceed credits." if pilot.credits < wage else ""))
     mission = tracked_mission(world)
@@ -7474,7 +7525,7 @@ def screen_notoriety_patrol(p: Palette, world: World) -> None:
     _screen_combat_session(p, world, patrol, patrol=True)
 
 
-def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, patrol: bool, details: bool = False, tactics: dict | None = None, warrant: dict | None = None) -> list[str]:
+def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, patrol: bool, details: bool = False, tactics: dict | None = None, warrant: dict | None = None, hull_before: int | None = None) -> list[str]:
     """Read-only combat terms; no random draw or persisted presentation state."""
     ship, pilot = world.save.ship, world.save.pilot
     used = sum(world.save.cargo.values())
@@ -7503,7 +7554,10 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
             lines.append("Pattern: " + " > ".join(TACTICAL_PROFILES[tactics["profile"]]) + ".")
             lines.append("Cover/harry reduce your shot; recovery exposes the enemy. Harry lowers escape chance by 10 percentage points, minimum 5%.")
     else: lines.append("Original fight rules (no Brace).")
-    if ship.hull_hp * 3 <= hull_hp_max(ship): lines.append("LOW HULL: one third of maximum hull or less.")
+    if ship.hull_hp * 3 <= hull_hp_max(ship):
+        paid = min(pilot.credits, salvage_fee(ship))
+        lines.append(f"LOW HULL: one third of maximum hull or less. Destruction: {paid}cr salvage fee, all cargo lost, tow to Freeport"
+                     + (f" with hull patched to {salvage_hull(ship, paid, hull_before)}/{hull_hp_max(ship)} (the fee is {salvage_fee(ship)}cr)." if paid < salvage_fee(ship) else "."))
     lines += [
         "[F] Fight: fire once; a surviving enemy returns fire.",
         f"[E] Evade: about {combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics):.0%} success; failure draws enemy fire.",
@@ -7522,7 +7576,11 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                      f"{cost}cr only if accepted (about {bribe_chance(world, pirate):.0%}); "
                      "Blackwake +2 if accepted; refusal draws enemy fire. " + ("Available." if pilot.credits >= cost else "UNAFFORDABLE; bribe unavailable."))
     if details:
-        lines += [f"Shields Tier {ship.shield_tier}: reduce incoming damage by {ship.shield_tier * 3}, minimum 1.",
+        lines += [f"Destruction: {salvage_fee(ship)}cr salvage fee, all cargo lost, tow to Freeport; paying less than the fee leaves the hull "
+                  f"at a quarter of maximum plus the paid share of the rest, never full and never above the hull you brought into the fight; "
+                  + (f"this patrol also collects your {notoriety_fine_cost(pilot.notoriety)}cr fine and clears notoriety only once both are paid."
+                     if patrol else "notoriety stays."),
+                  f"Shields Tier {ship.shield_tier}: reduce incoming damage by {ship.shield_tier * 3}, minimum 1.",
                   f"Weapons Tier {ship.weapon_tier}: +{ship.weapon_tier * 4} damage; gunner bonus +{gunner_bonus(ship)}.",
                   f"Notoriety {pilot.notoriety}. " + ("Destroying this patrol: notoriety +3, Concord -10, Blackwake +3; no salvage."
                   if patrol else "Destroying this pirate earns salvage; Concord +2, Blackwake -1.")]
@@ -7541,6 +7599,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
     if combat is None:
         combat = encounter["combat"] = {
             "pirate": dataclasses.asdict(pirate), "outcome": None, "lines": [], "tactics": new_tactics(pirate),
+            "hull_before": world.save.ship.hull_hp,
         }
         world.checkpoint()
     else:
@@ -7551,6 +7610,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
     warrant = encounter.get("warrant")
     formation = encounter.get("formation")
     tactics = combat.get("tactics")  # Absence preserves an interrupted legacy fight.
+    hull_before = combat.get("hull_before")  # Absent in a legacy checkpoint; the floor then stands alone.
     ship = world.save.ship
     fine = notoriety_fine_cost(world.save.pilot.notoriety)
     page, details = 0, False
@@ -7565,7 +7625,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         if formation is not None and not formation["engaged"]: actions += "/T"
         action, page, count = _draw_service_page(
             p, f"Combat {world.save.pilot.credits:,}cr",
-            combat_display_lines(world, pirate, combat["lines"], patrol=patrol, details=details, tactics=tactics, warrant=warrant),
+            combat_display_lines(world, pirate, combat["lines"], patrol=patrol, details=details, tactics=tactics, warrant=warrant, hull_before=hull_before),
             f"[{actions}]Act [I]Info [< >]Page: ", page,
         )
         if action == ">":
@@ -7668,7 +7728,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         else:
             continue
         if ship.hull_hp <= 0 and outcome != "won":
-            lines.append(destroy_ship(world))
+            lines.append(destroy_ship(world, patrol=patrol, hull_before=hull_before))
             outcome = "destroyed"
         combat.update(pirate=dataclasses.asdict(pirate), outcome=outcome, lines=lines)
         world.checkpoint()
