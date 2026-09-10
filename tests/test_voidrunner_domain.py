@@ -4924,7 +4924,7 @@ def test_market_catalog_pages_preserve_goods_quotes_and_telemetry(monkeypatch,wi
     text=" ".join(" ".join(frames).split())
     for commodity in vr.LEGAL_COMMODITIES+["weapons"]:assert vr.COMMODITIES[commodity]["label"] in text
     assert "prohibited" in text or haven
-    assert "Illegal" in text and "Stock" in text and "station buys" in text and "in hold" in text
+    assert "Illegal" in text and "Stock" in text and "demand" in text and "hold" in text
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
@@ -4997,7 +4997,8 @@ def test_screen_market_contraband_catalog_keeps_labels_and_bounds(monkeypatch):
     with contextlib.redirect_stdout(buf):
         vr.screen_market(vr.Palette(truecolor=False), world)
     text = " ".join(vr._ANSI_RE.sub("", buf.getvalue()).split())
-    assert "Illegal" in text and "station buys" in text and "Cargo Hold: 8/" in text
+    # The market row now reads "Stock N; demand N; hold N" so it fits an 80-column page (#412).
+    assert "Illegal" in text and "demand" in text and "Cargo Hold: 8/" in text
     assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
 
@@ -8065,7 +8066,7 @@ def test_cockpit_settlement_results_stay_inside_height_budget(monkeypatch, width
     for frame in frames:
         plain = vr._ANSI_RE.sub("", frame)
         assert plain.split("Command Deck:", 1)[0].strip() in ("", ">")
-        content.append(re.search(r"\d+/\d+\r\n(.*?)\r\n\[<\]", plain, re.S).group(1))
+        content.append(re.search(r"\d+/\d+\r\n(.*?)\r\n\[[<X]\]", plain, re.S).group(1))  # one-page decks drop Prev/Next (#412)
     text = " ".join(" ".join(content).split())
     for message in settled: assert text.count(message) == 1
 
@@ -12654,3 +12655,60 @@ def test_mission_board_and_picker_continuations_carry_one_key(monkeypatch):
         vr._pick_trade_field("Pick", [("x", "a very long option label that certainly wraps at thirty columns wide")])
     rows = vr._ANSI_RE.sub("", output.getvalue()).split("\r\n")
     assert sum(row.startswith("[1] a very long") for row in rows) == 1 and any(row.startswith("    ") for row in rows)
+
+
+# --- #412: notes that apply, single-page footers, market rows that fit ------------------
+
+
+def test_single_page_footers_drop_paging_tokens_but_keep_the_counter(monkeypatch):
+    assert vr.single_page_footer("[<]Prev [>]Next [R]Fuel [B]Back: ", 1) == "[R]Fuel [B]Back: "
+    assert vr.single_page_footer("[<>]Page [B]Back: ", 1) == "[B]Back: " and vr.single_page_footer("[<>]Page [B]Back: ", 2) == "[<>]Page [B]Back: "
+    world = _world_with_seed(42)
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 60)
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_shipyard(vr.Palette(False), world)
+    plain = " ".join(vr._ANSI_RE.sub("", output.getvalue()).split())
+    assert " 1/1 " in plain and "[<]Prev" not in plain and "[R]Fuel [P]Repair" in plain
+
+
+def test_market_rows_fit_eighty_columns_without_filler_status():
+    world = _world_with_seed(42)
+    goods = vr.LEGAL_COMMODITIES + vr.CONTRABAND_COMMODITIES
+    world.save.current_system = next(s.id for s in world.galaxy if s.economy == "Haven")
+    lines = vr.market_catalog_lines(world, goods)
+    assert all(vr._visible_width(line) <= 79 for line in lines if line.startswith("["))
+    assert not any(line.endswith(" Normal") for line in lines) and any("Illegal" in line for line in lines)
+    assert "Only jumps advance days" in lines[1]
+
+
+def test_contract_notes_appear_only_when_they_apply():
+    world = _world_with_seed(42)
+    dest = sorted(world.here.connections)[0]; world.by_id[dest].discovered = True
+    delivery = vr.Mission(1, "delivery", "Deliver", 300, 0, dest, commodity="food", quantity=2)
+    text = " ".join(vr.mission_details(world, delivery))
+    assert "not total profit" in text and "cargo already aboard" not in text
+    assert "crew wages" not in text and "Survey scanning" not in text and "Remote danger" not in text
+    world.save.cargo = {"food": 1}
+    assert "as is cargo already aboard" in " ".join(vr.mission_details(world, delivery))
+    world.save.ship.has_gunner = True
+    assert "Budget keeps current crew wages" in " ".join(vr.mission_details(world, delivery))
+    far = next(s.id for s in world.galaxy if not s.discovered and s.id != dest)
+    scan = vr.Mission(2, "scan", "Survey", 250, 0, far)
+    text = " ".join(vr.mission_details(world, scan))
+    assert "Survey scanning may avoid travel." in text and "Remote danger remains unknown until charted." in text
+
+
+def test_offer_page_one_points_to_accept_without_offering_it(monkeypatch):
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 12)
+    world, mission = _mission_details_world()
+    frames = []; output = io.StringIO()
+    def choose():
+        frames.append(output.getvalue()); output.seek(0); output.truncate(0)
+        return "A" if len(frames) == 1 else "B"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output):
+        vr.screen_mission_details(vr.Palette(False), world, mission, active=False)
+    first = " ".join(frames[0].split())
+    assert "[A] on last page." in first and "[A]ccept" not in first
+    assert not world.save.active_missions  # A on page 1 did not accept

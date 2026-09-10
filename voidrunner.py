@@ -4947,7 +4947,8 @@ def screen_landmark(p: Palette, world: World) -> None:
 def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
     system = world.here
     lines = [f"Commodity Market: {system.station_name}",
-             f"Cargo Hold: {sum(world.save.cargo.values())}/{cargo_capacity(world.save.ship)} units used. Prices per unit."]
+             f"Cargo Hold: {sum(world.save.cargo.values())}/{cargo_capacity(world.save.ship)} units used. Prices per unit. "
+             "Only jumps advance days; reopening does not replenish stock."]
     for index, commodity in enumerate(goods):
         quote = price_for(world, system.id, commodity)
         depth = market_depth_quote(world, system.id, commodity)
@@ -4958,8 +4959,8 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
         if event and event["commodity"] == commodity and system.id in economy_event_system_ids(world, event):
             tags.append("[CRASH]" if event["direction"] == "crash" else "[BOOM]")
         lines.append(f"[{MARKET_LETTERS[index]}] {COMMODITIES[commodity]['label']}: buy {buy}; sell {round(quote * SELL_SPREAD)}cr. "
-                     f"Stock {depth['stock']}; station buys {depth['demand']}; in hold {world.save.cargo.get(commodity, 0)}. "
-                     + " ".join(tags or ["Normal"]))
+                     f"Stock {depth['stock']}; demand {depth['demand']}; hold {world.save.cargo.get(commodity, 0)}."
+                     + (" " + " ".join(tags) if tags else ""))
     if any(not COMMODITIES[c]["legal"] for c in goods):
         lines.append(f"Blackwake: +1 standing per new {CONTRABAND_STANDING_STEP}cr net contraband trading gain; purchases count against gains.")
     return lines
@@ -5520,8 +5521,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
     purchase = "Buy prohibited at this station" if prohibited else f"Buy {buy}cr/unit"
     lines = [f"{purchase}; sell {sell}cr/unit.",
              f"Credits: {world.save.pilot.credits}cr. Hold: {world.save.cargo.get(commodity, 0)} units.",
-             f"Stock {depth['stock']} (+{depth['stock_rate']}/day); station buys {depth['demand']} (+{depth['demand_rate']}/day).",
-             "Only jumps advance days. Reopening this screen does not replenish the market."]
+             f"Stock {depth['stock']} (+{depth['stock_rate']}/day); station buys {depth['demand']} (+{depth['demand_rate']}/day)."]
     footer = ("" if prohibited else "[P]urchase ") + "[S]ell [<>]Page [B]ack: "
     title = f"{label} Exchange"
     pages = _trade_pages(lines, title, footer)
@@ -5743,13 +5743,26 @@ def _service_pages(lines: list[str], title: str, footer: str) -> list[list[str]]
     return pages
 
 
+_PAGING_TOKENS = ("[<]Prev [>]Next ", "[<>]Page ", "[< >]Page ", "[<] [>] ")
+
+
+def single_page_footer(footer: str, count: int) -> str:
+    """Drop Prev/Next from a one-page screen's action bar; the page counter stays
+    (it is the paging oracle for readers and scripted tests alike)."""
+    if count > 1:
+        return footer
+    for token in _PAGING_TOKENS:
+        footer = footer.replace(token, "")
+    return footer
+
+
 def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, page: int, *, pages: list[list[str]] | None = None) -> tuple[str, int, int]:
     if pages is None:
         pages = _service_pages(lines, title, footer)
     page = min(page, len(pages) - 1)
     out_line(); out_line(f"{p.gold}{title} {page + 1}/{len(pages)}{RESET}")
     for line in pages[page]: out_line(line)
-    out_prompt(footer); action = read_command(); out_line(action)
+    out_prompt(single_page_footer(footer, len(pages))); action = read_command(); out_line(action)
     return action, page, len(pages)
 
 
@@ -6220,12 +6233,20 @@ def mission_details(world: World, mission: Mission) -> list[str]:
     wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
     wages = wage * len(path)
     outlay = procurement + fuel_cash + wages
+    held = mission.kind == "delivery" and world.save.cargo.get(mission.commodity, 0) > 0
     lines.extend([
-        f"Shortest-route budget: {fuel} fuel ({world.save.ship.fuel} aboard), {fuel_cash} cr top-ups; wages {wage} cr/jump, {wages} cr total.",
+        f"Shortest-route budget: {fuel} fuel ({world.save.ship.fuel} aboard), {fuel_cash} cr top-ups"
+        + (f"; wages {wage} cr/jump, {wages} cr total." if wage else "."),
         f"Estimated remaining cash outlay: {outlay:,} cr; payout less this outlay: {reward - outlay:+,} cr.",
-        "Estimate excludes cargo already paid for, repairs, detours, combat gains/losses and changing prices; it is not total profit.",
-        "Budget assumes refuelling stops and retained crew. Survey scanning may avoid travel. Remote danger remains unknown until charted.",
+        "Estimate is not total profit: repairs, detours, combat and price changes are excluded"
+        + (", as is cargo already aboard." if held else "."),
     ])
+    if wage:
+        lines.append("Budget keeps current crew wages and assumes refuelling stops.")
+    if mission.kind == "scan":
+        lines.append("Survey scanning may avoid travel.")
+    if any(not world.by_id[sid].discovered for sid in path):
+        lines.append("Remote danger remains unknown until charted.")
     if max_leg > fuel_capacity(world.save.ship):
         lines.append("WARNING: a shortest-route jump exceeds tank capacity; upgrade or find another route.")
     if outlay > world.save.pilot.credits:
@@ -6510,9 +6531,10 @@ def screen_mission_details(p: Palette, world: World, mission: Mission, *, active
         max_pages = sum(len(_wrap_output(line, max(1, _OUTPUT_WIDTH - 1)).split("\r\n")) for line in lines)
         title = f"Contract #{mission.id} {max_pages}/{max_pages}"
         footer = "[R]oute [N]ext [P]rev [B]ack > "
+        pointer_rows = len(_wrap_output(f"[A] on the last page ({max_pages}; [N]ext).", max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
         overhead = max(7, 1 + len(_wrap_output(title, _OUTPUT_WIDTH).split("\r\n"))
                        + len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
-                       + (2 if active else 1))
+                       + (2 if active else pointer_rows))
         pages = _mission_text_pages(lines, overhead=overhead)
         page = min(page, len(pages) - 1)
         out_line()
@@ -6526,6 +6548,8 @@ def screen_mission_details(p: Palette, world: World, mission: Mission, *, active
             out_line("[D] Abandon")
         elif page == len(pages) - 1:
             out_line("[A]ccept contract")
+        else:
+            out_line("[A] on last page.")
         out_prompt(actions + " > ")
         key = read_command()
         if key in ("B", "Q"):
@@ -6872,7 +6896,7 @@ def screen_chart(p: Palette, world: World) -> int | None:
         page = min(page, len(pages) - 1)
         out_line(); out_line(f"{p.gold}{title} {page + 1}/{len(pages)}{RESET}")
         for row in pages[page][0]: out_line(row)
-        out_prompt(footer); key = read_command(); out_line(key)
+        out_prompt(single_page_footer(footer, len(pages))); key = read_command(); out_line(key)
         if key in ("B", "Q"): return None
         if key == ">": page = min(page + 1, len(pages) - 1); continue
         if key == "<": page = max(0, page - 1); continue
