@@ -2798,7 +2798,7 @@ def test_general_route_flies_only_one_leg_until_another_command(monkeypatch, out
     monkeypatch.setattr(vr, "screen_travel", travel)
     keys = iter("JB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
-        vr._screen_auto_route(vr.Palette(False), world, destination=target.id)
+        vr.screen_auto_route(vr.Palette(False), world, destination=target.id)
     assert calls == [expected]
     assert ("Last hop: arrived" if outcome == "arrive" else "Travel diverted") in output.getvalue()
 
@@ -2820,7 +2820,7 @@ def test_general_route_pages_are_read_only_and_hide_unknown_details(monkeypatch,
         assert match and len(frames) < 200
         return "B" if match[1] == match[2] else "N"
     monkeypatch.setattr(vr, "read_key", choose)
-    with contextlib.redirect_stdout(output): vr._screen_auto_route(vr.Palette(False), world, destination=target.id)
+    with contextlib.redirect_stdout(output): vr.screen_auto_route(vr.Palette(False), world, destination=target.id)
     assert all(len(frame.splitlines()) <= height for frame in frames)
     assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
     text = " ".join(" ".join(frames).split())
@@ -2839,7 +2839,7 @@ def test_general_route_opens_on_a_destination_and_cancel_preserves_the_preview(m
     monkeypatch.setattr(vr, "_pick_trade_field", pick)
     monkeypatch.setattr(vr, "read_line_raw", lambda **kw: pytest.fail("Entry asked a question"))
     keys = iter("DB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
-    with contextlib.redirect_stdout(io.StringIO()) as output: vr._screen_auto_route(vr.Palette(False), world)
+    with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_auto_route(vr.Palette(False), world)
     text = output.getvalue()
     assert text.count("Destination: " + world.by_id[chosen].name) == 2
     assert all(world.by_id[sid].discovered for sid, label in choices_seen)
@@ -2850,7 +2850,7 @@ def test_cancelling_the_opening_route_picker_leaves_without_a_planner(monkeypatc
     world = _world_with_seed(42)
     monkeypatch.setattr(vr, "_pick_trade_field", lambda title, options: None)
     monkeypatch.setattr(vr, "read_key", lambda: pytest.fail("Back from the picker must leave at once"))
-    with contextlib.redirect_stdout(io.StringIO()) as output: vr._screen_auto_route(vr.Palette(False), world)
+    with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_auto_route(vr.Palette(False), world)
     assert "Route Planner" not in output.getvalue() and world.save.turn == 0
 
 
@@ -3879,7 +3879,7 @@ def test_route_screens_open_map_with_their_exact_path(monkeypatch):
     keys = iter("VBVB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_mission_navigation(vr.Palette(False), world, mission, active=True)
-        vr._screen_auto_route(vr.Palette(False), world, destination=target.id)
+        vr.screen_auto_route(vr.Palette(False), world, destination=target.id)
     assert opened == [{"path":vr.mission_route(world, mission), "public_target":target.id},
                       {"path":vr.bfs_path(world.by_id,0,target.id), "public_target":target.id}]
 
@@ -5637,7 +5637,7 @@ def test_auto_route_checkpoints_each_completed_hop_before_next_hop(tmp_path, mon
 
     monkeypatch.setattr(vr, "screen_travel", travel)
     with contextlib.redirect_stdout(io.StringIO()):
-        vr._screen_auto_route(vr.Palette(False), world, destination=target)
+        vr.screen_auto_route(vr.Palette(False), world, destination=target)
     saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert visited == path
     assert saved.current_system == target
@@ -9582,7 +9582,7 @@ def test_archive_route_map_includes_uncharted_accepted_bearing(monkeypatch):
     keys = iter("VB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     calls = []
     monkeypatch.setattr(vr, "screen_galaxy_map", lambda p, w, **kwargs: calls.append(kwargs))
-    with contextlib.redirect_stdout(io.StringIO()): vr._screen_auto_route(vr.Palette(False), world, destination=target)
+    with contextlib.redirect_stdout(io.StringIO()): vr.screen_auto_route(vr.Palette(False), world, destination=target)
     assert calls == [{"path": vr.bfs_path(world.by_id, 0, target), "public_target": target}]
     assert not world.by_id[target].discovered
 
@@ -10932,7 +10932,7 @@ def test_general_route_map_keeps_independent_tracked_objective_and_route_end(mon
         lines = original(current, supplied, public); lists.extend(lines); return lines
     monkeypatch.setattr(vr, "map_list_lines", capture)
     keys = iter("VOBB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
-    with contextlib.redirect_stdout(io.StringIO()): vr._screen_auto_route(vr.Palette(False), world, destination=destination)
+    with contextlib.redirect_stdout(io.StringIO()): vr.screen_auto_route(vr.Palette(False), world, destination=destination)
     objective = [line for line in lists if world.by_id[target].name in line]
     endpoint = [line for line in lists if world.by_id[destination].name in line]
     assert len(objective) == 1 and objective[0].startswith("! ")
@@ -11715,7 +11715,7 @@ def test_faction_case_route_becomes_available_only_after_committing_ending(monke
         else:assert "[R]Route" in frame
         return key
     monkeypatch.setattr(vr,"read_key",choose)
-    monkeypatch.setattr(vr,"_screen_auto_route",lambda p,w,*,destination:routes.append(destination))
+    monkeypatch.setattr(vr,"screen_auto_route",lambda p,w,*,destination:routes.append(destination))
     with contextlib.redirect_stdout(output):vr.screen_faction_story(vr.Palette(False),world,faction)
     assert routes==[vr.faction_story_target(world,faction,"aid")] and checkpoints==["committed"]
 
@@ -11749,7 +11749,7 @@ def test_faction_case_idle_route_is_unavailable_until_acceptance(monkeypatch,fac
         else:assert "[R]Route" in frame
         return key
     monkeypatch.setattr(vr,"read_key",choose)
-    monkeypatch.setattr(vr,"_screen_auto_route",lambda p,w,*,destination:routes.append(destination))
+    monkeypatch.setattr(vr,"screen_auto_route",lambda p,w,*,destination:routes.append(destination))
     with contextlib.redirect_stdout(output):vr.screen_faction_story(vr.Palette(False),world,faction)
     assert routes==[vr.faction_story_target(world,faction)] and checkpoints==["accepted"]
 
@@ -12895,13 +12895,13 @@ def test_chart_route_planner_opens_the_destination_picker_first(monkeypatch):
     picked = []
     monkeypatch.setattr(vr, "_pick_trade_field", lambda title, choices, **kw: picked.append(title) or None)
     with contextlib.redirect_stdout(io.StringIO()) as output:
-        vr._screen_auto_route(vr.Palette(False), world)
+        vr.screen_auto_route(vr.Palette(False), world)
     assert picked == ["Charted Destination"] and "Route Planner" not in output.getvalue()
     dest = sorted(world.here.connections)[0]; world.by_id[dest].discovered = True
     monkeypatch.setattr(vr, "_pick_trade_field", lambda title, choices, **kw: dest)
     keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
-        vr._screen_auto_route(vr.Palette(False), world)
+        vr.screen_auto_route(vr.Palette(False), world)
     assert "Route Planner" in output.getvalue() and "[J]ump next" in output.getvalue()
 
 
@@ -13309,3 +13309,34 @@ def test_the_pure_galaxy_caches_answer_from_the_seed_alone():
     assert all(hops[sid] == real.get(sid, -1) for sid in range(vr.GALAXY_SYSTEM_COUNT))
     galaxy[1].discovered = True  # mutating a generated galaxy cannot reach the caches
     assert vr.galaxy_economies(42) is economies
+
+
+# --- #420: the module's own placement and naming rules ----------------------------------
+
+
+def test_no_screen_lives_above_the_ui_marker():
+    """The marker is a boundary: nothing above it may read a key (issue #420)."""
+    source = _VOIDRUNNER_PATH.read_text(encoding="utf-8").split("\n")
+    marker = next(index for index, line in enumerate(source) if line.startswith("# UI layer"))
+    above = [line for line in source[:marker] if line.startswith(("def screen_", "def _screen_"))]
+    assert above == []
+
+
+def test_screen_naming_says_what_a_caller_can_navigate_to():
+    """`_screen_*` is a shared body or a sub-step, never a destination (#420)."""
+    import inspect
+    helpers = {name for name, value in vars(vr).items()
+               if name.startswith("_screen_") and inspect.isfunction(value)}
+    assert helpers == {"_screen_combat_session", "_screen_faction_contact", "_screen_buy_futures",
+                       "_screen_futures_order", "_screen_map_info", "_screen_opening_offer"}
+    # Each of those is called only from another screen, never from the outer loop.
+    outer = inspect.getsource(vr.main) if hasattr(vr, "main") else ""
+    assert not any(name in outer for name in helpers)
+
+
+def test_save_validators_are_named_as_validators():
+    for name in ("_validate_mission_boards", "_validate_trade_total", "_validate_tracked_mission_id",
+                 "_validate_tactics", "_validate_warrant", "_validate_formation", "_validate_versioned"):
+        assert callable(getattr(vr, name)), name
+    assert not [name for name in vars(vr) if name.startswith("_load_") and name.endswith(
+        ("_boards", "_total", "_mission_id"))]

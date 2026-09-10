@@ -1324,10 +1324,10 @@ class SaveData:
             next_futures_id=d.get("next_futures_id", 1),
             pending_travel=_load_pending_travel(d.get("pending_travel")),
             event_rng_state=d.get("event_rng_state"),
-            mission_boards=_load_mission_boards(d.get("mission_boards", {})),
-            tracked_mission_id=_load_tracked_mission_id(d.get("tracked_mission_id")),
-            best_credits=_load_trade_total(d.get("best_credits", 0), nonnegative=True, label="credit high-water mark"),
-            contraband_trade_balance=_load_trade_total(d.get("contraband_trade_balance", 0)),
+            mission_boards=_validate_mission_boards(d.get("mission_boards", {})),
+            tracked_mission_id=_validate_tracked_mission_id(d.get("tracked_mission_id")),
+            best_credits=_validate_trade_total(d.get("best_credits", 0), nonnegative=True, label="credit high-water mark"),
+            contraband_trade_balance=_validate_trade_total(d.get("contraband_trade_balance", 0)),
             contraband_trade_milestones=_load_contraband_milestones(d),
             cargo_basis={c: [list(lot) for lot in lots] for c, lots in d.get("cargo_basis", {}).items()},
             trading_ledger=TradingLedger(**d.get("trading_ledger", {})),
@@ -1573,7 +1573,7 @@ def _validate_save_document(data: dict) -> None:
     flags = data.get("flags", {})
     require(isinstance(flags, dict) and all(isinstance(k, str) and type(v) is bool for k, v in flags.items()), "flags")
     boards = data.get("mission_boards", {})
-    _load_mission_boards(boards)
+    _validate_mission_boards(boards)
     posted = []
     for board in boards.values():
         if set(board) != {"refresh_turn", "offers"}:
@@ -2547,7 +2547,7 @@ class MissionError(ValueError):
     """A rejected contract action makes no changes."""
 
 
-def _load_mission_boards(data: dict) -> dict[int, dict]:
+def _validate_mission_boards(data: dict) -> dict[int, dict]:
     try:
         if not isinstance(data, dict) or len(data) > GALAXY_SYSTEM_COUNT:
             raise ValueError("invalid boards")
@@ -3053,7 +3053,7 @@ CONCORD_STANDING_PER_CONTRACT = 1  # Legal contract work earns Concord standing 
 CONCORD_STANDING_CONTRACTS = ("delivery", "scan", "escort")
 
 
-def _load_trade_total(value, *, nonnegative=False, label="contraband trading record") -> int:
+def _validate_trade_total(value, *, nonnegative=False, label="contraband trading record") -> int:
     if type(value) is not int or (nonnegative and value < 0):
         raise ResumeError(f"The saved {label} cannot be read.")
     return value
@@ -3067,7 +3067,7 @@ def _load_contraband_milestones(d: dict) -> int:
     load as four points once the step is 250 -- otherwise the next contraband
     purchase mints retroactive standing, and a large balance mints enough to
     unlock membership outright (issue #407 review)."""
-    awarded = _load_trade_total(d.get("contraband_trade_milestones", 0), nonnegative=True)
+    awarded = _validate_trade_total(d.get("contraband_trade_milestones", 0), nonnegative=True)
     step = d.get("contraband_standing_step", CONTRABAND_STANDING_LEGACY_STEP)
     if type(step) is not int or step <= 0:
         raise ResumeError("The saved contraband trading record cannot be read.")
@@ -3258,35 +3258,6 @@ def faction_story_recap(world: World) -> list[str]:
             for faction, story in world.save.faction_stories.items() if story["stage"] != "complete"]
 
 
-def screen_faction_story(p: Palette, world: World, faction: str) -> str | None:
-    page, result = 0, None
-    while True:
-        story = world.save.faction_stories.get(faction)
-        stage = story["stage"] if story is not None else None
-        actions = {None: "A/", "accepted": "I/R/", "evidence": "H/A/", "committed": "C/R/", "complete": ""}[stage]
-        if stage == "evidence" and faction_story_target(world, faction, "hardline") is None:
-            actions = "A/"
-        lines = ([result] if result else []) + faction_story_lines(world, faction)
-        key, page, count = _draw_service_page(p, f"Case {world.save.pilot.credits:,}cr", lines, _detail_action_bar(actions, {"A": "Aid" if stage == "evidence" else "Accept", "I": "Investigate", "H": "Hardline", "C": "Complete", "R": "Route"}), page)
-        if key in ("B", "Q"): return result
-        if (moved := page_step(key, page, count)) is not None:
-            page = moved
-            continue
-        if not key or key not in actions.split("/"): continue
-        if key == "R":
-            _screen_auto_route(p, world, destination=faction_story_destination(world, faction)); page = 0; continue
-        if key == "C":
-            if blocker := faction_story_completion_blocker(world, faction): result, page = blocker, 0; continue
-            ending = FACTION_STORIES[faction][story["choice"]]
-            if ending["commodity"] is not None:
-                question = f"Hand over {ending['quantity']} {COMMODITIES[ending['commodity']]['label']}, including any promised to contracts, for {ending['reward']:,}cr?"
-                if not confirm(question, p): continue
-        try: result = faction_story_action(world, faction, key)
-        except ValueError as exc: result, page = str(exc), 0; continue
-        world.commit()
-        page = 0
-
-
 def perk_active(save: SaveData, faction: str) -> bool:
     """Save-level core: retirement quotes payouts without a live `World`."""
     info = FACTION_MEMBERSHIPS[faction]
@@ -3348,30 +3319,6 @@ def faction_contact_lines(world: World, faction: str) -> list[str]:
     return lines
 
 
-def _screen_faction_contact(p: Palette, world: World, faction: str) -> None:
-    page, result = 0, None
-    while True:
-        available = faction_join_blocker(world, faction) is None
-        lines = ([result] if result else []) + faction_contact_lines(world, faction)
-        action, page, count = _draw_service_page(p, f"{FACTION_LABEL[faction].split()[0]} {world.save.pilot.credits:,}cr", lines,
-                                                "[J]Join [S]Story [B]Back [<>]Page: " if available else "[S]Story [B]Back [<>]Page: ", page)
-        if action in ("B", "Q"): return
-        if (moved := page_step(action, page, count)) is not None:
-            page = moved
-            continue
-        if action == "S":
-            response = screen_faction_story(p, world, faction)
-            if response is not None: result = response
-            page = 0
-            continue
-        if action != "J" or not available: continue
-        info = FACTION_MEMBERSHIPS[faction]
-        if not confirm(f"Join {info['label']} with a one-time {info['grant']:,}cr grant?", p): continue
-        result = join_faction(world, faction)
-        world.commit()
-        page = 0
-
-
 
 def concord_commission_available(world: World) -> bool:
     return (not world.save.pilot.has_concord_commission
@@ -3397,14 +3344,6 @@ def mission_reward_for(save: SaveData, kind: str, base_reward: int) -> int:
 def bounty_reward_for(world: World, base_reward: int) -> int:
     """Evaluate the retained Concord credential and current standing at payout."""
     return mission_reward_for(world.save, "bounty", base_reward)
-
-
-def screen_concord_commission(p: Palette, world: World) -> None:
-    _screen_faction_contact(p, world, FACTION_CONCORD)
-
-
-def screen_blackwake_made(p: Palette, world: World) -> None:
-    _screen_faction_contact(p, world, FACTION_BLACKWAKE)
 
 
 SALVAGE_FEE_BASE = 200
@@ -4280,6 +4219,18 @@ def letter_span(letters: list[str]) -> str:
     return ",".join(run[0] if len(run) == 1 else f"{run[0]}-{run[-1]}" for run in runs)
 
 
+# [S]can, [G]o to, [V]iew are fixed control keys on this same prompt,
+# not per-connection row letters -- never assigned to a connection.
+# Dogfood-caught: `_connect_systems`'s own extra-edge pass can give a
+# single system up to ~7 connections (seen across a few thousand random
+# seeds), and "G" is only the *7th* letter -- a plain `LETTERS[index]`
+# assignment would silently make that 7th connection's own row letter
+# collide with (and be permanently shadowed by) the "[G]o to" hotkey,
+# unlike "S"/"V" which sit late enough in the alphabet to never
+# realistically collide with any observed degree.
+CHART_RESERVED_LETTERS = BACK_KEY + "SGVRQ"
+
+
 MARKET_LETTERS = choice_letters("XQ")
 YARD_LETTERS = choice_letters("RPKSVUQ")
 CREW_LETTERS = choice_letters("Q")
@@ -4573,6 +4524,67 @@ def select_display_style(world: World, style: str) -> bool:
     return changed
 
 
+def screen_blackwake_made(p: Palette, world: World) -> None:
+    _screen_faction_contact(p, world, FACTION_BLACKWAKE)
+
+
+def screen_concord_commission(p: Palette, world: World) -> None:
+    _screen_faction_contact(p, world, FACTION_CONCORD)
+
+
+def _screen_faction_contact(p: Palette, world: World, faction: str) -> None:
+    page, result = 0, None
+    while True:
+        available = faction_join_blocker(world, faction) is None
+        lines = ([result] if result else []) + faction_contact_lines(world, faction)
+        action, page, count = _draw_service_page(p, f"{FACTION_LABEL[faction].split()[0]} {world.save.pilot.credits:,}cr", lines,
+                                                "[J]Join [S]Story [B]Back [<>]Page: " if available else "[S]Story [B]Back [<>]Page: ", page)
+        if action in ("B", "Q"): return
+        if (moved := page_step(action, page, count)) is not None:
+            page = moved
+            continue
+        if action == "S":
+            response = screen_faction_story(p, world, faction)
+            if response is not None: result = response
+            page = 0
+            continue
+        if action != "J" or not available: continue
+        info = FACTION_MEMBERSHIPS[faction]
+        if not confirm(f"Join {info['label']} with a one-time {info['grant']:,}cr grant?", p): continue
+        result = join_faction(world, faction)
+        world.commit()
+        page = 0
+
+
+def screen_faction_story(p: Palette, world: World, faction: str) -> str | None:
+    page, result = 0, None
+    while True:
+        story = world.save.faction_stories.get(faction)
+        stage = story["stage"] if story is not None else None
+        actions = {None: "A/", "accepted": "I/R/", "evidence": "H/A/", "committed": "C/R/", "complete": ""}[stage]
+        if stage == "evidence" and faction_story_target(world, faction, "hardline") is None:
+            actions = "A/"
+        lines = ([result] if result else []) + faction_story_lines(world, faction)
+        key, page, count = _draw_service_page(p, f"Case {world.save.pilot.credits:,}cr", lines, _detail_action_bar(actions, {"A": "Aid" if stage == "evidence" else "Accept", "I": "Investigate", "H": "Hardline", "C": "Complete", "R": "Route"}), page)
+        if key in ("B", "Q"): return result
+        if (moved := page_step(key, page, count)) is not None:
+            page = moved
+            continue
+        if not key or key not in actions.split("/"): continue
+        if key == "R":
+            screen_auto_route(p, world, destination=faction_story_destination(world, faction)); page = 0; continue
+        if key == "C":
+            if blocker := faction_story_completion_blocker(world, faction): result, page = blocker, 0; continue
+            ending = FACTION_STORIES[faction][story["choice"]]
+            if ending["commodity"] is not None:
+                question = f"Hand over {ending['quantity']} {COMMODITIES[ending['commodity']]['label']}, including any promised to contracts, for {ending['reward']:,}cr?"
+                if not confirm(question, p): continue
+        try: result = faction_story_action(world, faction, key)
+        except ValueError as exc: result, page = str(exc), 0; continue
+        world.commit()
+        page = 0
+
+
 def screen_display_options(p: Palette, world: World) -> None:
     page, result = 0, None
     styles = list(DISPLAY_STYLES)
@@ -4750,7 +4762,7 @@ def screen_archive(p: Palette, world: World) -> None:
             continue
         if not action or action not in actions.split("/"): continue
         if action == "R":
-            _screen_auto_route(p, world, destination=archive_destination(world)); page = 0
+            screen_auto_route(p, world, destination=archive_destination(world)); page = 0
             continue
         result = archive_action(world, action)
         world.commit()
@@ -5863,7 +5875,7 @@ def screen_workshop(p: Palette, world: World, key: str) -> str | None:
             page = moved
             continue
         if action == "R":
-            _screen_auto_route(p, world, destination=specialist_stations(world)[key]); page = 0
+            screen_auto_route(p, world, destination=specialist_stations(world)[key]); page = 0
         elif action == "I" and available:
             quote = workshop_quote(world, key)
             if confirm(f"Install {UPGRADES[key]['label']} tier {quote['tier']} for {quote['credits']}cr and {quote['quantity']} {COMMODITIES[quote['commodity']]['label']}? Materials are consumed.", p):
@@ -6183,7 +6195,7 @@ def screen_crew_assignment(p: Palette, world: World, role: str) -> str | None:
             continue
         if not key or key not in actions.split("/"): continue
         if key == "R":
-            _screen_auto_route(p, world, destination=crew_assignment_destination(world, role)); page = 0; continue
+            screen_auto_route(p, world, destination=crew_assignment_destination(world, role)); page = 0; continue
         blocker = crew_assignment_blocker(world, role, completing=key == "C")
         if blocker: result, page = blocker, 0; continue
         if key == "C" and role == "engineer" and not confirm("Hand over 3 Machinery, including any promised to contracts, for 900cr?", p): continue
@@ -6363,7 +6375,7 @@ def _mission_plain(text) -> str:
     return "".join(c if c.isprintable() else " " for c in _ANSI_RE.sub("", str(text)))
 
 
-def _load_tracked_mission_id(value) -> int | None:
+def _validate_tracked_mission_id(value) -> int | None:
     if value is not None and (type(value) is not int or value < 1):
         raise ResumeError("The tracked contract cannot be read.")
     return value
@@ -7085,16 +7097,6 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
             page = moved
 
 
-# [S]can, [G]o to, [V]iew are fixed control keys on this same prompt,
-# not per-connection row letters -- never assigned to a connection.
-# Dogfood-caught: `_connect_systems`'s own extra-edge pass can give a
-# single system up to ~7 connections (seen across a few thousand random
-# seeds), and "G" is only the *7th* letter -- a plain `LETTERS[index]`
-# assignment would silently make that 7th connection's own row letter
-# collide with (and be permanently shadowed by) the "[G]o to" hotkey,
-# unlike "S"/"V" which sit late enough in the alphabet to never
-# realistically collide with any observed degree.
-CHART_RESERVED_LETTERS = BACK_KEY + "SGVRQ"
 CHART_CONNECTION_LETTERS = [c for c in LETTERS if c not in CHART_RESERVED_LETTERS]
 
 
@@ -7185,7 +7187,7 @@ def screen_chart(p: Palette, world: World) -> int | None:
             page = 0
             continue
         if key == "G":
-            _screen_auto_route(p, world); page = 0
+            screen_auto_route(p, world); page = 0
             continue
         if key == "V":
             screen_galaxy_map(p, world); page = 0
@@ -7543,7 +7545,7 @@ def navigation_route_lines(world: World, destination: int | None) -> list[str]:
     return lines
 
 
-def _screen_auto_route(p: Palette, world: World, *, destination: int | None = None) -> None:
+def screen_auto_route(p: Palette, world: World, *, destination: int | None = None) -> None:
     """Screen-first route planner; each deliberate command flies one ordinary hop."""
     page, result, pages = 0, None, None
     if destination is None:
