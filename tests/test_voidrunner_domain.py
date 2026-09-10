@@ -702,7 +702,7 @@ def test_trading_ledger_combat_dump_accounts_only_for_real_cargo(monkeypatch, qu
     else:
         world.save.cargo = {"food": 0}  # Valid older saves can retain zero entries.
     pirate = vr.generate_pirate(world, tier=1)
-    monkeypatch.setattr(vr, "read_key", lambda: "D")
+    monkeypatch.setattr(vr, "read_key", lambda: "D" if quantity else "E")  # Dump is only offered with cargo aboard (#414)
     monkeypatch.setattr(world.event_rng, "random", lambda: 0)
     with contextlib.redirect_stdout(io.StringIO()):
         assert vr.screen_combat(vr.Palette(False), world, pirate) == "escaped"
@@ -8244,7 +8244,7 @@ def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch,
         frames.append(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
-        assert "[I]Info" in frame and "[< >]Page:" in frame
+        assert "[I]Info" in frame and "[<>]Page:" in frame
         if not state["fired"]:
             state["fired"] = True
             return "F"
@@ -8263,7 +8263,16 @@ def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch,
     with contextlib.redirect_stdout(output), pytest.raises(EOFError):
         vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=patrol)
     assert len(snapshots) == 2
-    text = " ".join(" ".join(frames).split())
+    # Join content rows only: a narrow page splits a phrase across frames, and the page
+    # header, the action bar and the echoed keypress would otherwise land between its two
+    # words.
+    def body(frame):
+        rows = vr._ANSI_RE.sub("", frame).splitlines()
+        return [row for row in rows
+                if not re.match(r"Combat [\d,]+cr \d+/\d+\s*$", row)
+                and not re.fullmatch(r"[A-Z0-9<>]", row)
+                and (not re.match(r"\[[A-Z<]", row) or re.match(r"\[[A-Z]\] ", row))]
+    text = " ".join(" ".join(row for frame in frames for row in body(frame)).split())
     for label in ("Last exchange:", "damage.", "Tactical Systems:", "Cargo 3/24 used", "Your hull", "Fuel", "Shields Tier"):
         assert label in text
     if patrol: assert "clear notoriety" in text and "no salvage" in text
@@ -9198,12 +9207,16 @@ def test_review_combat_dump_terms_disclose_actual_escape_probability(tier, cargo
     world = _world_with_seed(42); world.save.cargo = {"food": cargo}
     before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
     pirate = vr.Pirate("Raider", tier, 80, 80)
-    line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False) if row.startswith("[D]"))
+    line = next((row for row in vr.combat_display_lines(world, pirate, [], patrol=False) if row.startswith("[D]")), None)
     after = copy.deepcopy(world)
-    if cargo: vr._dispose_cargo(after, "food", 1)
-    assert f"{vr.evade_chance(after, pirate, dumped_cargo=bool(cargo)):.0%}" in line
+    if not cargo:
+        assert line is None  # an empty hold has nothing to dump, so the action is not offered (#414)
+        assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+        return
+    vr._dispose_cargo(after, "food", 1)
+    assert f"{vr.evade_chance(after, pirate, dumped_cargo=True):.0%}" in line
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
-    assert "one unit" in line if cargo else "hold empty" in line
+    assert "one unit" in line
 
 
 @pytest.mark.parametrize("hull", [20, 60])
@@ -9242,11 +9255,14 @@ def test_tactical_dump_terms_include_harry_escape_penalty(cargo):
     world = _world_with_seed(42); world.save.cargo = {"food": cargo}
     pirate = vr.Pirate("Rust Wraith", 2, 50, 50)
     tactics = {"version": 1, "profile": "Skirmisher", "step": 0, "brace_ready": True}
-    line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics) if row.startswith("[D]"))
+    line = next((row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics) if row.startswith("[D]")), None)
+    if not cargo:
+        assert line is None  # no cargo, no Dump (#414)
+        return
     after = copy.deepcopy(world)
-    if cargo: vr._dispose_cargo(after, "food", 1)
-    expected = vr.combat_evade_chance(after, pirate, dumped_cargo=bool(cargo), tactics=tactics)
-    assert expected < vr.evade_chance(after, pirate, dumped_cargo=bool(cargo))
+    vr._dispose_cargo(after, "food", 1)
+    expected = vr.combat_evade_chance(after, pirate, dumped_cargo=True, tactics=tactics)
+    assert expected < vr.evade_chance(after, pirate, dumped_cargo=True)
     assert f"{expected:.0%}" in line
 
 
@@ -12303,12 +12319,22 @@ def test_dossiers_record_losses_and_older_dossiers_still_load():
     with pytest.raises(vr.ResumeError): vr.SaveData.from_dict(data)
 
 
+@pytest.mark.parametrize("width,labelled", [(20, False), (39, False), (40, True), (80, True)])
+def test_the_combat_bar_keeps_its_labels_until_the_page_cannot_afford_them(monkeypatch, width, labelled):
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    bar = vr.combat_action_bar("F/E/D/P")
+    assert ("[F]Fire" in bar) == labelled
+    assert ("[F/E/D/P]Act" in bar) != labelled
+    assert "[I]Info" in bar and "[<>]Page: " in bar
+
+
 def test_combat_lines_name_the_escort_at_stake_only_during_escort_fights():
     world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 1, 50, 50)
     world.save.pilot.credits = 10_000
     plain = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
     assert "fails the escort contract" not in plain
     world, mission = _escort_world("escaped"); world.save.pilot.credits = 10_000
+    world.save.cargo = {"food": 1}  # Dump is only offered with something to dump (#414)
     lines = vr.combat_display_lines(world, pirate, [], patrol=False)
     evade = next(row for row in lines if row.startswith("[E]")); dump = next(row for row in lines if row.startswith("[D]"))
     bribe = next(row for row in lines if row.startswith("[P]"))
@@ -12762,3 +12788,44 @@ def test_real_escape_at_the_departure_confirmation_keeps_the_pilot_docked(tmp_pa
     before = (tmp_path / "77.json").read_bytes()
     with _door_stopped_at(tmp_path, b"C" + vr.CHART_CONNECTION_LETTERS[0].encode() + b"\x1b", b"Departure cancelled; still docked."):
         assert (tmp_path / "77.json").read_bytes() == before
+
+
+# --- #414: labelled combat action bar; Dump only with cargo --------------------------------
+
+
+def test_combat_action_bar_labels_every_verb_and_matches_the_body(monkeypatch):
+    assert vr.combat_action_bar("F/G/E/D/P") == "[F]Fire [G]Brace [E]Evade [D]Dump [P]Bribe [I]Info [<>]Page: "
+    world, pirate = _world_with_pending_fight(tactics={"version": 2, "profile": "Raider", "step": 0, "brace_ready": True})
+    world.save.pilot.credits = 10_000; world.save.cargo = {"food": 1}
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 60)
+    frames = []; output = io.StringIO()
+    def choose():
+        frames.append(output.getvalue()); output.seek(0); output.truncate(0)
+        raise EOFError
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output), pytest.raises(EOFError):
+        vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=False)
+    frame = vr._ANSI_RE.sub("", frames[0])
+    bar = frame.rstrip().splitlines()[-1]
+    keys = {part[1] for part in bar.split() if part.startswith("[") and len(part) > 2 and part[1] != "<"} - {"I"}
+    body_keys = {line[1] for line in frame.splitlines() if len(line) > 3 and line[0] == "[" and line[2] == "]" and line[3] == " "}
+    assert keys == body_keys == {"F", "G", "E", "D", "P"} and "]Act" not in bar
+
+
+def test_dump_is_absent_and_harmless_with_an_empty_hold(monkeypatch):
+    world, pirate = _world_with_pending_fight()
+    world.save.pilot.credits = 0
+    lines = vr.combat_display_lines(world, pirate, [], patrol=False)
+    assert not any(line.startswith("[D]") for line in lines)
+    before = world.save.to_dict(); rng = world.event_rng.getstate()
+    keys = iter(["D"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    frames = []
+    def choose():
+        try: return next(keys)
+        except StopIteration:
+            assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+            raise EOFError
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(io.StringIO()) as output, pytest.raises(EOFError):
+        vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=False)
+    assert "[D]Dump" not in output.getvalue()

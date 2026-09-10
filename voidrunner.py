@@ -7814,10 +7814,9 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         lines.append((f"[S] Surrender: pay {cost}cr, clear notoriety, Concord +2 and escape. " if pilot.credits >= cost else f"Surrender requires {cost}cr. ") +
                      ("Available." if pilot.credits >= cost else "UNAFFORDABLE; surrender unavailable."))
     else:
-        chance = combat_evade_chance(world, pirate, dumped_cargo=bool(used), tactics=tactics, cargo_units=max(0, used - 1))
-        lines.append(f"[D] Dump & evade: about {chance:.0%} success; " +
-                     ("lose one unit of a random held commodity; failure draws fire."
-                      if used else "hold empty; same chance as Evade.") + escort_at_stake)
+        if used:
+            chance = combat_evade_chance(world, pirate, dumped_cargo=True, tactics=tactics, cargo_units=max(0, used - 1))
+            lines.append(f"[D] Dump & evade: about {chance:.0%} success; lose one unit of a random held commodity; failure draws fire." + escort_at_stake)
         cost = bribe_cost(pirate)
         lines.append((f"[P] Pay bribe: " if pilot.credits >= cost else "Bribe unavailable: ") +
                      f"{cost}cr only if accepted (about {bribe_chance(world, pirate):.0%}); "
@@ -7833,6 +7832,23 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                   f"Notoriety {pilot.notoriety}. " + ("Destroying this patrol: notoriety +3, Concord -10, Blackwake +3; no salvage."
                   if patrol else "Destroying this pirate earns salvage; Concord +2, Blackwake -1.")]
     return lines
+
+
+COMBAT_LABELS = {"F": "Fire", "G": "Brace", "E": "Evade", "D": "Dump", "P": "Bribe", "S": "Surrender",
+                 "V": "Verify", "R": "Report", "W": "Withdraw", "T": "Target"}
+
+
+def combat_action_bar(actions: str) -> str:
+    """Every combat verb labelled like the other detail screens; Info and paging follow.
+    There is no Back in a fight, so this does not reuse `_detail_action_bar`.
+
+    Below 40 columns the labels wrap to four rows and leave a ten-row page one row for
+    the fight itself, so a narrow terminal keeps the compact letter list -- the same
+    width switch the pilot record already uses for its own view keys."""
+    keys = [key for key in actions.split("/") if key]
+    if _OUTPUT_WIDTH < 40:
+        return f"[{'/'.join(keys)}]Act [I]Info [<>]Page: "
+    return "".join(f"[{key}]{COMBAT_LABELS[key]} " for key in keys) + "[I]Info [<>]Page: "
 
 
 def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: bool) -> str:
@@ -7865,7 +7881,12 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
     page, details = 0, False
     while True:
         can_pay = world.save.pilot.credits >= (fine if patrol else bribe_cost(pirate))
-        actions = "F/E/S" if patrol and can_pay else "F/E" if patrol else "F/E/D/P" if can_pay else "F/E/D"
+        cargo_aboard = sum(world.save.cargo.values()) > 0
+        actions = "F/E"
+        if patrol and can_pay: actions += "/S"
+        if not patrol:
+            if cargo_aboard: actions += "/D"  # Dump only means something with cargo aboard (issue #414)
+            if can_pay: actions += "/P"
         if tactics is not None and tactics["brace_ready"]: actions = actions.replace("F/", "F/G/")
         if warrant is not None and not warrant["engaged"]:
             if not warrant["checked"] and world.save.ship.fuel >= 1: actions += "/V"
@@ -7875,7 +7896,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         action, page, count = _draw_service_page(
             p, f"Combat {world.save.pilot.credits:,}cr",
             combat_display_lines(world, pirate, combat["lines"], patrol=patrol, details=details, tactics=tactics, warrant=warrant, hull_before=hull_before),
-            f"[{actions}]Act [I]Info [< >]Page: ", page,
+            combat_action_bar(actions), page,
         )
         if action == ">":
             page = min(page + 1, count - 1)
@@ -7901,7 +7922,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         lines = []
         outcome = None
         engaging = (action in ("F", "E") or (action == "G" and tactics is not None and tactics["brace_ready"])
-                    or (action == "D" and not patrol) or (action == "P" and not patrol and can_pay))
+                    or (action == "D" and not patrol and cargo_aboard) or (action == "P" and not patrol and can_pay))
         if warrant is not None and engaging: warrant["engaged"] = True
         if formation is not None and engaging: formation["engaged"] = True
         if action == "W" and warrant is not None and not warrant["engaged"]:
@@ -7929,7 +7950,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
                     adjust_reputation(world, FACTION_BLACKWAKE, -1)
                     lines.append(f"Salvage recovered: {loot}cr.")
                 outcome = "won"
-        elif action == "E" or (action == "D" and not patrol):
+        elif action == "E" or (action == "D" and not patrol and cargo_aboard):
             dumped = False
             available_cargo = [c for c, quantity in world.save.cargo.items() if quantity > 0]
             if action == "D" and available_cargo:
