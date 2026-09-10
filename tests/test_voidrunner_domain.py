@@ -5478,17 +5478,7 @@ def test_acknowledged_station_action_survives_forced_termination(
     reached = threading.Event()
     output = bytearray()
 
-    def read_until_ack():
-        while len(output) < 128_000:
-            byte = proc.stdout.read(1)
-            if not byte:
-                return
-            output.extend(byte)
-            if ack in output:
-                reached.set()
-                return
-
-    reader = threading.Thread(target=read_until_ack)
+    reader = threading.Thread(target=_drain_until, args=(proc.stdout, output, ack, reached))
     reader.start()
     try:
         proc.stdin.write(commands)
@@ -5788,6 +5778,23 @@ def test_every_travel_checkpoint_resumes_to_the_same_career(
         assert actual == expected, (scenario, saved["pending_travel"], next_key)
 
 
+def _drain_until(stream, output: bytearray, marker: bytes, reached) -> None:
+    """Read a door's stdout in chunks until the marker appears or it closes.
+
+    `read(1)` is the slowest possible drain and the subprocess tests dominate the
+    suite's runtime; `read1` returns whatever has already arrived, so a marker is
+    still seen as soon as the door writes it (issue #422).
+    """
+    while len(output) < 128_000:
+        chunk = stream.read1(4096) if hasattr(stream, "read1") else stream.read(1)
+        if not chunk:
+            return
+        output.extend(chunk)
+        if marker in output:
+            reached.set()
+            return
+
+
 @contextlib.contextmanager
 def _door_stopped_at(tmp_path, commands: bytes, acknowledgement: bytes):
     """Run the shipped script, then force-kill while stdin is still open."""
@@ -5806,17 +5813,7 @@ def _door_stopped_at(tmp_path, commands: bytes, acknowledgement: bytes):
     reached = threading.Event()
     output = bytearray()
 
-    def read_output():
-        while len(output) < 128_000:
-            byte = proc.stdout.read(1)
-            if not byte:
-                return
-            output.extend(byte)
-            if acknowledgement in output:
-                reached.set()
-                return
-
-    reader = threading.Thread(target=read_output)
+    reader = threading.Thread(target=_drain_until, args=(proc.stdout, output, acknowledgement, reached))
     reader.start()
     try:
         proc.stdin.write(commands)
@@ -7183,14 +7180,7 @@ def _live_voidrunner(tmp_path, user_id=77, commands=b"", acknowledgement=b"Stati
     output = bytearray()
     reached = threading.Event()
 
-    def drain():
-        while byte := proc.stdout.read(1):
-            if len(output) < 128_000:
-                output.extend(byte)
-                if acknowledgement in output:
-                    reached.set()
-
-    reader = threading.Thread(target=drain)
+    reader = threading.Thread(target=_drain_until, args=(proc.stdout, output, acknowledgement, reached))
     reader.start()
     try:
         proc.stdin.write(commands)
@@ -13212,7 +13202,8 @@ def test_every_paged_screen_fits_and_offers_back_on_every_page(monkeypatch, widt
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
     screens = ["screen_chart", "screen_missions", "screen_market", "screen_shipyard",
                "screen_status", "screen_pilot_guide", "screen_trading_ledger",
-               "screen_remembered_markets", "screen_economy_opportunities"]
+               "screen_remembered_markets", "screen_economy_opportunities",
+               "screen_specialists"]
     for name in screens:
         world = _world_with_seed(42)
         world.checkpoint()
@@ -13340,3 +13331,174 @@ def test_save_validators_are_named_as_validators():
         assert callable(getattr(vr, name)), name
     assert not [name for name in vars(vr) if name.startswith("_load_") and name.endswith(
         ("_boards", "_total", "_mission_id"))]
+
+
+# --- #423: paths the suite review found untested ----------------------------------------
+
+
+def test_a_live_pilot_session_refuses_maintenance_and_maintenance_refuses_a_launch(tmp_path):
+    """Both directions of the gate, with a real second process holding the lock.
+
+    `maintenance_session` and `_maintenance_gate` had no game-side test at all:
+    `test_backup.py` only checked capture ordering (issue #423).
+    """
+    import json
+    import os
+    import subprocess
+
+    saves = tmp_path / "saves"
+    saves.mkdir(parents=True, exist_ok=True)
+    vr.persist(_world_with_seed(42), saves, 77)  # an existing career, so the door docks
+    with _live_voidrunner(saves) as (proc, env):
+        with pytest.raises(vr.PilotBusy):
+            with vr.maintenance_session(saves):
+                pytest.fail("maintenance must not start while a pilot is aboard")
+        # And the same gate is what the backup component reports on.
+        from netbbs import backup as backup_module
+        with pytest.raises(backup_module.BackupError, match="active or undergoing maintenance"):
+            with backup_module._voidrunner_maintenance(saves):
+                pytest.fail("a capture must not start while a pilot is aboard")
+
+    # The pilot has left: maintenance may start, and a launch during it reports busy.
+    info = saves / "info-99.json"
+    info.write_text(json.dumps({"user_id": 99, "handle": "Second"}), encoding="utf-8")
+    with vr.maintenance_session(saves):
+        launched = subprocess.run(
+            [sys.executable, str(_VOIDRUNNER_PATH)], input=b"", capture_output=True, timeout=20,
+            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(saves), NETBBS_DOOR_INFO=str(info)))
+    assert launched.returncode == 0 and not launched.stderr
+    assert b"already has an active Voidrunner session" in launched.stdout  # the message wraps
+    assert not (saves / "99.json").exists()  # a refused launch creates no career
+
+
+@pytest.mark.parametrize("style,keeps_colour,keeps_unicode", [
+    ("auto", True, True), ("basic", True, True), ("mono", False, True), ("plain", False, False),
+])
+def test_apply_display_style_selects_what_reaches_the_terminal(monkeypatch, style, keeps_colour, keeps_unicode):
+    """The presets were covered only indirectly, through one output test (#423)."""
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
+    vr.apply_display_style(style)
+    assert vr._OUTPUT_STYLE == style
+    written = io.StringIO()
+    with contextlib.redirect_stdout(written):
+        vr.out("\x1b[38;5;220mHull \u2588\u2591\u2588\x1b[0m")
+    shown = written.getvalue()
+    assert ("\x1b[" in shown) == keeps_colour
+    assert any(ord(ch) > 127 for ch in shown) == keeps_unicode
+    assert "Hull" in shown  # the text itself survives every preset
+
+
+def test_apply_display_style_refuses_an_unknown_preset(monkeypatch):
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
+    with pytest.raises(ValueError):
+        vr.apply_display_style("sepia")
+    assert vr._OUTPUT_STYLE == "auto"
+
+
+def test_select_display_style_rejects_unknown_presets_and_reports_a_change():
+    world = _world_with_seed(42)
+    assert vr.select_display_style(world, "mono") is True
+    assert vr.select_display_style(world, "mono") is False  # already applied
+    assert world.save.display_style == "mono"
+    with pytest.raises(ValueError):
+        vr.select_display_style(world, "sepia")
+    assert world.save.display_style == "mono"
+
+
+def test_hull_condition_names_each_band_at_its_own_threshold():
+    """A reversed mapping -- "Intact" for a wreck -- must fail this test."""
+    world = _world_with_seed(42)
+    ship = world.save.ship
+    maximum = vr.hull_hp_max(ship)
+    expected = ["Critical", "Damaged", "Scuffed", "Intact"]
+    ship.hull_hp = maximum
+    assert vr.hull_condition(ship) == "Intact"
+    ship.hull_hp = maximum - 1
+    assert vr.hull_condition(ship) == "Scuffed"
+    ship.hull_hp = maximum // 2
+    assert vr.hull_condition(ship) == "Damaged"
+    ship.hull_hp = maximum // 2 + 1
+    assert vr.hull_condition(ship) == "Scuffed"  # the halfway point is the boundary
+    ship.hull_hp = maximum // 5
+    assert vr.hull_condition(ship) == "Critical"
+    ship.hull_hp = maximum // 5 + 1
+    assert vr.hull_condition(ship) == "Damaged"
+    ship.hull_hp = 1
+    assert vr.hull_condition(ship) == "Critical"
+    bands = []
+    for hull in range(1, maximum + 1):
+        ship.hull_hp = hull
+        name = vr.hull_condition(ship)
+        if not bands or bands[-1] != name:
+            bands.append(name)
+    assert bands == expected  # in that order, worst first, each band entered once
+
+
+def test_mission_expired_reads_the_deadline_and_nothing_else():
+    world = _world_with_seed(42)
+    target = sorted(world.here.connections)[0]
+    open_ended = vr.Mission(1, "delivery", "Deliver", 100, 0, target, commodity="food", quantity=1)
+    assert vr.mission_expired(world, open_ended) is False  # no deadline never expires
+    dated = vr.Mission(2, "delivery", "Deliver", 100, 0, target, commodity="food", quantity=1, deadline_turn=3)
+    world.save.turn = 3
+    assert vr.mission_expired(world, dated) is False  # the deadline day is inclusive
+    world.save.turn = 4
+    assert vr.mission_expired(world, dated) is True
+
+
+def test_bribe_chance_falls_with_the_opponent_and_rises_with_standing():
+    world = _world_with_seed(42)
+    weak, strong = vr.Pirate("Weak", 0, 20, 20), vr.Pirate("Strong", 4, 90, 90)
+    assert 0.0 <= vr.bribe_chance(world, strong) < vr.bribe_chance(world, weak) <= 1.0
+    baseline = vr.bribe_chance(world, weak)
+    world.save.pilot.reputation[vr.FACTION_BLACKWAKE] = 100
+    assert vr.bribe_chance(world, weak) > baseline  # standing has to move it, upward
+    world.save.pilot.reputation[vr.FACTION_BLACKWAKE] = -100
+    assert vr.bribe_chance(world, weak) <= baseline  # and hostility must not help
+    assert vr.bribe_cost(strong) > vr.bribe_cost(weak)
+
+
+def test_faction_and_workshop_blockers_name_what_is_missing():
+    world = _world_with_seed(42)
+    concord = vr.faction_join_blocker(world, vr.FACTION_CONCORD)
+    assert isinstance(concord, str) and str(vr.FACTION_MEMBERSHIPS[vr.FACTION_CONCORD]["threshold"]) in concord
+    world.save.pilot.reputation[vr.FACTION_CONCORD] = 100
+    assert vr.faction_join_blocker(world, vr.FACTION_CONCORD) is None
+    key = next(iter(vr.WORKSHOPS))
+    quote = vr.workshop_quote(world, key)
+    world.save.current_system = next(s.id for s in world.galaxy if s.id != quote["station"])
+    assert vr.workshop_blocker(world, key) == "Visit this workshop before installing a module."
+    world.save.current_system = quote["station"]
+    world.save.pilot.credits = quote["credits"] - 1
+    assert str(quote["credits"]) in vr.workshop_blocker(world, key).replace(",", "")
+    world.save.pilot.credits = quote["credits"]
+    world.save.cargo = {}
+    assert vr.COMMODITIES[quote["commodity"]]["label"] in vr.workshop_blocker(world, key)
+    world.save.cargo = {quote["commodity"]: quote["quantity"]}
+    assert vr.workshop_blocker(world, key) is None  # every requirement met
+    world.save.pending_travel = {"phase": "arrival"}
+    assert vr.workshop_blocker(world, key) == "Finish the current journey first."
+    world.save.pending_travel = None
+    with pytest.raises(ValueError):
+        vr.workshop_quote(world, "no-such-workshop")
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_the_workshop_screen_fits_and_can_be_left(monkeypatch, width, height):
+    """`screen_workshop` takes a workshop key, so it is not in the generic table (#423)."""
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    world = _world_with_seed(42)
+    world.checkpoint()
+    frames, output = [], io.StringIO()
+    def choose():
+        frames.append(vr._ANSI_RE.sub("", output.getvalue())); output.seek(0); output.truncate(0)
+        assert len(frames) < 60
+        return "B"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output):
+        vr.screen_workshop(vr.Palette(False), world, next(iter(vr.WORKSHOPS)))
+    assert frames
+    for frame in frames:
+        assert all(vr._visible_width(row) <= width for row in frame.splitlines())
+        assert len(frame.splitlines()) <= height
+        assert "[B]" in frame or "[Q]" in frame
