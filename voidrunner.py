@@ -805,6 +805,18 @@ def notoriety_fine_cost(notoriety: int) -> int:
     return 100 + notoriety * 40
 
 
+# 250, not 500: with the non-Haven demand pool capped at 48 units, a deliberate
+# smuggler needed about a hundred round trips at 30% customs risk per arrival to
+# reach Cartel membership through trade (issue #407). Milestones still follow
+# lifetime net cash surplus, so buying and same-station recycling grant nothing.
+CONTRABAND_STANDING_STEP = 250
+# The step careers were awarded under before issue #407. A save without a
+# recorded step was counted in this one, and its awarded total is rescaled on
+# load -- the counter is standing already granted, so re-reading it against a
+# smaller step would mint points for gains that were already paid for.
+CONTRABAND_STANDING_LEGACY_STEP = 500
+
+
 # ---------------------------------------------------------------------------
 # Domain model
 # ---------------------------------------------------------------------------
@@ -1200,6 +1212,10 @@ class SaveData:
     tracked_mission_id: int | None = None
     contraband_trade_balance: int = 0
     contraband_trade_milestones: int = 0
+    # The milestone step `contraband_trade_milestones` was awarded under.
+    # Additive field, safe default via from_dict's own rescaling below --
+    # no SCHEMA_VERSION bump needed (issue #407 review).
+    contraband_standing_step: int = CONTRABAND_STANDING_STEP
     best_credits: int = 0
     galaxy_version: int = 1
     display_style: str = "auto"
@@ -1237,6 +1253,7 @@ class SaveData:
             "tracked_mission_id": self.tracked_mission_id,
             "contraband_trade_balance": self.contraband_trade_balance,
             "contraband_trade_milestones": self.contraband_trade_milestones,
+            "contraband_standing_step": self.contraband_standing_step,
             "best_credits": self.best_credits,
             "cargo_basis": self.cargo_basis,
             "trading_ledger": dataclasses.asdict(self.trading_ledger),
@@ -1276,7 +1293,7 @@ class SaveData:
             tracked_mission_id=_load_tracked_mission_id(d.get("tracked_mission_id")),
             best_credits=_load_trade_total(d.get("best_credits", 0), nonnegative=True, label="credit high-water mark"),
             contraband_trade_balance=_load_trade_total(d.get("contraband_trade_balance", 0)),
-            contraband_trade_milestones=_load_trade_total(d.get("contraband_trade_milestones", 0), nonnegative=True),
+            contraband_trade_milestones=_load_contraband_milestones(d),
             cargo_basis={c: [list(lot) for lot in lots] for c, lots in d.get("cargo_basis", {}).items()},
             trading_ledger=TradingLedger(**d.get("trading_ledger", {})),
             market_memory={int(sid): {c: dict(q) for c, q in quotes.items()}
@@ -1332,6 +1349,7 @@ def _validate_save_document(data: dict) -> None:
         integer(data.get(key, 1), key, minimum=1)
     for key in ("best_credits", "contraband_trade_milestones"):
         integer(data.get(key, 0), key)
+    integer(data.get("contraband_standing_step", CONTRABAND_STANDING_LEGACY_STEP), "contraband milestone step", minimum=1)
     integer(data.get("contraband_trade_balance", 0), "trade balance", minimum=-(2**63))
     pilot, ship = data["pilot"], data["ship"]
     record(pilot, Pilot, "pilot")
@@ -2682,12 +2700,13 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
             done = True
         if done:
             world.save.pilot.credits += m.reward
+            adjust_reputation(world, FACTION_CONCORD, CONCORD_STANDING_PER_CONTRACT)
             if m.opening_assignment:
                 world.save.flags["opening_assignment_completed"] = True
             if world.save.pilot.missions_completed == 0:
                 world.save.pilot.highlight(f"First mission complete: {m.description}.")
             world.save.pilot.missions_completed += 1
-            msg = f"Mission complete: {m.description} (+{m.reward}cr)"
+            msg = f"Mission complete: {m.description} (+{m.reward}cr, +{CONCORD_STANDING_PER_CONTRACT} Concord standing)"
             world.save.pilot.note(msg)
             msgs.append(msg)
         else:
@@ -2918,13 +2937,30 @@ def bribe_chance(world: World, pirate: Pirate) -> float:
     return max(0.05, min(0.85, chance))
 
 
-CONTRABAND_STANDING_STEP = 500
+CONCORD_STANDING_PER_CONTRACT = 1  # Legal contract work earns Concord standing (issue #407).
+# A bounty pays its Concord standing through the kill itself, not the contract.
+CONCORD_STANDING_CONTRACTS = ("delivery", "scan", "escort")
 
 
 def _load_trade_total(value, *, nonnegative=False, label="contraband trading record") -> int:
     if type(value) is not int or (nonnegative and value < 0):
         raise ResumeError(f"The saved {label} cannot be read.")
     return value
+
+
+def _load_contraband_milestones(d: dict) -> int:
+    """Re-express a saved award count in the current milestone step.
+
+    The count is standing already granted, not progress, so a career awarded
+    two points per 500cr of gain has been paid for 1,000cr of gain and must
+    load as four points once the step is 250 -- otherwise the next contraband
+    purchase mints retroactive standing, and a large balance mints enough to
+    unlock membership outright (issue #407 review)."""
+    awarded = _load_trade_total(d.get("contraband_trade_milestones", 0), nonnegative=True)
+    step = d.get("contraband_standing_step", CONTRABAND_STANDING_LEGACY_STEP)
+    if type(step) is not int or step <= 0:
+        raise ResumeError("The saved contraband trading record cannot be read.")
+    return awarded * step // CONTRABAND_STANDING_STEP
 
 
 def record_contraband_trade(world: World, commodity: str, cash_delta: int) -> None:
@@ -3175,11 +3211,22 @@ def join_faction(world: World, faction: str) -> str:
     return f"{greeting} +{info['grant']:,}cr. {faction_membership_status(world, faction)}."
 
 
+def faction_standing_route(faction: str) -> str:
+    """How ordinary play moves this faction's standing, named on its own screen
+    rather than left for the player to infer from the numbers (issue #407)."""
+    if faction == FACTION_CONCORD:
+        return (f"Earning standing: +{CONCORD_STANDING_PER_CONTRACT} for every delivery, survey or escort contract "
+                "completed, and +2 for destroying a raider.")
+    return (f"Earning standing: +1 for every new {CONTRABAND_STANDING_STEP}cr of net contraband trading gain; "
+            "purchases count against the gain.")
+
+
 def faction_contact_lines(world: World, faction: str) -> list[str]:
     info = FACTION_MEMBERSHIPS[faction]
     lines = [f"{info['contact']}: {info['label']}.",
              f"Standing: {world.save.pilot.reputation.get(faction, 0)}. {faction_membership_status(world, faction)}.",
              f"Perk: {info['perk']}.",
+             faction_standing_route(faction),
              f"Joining requires {info['threshold']} standing and grants {info['grant']:,}cr once. No entry fee.",
              f"Perk suspended at {FACTION_PERK_SUSPEND_AT} standing or below; automatically restored above it. Membership stays, with no second grant.",
              "Dual membership is allowed. Each faction judges its own standing independently. Membership does not clear notoriety or fines.",
@@ -4886,7 +4933,7 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
                      f"Stock {depth['stock']}; station buys {depth['demand']}; in hold {world.save.cargo.get(commodity, 0)}. "
                      + " ".join(tags or ["Normal"]))
     if any(not COMMODITIES[c]["legal"] for c in goods):
-        lines.append("Blackwake: +1 standing per new 500cr net contraband trading gain; purchases count against gains.")
+        lines.append(f"Blackwake: +1 standing per new {CONTRABAND_STANDING_STEP}cr net contraband trading gain; purchases count against gains.")
     return lines
 
 
@@ -6099,6 +6146,8 @@ def mission_details(world: World, mission: Mission) -> list[str]:
         elif len(path) > remaining and mission.kind != "scan":
             lines.append("WARNING: the shortest route misses the deadline.")
     lines.append(f"Gross payout: {reward:,} cr. Credits available: {world.save.pilot.credits:,} cr.")
+    if mission.kind in CONCORD_STANDING_CONTRACTS:
+        lines.append(f"Completion also pays +{CONCORD_STANDING_PER_CONTRACT} Concord standing.")
     if mission.kind in ("bounty", "escort") and world.save.pilot.has_concord_commission:
         lines.append("The quoted commission bonus uses current standing; actual payout includes 25% only if Concord standing is above -50 when paid.")
     procurement = 0
@@ -7410,12 +7459,13 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
                 world.save.active_missions.remove(mission)
                 reward = bounty_reward_for(world, mission.reward)
                 world.save.pilot.credits += reward
+                adjust_reputation(world, FACTION_CONCORD, CONCORD_STANDING_PER_CONTRACT)
                 if world.save.pilot.missions_completed == 0:
                     world.save.pilot.highlight(f"First mission complete: {mission.description}.")
                 world.save.pilot.missions_completed += 1
-                world.save.pilot.note(f"Escort complete: {mission.description} (+{reward}cr)")
+                world.save.pilot.note(f"Escort complete: {mission.description} (+{reward}cr, +{CONCORD_STANDING_PER_CONTRACT} Concord standing)")
                 world.save.pilot.highlight(f"Escorted a convoy safely to {dest.name}.")
-                lines.append(f"Convoy delivered safely! +{reward}cr")
+                lines.append(f"Convoy delivered safely! +{reward}cr and +{CONCORD_STANDING_PER_CONTRACT} Concord standing")
             else:
                 lines.append("The convoy presses on.")
         else:

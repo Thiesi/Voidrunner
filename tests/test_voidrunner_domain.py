@@ -6883,15 +6883,16 @@ def test_trade_milestones_survive_splitting_losses_and_restart(tmp_path):
     for _ in range(1700):
         vr.record_contraband_trade(split, "weapons", 1)
     assert whole.save.pilot.reputation == split.save.pilot.reputation
-    assert split.save.pilot.reputation[vr.FACTION_BLACKWAKE] == 3
+    earned = 1500 // vr.CONTRABAND_STANDING_STEP
+    assert split.save.pilot.reputation[vr.FACTION_BLACKWAKE] == earned
     vr.persist(split, tmp_path, 77)
     save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
     split = vr.World(save)
     vr.record_contraband_trade(split, "weapons", -1000)
     vr.record_contraband_trade(split, "weapons", 1000)
-    assert split.save.pilot.reputation[vr.FACTION_BLACKWAKE] == 3
+    assert split.save.pilot.reputation[vr.FACTION_BLACKWAKE] == earned
     vr.record_contraband_trade(split, "weapons", 500)
-    assert split.save.pilot.reputation[vr.FACTION_BLACKWAKE] == 4
+    assert split.save.pilot.reputation[vr.FACTION_BLACKWAKE] == 2000 // vr.CONTRABAND_STANDING_STEP
 
 
 def test_legacy_trade_ledger_defaults_preserve_existing_standing():
@@ -12439,3 +12440,78 @@ def test_starter_shuttle_with_brace_survives_tier_three_more_often_than_not():
             vr.tactical_round(world, pirate, tactics, action)
         wins += ship.hull_hp > 0
     assert 70 <= wins <= 160, wins  # about a coin flip with Brace: survivable, not a walkover
+    assert 100 <= wins <= 195, wins  # survivable with Brace, not a walkover
+
+
+# --- #407: faction standing is reachable without fighting -------------------------------
+
+
+def test_completed_legal_contracts_earn_concord_standing():
+    world = _world_with_seed(42)
+    dest = sorted(world.here.connections)[0]
+    world.save.active_missions = [vr.Mission(1, "delivery", "Deliver", 300, 0, dest, commodity="food", quantity=2)]
+    world.save.cargo = {"food": 2}; world.save.current_system = dest
+    assert vr.check_mission_completions(world) and world.save.pilot.reputation["concord"] == vr.CONCORD_STANDING_PER_CONTRACT
+    world.save.active_missions = [vr.Mission(2, "scan", "Survey", 250, 0, 5)]
+    vr.check_mission_completions(world, just_discovered=5)
+    assert world.save.pilot.reputation["concord"] == 2 * vr.CONCORD_STANDING_PER_CONTRACT
+
+
+def test_escort_completion_earns_concord_standing_and_a_lost_escort_does_not(monkeypatch):
+    for outcome, delta in (("won", vr.CONCORD_STANDING_PER_CONTRACT), ("escaped", 0)):
+        world, mission = _escort_world(outcome)
+        monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: outcome)
+        with contextlib.redirect_stdout(io.StringIO()):
+            vr._resolve_escort_missions(vr.Palette(False), world, mission.target_system)
+        assert world.save.pilot.reputation.get("concord", 0) == delta
+
+
+def test_a_legacy_milestone_count_is_rescaled_rather_than_re_awarded():
+    """The counter is standing already granted, so halving the step must not
+    hand a loaded career free points for gains it was already paid for."""
+    world = _world_with_seed(42)
+    world.save.contraband_trade_balance = 1000
+    world.save.contraband_trade_milestones = 2  # two points, awarded per 500cr
+    data = world.save.to_dict()
+    data.pop("contraband_standing_step")  # a career saved before the step changed
+    restored = vr.SaveData.from_dict(data)
+    assert restored.contraband_trade_milestones == 4  # 1,000cr of gain, now four 250cr steps
+    reloaded = vr.World(restored)
+    reloaded.save.pilot.reputation["blackwake"] = 0
+    vr.record_contraband_trade(reloaded, "weapons", 249)
+    assert reloaded.save.pilot.reputation["blackwake"] == 0  # settled gains mint nothing
+    vr.record_contraband_trade(reloaded, "weapons", 1)
+    assert reloaded.save.pilot.reputation["blackwake"] == 1  # the next genuine step still pays
+    assert vr.SaveData.from_dict(reloaded.save.to_dict()).contraband_trade_milestones == 5  # and reloads unchanged
+    data["contraband_standing_step"] = 0
+    with pytest.raises(vr.ResumeError): vr.SaveData.from_dict(data)
+
+
+def test_the_concord_standing_a_contract_pays_is_visible_before_and_after():
+    """A new progression route the player cannot see is not a route (#407)."""
+    world = _world_with_seed(42)
+    dest = sorted(world.here.connections)[0]
+    mission = vr.Mission(1, "delivery", "Deliver", 300, 0, dest, commodity="food", quantity=2)
+    world.save.active_missions = [mission]
+    terms = " ".join(vr.mission_details(world, mission))
+    assert f"+{vr.CONCORD_STANDING_PER_CONTRACT} Concord standing" in terms
+    bounty = vr.Mission(2, "bounty", "Intercept", 500, 0, dest, pirate_tier=1)
+    assert "Completion also pays" not in " ".join(vr.mission_details(world, bounty))  # the kill pays that, not the contract
+    contact = " ".join(vr.faction_contact_lines(world, vr.FACTION_CONCORD))
+    assert f"+{vr.CONCORD_STANDING_PER_CONTRACT} for every delivery, survey or escort contract" in contact
+    assert f"{vr.CONTRABAND_STANDING_STEP}cr of net contraband trading gain" in " ".join(
+        vr.faction_contact_lines(world, vr.FACTION_BLACKWAKE))
+    world.save.cargo = {"food": 2}; world.save.current_system = dest
+    assert "Concord standing" in " ".join(vr.check_mission_completions(world))
+
+
+def test_contraband_milestones_follow_the_shorter_step_without_recycling():
+    world = _world_with_seed(42)
+    vr.record_contraband_trade(world, "weapons", 249)
+    assert world.save.pilot.reputation.get("blackwake", 0) == 0
+    vr.record_contraband_trade(world, "weapons", 1)
+    assert world.save.pilot.reputation["blackwake"] == 1
+    vr.record_contraband_trade(world, "weapons", -250); vr.record_contraband_trade(world, "weapons", 250)
+    assert world.save.pilot.reputation["blackwake"] == 1  # a recovered loss mints nothing
+    vr.record_contraband_trade(world, "weapons", 250)
+    assert world.save.pilot.reputation["blackwake"] == 2
