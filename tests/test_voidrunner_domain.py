@@ -12541,3 +12541,25 @@ def test_shuttle_boards_are_unchanged_and_carrier_boards_post_bulk_deliveries():
     assert [m.target_system for m in before if m] == [m.target_system for m in after if m]  # same draw sequence
     for small, big in zip(before, after):
         if small and big and big.quantity > small.quantity: assert big.reward > small.reward
+
+
+# --- #409: the engineer pays for themselves at the yard --------------------------------
+
+
+@pytest.mark.parametrize("paid_jumps,expected", [(0, 3), (5, 3), (15, 2), (30, 2)])
+def test_engineer_discounts_repairs_by_service_level(paid_jumps, expected):
+    world = _world_with_named_crew("engineer", paid_jumps)
+    assert vr.repair_cost_per_hp(world.save.ship) == expected
+    world.save.ship.has_engineer = False
+    assert vr.repair_cost_per_hp(world.save.ship) == 4
+
+
+def test_repair_screen_charges_the_discounted_rate_and_yard_shows_it(monkeypatch):
+    world = _world_with_named_crew("engineer", 15)
+    world.save.ship.hull_hp = vr.hull_hp_max(world.save.ship) - 10; world.save.pilot.credits = 1_000
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: "for 20cr" in prompt)
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert "for 20cr" in vr._repair(vr.Palette(False), world)
+    assert world.save.pilot.credits == 980 and world.save.ship.hull_hp == vr.hull_hp_max(world.save.ship)
+    assert "at 2cr/HP" in " ".join(vr.shipyard_lines(world)) and "discounts repairs" in " ".join(vr.shipyard_lines(world))
+    assert "repairs 2cr/HP instead of 4" in vr.crew_effect("engineer", 2)

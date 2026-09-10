@@ -1940,13 +1940,24 @@ def engineer_discount(ship: Ship) -> int:
     return 25 + 5 * crew_level(ship, "engineer") if ship.has_engineer else 0
 
 
+REPAIR_COST_PER_HP = 4
+
+
+def repair_cost_per_hp(ship: Ship) -> int:
+    """Yard repair price per hull point; an engineer aboard cuts it by their service level.
+
+    Fuel savings alone were worth well under a credit per jump because most
+    adjacent jumps cost one unit (issue #409); repairs are where the role pays."""
+    return REPAIR_COST_PER_HP - (1 + crew_level(ship, "engineer") // 2 if ship.has_engineer else 0)
+
+
 def navigator_bonus(ship: Ship) -> int:
     return 1 + crew_level(ship, "navigator") if ship.has_navigator else 0
 
 
 def crew_effect(role: str, level: int) -> str:
     if role == "gunner": return f"+{3 + level} combat damage per hit"
-    if role == "engineer": return f"-{25 + 5 * level}% base fuel, saving rounded up (min 1 burned)"
+    if role == "engineer": return f"-{25 + 5 * level}% base fuel (min 1 burned); repairs {REPAIR_COST_PER_HP - (1 + level // 2)}cr/HP instead of {REPAIR_COST_PER_HP}"
     return f"+{1 + level} survey hops"
 
 
@@ -5691,7 +5702,8 @@ def screen_specialists(p: Palette, world: World) -> str | None:
 def shipyard_lines(world: World) -> list[str]:
     ship = world.save.ship
     lines = [world.here.station_name,
-             f"Fuel {ship.fuel}/{fuel_capacity(ship)} at 6cr/unit; hull {ship.hull_hp}/{hull_hp_max(ship)} at 4cr/HP."]
+             f"Fuel {ship.fuel}/{fuel_capacity(ship)} at 6cr/unit; hull {ship.hull_hp}/{hull_hp_max(ship)} at {repair_cost_per_hp(ship)}cr/HP"
+             + (f" ({crew_name(world, 'engineer')} discounts repairs)." if ship.has_engineer else ".")]
     for i, (key, upgrade) in enumerate(UPGRADES.items()):
         tier = getattr(ship, f"{key}_tier")
         status = "MAXED" if tier >= upgrade["max_tier"] else f"Tier {tier} -> {tier + 1}; {upgrade['cost'](tier):,}cr"
@@ -6019,14 +6031,15 @@ def _repair(p: Palette, world: World) -> str | None:
     if missing <= 0:
         out_line(f"{p.muted}Hull is already at full integrity.{RESET}")
         return "Hull is already at full integrity."
-    cost = missing * 4
+    unit = repair_cost_per_hp(ship)
+    cost = missing * unit
     if world.save.pilot.credits < cost:
-        affordable_hp = world.save.pilot.credits // 4
+        affordable_hp = world.save.pilot.credits // unit
         if affordable_hp <= 0:
             out_line(f"{p.wrong}Can't afford any repairs right now.{RESET}")
             return "Cannot afford repairs right now."
         missing = affordable_hp
-        cost = missing * 4
+        cost = missing * unit
     if not confirm(f"Repair {missing} hull for {cost}cr?", p):
         return
     world.save.pilot.credits -= cost
