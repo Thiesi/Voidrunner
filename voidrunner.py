@@ -3234,8 +3234,9 @@ def screen_faction_story(p: Palette, world: World, faction: str) -> str | None:
         lines = ([result] if result else []) + faction_story_lines(world, faction)
         key, page, count = _draw_service_page(p, f"Case {world.save.pilot.credits:,}cr", lines, _detail_action_bar(actions, {"A": "Aid" if stage == "evidence" else "Accept", "I": "Investigate", "H": "Hardline", "C": "Complete", "R": "Route"}), page)
         if key in ("B", "Q"): return result
-        if key == ">": page = min(page + 1, count - 1); continue
-        if key == "<": page = max(0, page - 1); continue
+        if (moved := page_step(key, page, count)) is not None:
+            page = moved
+            continue
         if not key or key not in actions.split("/"): continue
         if key == "R":
             _screen_auto_route(p, world, destination=faction_story_destination(world, faction)); page = 0; continue
@@ -3320,8 +3321,9 @@ def _screen_faction_contact(p: Palette, world: World, faction: str) -> None:
         action, page, count = _draw_service_page(p, f"{FACTION_LABEL[faction].split()[0]} {world.save.pilot.credits:,}cr", lines,
                                                 "[J]Join [S]Story [B]Back [<>]Page: " if available else "[S]Story [B]Back [<>]Page: ", page)
         if action in ("B", "Q"): return
-        if action == ">": page = min(page + 1, count - 1); continue
-        if action == "<": page = max(0, page - 1); continue
+        if (moved := page_step(action, page, count)) is not None:
+            page = moved
+            continue
         if action == "S":
             response = screen_faction_story(p, world, faction)
             if response is not None: result = response
@@ -4500,8 +4502,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
             lines[0:0] = ["Result: " + message for message in completed]
         footer = "[<]Prev [>]Next [X]Compact [Q]Exit: " if expanded else "[<]Prev [>]Next [X]Expand [Q]Exit: "
         choice, page, count = _draw_service_page(p, f"Command Deck: {world.save.pilot.credits:,}cr", lines, footer, page)
-        if choice == ">": page = min(page + 1, count - 1)
-        elif choice == "<": page = max(0, page - 1)
+        if (moved := page_step(choice, page, count)) is not None: page = moved
         elif choice == "X": expanded, page = not expanded, 0
         elif choice in "MYBCSHGTQLDPWONV" and len(choice) == 1:
             return choice
@@ -4529,8 +4530,7 @@ def screen_display_options(p: Palette, world: World) -> None:
         if result: lines.insert(0, result)
         key, page, count = _draw_service_page(p, "Display Options", lines, "[1-4]Set [<]Prev [>]Next [B]Back: ", page)
         if key in ("B", "Q"): return
-        if key == ">": page = min(page + 1, count - 1)
-        elif key == "<": page = max(0, page - 1)
+        if (moved := page_step(key, page, count)) is not None: page = moved
         elif len(key) == 1 and "1" <= key <= "4":
             style = styles[int(key) - 1]
             changed = select_display_style(world, style)
@@ -4688,8 +4688,9 @@ def screen_archive(p: Palette, world: World) -> None:
         action, page, count = _draw_service_page(p, f"Archive {world.save.pilot.credits:,}cr", result + archive_lines(world),
                                                 _detail_action_bar(actions, {"A": "Accept", "I": "Investigate", "P": "Publish", "S": "Sell", "R": "Route"}), page)
         if action in ("B", "Q"): return
-        if action == ">": page = min(page + 1, count - 1); continue
-        if action == "<": page = max(0, page - 1); continue
+        if (moved := page_step(action, page, count)) is not None:
+            page = moved
+            continue
         if not action or action not in actions.split("/"): continue
         if action == "R":
             _screen_auto_route(p, world, destination=archive_destination(world)); page = 0
@@ -4935,20 +4936,15 @@ def _portrait_pages_for(p: Palette, large: list[str], compact: list[str], detail
                         footer: str, *, color: str | None = None, leading: list[str] | None = None) -> list[list[str]]:
     width = max(1,_OUTPUT_WIDTH-1)
     art = list(large if _OUTPUT_WIDTH >= 40 and _OUTPUT_HEIGHT >= 16 else compact)
-    all_lines = (leading or []) + art + details
-    capacity = max(len(page) for page in _trade_pages(all_lines,title,footer))
-    if len(art)>capacity or any(_visible_width(row)>width for row in art): art=list(compact)
-    if len(art)>capacity or any(_visible_width(row)>width for row in art): art=[]
-    groups = [(_wrap_output(_mission_plain(line),width).split("\r\n"),False) for line in leading or []]
-    if art: groups.append((art,True))
-    groups += [(_wrap_output(_mission_plain(line),width).split("\r\n"),False) for line in details]
-    pages=[[]]
-    for rows,illustrated in groups:
-        if pages[-1] and len(pages[-1])+len(rows)>capacity:pages.append([])
-        for row in rows:
-            if len(pages[-1])==capacity:pages.append([])
-            pages[-1].append(f"{color or p.accent}{row}{RESET}" if illustrated else row)
-    return pages
+    capacity = page_capacity((leading or []) + art + details, title, footer)
+    if len(art) > capacity or any(_visible_width(row) > width for row in art): art = list(compact)
+    if len(art) > capacity or any(_visible_width(row) > width for row in art): art = []
+    groups = [wrapped_group(line) for line in leading or []]
+    illustrated = len(groups) if art else None
+    if art: groups.append(art)
+    groups += [wrapped_group(line) for line in details]
+    return paginate(groups, capacity,
+                    render=lambda row, index: f"{color or p.accent}{row}{RESET}" if index == illustrated else row)
 
 
 def viewport_content(world: World, view: str) -> tuple[list[str],list[str],list[str],str]:
@@ -4983,8 +4979,7 @@ def screen_viewport(p: Palette, world: World, view: str = "1") -> None:
         key,page,count=_draw_service_page(p,title,[],footer,page,pages=pages)
         if key in ("B","Q"):return
         if key in ("1","2","3"):view,page=key,0
-        elif key==">":page=min(page+1,count-1)
-        elif key=="<":page=max(page-1,0)
+        elif (moved := page_step(key, page, count)) is not None: page = moved
 
 
 def screen_landmark(p: Palette, world: World) -> None:
@@ -4997,8 +4992,9 @@ def screen_landmark(p: Palette, world: World) -> None:
         pages=portrait_pages(p,large,compact,[world.landmark["flavor"]],world.landmark["label"],footer,leading=result + [status])
         action,page,count=_draw_service_page(p,world.landmark["label"],[],footer,page,pages=pages)
         if action in ("B", "Q"): return
-        if action == ">": page = min(page + 1, count - 1); continue
-        if action == "<": page = max(0, page - 1); continue
+        if (moved := page_step(action, page, count)) is not None:
+            page = moved
+            continue
         if action == "I" and available:
             result = investigate_landmark(world)
             world.commit()
@@ -5057,8 +5053,9 @@ def screen_market(p: Palette, world: World) -> None:
         footer = f"[<]Prev [>]Next [{letter_span(MARKET_LETTERS[:len(goods)])}]Trade [X]Futures [B]Back: "
         key, page, count = _draw_service_page(p, f"Market: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return
-        if key == ">": page = min(page + 1, count - 1); continue
-        if key == "<": page = max(0, page - 1); continue
+        if (moved := page_step(key, page, count)) is not None:
+            page = moved
+            continue
         if key == "X":
             futures_goods = [c for c in goods if COMMODITIES[c]["legal"] or world.here.economy == "Haven"]
             response = screen_futures(p, world, futures_goods)
@@ -5111,8 +5108,7 @@ def _screen_futures_order(p: Palette, world: World, contract: FuturesContract) -
         footer = "[<>]Page " + ("[X]Cancel " if contract.origin_system is not None else "") + "[B]Back: "
         key, page, count = _draw_service_page(p, f"Order #{contract.id}: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return None
-        if key == ">": page = min(page + 1, count - 1)
-        elif key == "<": page = max(0, page - 1)
+        if (moved := page_step(key, page, count)) is not None: page = moved
         elif key == "X" and contract.origin_system is not None:
             if confirm(f"Cancel order #{contract.id} for {contract.principal}cr? Fee is not refunded.", p):
                 try: message = cancel_futures_contract(world, contract.id)
@@ -5140,8 +5136,7 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
         footer = "[<>]Page [U]Units [T]Term [S]Sign [B]Back: "
         key, page, count = _draw_service_page(p, f"Order {COMMODITIES[commodity]['label']}: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return None
-        if key == ">": page = min(page + 1, count - 1)
-        elif key == "<": page = max(0, page - 1)
+        if (moved := page_step(key, page, count)) is not None: page = moved
         elif key == "U":
             out_prompt(f"Quantity (1-{cargo_capacity(world.save.ship)}; Enter or Esc keeps {quantity}): ")
             raw = read_line_raw(max_len=5)
@@ -5201,12 +5196,58 @@ def trading_ledger_lines(world: World) -> list[str]:
     return lines
 
 
-def _trade_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
+def page_capacity(lines: list[str], title: str, footer: str) -> int:
+    """Content rows a page can hold, measured from the wrapped title and footer.
+
+    The counter in the title is sized for the worst case -- every content row on
+    its own page -- so the capacity cannot change once paging has begun.
+    """
     width = max(1, _OUTPUT_WIDTH - 1)
     max_pages = max(1, sum(len(_wrap_output(_mission_plain(line), width).split("\r\n")) for line in lines))
     overhead = (len(_wrap_output(footer, width).split("\r\n"))
                 + len(_wrap_output(title + f" {max_pages}/{max_pages}", width).split("\r\n")) + 3)
-    return _mission_text_pages(lines, overhead=overhead)
+    return max(1, _OUTPUT_HEIGHT - overhead)
+
+
+def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
+    """Fill pages with pre-wrapped groups, keeping each group whole where it fits.
+
+    One implementation for every paged screen (issue #418). A group is a logical
+    unit -- a wrapped line, an authored silhouette, a keyed list entry -- and is
+    only split when it is larger than a whole page, in which case it continues on
+    the next one rather than being dropped. `render(row, index)` decorates a row
+    with its group's index, which is how a portrait screen colours its art.
+
+    With `keys`, each group carries an optional `(letter, value)`: a page breaks
+    rather than repeat a letter, every page returns its own letter map alongside
+    its rows, and a selection letter therefore always means what the page it is
+    printed on says it means.
+    """
+    pages: list[tuple[list[str], dict]] = [([], {})]
+    for index, rows in enumerate(groups):
+        key, value = keys[index] if keys is not None else (None, None)
+        current, choices = pages[-1]
+        if current and (len(current) + len(rows) > capacity or (key is not None and key in choices)):
+            pages.append(([], {}))
+        for row in rows:
+            current, choices = pages[-1]
+            if len(current) == capacity:
+                pages.append(([], {}))
+                current, choices = pages[-1]
+            if key is not None:
+                choices[key] = value
+            current.append(render(row, index) if render is not None else row)
+    return pages if keys is not None else [rows for rows, _ in pages]
+
+
+def wrapped_group(line: str) -> list[str]:
+    """One display line as the rows it occupies."""
+    return _wrap_output(_mission_plain(line), max(1, _OUTPUT_WIDTH - 1)).split("\r\n")
+
+
+def _trade_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
+    """Row-at-a-time paging: groups may be split anywhere they run over."""
+    return _mission_text_pages(lines, overhead=max(0, _OUTPUT_HEIGHT - page_capacity(lines, title, footer)))
 
 
 def remembered_market_lines(world: World) -> list[str]:
@@ -5285,6 +5326,8 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choi
                        for value, label in options]
     maximum_pages = max(1, sum(len(rows) for _, _, rows in wrapped_options) + len(options) + len(notice_rows))
     def budget(heading, controls):
+        # Same measurement as every other screen; the worst-case counter is this
+        # picker's own, because one oversized label can occupy a page by itself.
         width = max(1, _OUTPUT_WIDTH - 1)
         overhead = len(_wrap_output(f"{heading} {maximum_pages}/{maximum_pages}", width).split("\r\n"))
         overhead += len(_wrap_output(controls, width).split("\r\n")) + 3
@@ -5338,8 +5381,8 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choi
             controls = controls.replace(f"[1-{max_choices}]", span, 1)
         out_prompt(controls); key = read_command_at_prompt(); out_line(key)
         if key in ("B", "Q"): return None
-        if key == "N": page = min(page + 1, len(pages) - 1)
-        elif key == "P": page = max(0, page - 1)
+        if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+            page = moved
         elif len(key) == 1 and "1" <= key <= "9" and int(key) <= len(current["choices"]):
             unseen = [part for part in current["required"] if part not in seen]
             if unseen:
@@ -5374,10 +5417,8 @@ def edit_door_draft(*, title: str, initial: dict, fields: list[tuple],
         out_line(key)
         if key == "B":
             return None
-        if key == "N":
-            page = min(page + 1, len(pages) - 1)
-        elif key == "P":
-            page = max(0, page - 1)
+        if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+            page = moved
         elif key == "S":
             try:
                 return apply(draft)
@@ -5452,10 +5493,8 @@ def screen_trade_route(p: Palette, world: World, *, initial: dict | None = None)
         out_line(key)
         if key == "B":
             return
-        if key == "N":
-            page = min(page + 1, len(pages) - 1)
-        elif key == "P":
-            page = max(0, page - 1)
+        if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+            page = moved
         elif key == "E":
             edited = _edit_trade_route(world, parameters)
             if edited is not None:
@@ -5476,10 +5515,8 @@ def screen_remembered_markets(p: Palette, world: World) -> None:
         out_line(key)
         if key in ("B", "Q"):
             return
-        if key == "N":
-            page = min(page + 1, len(pages) - 1)
-        elif key == "P":
-            page = max(0, page - 1)
+        if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+            page = moved
 
 
 def trade_opportunities(world: World) -> list[dict]:
@@ -5573,10 +5610,8 @@ def screen_economy_opportunities(p: Palette, world: World) -> None:
         out_line(key)
         if key == "B":
             return
-        if key == "N":
-            page = min(page + 1, len(pages) - 1)
-        elif key == "P":
-            page = max(0, page - 1)
+        if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+            page = moved
         elif len(key) == 1 and "1" <= key <= "6" and int(key) <= len(candidates):
             quote = candidates[int(key) - 1]
             initial = {key: quote[key] for key in ("destination", "commodity", "quantity", "use_hold")}
@@ -5597,10 +5632,8 @@ def screen_trading_ledger(p: Palette, world: World) -> None:
         out_line(action)
         if action in ("B", "Q"):
             return
-        if action == "N":
-            page = min(page + 1, len(pages) - 1)
-        elif action == "P":
-            page = max(0, page - 1)
+        if (moved := page_step(action, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+            page = moved
         elif action == "M":
             screen_remembered_markets(p, world)
         elif action == "R":
@@ -5635,10 +5668,8 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
             break
         if action in ("B", "Q"):
             return
-        if action == ">":
-            page = min(page + 1, len(pages) - 1)
-        elif action == "<":
-            page = max(0, page - 1)
+        if (moved := page_step(action, page, len(pages))) is not None:
+            page = moved
     if action == "P":
         if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
             result = "Station authorities prohibit the open purchase of contraband."
@@ -5771,8 +5802,9 @@ def screen_workshop(p: Palette, world: World, key: str) -> str | None:
         lines = (["Result: " + result] if result else []) + workshop_lines(world, key)
         action, page, count = _draw_service_page(p, f"Workshop {world.save.pilot.credits:,}cr", lines, footer, page)
         if action in ("B", "Q"): return result
-        if action == ">": page = min(page + 1, count - 1); continue
-        if action == "<": page = max(0, page - 1); continue
+        if (moved := page_step(action, page, count)) is not None:
+            page = moved
+            continue
         if action == "R":
             _screen_auto_route(p, world, destination=specialist_stations(world)[key]); page = 0
         elif action == "I" and available:
@@ -5794,8 +5826,9 @@ def screen_specialists(p: Palette, world: World) -> str | None:
         lines.append("Public bearings do not chart stations or reveal their market prices. Standard services remain available at every yard.")
         action, page, count = _draw_service_page(p, "Specialist Workshops", lines, "[1-3]View [B]Back [<>]Page: ", page)
         if action in ("B", "Q"): return result
-        if action == ">": page = min(page + 1, count - 1); continue
-        if action == "<": page = max(0, page - 1); continue
+        if (moved := page_step(action, page, count)) is not None:
+            page = moved
+            continue
         if action in ("1", "2", "3"):
             response = screen_workshop(p, world, list(WORKSHOPS)[int(action) - 1])
             if response is not None: result, page = response, 0
@@ -5850,16 +5883,7 @@ def _service_pages(lines: list[str], title: str, footer: str) -> list[list[str]]
 
 
 def _service_pages_for(lines: list[str], title: str, footer: str) -> list[list[str]]:
-    capacity = max(len(rows) for rows in _trade_pages(lines, title, footer))
-    pages = [[]]
-    for line in lines:
-        wrapped = _wrap_output(_mission_plain(line), max(1, _OUTPUT_WIDTH - 1)).split("\r\n")
-        if pages[-1] and len(pages[-1]) + len(wrapped) > capacity:
-            pages.append([])
-        for row in wrapped:
-            if len(pages[-1]) == capacity: pages.append([])
-            pages[-1].append(row)
-    return pages
+    return paginate([wrapped_group(line) for line in lines], page_capacity(lines, title, footer))
 
 
 # Footers spell paging several ways and end either with a space, the prompt's
@@ -5871,6 +5895,29 @@ _PAGING_PATTERN = re.compile(r"\[<\]\s*Prev\s+\[>\]\s*Next"
                              r"|\[P\](?:rev(?:ious)?|Prev)\s+\[N\](?:ext|Next)"
                              r"|\[<\s*>\]\s*Page"
                              r"|\[<\]\s*\[>\]")
+
+
+ARROW_PAGING_KEYS = ("<", ">")
+NEXT_PREV_PAGING_KEYS = ("P", "N")
+
+
+def page_step(key: str, page: int, count: int, *, keys=ARROW_PAGING_KEYS) -> int | None:
+    """Where the paging keys move a page, clamped at both ends.
+
+    `None` means the key was not a paging key, so a caller reads it as "not mine"
+    and goes on to its own actions. One implementation, because the clamp is the
+    part that is easy to get wrong and it appeared forty times (issue #418).
+
+    The key pair is explicit rather than accepting both spellings everywhere: `N`
+    is a live action on screens that do not page with it -- the Command Deck's
+    Archive Contacts -- so a screen pages with the pair it advertises.
+    """
+    back, forward = keys
+    if key == forward:
+        return min(page + 1, max(0, count - 1))
+    if key == back:
+        return max(0, page - 1)
+    return None
 
 
 def single_page_footer(footer: str, count: int) -> str:
@@ -5925,8 +5972,9 @@ def screen_shipyard(p: Palette, world: World) -> None:
         if result: lines.insert(0, "Result: " + result)
         action, page, count = _draw_service_page(p, f"Engineering Yard: {world.save.pilot.credits:,}cr", lines, footer, page)
         if action in ("B", "Q"): return
-        if action == ">": page = min(page + 1, count - 1); continue
-        if action == "<": page = max(0, page - 1); continue
+        if (moved := page_step(action, page, count)) is not None:
+            page = moved
+            continue
         if action == "V": screen_viewport(p,world); continue
         keys = list(UPGRADES)
         refits = HULL_REFITS[world.save.ship.hull_class]
@@ -6073,8 +6121,9 @@ def screen_crew_assignment(p: Palette, world: World, role: str) -> str | None:
         lines = ([result] if result else []) + crew_assignment_lines(world, role)
         key, page, count = _draw_service_page(p, f"Crew task {world.save.pilot.credits:,}cr", lines, _detail_action_bar(actions, {"A": "Accept", "C": "Complete", "R": "Route"}), page)
         if key in ("B", "Q"): return result
-        if key == ">": page = min(page + 1, count - 1); continue
-        if key == "<": page = max(0, page - 1); continue
+        if (moved := page_step(key, page, count)) is not None:
+            page = moved
+            continue
         if not key or key not in actions.split("/"): continue
         if key == "R":
             _screen_auto_route(p, world, destination=crew_assignment_destination(world, role)); page = 0; continue
@@ -6094,8 +6143,9 @@ def screen_crew(p: Palette, world: World) -> None:
         if result: lines.insert(0, "Result: " + result)
         key, page, count = _draw_service_page(p, f"Crew Roster: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return
-        if key == ">": page = min(page + 1, count - 1); continue
-        if key == "<": page = max(0, page - 1); continue
+        if (moved := page_step(key, page, count)) is not None:
+            page = moved
+            continue
         roles = list(CREW_ROLES)
         if key in ("1", "2", "3"):
             response = screen_crew_assignment(p, world, roles[int(key) - 1])
@@ -6233,8 +6283,7 @@ def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -
         pages=portrait_pages(p,ship_portrait(preview,"large"),ship_portrait(preview,"compact"),details,"Refit "+target_class,footer,leading=[result] if result else [])
         key,page,count=_draw_service_page(p,"Refit "+target_class,[],footer,page,pages=pages)
         if key in ("B","Q"):return result
-        if key==">":page=min(page+1,count-1);continue
-        if key=="<":page=max(page-1,0);continue
+        if (moved := page_step(key, page, count)) is not None: page = moved; continue
         if key!="C":continue
         if world.save.pending_travel is not None:result,page="Finish the current journey first.",0;continue
         if world.save.pilot.credits<cost:result,page=f"Need {cost}cr for the {target_class} refit.",0;continue
@@ -6412,9 +6461,14 @@ def mission_details(world: World, mission: Mission) -> list[str]:
 
 
 def _mission_text_pages(lines: list[str], *, overhead: int = 7) -> list[list[str]]:
-    rows = [row for line in lines for row in _wrap_output(_mission_plain(line), max(1, _OUTPUT_WIDTH - 1)).split("\r\n")]
-    size = max(1, _OUTPUT_HEIGHT - overhead)
-    return [rows[i:i + size] for i in range(0, len(rows), size)] or [[]]
+    """Prose paging: every row is its own group, so a paragraph may break anywhere.
+
+    The same `paginate` as the group-aware screens -- a one-row group can never
+    need splitting, so filling row by row is the degenerate case rather than a
+    second implementation (issue #418).
+    """
+    rows = [row for line in lines for row in wrapped_group(line)]
+    return paginate([[row] for row in rows], max(1, _OUTPUT_HEIGHT - overhead))
 
 
 def _show_tracked_mission(p: Palette, world: World) -> None:
@@ -6672,10 +6726,8 @@ def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, act
         out_line(key)
         if key in ("B", "Q"):
             return
-        if key == "N":
-            page = min(page + 1, len(pages) - 1)
-        elif key == "P":
-            page = max(0, page - 1)
+        if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+            page = moved
         elif key == "V":
             screen_galaxy_map(p, world, path=mission_route(world, mission), public_target=mission.target_system)
         elif key == "J" and active:
@@ -6727,10 +6779,8 @@ def screen_mission_details(p: Palette, world: World, mission: Mission, *, active
         key = read_command_at_prompt()
         if key in ("B", "Q"):
             return
-        if key == "N":
-            page = min(page + 1, len(pages) - 1)
-        elif key == "P":
-            page = max(0, page - 1)
+        if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+            page = moved
         elif key == "R":
             screen_mission_navigation(p, world, mission, active=active)
             page = 0
@@ -6806,10 +6856,8 @@ def screen_missions(p: Palette, world: World) -> None:
         key = read_command_at_prompt()
         if key in ("B", "Q"):
             return
-        if key == "N":
-            page = min(page + 1, len(pages) - 1)
-        elif key == "P":
-            page = max(0, page - 1)
+        if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+            page = moved
         elif len(key) == 1 and "1" <= key <= "9" and int(key) <= len(pages[page][1]):
             mission, active = pages[page][1][int(key) - 1]
             screen_mission_details(p, world, mission, active=active)
@@ -6868,8 +6916,7 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
         lines = ([result] if result else []) + career_finale_lines(world.save, selected)
         key, page, count = _draw_service_page(p, "Career Finale", lines, "[1-4]Choose [S]Retire [<>]Page [B]Back: ", page)
         if key in ("B", "Q"): return result
-        if key == ">": page = min(page+1,count-1); continue
-        if key == "<": page = max(page-1,0); continue
+        if (moved := page_step(key, page, count)) is not None: page = moved; continue
         if key in ("1", "2", "3", "4"): selected, page = list(CAREER_FINALES)[int(key)-1], 0; continue
         if key != "S": continue
         if blocker := career_finale_blocker(world.save, selected): result, page = blocker, 0; continue
@@ -6903,8 +6950,7 @@ def screen_status(p: Palette, world: World) -> None:
             cache[section] = _service_pages(lines, title, footer)
         key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[section])
         if key in ("B", "Q"): return
-        if key == ">": page = min(page + 1, count - 1)
-        elif key == "<": page = max(0, page - 1)
+        if (moved := page_step(key, page, count)) is not None: page = moved
         elif key in ("O", "C", "H", "D"): section, page = key, 0
         elif key == "R":
             previous = world.save.pilot.retirements
@@ -6978,8 +7024,8 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
         if key in ("B", "Q"): return
         if key in ("1", "2", "3", "4", "5"):
             category, page = list(SCORE_CATEGORIES)[int(key) - 1], 0
-        elif key in ("N", ">"): page = min(page + 1, count - 1)
-        elif key in ("P", "<"): page = max(0, page - 1)
+        elif (moved := page_step(">" if key == "N" else "<" if key == "P" else key, page, count)) is not None:
+            page = moved
 
 
 # [S]can, [G]o to, [V]iew are fixed control keys on this same prompt,
@@ -7035,24 +7081,18 @@ def _chart_pages_for(world: World, title: str, footer: str, result: str | None):
     entries = chart_entries(world, result)
     # Budget conservatively with one key prefix per wrapped continuation row.
     wrapped = [(sid, _wrap_output(_mission_plain(text), max(1, _OUTPUT_WIDTH - 5)).split("\r\n")) for sid, text in entries]
-    budget_rows = ["[A] " + row for _, rows in wrapped for row in rows]
-    capacity = max(len(rows) for rows in _trade_pages(budget_rows, title, footer))
-    pages = [([], {})]
-    index = 0
+    capacity = page_capacity(["[A] " + row for _, rows in wrapped for row in rows], title, footer)
+    letters, groups, index = [], [], 0
     for sid, paragraph in wrapped:
-        letter = CHART_CONNECTION_LETTERS[index % len(CHART_CONNECTION_LETTERS)] if sid is not None else None
-        rows, choices = pages[-1]
-        if rows and (len(rows) + len(paragraph) > capacity or letter in choices):
-            pages.append(([], {}))
-        for row in (keyed_rows(letter, paragraph) if sid is not None else paragraph):
-            rows, choices = pages[-1]
-            if len(rows) == capacity:
-                pages.append(([], {})); rows, choices = pages[-1]
-            if sid is not None:
-                choices[letter] = sid
-            rows.append(row)
-        if sid is not None: index += 1
-    return pages
+        if sid is None:
+            letters.append((None, None))
+            groups.append(paragraph)
+            continue
+        letter = CHART_CONNECTION_LETTERS[index % len(CHART_CONNECTION_LETTERS)]
+        letters.append((letter, sid))
+        groups.append(keyed_rows(letter, paragraph))
+        index += 1
+    return paginate(groups, capacity, keys=letters)
 
 
 def departure_terms(world: World, dest_id: int) -> str:
@@ -7076,8 +7116,7 @@ def screen_chart(p: Palette, world: World) -> int | None:
         for row in pages[page][0]: out_line(row)
         out_prompt(single_page_footer(footer, len(pages))); key = read_command_at_prompt(); out_line(key)
         if key in ("B", "Q"): return None
-        if key == ">": page = min(page + 1, len(pages) - 1); continue
-        if key == "<": page = max(0, page - 1); continue
+        if (moved := page_step(key, page, len(pages))) is not None: page = moved; continue
         mission = tracked_mission(world)
         if key == "S" and world.save.ship.scanner_tier > 0:
             scan_result = _do_scan(p, world)
@@ -7161,8 +7200,9 @@ def _do_scan(p: Palette, world: World) -> str | None:
         action, page, count = _draw_service_page(p, f"Survey {world.save.pilot.credits:,}cr", lines,
             "[S]Survey [B]Back [<>]Page: " if can_scan else "[B]Back [<>]Page: ", page)
         if action in ("B", "Q"): return result
-        if action == ">": page = min(page + 1, count - 1); continue
-        if action == "<": page = max(0, page - 1); continue
+        if (moved := page_step(action, page, count)) is not None:
+            page = moved
+            continue
         if action != "S" or not can_scan: continue
         result, report = perform_survey(world)
         world.commit()
@@ -7288,8 +7328,8 @@ def _screen_map_info(world: World, sid: int, path: list[int], public_target: int
         for line in pages[page]: out_line(line)
         out_prompt(footer); key = read_command_at_prompt(); out_line(key)
         if key in ("B", "Q"): return
-        if key == "N": page = min(page + 1, len(pages) - 1)
-        elif key == "P": page = max(0, page - 1)
+        if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+            page = moved
 
 
 def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None,
@@ -7336,8 +7376,8 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
             selected = _pick_trade_field("Inspect Station", options)
             if selected is not None: _screen_map_info(world, selected, path, public_target)
         elif list_mode:
-            if key == "N": page = min(page + 1, len(pages) - 1)
-            elif key == "P": page = max(0, page - 1)
+            if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+                page = moved
             elif key == "M" and not compact: list_mode = False
         elif key == "L": list_mode = True
         elif key == "O": sector = None
@@ -7474,10 +7514,8 @@ def _screen_auto_route(p: Palette, world: World, *, destination: int | None = No
         out_line(key)
         if key in ("B", "Q"):
             return
-        if key == "N":
-            page = min(page + 1, len(pages) - 1)
-        elif key == "P":
-            page = max(0, page - 1)
+        if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+            page = moved
         elif key == "D":
             choices = sorted(((station.id, station.name) for station in world.galaxy
                               if station.discovered and station.id != world.here.id), key=lambda item: item[1])
@@ -7585,8 +7623,7 @@ def exploration_choice(p: Palette, world: World, title: str, lines: list[str], a
             p, f"{title} {world.save.pilot.credits:,}cr Fuel {world.save.ship.fuel}", lines,
             f"[{actions}]Act [<>]Page: ", page,
         )
-        if action == ">": page = min(page + 1, count - 1)
-        elif action == "<": page = max(0, page - 1)
+        if (moved := page_step(action, page, count)) is not None: page = moved
         elif action in actions.split("/"): return action
 
 
@@ -8063,11 +8100,8 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             combat_display_lines(world, pirate, combat["lines"], patrol=patrol, details=details, tactics=tactics, warrant=warrant, hull_before=hull_before),
             combat_action_bar(actions), page,
         )
-        if action == ">":
-            page = min(page + 1, count - 1)
-            continue
-        if action == "<":
-            page = max(0, page - 1)
+        if (moved := page_step(action, page, count)) is not None:
+            page = moved
             continue
         if action == "I":
             details, page = not details, 0
@@ -8230,8 +8264,7 @@ def screen_customs(p: Palette, world: World) -> None:
         can_pay = world.save.pilot.credits >= customs_quote(world)[1]
         footer = "[S]Surrender [P]Pay bribe [<>]Page: " if can_pay else "[S]Surrender [<>]Page: "
         action, page, count = _draw_service_page(p, f"Customs {world.save.pilot.credits:,}cr", lines, footer, page)
-        if action == ">": page = min(page + 1, count - 1)
-        elif action == "<": page = max(0, page - 1)
+        if (moved := page_step(action, page, count)) is not None: page = moved
         else:
             try:
                 outcome = resolve_customs(world, action)

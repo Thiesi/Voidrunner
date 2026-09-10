@@ -13195,3 +13195,73 @@ def test_a_docked_commit_re_observes_the_market_it_just_traded_in():
     vr._consume_market_depth(world, "food", 5, buying=True)
     world.commit()  # mid-journey there is no local market to observe
     assert world.save.market_memory[0]["food"]["stock"] == before["stock"] - 10
+
+
+# --- #418: one paginator, one page step -------------------------------------------------
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_every_paged_screen_fits_and_offers_back_on_every_page(monkeypatch, width, height):
+    """One table instead of a per-screen copy (issue #418).
+
+    Each screen is walked to the last page its own counter advertises, using the
+    paging key its own action bar offers, so a screen that pages with `N` is not
+    silently redrawing page one.
+    """
+    import re
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    screens = ["screen_chart", "screen_missions", "screen_market", "screen_shipyard",
+               "screen_status", "screen_pilot_guide", "screen_trading_ledger",
+               "screen_remembered_markets", "screen_economy_opportunities"]
+    for name in screens:
+        world = _world_with_seed(42)
+        world.checkpoint()
+        frames, output, reached = [], io.StringIO(), []
+        def choose():
+            frame = vr._ANSI_RE.sub("", output.getvalue()); output.seek(0); output.truncate(0)
+            frames.append(frame)
+            assert len(frames) < 400, f"{name} never reached its last page"
+            counters = []
+            for row in frame.splitlines():
+                # The counter ends the title row; other numbers ("Fuel 24/24") precede it.
+                counters = re.findall(r"(\d+)/(\d+)", " ".join(row.split()))
+                if counters:
+                    break
+            assert counters, f"{name} draws no page counter in {frame!r}"
+            page, count = int(counters[-1][0]), int(counters[-1][1])
+            if page >= count:
+                reached.append(count)
+                return "B"
+            forward = ">" if ("[>]" in frame or "[<>]" in frame or "[< >]" in frame) else "N"
+            assert f"[{forward}]" in frame or "[<>]" in frame or "[< >]" in frame, f"{name} advertises no paging key"
+            return forward
+        monkeypatch.setattr(vr, "read_key", choose)
+        with contextlib.redirect_stdout(output):
+            getattr(vr, name)(vr.Palette(False), world)
+        assert frames and reached, name
+        assert len(frames) >= reached[0], f"{name} skipped pages"
+        for frame in frames:
+            assert all(vr._visible_width(row) <= width for row in frame.splitlines()), name
+            assert len(frame.splitlines()) <= height, name
+            assert "[B]" in frame or "[Q]" in frame, name
+
+
+def test_paginate_keeps_groups_whole_splits_oversized_ones_and_never_repeats_a_letter():
+    """The one paginator behind every paged screen (issue #418)."""
+    groups = [["a1", "a2"], ["b1"], ["c1", "c2", "c3", "c4", "c5"]]
+    assert vr.paginate(groups, 3) == [["a1", "a2", "b1"], ["c1", "c2", "c3"], ["c4", "c5"]]
+    assert vr.paginate(groups, 10) == [["a1", "a2", "b1", "c1", "c2", "c3", "c4", "c5"]]
+    coloured = vr.paginate(groups, 10, render=lambda row, index: f"<{row}>" if index == 1 else row)
+    assert coloured[0][2] == "<b1>"
+    keyed = vr.paginate([["A one"], ["A two"], ["B three"]], 10,
+                        keys=[("A", 1), ("A", 2), ("B", 3)])
+    assert [rows for rows, _ in keyed] == [["A one"], ["A two", "B three"]]  # a letter never repeats
+    assert [choices for _, choices in keyed] == [{"A": 1}, {"A": 2, "B": 3}]
+
+
+@pytest.mark.parametrize("key,page,count,expected", [
+    (">", 0, 3, 1), (">", 2, 3, 2), (">", 0, 1, 0), (">", 5, 0, 0),
+    ("<", 2, 3, 1), ("<", 0, 3, 0), ("B", 1, 3, None), ("", 1, 3, None),
+])
+def test_page_step_clamps_at_both_ends_and_declines_other_keys(key, page, count, expected):
+    assert vr.page_step(key, page, count) == expected
