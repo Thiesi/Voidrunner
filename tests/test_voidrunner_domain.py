@@ -382,7 +382,10 @@ def test_trade_route_destination_picker_pages_keep_selection_and_back_available(
         pages.append(value)
         output.seek(0)
         output.truncate(0)
-        match = re.search(r"Destination (\d+)/(\d+)", " ".join(value.split()))
+        # At 20 columns the bar needs a row more than the glued style did (#400), so
+        # every label is now one row too tall for a shared page and the picker heads
+        # each page "Choice n" instead; the counter is the same either way.
+        match = re.search(r"(\d+)/(\d+)", " ".join(value.split()))
         assert match and len(pages) < 500
         return "1" if match[1] == match[2] else "N"
 
@@ -394,7 +397,7 @@ def test_trade_route_destination_picker_pages_keep_selection_and_back_available(
     for page in pages:
         assert len(page.splitlines()) <= height, page
         assert all(vr._visible_width(row) <= width for row in page.splitlines())
-        assert "[B]ack" in page
+        assert "[B] Back" in " ".join(page.split())      # a narrow bar wraps (#400)
 
 
 def test_trade_route_editing_fields_and_cancelling_is_read_only(monkeypatch):
@@ -619,7 +622,7 @@ def test_trading_ledger_pages_fit_and_do_not_write(monkeypatch, width, height):
     rng = world.event_rng.getstate()
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
     monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
-    count = len(vr._trade_pages(vr.trading_ledger_lines(world), "Trading Ledger", "[M]arkets [R]oute [N]ext [P]rev [B]ack: "))
+    count = len(vr._trade_pages(vr.trading_ledger_lines(world), "Trading Ledger", "[M] Markets [R] Route [N] Next [P] Prev [B] Back: "))
     output = io.StringIO()
     pages = []
 
@@ -1316,7 +1319,7 @@ def test_mission_navigation_large_legacy_queue_budgets_actual_page_number_width(
     world.save.active_missions=[vr.Mission(i,"bounty","Legacy bounty",500,0,mission.target_system,pirate_tier=1) for i in range(1,1002)]
     mission=world.save.active_missions[-1]
     monkeypatch.setattr(vr,"_OUTPUT_WIDTH",20); monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",10)
-    title=f"Contract Route #{mission.id}"; footer="[J]ump next [N]ext [P]rev [B]ack: "
+    title=f"Contract Route #{mission.id}"; footer="[J] Jump next [N] Next [P] Prev [B] Back: "
     pages=vr._trade_pages(vr.mission_navigation_lines(world,mission,active=True),title,footer)
     assert len(pages)>999
     for index in (0,len(pages)-1):
@@ -1424,6 +1427,28 @@ def test_every_system_has_at_least_one_connection():
 
 
 # -- economy -------------------------------------------------------------
+
+
+@pytest.fixture
+def without_action_bar(monkeypatch):
+    """Removes the action bar from the frame that has just been drawn.
+
+    The bar is whatever `out_prompt` wrote last: it ends the frame, wrapping into
+    as many rows as the width needs. Tests used to spot it by its hotkey style,
+    which stopped telling it from a body row once every hotkey in the game was
+    written `[K] Label` (issue #400), so ask the writer instead of guessing.
+    """
+    rows_written, real = [1], vr.out_prompt
+    def spy(text):
+        rows_written[0] = len(vr._wrap_output(text, max(1, vr._OUTPUT_WIDTH - 1)).split("\r\n"))
+        real(text)
+    monkeypatch.setattr(vr, "out_prompt", spy)
+    def strip(text: str) -> str:
+        rows = text.splitlines()
+        del rows[max(0, len(rows) - rows_written[0]):]
+        while rows and not rows[-1].strip(): rows.pop()
+        return "\n".join(rows)
+    return strip
 
 
 def _world_with_seed(seed: int) -> "vr.World":
@@ -2921,7 +2946,7 @@ def test_tiny_picker_keeps_oversized_label_as_one_read_through_choice(monkeypatc
     def choose():
         frame=output.getvalue();frames.append(frame);output.seek(0);output.truncate(0)
         assert len(frames)<200
-        if "[1]Pick" in frame:return "1"
+        if "[1] Pick" in frame:return "1"
         assert "[1]" not in frame
         return "N"
     monkeypatch.setattr(vr,"read_key",choose)
@@ -2932,7 +2957,9 @@ def test_tiny_picker_keeps_oversized_label_as_one_read_through_choice(monkeypatc
     assert all(vr._visible_width(line)<=15 for frame in frames for line in frame.splitlines())
     rows=[]
     for frame in frames:
-        rows.extend(row for row in frame.splitlines() if row and row not in ("N","P") and not row.startswith(("Choice ","[")))
+        for row in frame.splitlines():
+            if row.startswith("["):break            # the action bar, and its wrapped tail
+            if row and row not in ("N","P") and not row.startswith("Choice "):rows.append(row)
     assert " ".join(" ".join(rows).split())==" ".join(label.split())
 
 
@@ -2944,9 +2971,9 @@ def test_oversized_picker_ignores_selection_on_incomplete_parts(monkeypatch):
         frame=output.getvalue();output.seek(0);output.truncate(0)
         if not attempted:
             attempted=True
-            assert "[1]Pick" not in frame
+            assert "[1] Pick" not in frame
             return "1"
-        return "1" if "[1]Pick" in frame else "N"
+        return "1" if "[1] Pick" in frame else "N"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):assert vr._pick_trade_field("Destination",[(9,"unusually long label "*20)])==9
 
@@ -2968,7 +2995,7 @@ def test_oversized_picker_keeps_choice_identity_when_returning_from_next_option(
             returned = True
             return "P"
         if returned:
-            assert "Choice 1" in frame and "[1]Pick" in frame
+            assert "Choice 1" in frame and "[1] Pick" in frame
             return "B" if back else "1"
         return "N"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -2988,7 +3015,7 @@ def test_map_list_advertises_only_available_view_actions(monkeypatch,width,heigh
     def choose():
         frame=output.getvalue();output.seek(0);output.truncate(0);frames.append(frame)
         if "Charted Systems" in " ".join(frame.split()):
-            assert ("[M]ap" in frame) is not compact
+            assert ("[M] Map" in frame) is not compact
         return next(commands)
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):vr.screen_galaxy_map(vr.Palette(False),world)
@@ -3091,7 +3118,7 @@ def test_charted_survey_has_no_promised_completion_or_contract_departure(destina
     keys=iter("JB");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     monkeypatch.setattr(world,"checkpoint",lambda:pytest.fail("Blocked survey saved"))
     with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_mission_navigation(vr.Palette(False),world,mission,active=True)
-    assert "[J]ump next" not in output.getvalue()
+    assert "[J] Jump next" not in output.getvalue()
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
@@ -4108,7 +4135,7 @@ def test_shipyard_offers_crew_option(monkeypatch):
     with contextlib.redirect_stdout(buf):
         vr.screen_shipyard(vr.Palette(truecolor=False), world)
 
-    assert "[K]Crew" in buf.getvalue()
+    assert "[K] Crew" in buf.getvalue()
 
 
 def test_shipyard_crew_row_letter_never_collides_with_an_upgrade_row():
@@ -4139,7 +4166,7 @@ def test_chart_screen_reserves_sgv_and_never_assigns_them_to_a_connection(monkey
     own extra-edge pass can give a single system up to ~7 connections
     (seen across a few thousand random seeds), and a plain `LETTERS[i]`
     assignment would silently give the 7th one the same row letter as
-    the "[G]o to" hotkey -- permanently shadowing that connection,
+    the "[G] Go to" hotkey -- permanently shadowing that connection,
     since "G" was checked as a fixed control key before ever falling
     through to the row lookup. Forces a system with 8 connections
     (more than "G"'s own position, 7th letter) and confirms the 8th
@@ -4481,7 +4508,7 @@ def test_futures_draft_and_order_pages_fit_and_preserve_all_terms(monkeypatch,wi
         frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0);frames.append(frame)
         assert len(frame.splitlines())<=height
         assert all(vr._visible_width(line)<=width for line in frame.splitlines())
-        assert "[B]Back:" in " ".join(frame.split())
+        assert "[B] Back:" in " ".join(frame.split())
         page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
         return "B" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
@@ -4489,7 +4516,7 @@ def test_futures_draft_and_order_pages_fit_and_preserve_all_terms(monkeypatch,wi
         if kind=="draft":vr._screen_buy_futures(vr.Palette(False),world,"food")
         else:vr._screen_futures_order(vr.Palette(False),world,contract)
     text=" ".join(" ".join(frames).split())
-    if kind=="legacy":assert "original remote" in text and "[X]Cancel" not in text
+    if kind=="legacy":assert "original remote" in text and "[X] Cancel" not in text
     else:assert "nonrefundable" in text and "Pickup:" in text
     assert world.save.to_dict()==before
 
@@ -4770,7 +4797,7 @@ def test_pilot_record_pages_expose_every_retained_entry_once_without_rebuilding(
         frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0)
         assert len(frame.splitlines())<=height
         assert all(vr._visible_width(line)<=width for line in frame.splitlines())
-        assert "[B]Back:" in " ".join(frame.split())
+        assert "[B] Back:" in " ".join(frame.split())
         if phase==0:phase=1;return section
         if phase==2:return "B"
         frames.append(frame)
@@ -4862,7 +4889,7 @@ def test_service_pages_retain_all_terms_and_fit_terminal(monkeypatch,width,heigh
         plain=" ".join(vr._ANSI_RE.sub("",frame).split())
         match=re.search(r"(?:Engineering Yard|Crew Roster): 100,000cr (\d+)/(\d+)",plain)
         assert match and len(frames)<200
-        assert "[B]Back" in plain or "[B]ack" in plain
+        assert "[B] Back" in plain or "[B] Back" in plain
         return "Q" if match[1]==match[2] else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):
@@ -4942,7 +4969,7 @@ def test_market_catalog_pages_preserve_goods_quotes_and_telemetry(monkeypatch,wi
         assert len(frame.splitlines())<=height
         assert all(vr._visible_width(line)<=width for line in frame.splitlines())
         plain=" ".join(frame.split())
-        assert "[B]Back:" in plain and "[X]Futures" in plain and "1,200cr" in plain
+        assert "[B] Back:" in plain and "[X] Futures" in plain and "1,200cr" in plain
         page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
         return "Q" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
@@ -4981,7 +5008,7 @@ def test_prohibited_commodity_details_hide_buy_and_reject_unadvertised_purchase(
     world=_world_with_seed(42);world.save.cargo={"weapons":1};before=world.save.to_dict()
     monkeypatch.setattr(vr,"read_key",lambda:"P")
     with contextlib.redirect_stdout(io.StringIO()) as output:result=vr._trade_commodity(vr.Palette(False),world,"weapons")
-    assert "Buy prohibited" in output.getvalue() and "[P]urchase" not in output.getvalue()
+    assert "Buy prohibited" in output.getvalue() and "[P] Purchase" not in output.getvalue()
     assert "prohibit" in result and world.save.to_dict()==before
 
 
@@ -5030,7 +5057,7 @@ def test_screen_market_contraband_catalog_keeps_labels_and_bounds(monkeypatch):
 
 @pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])
 @pytest.mark.parametrize("expanded", [False,True])
-def test_station_deck_pages_keep_telemetry_actions_and_exit_visible(monkeypatch,width,height,expanded):
+def test_station_deck_pages_keep_telemetry_actions_and_exit_visible(monkeypatch,without_action_bar,width,height,expanded):
     import re
     monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
     world=_world_with_seed(42)
@@ -5048,12 +5075,12 @@ def test_station_deck_pages_keep_telemetry_actions_and_exit_visible(monkeypatch,
         assert len(frame.splitlines())<=height
         assert all(vr._visible_width(line)<=width for line in frame.splitlines())
         plain=" ".join(frame.split())
-        assert "[Q]Exit:" in plain
+        assert "[Q] Exit:" in plain
         assert "5cr" in plain
         if expanded and not toggled:
             toggled=True
             return "X"
-        frames.append(frame)
+        frames.append(re.sub(r"^[\s>]*Command Deck:\s*[\d,]+cr\s+\d+/\d+","",without_action_bar(frame)))
         page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
         return "Q" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
@@ -5087,7 +5114,7 @@ def test_real_cockpit_paging_toggle_and_exit_preserve_career(tmp_path,commands):
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
     assert result.returncode==0 and not result.stderr
-    assert b"Command Deck:" in result.stdout and b"[X]Compact" in result.stdout
+    assert b"Command Deck:" in result.stdout and b"[X] Compact" in result.stdout
     if b"M" in commands:
         assert b"Commodity Market" in result.stdout and b"Engineering Yard:" in result.stdout
     assert (tmp_path/"77.json").read_bytes()==original
@@ -5136,7 +5163,7 @@ def test_navigation_chart_pages_preserve_all_connections_and_career(monkeypatch,
         frame=output.getvalue();frames.append(frame);output.seek(0);output.truncate(0)
         plain=" ".join(vr._ANSI_RE.sub("",frame).split())
         match=re.search(r"Navigation: Fuel 24/24 (\d+)/(\d+)",plain);assert match and len(frames)<300
-        assert "[B]Back" in plain
+        assert "[B] Back" in plain
         return "Q" if match[1]==match[2] else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output): assert vr.screen_chart(vr.Palette(False),world) is None
@@ -5215,7 +5242,7 @@ def test_score_pages_retain_all_twenty_pilots_and_fields_without_reloading(tmp_p
         frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0);frames.append(frame)
         assert len(frame.splitlines())<=height
         assert all(vr._visible_width(line)<=width for line in frame.splitlines())
-        assert "[B]Back:" in " ".join(frame.split())
+        assert "[B] Back:" in " ".join(frame.split())
         page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
         return "B" if page==count else "N"
     monkeypatch.setattr(vr,"read_key",choose)
@@ -5331,7 +5358,7 @@ def test_screen_missions_preserves_rewards_in_compact_entries(monkeypatch):
     output = buf.getvalue()
     assert "+5cr" in output and "+123,456cr" in output
     assert "[1]" in output and "[2]" in output
-    assert "Details" in output and "[B]ack" in output
+    assert "Details" in output and "[B] Back" in output
 
 
 def test_navigation_chart_keeps_danger_and_fuel_distinct_with_retained_rejection(monkeypatch):
@@ -5407,7 +5434,7 @@ def test_empty_mission_board_renders_clean_notice_and_back(monkeypatch):
         vr.screen_missions(p, world)
     output = buf.getvalue()
     assert "No contracts currently available" in output
-    assert "[B]ack" in output
+    assert "[B] Back" in output
 
 
 def test_commission_and_cartel_screens_fit_standard_terminal(monkeypatch):
@@ -5684,7 +5711,7 @@ def test_failed_atomic_replace_preserves_previous_save_and_removes_own_temp(tmp_
         ("ignore_derelict", 26, "?I", "leave the derelict"),
         ("ignore_distress", 8, "?I", "continue past the distress"),
         ("bounty", 0, "F", "Bounty complete!"),
-        ("bounty_brace", 0, "GFFG", "Braced;"),
+        ("bounty_brace", 0, "GFFG", "Guarding;"),
         ("bounty_report", 0, "VR", "Incorrect warrant closed"),
         ("bounty_withdraw", 0, "W", "withdraw before engaging"),
         ("bounty_loss", 0, "F", "Bounty failed"),
@@ -6285,7 +6312,7 @@ def test_real_pipe_lone_escape_is_absorbed_without_blocking_the_next_key(tmp_pat
     """
     world = _world_with_seed(42)
     vr.persist(world, tmp_path, 77)
-    with _door_stopped_at(tmp_path, [b"\x1b", b"X"], b"[X]Compact", ready=b"[X]Expand"):
+    with _door_stopped_at(tmp_path, [b"\x1b", b"X"], b"[X] Compact", ready=b"[X] Expand"):
         saved, is_new, notice = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert not is_new and notice is None
     assert saved.turn == 0
@@ -6688,7 +6715,7 @@ def test_full_contract_details_fit_each_page_and_retain_back(monkeypatch, width,
         rows = frame.split("\r\n")
         assert len(rows) <= height
         assert all(vr._visible_width(row) <= width for row in rows)
-        assert "[B]ack" in frame
+        assert "[B] Back" in frame
         return "N" if len(frames) < count else "B"
     monkeypatch.setattr(vr, "read_key", key)
     with contextlib.redirect_stdout(output):
@@ -7718,7 +7745,7 @@ def test_future_formats_never_offer_or_allow_downgrade_recovery(tmp_path, monkey
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         assert vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, error.value).save is None
-    assert "[R]estore" not in output.getvalue()
+    assert "[R] Restore" not in output.getvalue()
     with pytest.raises(vr.UnsupportedSave):
         vr.restore_previous_career(tmp_path, 77, previous)
     assert path.read_bytes() == original and not list(tmp_path.glob("77.recovery-*"))
@@ -7727,7 +7754,7 @@ def test_future_formats_never_offer_or_allow_downgrade_recovery(tmp_path, monkey
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"RYB", capture_output=True,
                             env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
     assert result.returncode == 0 and not result.stderr
-    assert b"[R]estore" not in result.stdout and b"Pilot callsign" not in result.stdout
+    assert b"[R] Restore" not in result.stdout and b"Pilot callsign" not in result.stdout
     assert path.read_bytes() == original and not list(tmp_path.glob("77.recovery-*"))
 
 
@@ -7754,7 +7781,7 @@ def test_recovery_hides_restore_and_explains_impossible_preservation(tmp_path, m
         result = vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, vr.ResumeError("Career unavailable"))
     rendered = " ".join(output.getvalue().split())
     assert result.save is None and result.exit_code == 0
-    assert "[R]estore" not in rendered and "manual recovery" in rendered
+    assert "[R] Restore" not in rendered and "manual recovery" in rendered
     reason = {"oversized": "file size", "unreadable": "cannot be read", "full": "copies are full"}[problem]
     assert reason in rendered
     assert {path.name: path.read_bytes() for path in tmp_path.glob("*.json")} == before
@@ -7773,7 +7800,7 @@ def test_missing_economy_event_fields_remain_recoverable_corruption(tmp_path, mo
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, error.value)
-    assert "[R]estore" in output.getvalue()
+    assert "[R] Restore" in output.getvalue()
 
 
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
@@ -7797,7 +7824,7 @@ def test_recovery_pages_fit_terminal_and_restore_is_on_last_page(tmp_path, monke
         rows = page.splitlines()
         assert len(rows) <= height, (width, height, rows)
         assert all(vr._visible_width(row) <= width for row in rows)
-    assert any("[R]estore" in page for page in chunks)
+    assert any("[R] Restore" in page for page in chunks)
 
 
 def test_notoriety_above_one_hundred_survives_checkpoint_and_restart(tmp_path):
@@ -7923,7 +7950,7 @@ def test_opening_guide_and_offer_pages_fit_and_browsing_is_read_only(monkeypatch
         output.truncate(0)
         assert world.save.to_dict() == before
         assert len(pages) <= 100
-        return "B" if ("[A]ccept" in value if screen == "offer" else len(pages) == guide_count) else "N"
+        return "B" if ("[A] Accept" in value if screen == "offer" else len(pages) == guide_count) else "N"
 
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output):
@@ -7937,7 +7964,7 @@ def test_opening_guide_and_offer_pages_fit_and_browsing_is_read_only(monkeypatch
         assert len(rows) <= height, (width, height, rows)
         assert all(vr._visible_width(row) <= width for row in rows)
     if screen == "offer":
-        assert all("[A]ccept" not in page for page in pages[:-1])
+        assert all("[A] Accept" not in page for page in pages[:-1])
 
 
 def test_real_first_flight_survives_kills_through_acceptance_purchase_delivery_and_upgrade(tmp_path):
@@ -8127,7 +8154,7 @@ def test_cockpit_settlement_results_stay_inside_height_budget(monkeypatch, width
         frames.append(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
-        assert "[Q]Exit:" in frame
+        assert "[Q] Exit:" in " ".join(frame.split())    # a narrow bar wraps (#400)
         page, count = map(int, re.search(r"Command Deck:.*?(\d+)/(\d+)", frame, re.S).groups())
         return "Q" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -8210,7 +8237,7 @@ def test_display_options_paging_and_back_write_nothing(monkeypatch, width, heigh
         frames.append(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
-        assert "[B]Back:" in " ".join(frame.split())
+        assert "[B] Back:" in " ".join(frame.split())
         page, count = map(int, re.search(r"(\d+)/(\d+)", frame).groups())
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -8284,7 +8311,7 @@ def test_real_display_saved_before_ack_and_applied_from_restart_title(tmp_path, 
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
 @pytest.mark.parametrize("patrol", [False, True])
 @pytest.mark.parametrize("style", ["auto", "plain"])
-def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch, width, height, patrol, style):
+def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch, without_action_bar, width, height, patrol, style):
     import re
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
     monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
@@ -8298,11 +8325,12 @@ def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch,
     state = {"fired": False, "details": False, "saved": None, "rng": None}
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0)
-        frames.append(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
+        frames.append(without_action_bar(vr._ANSI_RE.sub("", frame)))
         # A one-page screen drops its paging tokens (#412); the counter is the oracle.
-        assert "[I]Info" in frame and ("[<>]Page:" in frame or "/1" in frame)
+        bar = " ".join(frame.split())                        # a narrow bar wraps (#400)
+        assert "[I] Info" in bar and ("[<>] Page:" in bar or "/1" in bar)
         if not state["fired"]:
             state["fired"] = True
             return "F"
@@ -8322,14 +8350,12 @@ def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch,
         vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=patrol)
     assert len(snapshots) == 2
     # Join content rows only: a narrow page splits a phrase across frames, and the page
-    # header, the action bar and the echoed keypress would otherwise land between its two
-    # words.
+    # header and the echoed keypress would otherwise land between its two words. The
+    # action bar is already gone -- `without_action_bar` took it off as it was written.
     def body(frame):
-        rows = vr._ANSI_RE.sub("", frame).splitlines()
-        return [row for row in rows
+        return [row for row in frame.splitlines()
                 if not re.match(r"Combat [\d,]+cr \d+/\d+\s*$", row)
-                and not re.fullmatch(r"[A-Z0-9<>]", row)
-                and (not re.match(r"\[[A-Z<]", row) or re.match(r"\[[A-Z]\] ", row))]
+                and not re.fullmatch(r"[A-Z0-9<>]", row)]
     text = " ".join(" ".join(row for frame in frames for row in body(frame)).split())
     for label in ("Last exchange:", "damage.", "Tactical Systems:", "Cargo 3/24 used", "Your hull", "Fuel", "Shields Tier"):
         assert label in text
@@ -8392,7 +8418,7 @@ def test_unaffordable_customs_bribe_is_harmless_and_keeps_inspection_pending(mon
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
 @pytest.mark.parametrize("credits", [0, 10_000])
 @pytest.mark.parametrize("style", ["auto", "plain"])
-def test_customs_pages_keep_complete_terms_without_mutation(monkeypatch, width, height, credits, style):
+def test_customs_pages_keep_complete_terms_without_mutation(monkeypatch, without_action_bar, width, height, credits, style):
     import copy, re
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
     monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
@@ -8408,10 +8434,11 @@ def test_customs_pages_keep_complete_terms_without_mutation(monkeypatch, width, 
         frames.append(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
-        assert "[S]Surrender" in frame and ("[<>]Page:" in frame or "/1" in frame)
+        bar = " ".join(frame.split())                    # a narrow bar wraps (#400)
+        assert "[S] Surrender" in bar and ("[<>] Page:" in bar or "/1" in bar)
         if not credits: assert "[B]" not in frame
         plain = vr._ANSI_RE.sub("", frame)
-        content.append(re.search(r"\d+/\d+\r\n(.*?)\r\n\[S\]Surrender", plain, re.S).group(1))
+        content.append(re.sub(r"^[\s>]*Customs\s+[\d,]+cr\s+\d+/\d+", "", without_action_bar(plain)))
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         page, count = map(int, re.search(r"Customs.*?(\d+)/(\d+)", frame, re.S).groups())
         if page == count: raise EOFError
@@ -8627,7 +8654,7 @@ def test_tactical_brace_checkpoint_survives_real_kill_and_invalid_repeat(tmp_pat
     destination = sorted(world.here.connections)[0]
     world.save.active_missions = [vr.Mission(1, "bounty", "Intercept raider", 500, 0, destination, pirate_tier=2)]
     world.checkpoint(); vr.persist(world, tmp_path, 77)
-    with _door_stopped_at(tmp_path, b"CAYG", b"Braced;"):
+    with _door_stopped_at(tmp_path, b"CAYG", b"Guarding;"):
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         combat = saved.pending_travel["encounter"]["combat"]
         assert combat["tactics"]["version"] == vr.TACTICAL_RULESET_VERSION and not combat["tactics"]["brace_ready"]
@@ -8881,7 +8908,7 @@ def test_exploration_terms_fit_and_browsing_has_no_effects(monkeypatch, kind, wi
         page, count = map(int, re.search(r"(?:Derelict|Distress).*?(\d+)/(\d+)", frame, re.S).groups())
         if len(frames) == 1:
             first = " ".join(frame.split())
-            assert "30% ambush" in first if kind == "derelict" else "tank empty" in first
+            assert ("30%" in first) if kind == "derelict" else ("tank empty" in first)
             return "?"
         if page == count: raise EOFError
         return ">"
@@ -9198,7 +9225,7 @@ def test_survey_terms_before_and_after_scanning_fit_and_browsing_is_read_only(mo
         out = io.StringIO(); frames = []
         def choose():
             frame = out.getvalue(); out.seek(0); out.truncate(0); frames.append(frame)
-            assert "[B]Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
+            assert "[B] Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
             assert len(frame.splitlines()) <= height
             assert all(vr._visible_width(row) <= width for row in frame.splitlines())
             assert world.save.to_dict() == saved and world.event_rng.getstate() == rng
@@ -9255,7 +9282,7 @@ def test_review_combat_info_keeps_exchange_before_tactical_heading(monkeypatch, 
     world = _world_with_seed(42); pirate = vr.Pirate("Raider", 0, 50, 50)
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
     lines = vr.combat_display_lines(world, pirate, ["Your last shot hit."], patrol=False, details=True)
-    pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/P]Act [I]Info [< >]Page: ")
+    pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/P] Act [I] Info [< >]Page: ")
     assert pages[0][0] == "Last exchange:"
     assert lines.index("Your last shot hit.") < lines.index("Tactical Systems:")
 
@@ -9333,7 +9360,7 @@ def test_real_exchange_text_starts_on_first_combat_page(monkeypatch, width, heig
     _, _, result = vr.fight_round(world, pirate)
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
     lines = vr.combat_display_lines(world, pirate, result, patrol=False, details=details)
-    pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/P]Act [I]Info [< >]Page: ")
+    pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/P] Act [I] Info [< >]Page: ")
     assert len(pages[0]) > 1 and result[0].split()[0] in " ".join(pages[0][1:])
     text = " ".join(" ".join(row for page in pages for row in page).split())
     for entry in result: assert " ".join(entry.split()) in text
@@ -9425,7 +9452,7 @@ def test_invalid_archive_progress_preserves_original_career(tmp_path, flags):
 @pytest.mark.parametrize("stage", ["idle", "started", "recovered", "complete"])
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
 @pytest.mark.parametrize("style", ["auto", "plain"])
-def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, stage, width, height, style):
+def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, without_action_bar, stage, width, height, style):
     import copy,re
     world = _archive_world(stage)
     before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
@@ -9435,7 +9462,7 @@ def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, st
     world._checkpoint = lambda w: pytest.fail("Browsing archive wrote a checkpoint")
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
-        assert "[B]Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
+        assert "[B] Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
@@ -9447,7 +9474,7 @@ def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, st
     for frame in frames:
         plain=vr._ANSI_RE.sub("",frame)
         body=plain[re.search(r"Archive.*?\d+/\d+",plain,re.S).end():]
-        bodies.append(re.split(r"\[[A-Z]\](?:Accept|Investigate|Publish|Sell|Route|Back)",body)[0])
+        bodies.append(without_action_bar(body))
     assert " ".join(" ".join(bodies).split())==" ".join(" ".join(vr.archive_lines(world)).split())
 
 
@@ -9736,7 +9763,7 @@ def test_invalid_workshop_ledger_preserves_original_bytes(tmp_path, field, value
 @pytest.mark.parametrize("key", ["cargo", "engine", "scanner"])
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
 @pytest.mark.parametrize("style", ["auto", "plain"])
-def test_workshop_detail_pages_keep_terms_and_leave_career_untouched(monkeypatch, key, width, height, style):
+def test_workshop_detail_pages_keep_terms_and_leave_career_untouched(monkeypatch, without_action_bar, key, width, height, style):
     import copy,re
     world = _world_at_workshop(key)
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
@@ -9753,7 +9780,7 @@ def test_workshop_detail_pages_keep_terms_and_leave_career_untouched(monkeypatch
         match = re.search(r"Workshop\s+[\d,]+cr\s+(\d+)/(\d+)", plain)
         page, count = map(int, match.groups())
         payload = plain[match.end():]
-        payload = re.split(r"\[I\]Install|\[R\]Route", payload)[0]
+        payload = without_action_bar(payload)
         contents.append(payload.strip().removeprefix(">").strip())
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -10033,7 +10060,7 @@ def test_named_crew_roster_keeps_personality_progress_and_costs_without_writes(m
     world._checkpoint = lambda w: pytest.fail("Crew browsing checkpointed")
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
-        assert "[1-3]Task" in " ".join(vr._ANSI_RE.sub("",frame).split())
+        assert "[1-3] Task" in " ".join(vr._ANSI_RE.sub("",frame).split())
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
@@ -10141,8 +10168,9 @@ def test_crew_first_page_starts_with_available_specialist(monkeypatch, width, he
     output = io.StringIO()
     with contextlib.redirect_stdout(output): vr.screen_crew(vr.Palette(False), world)
     text = " ".join(vr._ANSI_RE.sub("", output.getvalue()).split())
-    assert "Gunner: Available" in text and vr.crew_name(world, "gunner") in text
+    assert "Gunner: Available" in text
     if width >= 40:
+        assert vr.crew_name(world, "gunner") in text
         assert "hire 800cr + 15cr/jump" in text and "+3 combat damage per hit" in text
     if "Promotions" in text: assert text.index("Gunner: Available") < text.index("Promotions")
 
@@ -10326,12 +10354,12 @@ def test_personal_crew_task_pages_keep_complete_terms_and_leave_no_writes(monkey
     world._checkpoint = lambda w: pytest.fail("Task browsing checkpointed")
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
-        assert "[B]Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
+        assert "[B] Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
         assert len(frame.splitlines()) <= height and all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         page, count = map(int, re.search(r"Crew task.*?(\d+)/(\d+)", frame, re.S).groups())
         plain = vr._ANSI_RE.sub("", frame)
-        body = re.sub(r"^[\s>]*Crew task\s+[\d,]+cr\s+\d+/\d+\s*", "", plain).split("[C]Complete")[0]
+        body = re.sub(r"^[\s>]*Crew task\s+[\d,]+cr\s+\d+/\d+\s*", "", plain).split("[C] Complete")[0]
         bodies.append(body)
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -10555,7 +10583,7 @@ def test_both_faction_memberships_can_be_joined_without_revoking_the_other(order
 @pytest.mark.parametrize("state", ["visitor", "eligible", "active", "suspended"])
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
 @pytest.mark.parametrize("style", ["auto", "plain"])
-def test_faction_contact_pages_preserve_all_terms_without_writes(monkeypatch, faction, state, width, height, style):
+def test_faction_contact_pages_preserve_all_terms_without_writes(monkeypatch, without_action_bar, faction, state, width, height, style):
     import copy,re
     world = _world_with_seed(42)
     world.save.pilot.reputation[faction] = -50 if state == "suspended" else 75 if state != "visitor" else 0
@@ -10569,12 +10597,12 @@ def test_faction_contact_pages_preserve_all_terms_without_writes(monkeypatch, fa
         frame = output.getvalue(); output.seek(0); output.truncate(0)
         assert len(frame.splitlines()) <= height and all(vr._visible_width(row) <= width for row in frame.splitlines())
         plain = vr._ANSI_RE.sub("", frame)
-        assert "[B]Back" in " ".join(plain.split())
-        if state=="eligible":assert "[J]Join" in " ".join(plain.split())
+        assert "[B] Back" in " ".join(plain.split())
+        if state=="eligible":assert "[J] Join" in " ".join(plain.split())
         match = re.search(r"[\d,]+cr\s+(\d+)/(\d+)", plain); assert match
         page, count = map(int, match.groups())
         body = re.sub(r"^[\s>]*\w+\s+[\d,]+cr\s+\d+/\d+\s*", "", plain)
-        bodies.append(re.split(r"\[(?:J|S|B)\](?:Join|Story|Back)", body)[0])
+        bodies.append(without_action_bar(body))
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -10811,7 +10839,7 @@ def test_faction_case_future_state_is_not_downgraded(tmp_path, record):
 @pytest.mark.parametrize("faction", vr.FACTIONS)
 @pytest.mark.parametrize("stage", ["idle", "accepted", "evidence", "committed", "complete"])
 @pytest.mark.parametrize("width,height,style", [(20, 10, "plain"), (40, 12, "auto"), (80, 24, "auto")])
-def test_faction_case_pages_preserve_full_terms_without_writes(monkeypatch, faction, stage, width, height, style):
+def test_faction_case_pages_preserve_full_terms_without_writes(monkeypatch, without_action_bar, faction, stage, width, height, style):
     import copy,re
     world = _faction_case_world(faction, stage)
     before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
@@ -10821,12 +10849,12 @@ def test_faction_case_pages_preserve_full_terms_without_writes(monkeypatch, fact
     monkeypatch.setattr(vr, "confirm", lambda *args: pytest.fail("Browsing opened a confirmation"))
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0)
-        assert "[B]Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
+        assert "[B] Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
         assert len(frame.splitlines()) <= height and all(vr._visible_width(row) <= width for row in frame.splitlines())
         plain = vr._ANSI_RE.sub("", frame)
         page, count = map(int, re.search(r"[\d,]+cr\s+(\d+)/(\d+)", plain).groups())
         body = re.sub(r"^[\s>]*Case\s+[\d,]+cr\s+\d+/\d+\s*", "", plain)
-        bodies.append(re.split(r"\[[A-Z]\](?:Accept|Aid|Investigate|Hardline|Complete|Route|Back)", body)[0])
+        bodies.append(without_action_bar(body))
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -11262,7 +11290,7 @@ def test_career_finale_complete_terms_fit_every_page_without_writes(monkeypatch,
         assert len(frame.splitlines())<=height and all(vr._visible_width(row)<=width for row in frame.splitlines())
         plain=vr._ANSI_RE.sub("",frame); page,count=map(int,re.search(r"Career Finale\s+(\d+)/(\d+)",plain).groups())
         body=re.sub(r"^[\s>]*Career Finale\s+\d+/\d+\s*","",plain)
-        bodies.append(body.split("[1-4]Choose")[0]); return "B" if page==count else ">"
+        bodies.append(body.split("[1-4] Choose")[0]); return "B" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):assert vr.screen_career_finale(vr.Palette(False),world) is None
     assert " ".join(" ".join(bodies).split())==" ".join(" ".join(vr.career_finale_lines(world.save,finale)).split())
@@ -11356,7 +11384,7 @@ def test_every_portrait_has_distinct_complete_bounded_composition(monkeypatch,wi
         assert all(row.isascii() and len(row)<=(38 if layout=="large" else 18) for art in portraits for row in art[layout])
     for art in portraits:
         details=["Real station information follows the complete portrait.", "Fuel 7/24; cargo 3/24 used."]
-        footer="[<>]Page [B]Back: "; title="Portrait"
+        footer="[<>] Page [B] Back: "; title="Portrait"
         pages=vr.portrait_pages(vr.Palette(True),art["large"],art["compact"],details,title,footer)
         rendered=[]
         for index,page in enumerate(pages):
@@ -11432,7 +11460,7 @@ def test_real_viewport_browsing_preserves_career_bytes(tmp_path,commands):
     info=tmp_path/"door_info.json"; info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,timeout=10,
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
-    assert result.returncode==0 and not result.stderr and b"[1-3]View" in result.stdout
+    assert result.returncode==0 and not result.stderr and b"[1-3] View" in result.stdout
     assert (tmp_path/"77.json").read_bytes()==before
 
 
@@ -11597,9 +11625,9 @@ def test_achievement_category_pages_keep_snapshot_complete_terms_and_all_navigat
         frame=output.getvalue();output.seek(0);output.truncate(0)
         assert len(frame.splitlines())<=height and all(vr._visible_width(row)<=width for row in frame.splitlines())
         plain=vr._ANSI_RE.sub("",frame)
-        assert "[1-5]View" in " ".join(plain.split()) and "[B]Back:" in " ".join(plain.split())
+        assert "[1-5] View" in " ".join(plain.split()) and "[B] Back:" in " ".join(plain.split())
         match=re.search(r"(\d+)/(\d+)",plain);page,count=map(int,match.groups())
-        bodies[list(vr.SCORE_CATEGORIES)[category]].append(plain[match.end():].split("[1-5]View")[0])
+        bodies[list(vr.SCORE_CATEGORIES)[category]].append(plain[match.end():].split("[1-5] View")[0])
         if page<count:return "N"
         category+=1;return str(category+1) if category<5 else "B"
     monkeypatch.setattr(vr,"read_key",choose)
@@ -11618,7 +11646,7 @@ def test_real_achievement_category_browsing_keeps_career_and_score_bytes(tmp_pat
     info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,timeout=10,
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
-    assert result.returncode==0 and not result.stderr and b"[1-5]View" in result.stdout
+    assert result.returncode==0 and not result.stderr and b"[1-5] View" in result.stdout
     assert {p:p.read_bytes() for p in paths}==before
 
 
@@ -11733,8 +11761,8 @@ def test_faction_case_route_becomes_available_only_after_committing_ending(monke
     def choose():
         key=next(keys);frame=output.getvalue();output.seek(0);output.truncate(0)
         if world.save.faction_stories[faction]["stage"]=="evidence":
-            assert "[R]Route" not in frame and world.save.to_dict()==before and world.event_rng.getstate()==rng
-        else:assert "[R]Route" in frame
+            assert "[R] Route" not in frame and world.save.to_dict()==before and world.event_rng.getstate()==rng
+        else:assert "[R] Route" in frame
         return key
     monkeypatch.setattr(vr,"read_key",choose)
     monkeypatch.setattr(vr,"screen_auto_route",lambda p,w,*,destination:routes.append(destination))
@@ -11749,7 +11777,7 @@ def test_faction_case_missing_haven_does_not_advertise_or_dispatch_hardline(monk
     keys=iter("HAB");output=io.StringIO();seen=[]
     def choose():
         key=next(keys);frame=output.getvalue();output.seek(0);output.truncate(0)
-        assert "[H]Hardline" not in frame
+        assert "[H] Hardline" not in frame
         if key=="A":assert world.save.faction_stories[vr.FACTION_BLACKWAKE]["stage"]=="evidence"
         return key
     world._checkpoint=lambda w:seen.append(w.save.faction_stories[vr.FACTION_BLACKWAKE]["choice"])
@@ -11767,8 +11795,8 @@ def test_faction_case_idle_route_is_unavailable_until_acceptance(monkeypatch,fac
     def choose():
         key=next(keys);frame=output.getvalue();output.seek(0);output.truncate(0)
         if faction not in world.save.faction_stories:
-            assert "[R]Route" not in frame and world.save.to_dict()==before and world.event_rng.getstate()==rng
-        else:assert "[R]Route" in frame
+            assert "[R] Route" not in frame and world.save.to_dict()==before and world.event_rng.getstate()==rng
+        else:assert "[R] Route" in frame
         return key
     monkeypatch.setattr(vr,"read_key",choose)
     monkeypatch.setattr(vr,"screen_auto_route",lambda p,w,*,destination:routes.append(destination))
@@ -11793,7 +11821,7 @@ def test_career_rank_checkpoint_notice_survives_spending_until_deck(monkeypatch,
         frame=output.getvalue();output.seek(0);output.truncate(0)
         assert len(frame.splitlines())<=height and all(vr._visible_width(line)<=width for line in frame.splitlines())
         plain=vr._ANSI_RE.sub("",frame);match=re.search(r"Command Deck:.*?(\d+)/(\d+)",plain,re.S);assert match
-        page,count=map(int,match.groups());bodies.append(plain[match.end():].split("[<]Prev")[0])
+        page,count=map(int,match.groups());bodies.append(plain[match.end():].split("[<] Prev")[0])
         return "Q" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):vr.screen_station_menu(vr.Palette(False),world)
@@ -11949,7 +11977,7 @@ def test_b_is_back_on_every_letter_list_screen_and_writes_nothing(monkeypatch, s
     with contextlib.redirect_stdout(io.StringIO()) as output:
         result = draw(vr.Palette(False), world)
     plain = vr._ANSI_RE.sub("", output.getvalue())
-    assert ("[B]Back" in plain or "[B]ack" in plain) and "[Q]Back" not in plain and result is None
+    assert ("[B] Back" in plain or "[B] Back" in plain) and "[Q] Back" not in plain and result is None
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
 
 
@@ -11995,7 +12023,7 @@ def test_combat_b_is_harmless_and_p_pays_the_bribe(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()) as output:
         outcome = vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=False)
     plain = vr._ANSI_RE.sub("", output.getvalue())
-    assert outcome == "escaped" and "[P] Pay bribe:" in plain and "[I]Info" in plain and "[Q]Info" not in plain
+    assert outcome == "escaped" and "[P] Pay bribe:" in plain and "[I] Info" in plain and "[Q] Info" not in plain
     assert world.save.pilot.credits == credits - vr.bribe_cost(pirate)
 
 
@@ -12007,7 +12035,7 @@ def test_customs_b_is_rejected_as_undisplayed_and_p_bribes(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_customs(vr.Palette(False), world)
     plain = vr._ANSI_RE.sub("", output.getvalue())
-    assert "Choose a displayed action" in plain and "[P]Pay bribe" in plain and "changes hands quietly" in plain
+    assert "Choose a displayed action" in plain and "[P] Pay bribe" in plain and "changes hands quietly" in plain
 
 
 # --- #401: futures orders reserve station stock ------------------------------------
@@ -12383,9 +12411,9 @@ def test_dossiers_record_losses_and_older_dossiers_still_load():
 def test_the_combat_bar_keeps_its_labels_until_the_page_cannot_afford_them(monkeypatch, width, labelled):
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
     bar = vr.combat_action_bar("F/E/D/P")
-    assert ("[F]Fire" in bar) == labelled
-    assert ("[F/E/D/P]Act" in bar) != labelled
-    assert "[I]Info" in bar and "[<>]Page: " in bar
+    assert ("[F] Fire" in bar) == labelled
+    assert ("[F/E/D/P] Act" in bar) != labelled
+    assert "[I] Info" in bar and "[<>] Page: " in bar
 
 
 def test_combat_lines_name_the_escort_at_stake_only_during_escort_fights():
@@ -12732,7 +12760,7 @@ def test_chart_continuations_are_indented_and_still_selectable(monkeypatch):
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 24)
     world = _world_with_seed(42); world.save.ship.fuel = 99
     for sid in world.here.connections: world.by_id[sid].discovered = True
-    pages = vr._chart_pages(world, "Navigation", "[B]Back: ", None)
+    pages = vr._chart_pages(world, "Navigation", "[B] Back: ", None)
     rows = [row for page in pages for row in page[0]]
     keyed = [row for row in rows if row.startswith("[") and row[1] in vr.CHART_CONNECTION_LETTERS]
     assert len(keyed) == len(world.here.connections)  # one key per destination, however many rows it wraps to
@@ -12762,15 +12790,15 @@ def test_mission_board_and_picker_continuations_carry_one_key(monkeypatch):
 
 
 def test_single_page_footers_drop_paging_tokens_but_keep_the_counter(monkeypatch):
-    assert vr.single_page_footer("[<]Prev [>]Next [R]Fuel [B]Back: ", 1) == "[R]Fuel [B]Back: "
-    assert vr.single_page_footer("[<>]Page [B]Back: ", 1) == "[B]Back: " and vr.single_page_footer("[<>]Page [B]Back: ", 2) == "[<>]Page [B]Back: "
+    assert vr.single_page_footer("[<] Prev [>] Next [R] Refuel [B] Back: ", 1) == "[R] Refuel [B] Back: "
+    assert vr.single_page_footer("[<>] Page [B] Back: ", 1) == "[B] Back: " and vr.single_page_footer("[<>] Page [B] Back: ", 2) == "[<>] Page [B] Back: "
     world = _world_with_seed(42)
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 60)
     monkeypatch.setattr(vr, "read_key", lambda: "B")
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_shipyard(vr.Palette(False), world)
     plain = " ".join(vr._ANSI_RE.sub("", output.getvalue()).split())
-    assert " 1/1 " in plain and "[<]Prev" not in plain and "[R]Fuel [P]Repair" in plain
+    assert " 1/1 " in plain and "[<] Prev" not in plain and "[R] Refuel [P] Repair" in plain
 
 
 def test_market_rows_fit_eighty_columns_without_filler_status():
@@ -12811,7 +12839,7 @@ def test_offer_page_one_points_to_accept_without_offering_it(monkeypatch):
     with contextlib.redirect_stdout(output):
         vr.screen_mission_details(vr.Palette(False), world, mission, active=False)
     first = " ".join(frames[0].split())
-    assert "[A] on last page." in first and "[A]ccept" not in first
+    assert "[A] on last page." in first and "[A] Accept" not in first
     assert not world.save.active_missions  # A on page 1 did not accept
 
 
@@ -12853,8 +12881,28 @@ def test_real_escape_at_the_departure_confirmation_keeps_the_pilot_docked(tmp_pa
 # --- #414: labelled combat action bar; Dump only with cargo --------------------------------
 
 
+def test_every_printed_hotkey_uses_the_one_style():
+    """`[K] Label` everywhere -- never `[B]ack`, never `[B]Back` (issue #400).
+
+    The game used to spell hotkeys three ways, sometimes two of them in one action
+    bar. Read the source rather than a sample of screens, because the styles that
+    were missed last time were on the screens nobody thought to render.
+    """
+    import re
+    source = _VOIDRUNNER_PATH.read_text(encoding="utf-8")
+    # A printed hotkey's opening bracket never follows an identifier or another
+    # closing bracket; that is what tells `[F]` in a message from `rows[0]` in code.
+    glued = re.findall(r"(?<![\w\]])(\[[A-Z0-9<>][A-Z0-9<>/,\-]{0,11}\][A-Za-z]\w*)", source)
+    assert not glued
+    # The bars composed at runtime spell it the same way.
+    for bar in (vr.combat_action_bar("F/G/E/D/P"),
+                vr._detail_action_bar("A/R", {"A": "Accept", "R": "Route"})):
+        assert not re.search(r"\]\S", bar)
+
+
 def test_combat_action_bar_labels_every_verb_and_matches_the_body(monkeypatch):
-    assert vr.combat_action_bar("F/G/E/D/P") == "[F]Fire [G]Brace [E]Evade [D]Dump [P]Bribe [I]Info [<>]Page: "
+    import re
+    assert vr.combat_action_bar("F/G/E/D/P") == "[F] Fire [G] Guard [E] Evade [D] Dump [P] Pay bribe [I] Info [<>] Page: "
     world, pirate = _world_with_pending_fight(tactics={"version": 2, "profile": "Raider", "step": 0, "brace_ready": True})
     world.save.pilot.credits = 10_000; world.save.cargo = {"food": 1}
     monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 60)
@@ -12869,7 +12917,8 @@ def test_combat_action_bar_labels_every_verb_and_matches_the_body(monkeypatch):
     bar = frame.rstrip().splitlines()[-1]
     keys = {part[1] for part in bar.split() if part.startswith("[") and len(part) > 2 and part[1] != "<"} - {"I"}
     body_keys = {line[1] for line in frame.splitlines() if len(line) > 3 and line[0] == "[" and line[2] == "]" and line[3] == " "}
-    assert keys == body_keys == {"F", "G", "E", "D", "P"} and "]Act" not in bar
+    assert keys == body_keys == {"F", "G", "E", "D", "P"}
+    assert not re.search(r"\]\S", bar)                     # one hotkey style: `[K] Label` (#400)
 
 
 def test_dump_is_absent_and_harmless_with_an_empty_hold(monkeypatch):
@@ -12888,7 +12937,7 @@ def test_dump_is_absent_and_harmless_with_an_empty_hold(monkeypatch):
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(io.StringIO()) as output, pytest.raises(EOFError):
         vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=False)
-    assert "[D]Dump" not in output.getvalue()
+    assert "[D] Dump" not in output.getvalue()
 
 
 # --- #415: First Flight hand-off and route-planning entry points ----------------------
@@ -12907,7 +12956,7 @@ def test_accepting_first_flight_returns_to_the_deck_with_the_next_step(monkeypat
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_pilot_guide(vr.Palette(False), world)  # returns on its own after acceptance
     assert world.save.active_missions and world.save.active_missions[0].opening_assignment
-    assert any(line.startswith("First Flight accepted and tracked. Next: [M]arket") for line in world.hop_report)
+    assert any(line.startswith("First Flight accepted and tracked. Next: [M] Market") for line in world.hop_report)
     page = _deck_page(world, monkeypatch)
     assert "Result: First Flight accepted and tracked." in page
 
@@ -12924,7 +12973,7 @@ def test_chart_route_planner_opens_the_destination_picker_first(monkeypatch):
     keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_auto_route(vr.Palette(False), world)
-    assert "Route Planner" in output.getvalue() and "[J]ump next" in output.getvalue()
+    assert "Route Planner" in output.getvalue() and "[J] Jump next" in output.getvalue()
 
 
 def _world_with_a_trade_lead():
@@ -12954,15 +13003,15 @@ def test_ledger_route_draft_starts_from_the_best_lead(monkeypatch):
     keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_trading_ledger(vr.Palette(False), world)
-    assert "[O]pportunities [R]oute [M]arkets" in output.getvalue()
+    assert "[O] Opportunities [R] Route [M] Markets" in output.getvalue()
 
 
 # --- #416: idle keys do not redraw; wording -----------------------------------------------
 
 
-@pytest.mark.parametrize("screen,footer", [("screen_chart", "[G]Route planner"),
-                                           ("screen_missions", "[B]ack"),
-                                           ("screen_trading_ledger", "[O]pportunities")])
+@pytest.mark.parametrize("screen,footer", [("screen_chart", "[G] Route planner"),
+                                           ("screen_missions", "[B] Back"),
+                                           ("screen_trading_ledger", "[O] Opportunities")])
 def test_idle_keys_are_absorbed_on_hand_rolled_action_bars_too(monkeypatch, screen, footer):
     """The rule holds on every action bar, not only the service pages (#416)."""
     world = _world_with_seed(42)
@@ -12980,7 +13029,7 @@ def test_idle_keys_at_an_action_bar_do_not_reprint_the_page(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()) as output:
         assert vr.screen_station_menu(vr.Palette(False), world) == "Q"
     text = vr._ANSI_RE.sub("", output.getvalue())
-    assert text.count("Command Deck:") == 1 and text.count("[Q]Exit:") == 1
+    assert text.count("Command Deck:") == 1 and text.count("[Q] Exit:") == 1
     keys = iter(["?", "Q"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_station_menu(vr.Palette(False), world)
@@ -13006,15 +13055,15 @@ def test_wording_uses_singular_forms_and_names_the_offer_refresh():
 
 
 @pytest.mark.parametrize("footer,expected", [
-    ("[<]Prev [>]Next [X]Expand [Q]Exit: ", "[X]Expand [Q]Exit: "),
-    ("[S]Story [B]Back [<>]Page: ", "[S]Story [B]Back: "),
-    ("[<>]Page [O/C/H/D]View [R]Finale [B]Back: ", "[O/C/H/D]View [R]Finale [B]Back: "),
-    ("[F]Fire [E]Evade [I]Info [<>]Page: ", "[F]Fire [E]Evade [I]Info: "),
-    ("[R]oute [N]ext [P]rev [B]ack", "[R]oute [B]ack"),
-    ("[1-9] Details [N]ext [P]rev [B]ack > ", "[1-9] Details [B]ack > "),
-    ("[A]ccept [N]ext [P]rev [B]ack: ", "[A]ccept [B]ack: "),
-    ("[1-5]View [N]Next [P]Prev [B]Back: ", "[1-5]View [B]Back: "),  # the Hall of Fame spelling
-    ("[E]dit draft [B]ack: ", "[E]dit draft [B]ack: "),
+    ("[<] Prev [>] Next [X] Expand [Q] Exit: ", "[X] Expand [Q] Exit: "),
+    ("[S] Story [B] Back [<>] Page: ", "[S] Story [B] Back: "),
+    ("[<>] Page [O/C/H/D] View [R] Finale [B] Back: ", "[O/C/H/D] View [R] Finale [B] Back: "),
+    ("[F] Fire [E] Evade [I] Info [<>] Page: ", "[F] Fire [E] Evade [I] Info: "),
+    ("[R] Route [N] Next [P] Prev [B] Back", "[R] Route [B] Back"),
+    ("[1-9] Details [N] Next [P] Prev [B] Back > ", "[1-9] Details [B] Back > "),
+    ("[A] Accept [N] Next [P] Prev [B] Back: ", "[A] Accept [B] Back: "),
+    ("[1-5] View [N] Next [P] Prev [B] Back: ", "[1-5] View [B] Back: "),  # the Hall of Fame spelling
+    ("[E] Edit draft [B] Back: ", "[E] Edit draft [B] Back: "),
 ])
 def test_single_page_footers_drop_every_spelling_of_the_paging_tokens(footer, expected):
     """The literal table missed every colon-terminated bar, which is most of them."""
@@ -13029,7 +13078,7 @@ def test_a_screen_that_fits_without_paging_tokens_is_one_page(monkeypatch):
     at 40 columns the market's own bar wraps to two rows and its shortened form to
     one, so the page that was two rows short of fitting now fits."""
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 24)
-    footer = "[<]Prev [>]Next [A,C-J]Trade [X]Futures [B]Back: "
+    footer = "[<] Prev [>] Next [A,C-J] Trade [X] Futures [B] Back: "
     rows = lambda text: len(vr._wrap_output(text, 39).split("\r\n"))
     assert rows(footer) > rows(vr.single_page_footer(footer, 1))
     capacity = len(vr._service_pages(["row"] * 200, "Title", footer)[0])
@@ -13045,8 +13094,8 @@ def test_contract_details_stop_advertising_paging_on_a_single_page(monkeypatch):
         vr.screen_mission_details(vr.Palette(False), world, mission, active=False)
     text = vr._ANSI_RE.sub("", output.getvalue())
     assert "Contract #" in text and "1/1" in text
-    assert "[N]ext" not in text and "[P]rev" not in text
-    assert "[A]ccept contract" in text and "[R]oute" in text
+    assert "[N] Next" not in text and "[P] Prev" not in text
+    assert "[A] Accept contract" in text and "[R] Route" in text
 
 
 def test_a_tagged_market_row_still_fits_one_line(monkeypatch):
@@ -13089,7 +13138,7 @@ def test_first_flight_names_its_acceptance_action_on_every_page(monkeypatch):
         assert vr._screen_opening_offer(vr.Palette(False), world, offer) is False
     plain = [vr._ANSI_RE.sub("", frame) for frame in frames]
     assert len(plain) > 1 and "[A] on last page." in plain[0]
-    assert "[A]ccept contract" in plain[-1]
+    assert "[A] Accept contract" in plain[-1]
     assert all(len(frame.splitlines()) <= 24 for frame in plain)
 
 
@@ -13117,7 +13166,7 @@ def test_precomputed_portrait_pages_also_paginate_against_the_shown_footer(monke
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
     world = _world_with_seed(42)
     large, compact, details, title = vr.viewport_content(world, "1")
-    footer = "[1-4]View [<]Prev [>]Next [B]Back: "
+    footer = "[1-4] View [<] Prev [>] Next [B] Back: "
     pages = vr.portrait_pages(vr.Palette(False), large, compact, details, title, footer)
     shortened = vr.single_page_footer(footer, 1)
     assert shortened != footer
@@ -13572,7 +13621,7 @@ def test_a_chart_entry_that_spans_pages_carries_its_letter_on_each(monkeypatch):
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 20); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 10)
     world = _world_with_seed(42)
     world.checkpoint()
-    pages = vr._chart_pages(world, "Navigation", "[G]Route planner [B]Back: ", None)
+    pages = vr._chart_pages(world, "Navigation", "[G] Route planner [B] Back: ", None)
     for rows, choices in pages:
         shown = {match[0] for row in rows for match in re.findall(r"^\[([A-Z])\] ", row)}
         assert set(choices) <= shown, (choices, rows)  # every offered letter is visible here

@@ -2922,6 +2922,7 @@ def new_tactics(pirate: Pirate, version: int = TACTICAL_RULESET_VERSION) -> dict
     resuming a checkpoint or switching squadron target inside one carries its
     saved `version` rather than adopting the current one (issue #406 review)."""
     profile = list(TACTICAL_PROFILES)[sum(map(ord, pirate.name)) % len(TACTICAL_PROFILES)]
+    # `brace_ready` is the saved field; the player-facing verb is Guard (#400).
     return {"version": version, "profile": profile, "step": 0, "brace_ready": True}
 
 
@@ -2955,9 +2956,9 @@ def squadron_terms(world: World) -> list[str]:
     if state["index"] != 0: return ["One raider remains: covering fire has ended. No repairs between foes."]
     target, wing = state["pirates"]
     lines = [f"Squadron: +{squadron_cover(world)} cover; target {target['name']} (T{target['tier']}).",
-             "Cover adds to incoming damage before Brace.",
+             "Cover adds to incoming damage before Guard.",
              f"Partner: {wing['name']}, tier {wing['tier']}, HP {wing['hp']}/{wing['hp_max']}; {new_tactics(Pirate(**wing))['profile']} pattern.",
-             "Destroy the target to prevent this return volley and end covering fire. Brace reduces combined damage.",
+             "Destroy the target to prevent this return volley and end covering fire. Guard reduces combined damage.",
              "Escape or an accepted bribe breaks contact with both raiders."]
     if not state["formation"]["engaged"]: lines.append("[T] Target: swap who you fight first; no turn or fuel cost. Selection closes after engaging.")
     return lines
@@ -2982,7 +2983,7 @@ def tactical_retaliation(world: World, pirate: Pirate, tactics: dict, *, braced:
 
 def tactical_round(world: World, pirate: Pirate, tactics: dict, action: str) -> tuple[int, int, list[str]]:
     if action not in ("F", "G") or (action == "G" and not tactics["brace_ready"]):
-        raise ValueError("Fire to recharge Brace before using it again.")
+        raise ValueError("Fire to recharge Guard before using it again.")
     if pirate.hp <= 0 or world.save.ship.hull_hp <= 0:
         raise ValueError("This exchange is already over.")
     ship = world.save.ship
@@ -2992,7 +2993,7 @@ def tactical_round(world: World, pirate: Pirate, tactics: dict, action: str) -> 
     if action == "G": damage = max(1, damage * 55 // 100)
     pirate.hp = max(0, pirate.hp - damage)
     tactics["brace_ready"] = action == "F"
-    lines = [f"You hit the {pirate.name} for {damage} damage." + (" Braced; fire to recharge." if action == "G" else "")]
+    lines = [f"You hit the {pirate.name} for {damage} damage." + (" Guarding; fire to recharge." if action == "G" else "")]
     if pirate.hp > 0:
         received, retaliation = tactical_retaliation(world, pirate, tactics, braced=action == "G")
         lines += retaliation
@@ -4219,13 +4220,13 @@ def letter_span(letters: list[str]) -> str:
     return ",".join(run[0] if len(run) == 1 else f"{run[0]}-{run[-1]}" for run in runs)
 
 
-# [S]can, [G]o to, [V]iew are fixed control keys on this same prompt,
+# [S] Scan, [G] Go to, [V] View are fixed control keys on this same prompt,
 # not per-connection row letters -- never assigned to a connection.
 # Dogfood-caught: `_connect_systems`'s own extra-edge pass can give a
 # single system up to ~7 connections (seen across a few thousand random
 # seeds), and "G" is only the *7th* letter -- a plain `LETTERS[index]`
 # assignment would silently make that 7th connection's own row letter
-# collide with (and be permanently shadowed by) the "[G]o to" hotkey,
+# collide with (and be permanently shadowed by) the "[G] Go to" hotkey,
 # unlike "S"/"V" which sit late enough in the alphabet to never
 # realistically collide with any observed degree.
 CHART_RESERVED_LETTERS = BACK_KEY + "SGVRQ"
@@ -4508,7 +4509,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
         lines = station_deck_lines(world, expanded=expanded)
         if completed:
             lines[0:0] = ["Result: " + message for message in completed]
-        footer = "[<]Prev [>]Next [X]Compact [Q]Exit: " if expanded else "[<]Prev [>]Next [X]Expand [Q]Exit: "
+        footer = "[<] Prev [>] Next [X] Compact [Q] Exit: " if expanded else "[<] Prev [>] Next [X] Expand [Q] Exit: "
         choice, page, count = _draw_service_page(p, f"Command Deck: {world.save.pilot.credits:,}cr", lines, footer, page)
         if (moved := page_step(choice, page, count)) is not None: page = moved
         elif choice == "X": expanded, page = not expanded, 0
@@ -4538,7 +4539,7 @@ def _screen_faction_contact(p: Palette, world: World, faction: str) -> None:
         available = faction_join_blocker(world, faction) is None
         lines = ([result] if result else []) + faction_contact_lines(world, faction)
         action, page, count = _draw_service_page(p, f"{FACTION_LABEL[faction].split()[0]} {world.save.pilot.credits:,}cr", lines,
-                                                "[J]Join [S]Story [B]Back [<>]Page: " if available else "[S]Story [B]Back [<>]Page: ", page)
+                                                "[J] Join [S] Story [B] Back [<>] Page: " if available else "[S] Story [B] Back [<>] Page: ", page)
         if action in ("B", "Q"): return
         if (moved := page_step(action, page, count)) is not None:
             page = moved
@@ -4597,7 +4598,7 @@ def screen_display_options(p: Palette, world: World) -> None:
                  "[4] Plain: ASCII artwork without ANSI styling. Unicode letters and text input stay UTF-8.",
                  "Sample: Hull 30/60; Fuel 8/24; Cargo 12/24 used. LOW FUEL / DANGER labels do not need color."]
         if result: lines.insert(0, result)
-        key, page, count = _draw_service_page(p, "Display Options", lines, "[1-4]Set [<]Prev [>]Next [B]Back: ", page)
+        key, page, count = _draw_service_page(p, "Display Options", lines, "[1-4] Set [<] Prev [>] Next [B] Back: ", page)
         if key in ("B", "Q"): return
         if (moved := page_step(key, page, count)) is not None: page = moved
         elif len(key) == 1 and "1" <= key <= "4":
@@ -5039,7 +5040,7 @@ def viewport_content(world: World, view: str) -> tuple[list[str],list[str],list[
 
 
 def screen_viewport(p: Palette, world: World, view: str = "1") -> None:
-    page=0;footer="[1-3]View [<>]Page [B]Back: "
+    page=0;footer="[1-3] View [<>] Page [B] Back: "
     while True:
         large,compact,details,title=viewport_content(world,view)
         details += ["Views: [1] Ship, [2] Station, [3] Discovery."]
@@ -5056,7 +5057,7 @@ def screen_landmark(p: Palette, world: World) -> None:
     while True:
         available = landmark_available_here(world)
         status = f"Unclaimed salvage: {world.landmark['reward_credits']}cr." if available else "Salvage already claimed or unavailable here."
-        footer = "[I]Investigate [B]Back [<>]Page: " if available else "[B]Back [<>]Page: "
+        footer = "[I] Investigate [B] Back [<>] Page: " if available else "[B] Back [<>] Page: "
         large,compact,_,_=viewport_content(world,"3")
         pages=portrait_pages(p,large,compact,[world.landmark["flavor"]],world.landmark["label"],footer,leading=result + [status])
         action,page,count=_draw_service_page(p,world.landmark["label"],[],footer,page,pages=pages)
@@ -5119,7 +5120,7 @@ def screen_market(p: Palette, world: World) -> None:
         goods = LEGAL_COMMODITIES + [c for c in CONTRABAND_COMMODITIES if world.here.economy == "Haven" or world.save.cargo.get(c, 0) > 0]
         lines = market_catalog_lines(world, goods)
         if result: lines.insert(0, "Result: " + result)
-        footer = f"[<]Prev [>]Next [{letter_span(MARKET_LETTERS[:len(goods)])}]Trade [X]Futures [B]Back: "
+        footer = f"[<] Prev [>] Next [{letter_span(MARKET_LETTERS[:len(goods)])}] Trade [X] Futures [B] Back: "
         key, page, count = _draw_service_page(p, f"Market: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return
         if (moved := page_step(key, page, count)) is not None:
@@ -5174,7 +5175,7 @@ def _screen_futures_order(p: Palette, world: World, contract: FuturesContract) -
                        if contract.reserved else "Signed before stock reservation: cancelling returns no stock."),
                       f"[X] Cancel: refund {contract.principal}cr, forfeit {fee}cr fee."]
         if result: lines.insert(0, "Result: " + result)
-        footer = "[<>]Page " + ("[X]Cancel " if contract.origin_system is not None else "") + "[B]Back: "
+        footer = "[<>] Page " + ("[X] Cancel " if contract.origin_system is not None else "") + "[B] Back: "
         key, page, count = _draw_service_page(p, f"Order #{contract.id}: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return None
         if (moved := page_step(key, page, count)) is not None: page = moved
@@ -5202,7 +5203,7 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
                  if quantity <= depth["stock"] else f"Station stock {depth['stock']} (+{depth['stock_rate']}/day): not enough for this order.",
                  "Full cargo space needed only at pickup. Cancellation refunds goods principal only; full holds leave orders waiting."]
         if result: lines.insert(0, "Result: " + result)
-        footer = "[<>]Page [U]Units [T]Term [S]Sign [B]Back: "
+        footer = "[<>] Page [U] Units [T] Term [S] Sign [B] Back: "
         key, page, count = _draw_service_page(p, f"Order {COMMODITIES[commodity]['label']}: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return None
         if (moved := page_step(key, page, count)) is not None: page = moved
@@ -5233,7 +5234,7 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
 def trading_ledger_lines(world: World) -> list[str]:
     ledger = world.save.trading_ledger
     lines = [
-        "[B]ack returns to the deck. This ledger is read-only.",
+        "[B] Back returns to the deck. This ledger is read-only.",
         f"Credits available: {world.save.pilot.credits:,}cr.",
         (f"Recorded activity since day {ledger.since_day}; today is day {world.save.turn}."
          if ledger.since_day is not None else "No activity recorded yet. Earlier career costs are unknown."),
@@ -5345,7 +5346,7 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
     name = world.by_id[destination].name if destination is not None else "not selected"
     lines = [f"Destination: {name}. Cargo: {COMMODITIES[commodity]['label']} x{quantity}.",
              f"Source: {'existing hold cargo' if use_hold else 'buy new cargo here'}. Credits: {world.save.pilot.credits:,}cr.",
-             "Use [E]dit draft to change the route. Back makes no changes; this estimate never buys cargo or launches a route."]
+             "Use [E] Edit draft to change the route. Back makes no changes; this estimate never buys cargo or launches a route."]
     if destination is None:
         return lines + ["No other station has remembered prices yet. Visit another station or receive a trader's market report first."]
     try:
@@ -5396,7 +5397,7 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
 
 
 def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choices: int = 9, notice: list[str] | None = None, page_state: dict[str, int] | None = None) -> object | None:
-    footer = f"[1-{max_choices}] Select [N]ext [P]rev [B]ack: "
+    footer = f"[1-{max_choices}] Select [N] Next [P] Prev [B] Back: "
     notice_rows = [row for line in notice or [] for row in _wrap_output(_mission_plain(line), max(1, _OUTPUT_WIDTH - 1)).split("\r\n")]
     wrapped_options = [(value, _mission_plain(label), _wrap_output(_mission_plain(label), max(1, _OUTPUT_WIDTH - 5)).split("\r\n"))
                        for value, label in options]
@@ -5421,8 +5422,8 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choi
             # Only its final part is selectable, after every part was viewed.
             if not pages[-1]["rows"]: pages.pop()
             heading = f"Choice {ordinal}"
-            select_footer = "[1]Pick [N/P] [B]Back: "
-            more_footer = "[N]More [P]Prev [B]Back: "
+            select_footer = "[1] Pick [N/P] [B] Back: "
+            more_footer = "[N] More [P] Prev [B] Back: "
             size = min(budget(heading, select_footer), budget(heading, more_footer))
             rows = _wrap_output(label, max(1, _OUTPUT_WIDTH - 1)).split("\r\n")
             chunks = [rows[i:i + size] for i in range(0, len(rows), size)]
@@ -5450,7 +5451,7 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choi
         out_line(); out_line(f"{current['title']} {page + 1}/{len(pages)}")
         for row in current["rows"]: out_line(row)
         seen.add(page)
-        controls = current["footer"] if current["choices"] or current["required"] else "[N]ext [P]rev [B]ack: "
+        controls = current["footer"] if current["choices"] or current["required"] else "[N] Next [P] Prev [B] Back: "
         if current["choices"] and not current["required"]:
             count = len(current["choices"])
             span = "[1]" if count == 1 else f"[1-{count}]"
@@ -5476,7 +5477,7 @@ def edit_door_draft(*, title: str, initial: dict, fields: list[tuple],
     """
     draft = dict(initial)
     page, error = 0, None
-    footer = " ".join(f"[{key}]{label}" for key, label, _, _ in fields) + " [S]Apply [N]ext [P]rev [B]ack: "
+    footer = " ".join(f"[{key}] {label}" for key, label, _, _ in fields) + " [S] Apply [N] Next [P] Prev [B] Back: "
     while True:
         lines = [f"[{key}] {label}: {display(draft)}" for key, label, display, _ in fields]
         lines += ["Apply uses these draft values. Back discards edits; no career data is written."]
@@ -5556,7 +5557,7 @@ def screen_trade_route(p: Palette, world: World, *, initial: dict | None = None)
         "destination": destinations[0] if destinations else None,
         "commodity": "food", "quantity": 1, "use_hold": False}
     page = 0
-    footer = "[E]dit draft [N]ext [P]rev [B]ack: "
+    footer = "[E] Edit draft [N] Next [P] Prev [B] Back: "
     while True:
         pages = _trade_pages(trade_route_lines(world, **parameters), "Trade Route", footer)
         page = min(page, len(pages) - 1)
@@ -5578,7 +5579,7 @@ def screen_trade_route(p: Palette, world: World, *, initial: dict | None = None)
 
 
 def screen_remembered_markets(p: Palette, world: World) -> None:
-    footer = "[N]ext [P]rev [B]ack: "
+    footer = "[N] Next [P] Prev [B] Back: "
     pages = _trade_pages(remembered_market_lines(world), "Market Memory", footer)
     page = 0
     while True:
@@ -5679,7 +5680,7 @@ def economy_opportunity_lines(world: World, candidates: list[dict]) -> list[str]
 
 def screen_economy_opportunities(p: Palette, world: World) -> None:
     candidates = trade_opportunities(world)
-    footer = "[1-6] Route [N]ext [P]rev [B]ack: "
+    footer = "[1-6] Route [N] Next [P] Prev [B] Back: "
     pages = _trade_pages(economy_opportunity_lines(world, candidates), "Opportunities", footer)
     page = 0
     while True:
@@ -5701,7 +5702,7 @@ def screen_economy_opportunities(p: Palette, world: World) -> None:
 
 
 def screen_trading_ledger(p: Palette, world: World) -> None:
-    footer = "[O]pportunities [R]oute [M]arkets [N]ext [P]rev [B]ack: "
+    footer = "[O] Opportunities [R] Route [M] Markets [N] Next [P] Prev [B] Back: "
     pages = _trade_pages(trading_ledger_lines(world), "Trading Ledger", footer)
     page = 0
     while True:
@@ -5734,7 +5735,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
     lines = [f"{purchase}; sell {sell}cr/unit.",
              f"Credits: {world.save.pilot.credits}cr. Hold: {world.save.cargo.get(commodity, 0)} units.",
              f"Stock {depth['stock']} (+{depth['stock_rate']}/day); station buys {depth['demand']} (+{depth['demand_rate']}/day)."]
-    footer = ("" if prohibited else "[P]urchase ") + "[S]ell [<>]Page [B]ack: "
+    footer = ("" if prohibited else "[P] Purchase ") + "[S] Sell [<>] Page [B] Back: "
     title = f"{label} Exchange"
     pages = _trade_pages(lines, title, footer)
     page = 0
@@ -5880,7 +5881,7 @@ def screen_workshop(p: Palette, world: World, key: str) -> str | None:
     page, result = 0, None
     while True:
         available = workshop_blocker(world, key) is None
-        footer = ("[I]Install " if available else "") + "[R]Route [B]Back [<>]Page: "
+        footer = ("[I] Install " if available else "") + "[R] Route [B] Back [<>] Page: "
         lines = (["Result: " + result] if result else []) + workshop_lines(world, key)
         action, page, count = _draw_service_page(p, f"Workshop {world.save.pilot.credits:,}cr", lines, footer, page)
         if action in ("B", "Q"): return result
@@ -5906,7 +5907,7 @@ def screen_specialists(p: Palette, world: World) -> str | None:
             station = world.by_id[stations[key]]
             lines.append(f"[{index}] {shop['name']}: {shop['owner']}, {UPGRADES[key]['label']}. {station.name}, {station.station_name}.")
         lines.append("Public bearings do not chart stations or reveal their market prices. Standard services remain available at every yard.")
-        action, page, count = _draw_service_page(p, "Specialist Workshops", lines, "[1-3]View [B]Back [<>]Page: ", page)
+        action, page, count = _draw_service_page(p, "Specialist Workshops", lines, "[1-3] View [B] Back [<>] Page: ", page)
         if action in ("B", "Q"): return result
         if (moved := page_step(action, page, count)) is not None:
             page = moved
@@ -5939,7 +5940,7 @@ def shipyard_lines(world: World) -> list[str]:
 
 def _detail_action_bar(actions: str, labels: dict[str, str]) -> str:
     """Keep every available action and the harmless exit explicit on all pages."""
-    return "".join(f"[{key}]{labels[key]} " for key in actions.split("/") if key) + "[B]Back [<>]Page: "
+    return "".join(f"[{key}] {labels[key]} " for key in actions.split("/") if key) + "[B] Back [<>] Page: "
 
 
 def _paginate_against_shown_footer(build, footer: str):
@@ -5968,15 +5969,15 @@ def _service_pages_for(lines: list[str], title: str, footer: str) -> list[list[s
     return paginate([wrapped_group(line) for line in lines], page_capacity(lines, title, footer))
 
 
-# Footers spell paging several ways and end either with a space, the prompt's
-# own colon or " > ", so the tokens are matched by shape rather than by exact
-# text: a literal table missed every colon-terminated bar, which is most of them
-# (issue #412 review).
-_PAGING_PATTERN = re.compile(r"\[<\]\s*Prev\s+\[>\]\s*Next"
-                             r"|\[N\](?:ext|Next)\s+\[P\](?:rev(?:ious)?|Prev)"
-                             r"|\[P\](?:rev(?:ious)?|Prev)\s+\[N\](?:ext|Next)"
-                             r"|\[<\s*>\]\s*Page"
-                             r"|\[<\]\s*\[>\]")
+# Every hotkey in the game is written `[K] Label` (issue #400), so the paging
+# tokens have one spelling each; they are still matched by shape rather than by
+# whole-footer text, because a footer ends with a space, the prompt's own colon
+# or " > " (issue #412 review).
+_PAGING_PATTERN = re.compile(r"\[<\] Prev \[>\] Next"
+                             r"|\[N\] Next \[P\] Prev(?:ious)?"
+                             r"|\[P\] Prev(?:ious)? \[N\] Next"
+                             r"|\[<>\] Page"
+                             r"|\[<\] \[>\]")
 
 
 ARROW_PAGING_KEYS = ("<", ">")
@@ -6048,7 +6049,7 @@ def read_command_at_prompt() -> str:
 
 def screen_shipyard(p: Palette, world: World) -> None:
     page, result = 0, None
-    footer = "[<]Prev [>]Next [R]Fuel [P]Repair [K]Crew [S]Specialists [V]Ship [B]Back: "
+    footer = "[<] Prev [>] Next [R] Refuel [P] Repair [K] Crew [S] Specialists [V] Ship [B] Back: "
     while True:
         lines = shipyard_lines(world)
         if result: lines.insert(0, "Result: " + result)
@@ -6095,7 +6096,7 @@ def crew_roster_lines(world: World) -> list[str]:
             state = "available" if hired else "available after rehiring"
         else:
             state = "unlocks after hiring and five paid jumps"
-        lines.append(f"[{index + 1}]Task: {CREW_ASSIGNMENTS[role]['title']}; {state}.")
+        lines.append(f"[{index + 1}] Task: {CREW_ASSIGNMENTS[role]['title']}; {state}.")
     lines.extend([
         "Specialists earn wages on every jump, including detours.",
         "Promotions follow 5, 15 and 30 paid jumps. Rehiring keeps recorded experience; earlier unrecorded service is unknown.",
@@ -6219,7 +6220,7 @@ def screen_crew_assignment(p: Palette, world: World, role: str) -> str | None:
 
 def screen_crew(p: Palette, world: World) -> None:
     page, result = 0, None
-    footer = f"[<>]Page [1-3]Task [{letter_span(CREW_LETTERS[:len(CREW_ROLES)])}]Crew [B]ack: "
+    footer = f"[<>] Page [1-3] Task [{letter_span(CREW_LETTERS[:len(CREW_ROLES)])}] Crew [B] Back: "
     while True:
         lines = crew_roster_lines(world)
         if result: lines.insert(0, "Result: " + result)
@@ -6352,7 +6353,7 @@ def _repair(p: Palette, world: World) -> str | None:
 
 def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -> str | None:
     """Read-only commissioning preview, then deliberate action and confirmation."""
-    page,result=0,None;footer="[C]Commission [B]Back [<>]Page: "
+    page,result=0,None;footer="[C] Commission [B] Back [<>] Page: "
     while True:
         ship=world.save.ship;preview=dataclasses.replace(ship,hull_class=target_class)
         preview.hull_hp=hull_hp_max(preview)
@@ -6579,7 +6580,7 @@ def pilot_recap(world: World) -> list[str]:
 
 
 def pilot_guide_lines(world: World) -> list[str]:
-    lines = ["Use [B]ack to return to the station deck before using its market, yard or chart commands.",
+    lines = ["Use [B] Back to return to the station deck before using its market, yard or chart commands.",
              "Your ship is your livelihood. Supply outlying stations, build capital, and choose what kind of pilot to become."]
     lines += pilot_recap(world)
     active = next((m for m in world.save.active_missions if m.opening_assignment), None)
@@ -6592,18 +6593,18 @@ def pilot_guide_lines(world: World) -> list[str]:
     elif world.save.flags.get("opening_assignment_taken"):
         lines.append("First Flight is closed. An abandoned introductory job cannot be taken again this career.")
     elif opening_assignment_offer(world) is not None:
-        lines.append("Optional First Flight: Freeport merchants will sponsor one local delivery. [O]ffer shows all terms before acceptance.")
+        lines.append("Optional First Flight: Freeport merchants will sponsor one local delivery. [O] Offer shows all terms before acceptance.")
     else:
         lines.append("First Flight needs an affordable cargo and return-fuel budget while still at Freeport on day zero. The guide remains available anywhere.")
     lines += [
-        "1. Buy cargo: [M]arket, choose the commodity's letter, [P]urchase, enter a quantity. Buying spends credits and needs free hold space. Enter with no quantity cancels.",
-        "2. Keep fuel: [Y]ard, [R]efuel. Each fuel unit costs 6 cr. Reserve enough for the outward and return jumps; keep credits for repairs and crew wages too.",
-        "3. Depart: [C]hart, select the destination's letter, then confirm its fuel cost and danger. A jump advances one day, uses fuel and charges wages. Browsing, trading and upgrades do not advance the day.",
-        "4. Deliver a contract by docking with its full cargo. Ordinary trading instead uses [M]arket, commodity letter, [S]ell. Sales pay less than the local buy quote; distant prices can change.",
-        f"5. First upgrade: [Y]ard, [{YARD_LETTERS[list(UPGRADES).index('cargo')]}] Cargo Bay Expansion adds 8 cargo spaces. [{YARD_LETTERS[list(UPGRADES).index('hull')]}] Hull Reinforcement adds 35 maximum hull. Keep travel money before investing.",
+        "1. Buy cargo: [M] Market, choose the commodity's letter, [P] Purchase, enter a quantity. Buying spends credits and needs free hold space. Enter with no quantity cancels.",
+        "2. Keep fuel: [Y] Yard, [R] Refuel. Each fuel unit costs 6 cr. Reserve enough for the outward and return jumps; keep credits for repairs and crew wages too.",
+        "3. Depart: [C] Chart, select the destination's letter, then confirm its fuel cost and danger. A jump advances one day, uses fuel and charges wages. Browsing, trading and upgrades do not advance the day.",
+        "4. Deliver a contract by docking with its full cargo. Ordinary trading instead uses [M] Market, commodity letter, [S] Sell. Sales pay less than the local buy quote; distant prices can change.",
+        f"5. First upgrade: [Y] Yard, [{YARD_LETTERS[list(UPGRADES).index('cargo')]}] Cargo Bay Expansion adds 8 cargo spaces. [{YARD_LETTERS[list(UPGRADES).index('hull')]}] Hull Reinforcement adds 35 maximum hull. Keep travel money before investing.",
         f"Your next cargo tier costs {UPGRADES['cargo']['cost'](world.save.ship.cargo_tier):,} cr." if world.save.ship.cargo_tier < UPGRADES['cargo']['max_tier'] else "Your cargo upgrades are complete.",
         "Danger is a risk rating, not a guarantee you can win a fight. Evasion can fail; bribes cost credits and can be refused. Read the encounter choices before acting.",
-        "The Mission Board ([B] on the station deck) shows full contract terms, tracking and abandonment. [G]uide keeps this recap available. On every other screen [B] is Back; [Q] on the station deck saves and leaves the game.",
+        "The Mission Board ([B] on the station deck) shows full contract terms, tracking and abandonment. [G] Guide keeps this recap available. On every other screen [B] is Back; [Q] on the station deck saves and leaves the game.",
     ]
     return lines
 
@@ -6616,8 +6617,8 @@ def _opening_next_step(world: World, offer: Mission) -> str:
     station = world.by_id[offer.target_system].name
     missing = max(0, offer.quantity - world.save.cargo.get(offer.commodity, 0))
     if not missing:
-        return f"[C]hart to {station}; all {plural(offer.quantity, 'unit')} of {label} are already aboard."
-    return f"[M]arket, buy {plural(missing, 'unit')} of {label}, then [C]hart to {station}."
+        return f"[C] Chart to {station}; all {plural(offer.quantity, 'unit')} of {label} are already aboard."
+    return f"[M] Market, buy {plural(missing, 'unit')} of {label}, then [C] Chart to {station}."
 
 
 def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
@@ -6630,7 +6631,7 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
               f"Current crew: {wage} cr per jump, {2 * wage} cr for delivery and return.",
               "Payment covers the quoted three units, round-trip fuel and current crew wages plus 200 cr. Detours, repairs, encounters and later prices can change your result.",
               "No deadline. This uses one active-contract slot. Abandonment closes First Flight for this career; the guide stays available.",
-              "After acceptance, use [M]arket to buy the goods, [Y]ard to refuel if needed, then [C]hart to jump to the named station."]
+              "After acceptance, use [M] Market to buy the goods, [Y] Yard to refuel if needed, then [C] Chart to jump to the named station."]
     pages = _mission_text_pages(lines, overhead=6)  # one row reserved for the acceptance pointer
     page = 0
     while True:
@@ -6639,8 +6640,8 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
         for line in pages[page]:
             out_line(line)
         # The first screen of the game must not hide its one action (issue #412 review).
-        out_line("[A]ccept contract" if page == len(pages) - 1 else "[A] on last page.")
-        out_prompt(single_page_footer(("[A]ccept " if page == len(pages) - 1 else "") + "[N]ext [P]rev [B]ack: ", len(pages)))
+        out_line("[A] Accept contract" if page == len(pages) - 1 else "[A] on last page.")
+        out_prompt(single_page_footer(("[A] Accept " if page == len(pages) - 1 else "") + "[N] Next [P] Prev [B] Back: ", len(pages)))
         key = read_command_at_prompt()
         if key in ("B", "Q"):
             return False
@@ -6668,7 +6669,7 @@ def screen_pilot_guide(p: Palette, world: World) -> None:
         out_line(f"Pilot Guide {page + 1}/{len(pages)}")
         for line in pages[page]:
             out_line(line)
-        out_prompt(("[O]ffer " if offer is not None else "") + "[N]ext [P]rev [B]ack: ")
+        out_prompt(("[O] Offer " if offer is not None else "") + "[N] Next [P] Prev [B] Back: ")
         key = read_command_at_prompt()
         if key in ("B", "Q"):
             return
@@ -6788,7 +6789,7 @@ def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, act
     while True:
         if pages is None:
             live = active and any(m.id == mission.id for m in world.save.active_missions) and not mission_expired(world, mission)
-            footer = ("[J]ump next " if live and not (mission.kind == "scan" and world.by_id[mission.target_system].discovered) and mission_route(world, mission) else "") + "[V]Map [N]ext [P]rev [B]ack: "
+            footer = ("[J] Jump next " if live and not (mission.kind == "scan" and world.by_id[mission.target_system].discovered) and mission_route(world, mission) else "") + "[V] Map [N] Next [P] Prev [B] Back: "
             lines = ([mission.description, "Contract is no longer active. Return to the board or career log."]
                      if active and not live else mission_navigation_lines(world, mission, active=active))
             if result:
@@ -6833,8 +6834,8 @@ def screen_mission_details(p: Palette, world: World, mission: Mission, *, active
         lines = mission_details(world, mission)
         max_pages = sum(len(_wrap_output(line, max(1, _OUTPUT_WIDTH - 1)).split("\r\n")) for line in lines)
         title = f"Contract #{mission.id} {max_pages}/{max_pages}"
-        footer = "[R]oute [N]ext [P]rev [B]ack > "
-        pointer_rows = len(_wrap_output(f"[A] on the last page ({max_pages}; [N]ext).", max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
+        footer = "[R] Route [N] Next [P] Prev [B] Back > "
+        pointer_rows = len(_wrap_output(f"[A] on the last page ({max_pages}; [N] Next).", max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
         overhead = max(7, 1 + len(_wrap_output(title, _OUTPUT_WIDTH).split("\r\n"))
                        + len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
                        + (2 if active else pointer_rows))
@@ -6844,13 +6845,13 @@ def screen_mission_details(p: Palette, world: World, mission: Mission, *, active
         out_line(f"{p.gold}Contract #{mission.id} {page + 1}/{len(pages)}{RESET}")
         for row in pages[page]:
             out_line(row)
-        actions = single_page_footer("[R]oute [N]ext [P]rev [B]ack", len(pages))
+        actions = single_page_footer("[R] Route [N] Next [P] Prev [B] Back", len(pages))
         if active:
             toggle = "Untrack" if world.save.tracked_mission_id == mission.id else "Track"
             out_line(f"[T] {toggle}")
             out_line("[D] Abandon")
         elif page == len(pages) - 1:
-            out_line("[A]ccept contract")
+            out_line("[A] Accept contract")
         else:
             out_line("[A] on last page.")
         out_prompt(actions + " > ")
@@ -6901,7 +6902,7 @@ def screen_missions(p: Palette, world: World) -> None:
         posted = world.save.mission_boards.get(world.save.current_system)
         if posted:
             summary.append(f"New offers on day {posted['refresh_turn']}")
-        footer = "[1-9] Details [N]ext [P]rev [B]ack > "
+        footer = "[1-9] Details [N] Next [P] Prev [B] Back > "
         # Measured like every other screen: the content column is one narrower than
         # the terminal, and the board's own summary rows are part of its overhead.
         width = max(1, _OUTPUT_WIDTH - 1)
@@ -6947,7 +6948,7 @@ def screen_missions(p: Palette, world: World) -> None:
 def pilot_record_lines(world: World, section: str = "O") -> list[str]:
     """Complete retained records, without display truncation or state changes."""
     pilot, ship = world.save.pilot, world.save.ship
-    lines = ["Views: [O]Pilot [C]Jobs [H]Log [D]Dossiers"]
+    lines = ["Views: [O] Pilot [C] Jobs [H] Log [D] Dossiers"]
     if section == "C":
         lines.append(f"Active Contracts & Missions: {len(world.save.active_missions)}. Full terms, tracking and routes: station [B] Mission Board.")
         for mission in world.save.active_missions:
@@ -6995,7 +6996,7 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
     page, result = 0, None
     while True:
         lines = ([result] if result else []) + career_finale_lines(world.save, selected)
-        key, page, count = _draw_service_page(p, "Career Finale", lines, "[1-4]Choose [S]Retire [<>]Page [B]Back: ", page)
+        key, page, count = _draw_service_page(p, "Career Finale", lines, "[1-4] Choose [S] Retire [<>] Page [B] Back: ", page)
         if key in ("B", "Q"): return result
         if (moved := page_step(key, page, count)) is not None: page = moved; continue
         if key in ("1", "2", "3", "4"): selected, page = list(CAREER_FINALES)[int(key)-1], 0; continue
@@ -7022,8 +7023,8 @@ def screen_status(p: Palette, world: World) -> None:
     section, page, result = "O", 0, None
     cache = {}
     while True:
-        footer = "[<>]Page [O/C/H/D]View " if _OUTPUT_WIDTH < 30 else "[<]Prev [>]Next [O]Pilot [C]Jobs [H]Log [D]Dossiers "
-        footer += "[R]Finale [B]Back: "
+        footer = "[<>] Page [O/C/H/D] View " if _OUTPUT_WIDTH < 30 else "[<] Prev [>] Next [O] Pilot [C] Jobs [H] Log [D] Dossiers "
+        footer += "[R] Finale [B] Back: "
         title = "Pilot Record: " + {"O":"Overview", "C":"Contracts", "H":"History", "D":"Dossiers"}[section]
         if section not in cache:
             lines = pilot_record_lines(world, section)
@@ -7092,7 +7093,7 @@ def achievement_lines(entries: list[dict], category: str, user_id: int) -> list[
 
 def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) -> None:
     entries = _load_score_records(save_dir)
-    footer = "[1-5]View [N]Next [P]Prev [B]Back: "
+    footer = "[1-5] View [N] Next [P] Prev [B] Back: "
     category, page, cache = "wealth", 0, {}
     while True:
         title = "Hall of Fame: " + SCORE_CATEGORIES[category]
@@ -7120,9 +7121,9 @@ def chart_entries(world: World, result: str | None = None) -> list[tuple[int | N
     mission = tracked_mission(world)
     route = mission_route(world, mission) if mission and not (mission.kind == "scan" and world.by_id[mission.target_system].discovered) else []
     if mission: entries.append((None, f"Tracked #{mission.id}: {mission_bearing(world, mission)}"))
-    actions = "[G]Route planner [V]Map/list"
-    if world.save.ship.scanner_tier > 0: actions += " [S]Scan"
-    if mission: actions += " [R]Contract route"
+    actions = "[G] Route planner [V] Map/list"
+    if world.save.ship.scanner_tier > 0: actions += " [S] Scan"
+    if mission: actions += " [R] Contract route"
     entries.append((None, actions))
     for sid in sorted(here.connections):
         dest = world.by_id[sid]
@@ -7177,7 +7178,7 @@ def departure_terms(world: World, dest_id: int) -> str:
 def screen_chart(p: Palette, world: World) -> int | None:
     """Return a deliberately selected and confirmed adjacent destination, or Back."""
     page, result = 0, None
-    footer = "[<]Prev [>]Next [B]Back: " if _OUTPUT_WIDTH >= 30 else "[<] [>] [B]Back: "
+    footer = "[<] Prev [>] Next [B] Back: " if _OUTPUT_WIDTH >= 30 else "[<] [>] [B] Back: "
     while True:
         title = f"Navigation: Fuel {world.save.ship.fuel}/{fuel_capacity(world.save.ship)}"
         pages = _chart_pages(world, title, footer, result)
@@ -7268,7 +7269,7 @@ def _do_scan(p: Palette, world: World) -> str | None:
         can_scan = world.save.ship.scanner_tier > 0 and world.save.ship.fuel >= 2 and bool(survey_candidates(world))
         lines = ([f"Result: {result}"] + report if result else []) + survey_terms(world)
         action, page, count = _draw_service_page(p, f"Survey {world.save.pilot.credits:,}cr", lines,
-            "[S]Survey [B]Back [<>]Page: " if can_scan else "[B]Back [<>]Page: ", page)
+            "[S] Survey [B] Back [<>] Page: " if can_scan else "[B] Back [<>] Page: ", page)
         if action in ("B", "Q"): return result
         if (moved := page_step(action, page, count)) is not None:
             page = moved
@@ -7390,7 +7391,7 @@ def map_inspection_lines(world: World, sid: int, path: list[int], public_target:
 
 
 def _screen_map_info(world: World, sid: int, path: list[int], public_target: int | None) -> None:
-    title, footer = "Station Info", "[N]ext [P]rev [B]ack: "
+    title, footer = "Station Info", "[N] Next [P] Prev [B] Back: "
     pages = _trade_pages(map_inspection_lines(world, sid, path, public_target), title, footer)
     page = 0
     while True:
@@ -7415,7 +7416,7 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
     compact = _OUTPUT_WIDTH < 40 or _OUTPUT_HEIGHT < 12
     list_mode, page = compact, 0
     title = "Charted Systems"
-    list_footer = "[N]ext [P]rev " + ("" if compact else "[M]ap ") + "[I]nfo [B]ack: "
+    list_footer = "[N] Next [P] Prev " + ("" if compact else "[M] Map ") + "[I] Info [B] Back: "
     lines = map_list_lines(world, path, public_target)
     if compact: lines.insert(0, "Spatial map needs 40 columns and 12 rows; exact list is available here.")
     pages = _trade_pages(lines, title, list_footer)
@@ -7430,7 +7431,7 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
             xmin, xmax, ymin, ymax = map_bounds(sector)
             bounds = f"X {xmin}-{xmax}; Y {ymin}-{ymax}"
             legend = "@ Here ! Goal X End * Route o Known + Cluster; . link : route"
-            footer = "[N/P] Sector [O]verview [L]ist [I]nfo [B]ack: "
+            footer = "[N/P] Sector [O] Overview [L] List [I] Info [B] Back: "
             overhead = 2 + sum(len(_wrap_output(text, max(1, _OUTPUT_WIDTH - 1)).split("\r\n")) for text in (heading, bounds, legend, footer))
             out_line(heading); out_line(bounds)
             for row in spatial_map_grid(world, path, public_target=public_target, sector=sector,
@@ -7569,7 +7570,7 @@ def screen_auto_route(p: Palette, world: World, *, destination: int | None = Non
     while True:
         if pages is None:
             path = bfs_path(world.by_id, world.here.id, destination) if destination is not None else []
-            footer = ("[J]ump next " if path else "") + "[D]estination [V]Map [N]ext [P]rev [B]ack: "
+            footer = ("[J] Jump next " if path else "") + "[D] Destination [V] Map [N] Next [P] Prev [B] Back: "
             lines = navigation_route_lines(world, destination)
             if result:
                 lines.insert(0, result)
@@ -7691,7 +7692,7 @@ def exploration_choice(p: Palette, world: World, title: str, lines: list[str], a
     while True:
         action, page, count = _draw_service_page(
             p, f"{title} {world.save.pilot.credits:,}cr Fuel {world.save.ship.fuel}", lines,
-            f"[{actions}]Act [<>]Page: ", page,
+            f"[{actions}] Act [<>] Page: ", page,
         )
         if (moved := page_step(action, page, count)) is not None: page = moved
         elif action in actions.split("/"): return action
@@ -8077,12 +8078,12 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         lines.append(f"{tactics['profile']} intent: {intent.upper()}; incoming {low}-{high} damage if it survives or you fail to disengage.")
         if tactics["brace_ready"]:
             low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, braced=True, cover=squadron_cover(world), tactics=tactics) for roll in (4, 9))
-            lines.append(f"[G] Brace: reduced shot (55%); incoming {low}-{high}. Fire recharges Brace.")
-        else: lines.append("Brace recharging: fire once before using G again.")
+            lines.append(f"[G] Guard: reduced shot (55%); incoming {low}-{high}. Fire recharges Guard.")
+        else: lines.append("Guard recharging: fire once before using G again.")
         if details:
             lines.append("Pattern: " + " > ".join(TACTICAL_PROFILES[tactics["profile"]]) + ".")
             lines.append("Cover/harry reduce your shot; recovery exposes the enemy. Harry lowers escape chance by 10 percentage points, minimum 5%.")
-    else: lines.append("Original fight rules (no Brace).")
+    else: lines.append("Original fight rules (no Guard).")
     if ship.hull_hp * 3 <= hull_hp_max(ship):
         paid = min(pilot.credits, salvage_fee(ship))
         lines.append(f"LOW HULL: one third of maximum hull or less. Destruction: {paid}cr salvage fee, all cargo lost, tow to Freeport"
@@ -8090,7 +8091,7 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     travel = world.save.pending_travel
     escort_at_stake = " Escaping fails the escort contract." if travel is not None and travel.get("phase") == "escorts" else ""
     lines += [
-        "[F] Fight: fire once; a surviving enemy returns fire.",
+        "[F] Fire: one shot; a surviving enemy returns fire.",
         f"[E] Evade: about {combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics):.0%} success; failure draws enemy fire.{escort_at_stake}",
     ]
     if patrol:
@@ -8100,9 +8101,10 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     else:
         if used:
             chance = combat_evade_chance(world, pirate, dumped_cargo=True, tactics=tactics, cargo_units=max(0, used - 1))
-            lines.append(f"[D] Dump & evade: about {chance:.0%} success; lose one unit of a random held commodity; failure draws fire." + escort_at_stake)
+            lines.append(f"[D] Dump: jettison one unit of a random held commodity to try to break contact; about "
+                     f"{chance:.0%} success; failure draws fire." + escort_at_stake)
         cost = bribe_cost(pirate)
-        lines.append((f"[P] Pay bribe: " if pilot.credits >= cost else "Bribe unavailable: ") +
+        lines.append((f"[P] Pay bribe: " if pilot.credits >= cost else "Pay bribe unavailable: ") +
                      f"{cost}cr only if accepted (about {bribe_chance(world, pirate):.0%}); "
                      "Blackwake +2 if accepted; refusal draws enemy fire. " + ("Available." if pilot.credits >= cost else "UNAFFORDABLE; bribe unavailable.")
                      + (" An accepted bribe fails the escort contract." if escort_at_stake else ""))
@@ -8118,8 +8120,12 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     return lines
 
 
-COMBAT_LABELS = {"F": "Fire", "G": "Brace", "E": "Evade", "D": "Dump", "P": "Bribe", "S": "Surrender",
-                 "V": "Verify", "R": "Report", "W": "Withdraw", "T": "Target"}
+# Every combat key is its verb's own initial, and the bar's label is the word the
+# detail line leads with, so the two screens never name one action twice (#400).
+# `B` cannot be Brace, because `B` is Back everywhere and a stray Back must not
+# spend a combat turn -- hence Guard, which the key does spell.
+COMBAT_LABELS = {"F": "Fire", "G": "Guard", "E": "Evade", "D": "Dump", "P": "Pay bribe",
+                 "S": "Surrender", "V": "Verify", "R": "Report", "W": "Withdraw", "T": "Target"}
 
 
 def combat_action_bar(actions: str) -> str:
@@ -8131,8 +8137,8 @@ def combat_action_bar(actions: str) -> str:
     width switch the pilot record already uses for its own view keys."""
     keys = [key for key in actions.split("/") if key]
     if _OUTPUT_WIDTH < 40:
-        return f"[{'/'.join(keys)}]Act [I]Info [<>]Page: "
-    return "".join(f"[{key}]{COMBAT_LABELS[key]} " for key in keys) + "[I]Info [<>]Page: "
+        return f"[{'/'.join(keys)}] Act [I] Info [<>] Page: "
+    return "".join(f"[{key}] {COMBAT_LABELS[key]} " for key in keys) + "[I] Info [<>] Page: "
 
 
 def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: bool) -> str:
@@ -8344,7 +8350,7 @@ def screen_customs(p: Palette, world: World) -> None:
         lines = customs_display_lines(world)
         if result: lines.insert(0, result)
         can_pay = world.save.pilot.credits >= customs_quote(world)[1]
-        footer = "[S]Surrender [P]Pay bribe [<>]Page: " if can_pay else "[S]Surrender [<>]Page: "
+        footer = "[S] Surrender [P] Pay bribe [<>] Page: " if can_pay else "[S] Surrender [<>] Page: "
         action, page, count = _draw_service_page(p, f"Customs {world.save.pilot.credits:,}cr", lines, footer, page)
         if (moved := page_step(action, page, count)) is not None: page = moved
         else:
@@ -8402,8 +8408,8 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
         for line in pages[page]:
             out_line(line)
         can_restore = candidate is not None and preservation_problem is None and page == len(pages) - 1
-        action = "[R]estore  " if can_restore else ""
-        out_prompt(action + "[N]ext [P]revious [B]ack: ")
+        action = "[R] Restore  " if can_restore else ""
+        out_prompt(action + "[N] Next [P] Previous [B] Back: ")
         try:
             key = read_command_at_prompt()
         except EOFError:
