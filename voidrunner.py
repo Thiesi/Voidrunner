@@ -5183,7 +5183,7 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
         f"Cargo acquisition cost: {quote['cargo_cost']:,}cr recorded; {quote['unknown_units']} units with unknown cost.",
         f"Buy now: {quote['procurement']:,}cr. Credits after buying: {world.save.pilot.credits - quote['procurement']:,}cr.",
         f"Fuel: {quote['fuel']} units, replacement value {quote['fuel'] * 6}cr. Additional fuel cash: {quote['fuel_cash']}cr with your current tank.",
-        f"Crew wages: {quote['wages']}cr for {len(quote['legs'])} jumps. Arrival day {world.save.turn + len(quote['legs'])} if uninterrupted.",
+        f"Crew wages: {quote['wages']}cr for {plural(len(quote['legs']), 'jump')}. Arrival day {world.save.turn + len(quote['legs'])} if uninterrupted.",
         f"Cash needed before sale: {quote['cash_needed']:,}cr. Budget {'covered' if quote['cash_needed'] <= world.save.pilot.credits else 'SHORT by ' + str(quote['cash_needed'] - world.save.pilot.credits) + 'cr'}.",
     ])
     if quote["observed_demand"] is None:
@@ -5372,6 +5372,10 @@ def _edit_trade_route(world: World, initial: dict) -> dict | None:
 
 def screen_trade_route(p: Palette, world: World, *, initial: dict | None = None) -> None:
     destinations = sorted((sid for sid in world.save.market_memory if sid != world.here.id), key=lambda sid: world.by_id[sid].name)
+    if initial is None:
+        # Start from the best remembered lead rather than a one-unit placeholder (issue #415).
+        leads = trade_opportunities(world)
+        initial = ({key: leads[0][key] for key in ("destination", "commodity", "quantity", "use_hold")} if leads else None)
     parameters = dict(initial) if initial is not None else {
         "destination": destinations[0] if destinations else None,
         "commodity": "food", "quantity": 1, "use_hold": False}
@@ -5420,31 +5424,42 @@ def screen_remembered_markets(p: Palette, world: World) -> None:
 
 
 def trade_opportunities(world: World) -> list[dict]:
-    """Rank bounded, cash-covered outbound candidates from observed sale prices."""
-    room = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
-    if room <= 0 or world.save.pending_travel is not None:
+    """Rank bounded, cash-covered outbound candidates from observed sale prices.
+
+    Cargo already aboard is a candidate in its own right: a full hold has nothing
+    left to buy but can still have somewhere profitable to take what it carries,
+    and a planner that reports nothing there sends the caller back to a
+    placeholder (issue #415 review)."""
+    if world.save.pending_travel is not None:
         return []
+    room = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
     candidates = []
     for sid, observed in world.save.market_memory.items():
         if sid == world.here.id:
             continue
         for commodity, memory in observed.items():
-            if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
-                continue
-            try:
-                unit_quote = trade_route_quote(world, sid, commodity, 1)
-                budget = world.save.pilot.credits - unit_quote["fuel_cash"] - unit_quote["wages"]
-                unit = price_for(world, world.here.id, commodity)
-                quantity = min(room, market_depth_quote(world, world.here.id, commodity)["stock"],
-                               max(0, budget // unit), memory.get("demand", room))
-                if quantity <= 0:
+            held = world.save.cargo.get(commodity, 0)
+            for use_hold in ((False, True) if held else (False,)):
+                if not use_hold and not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
                     continue
-                quote = trade_route_quote(world, sid, commodity, quantity)
-            except TradeError:
-                continue
-            if quote["feasible"] and quote["margin"] is not None and quote["margin"] > 0:
-                candidates.append(quote)
-    candidates.sort(key=lambda q: (-q["margin"] / len(q["legs"]), -q["margin"], q["destination"], q["commodity"]))
+                try:
+                    if use_hold:
+                        quantity = min(held, memory.get("demand", held))
+                    else:
+                        unit_quote = trade_route_quote(world, sid, commodity, 1)
+                        budget = world.save.pilot.credits - unit_quote["fuel_cash"] - unit_quote["wages"]
+                        unit = price_for(world, world.here.id, commodity)
+                        quantity = min(room, market_depth_quote(world, world.here.id, commodity)["stock"],
+                                       max(0, budget // unit), memory.get("demand", room))
+                    if quantity <= 0:
+                        continue
+                    quote = trade_route_quote(world, sid, commodity, quantity, use_hold=use_hold)
+                except TradeError:
+                    continue
+                if quote["feasible"] and quote["margin"] is not None and quote["margin"] > 0:
+                    candidates.append(quote)
+    candidates.sort(key=lambda q: (-q["margin"] / len(q["legs"]), -q["margin"], q["destination"],
+                                   q["commodity"], q["use_hold"]))
     return candidates[:6]
 
 
@@ -5454,7 +5469,7 @@ def economy_opportunity_lines(world: World, candidates: list[dict]) -> list[str]
     if event is None:
         lines.append("No active disruption reported. Ordinary price differences still create trade leads.")
     else:
-        lines.append(_mission_plain(f"{event['description']}. {event['turns_remaining']} jumps of event time remain."))
+        lines.append(_mission_plain(f"{event['description']}. {plural(event['turns_remaining'], 'jump')} of event time remain."))
         commodity = COMMODITIES[event["commodity"]]["label"]
         lines.append(f"Lead: {'bring' if event['direction'] == 'boom' else 'investigate buying'} {commodity}. Prices and availability still need checking.")
         if not COMMODITIES[event["commodity"]]["legal"]:
@@ -5464,7 +5479,7 @@ def economy_opportunity_lines(world: World, candidates: list[dict]) -> list[str]
             path = bfs_path(world.by_id, world.here.id, sid)
             threat = str(station.danger) if station.discovered else "unknown"
             timing = "event ends by arrival if uninterrupted" if len(path) >= event["turns_remaining"] else "reachable before event ends if uninterrupted"
-            lines.append(f"{station.name} ({station.x},{station.y}), {len(path)} jumps; danger {threat}; {timing}.")
+            lines.append(f"{station.name} ({station.x},{station.y}), {plural(len(path), 'jump')}; danger {threat}; {timing}.")
             if path:
                 first = world.by_id[path[0]]
                 bearing = first.name if first.discovered else f"uncharted connection at ({first.x},{first.y})"
@@ -5477,7 +5492,7 @@ def economy_opportunity_lines(world: World, candidates: list[dict]) -> list[str]
         station = world.by_id[quote["destination"]]
         cargo = COMMODITIES[quote["commodity"]]
         capacity = "capacity unobserved" if quote["observed_demand"] is None else f"observed demand {quote['observed_demand']}"
-        lines.append(f"[{index}] {quote['quantity']} {cargo['label']} to {station.name}: {quote['margin']:+,}cr estimate, {len(quote['legs'])} jumps.")
+        lines.append(f"[{index}] {quote['quantity']} {cargo['label']} to {station.name}: {quote['margin']:+,}cr estimate, {plural(len(quote['legs']), 'jump')}.")
         lines.append(f"Buy {quote['procurement']}cr; additional fuel {quote['fuel_cash']}cr; wages {quote['wages']}cr. Quote day {quote['observed_day']}; {capacity}.")
         if not cargo["legal"]:
             lines.append("ILLEGAL CARGO: customs risk; quoted margin excludes confiscation and fines.")
@@ -5510,7 +5525,7 @@ def screen_economy_opportunities(p: Palette, world: World) -> None:
 
 
 def screen_trading_ledger(p: Palette, world: World) -> None:
-    footer = "[M]arkets [R]oute [O]pportunities [N]ext [P]rev [B]ack: "
+    footer = "[O]pportunities [R]oute [M]arkets [N]ext [P]rev [B]ack: "
     pages = _trade_pages(trading_ledger_lines(world), "Trading Ledger", footer)
     page = 0
     while True:
@@ -6120,6 +6135,11 @@ def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -
         return f"Commissioned a {target_class} hull for {cost}cr."
 
 
+def plural(count: int, noun: str) -> str:
+    """"1 jump", "2 jumps": counts in prose read as prose (issues #415/#416)."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
 def _mission_plain(text) -> str:
     return "".join(c if c.isprintable() else " " for c in _ANSI_RE.sub("", str(text)))
 
@@ -6338,7 +6358,20 @@ def pilot_guide_lines(world: World) -> list[str]:
     return lines
 
 
-def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> None:
+def _opening_next_step(world: World, offer: Mission) -> str:
+    """Name the cargo still missing, not the whole contract: buying the offered
+    commodity before accepting is allowed, and telling a pilot with two units to
+    buy three sends them to the market for nothing (issue #415 review)."""
+    label = COMMODITIES[offer.commodity]["label"]
+    station = world.by_id[offer.target_system].name
+    missing = max(0, offer.quantity - world.save.cargo.get(offer.commodity, 0))
+    if not missing:
+        return f"[C]hart to {station}; all {plural(offer.quantity, 'unit')} of {label} are already aboard."
+    return f"[M]arket, buy {plural(missing, 'unit')} of {label}, then [C]hart to {station}."
+
+
+def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
+    """Return True once the offer is accepted so the guide hands the pilot back to the deck."""
     fuel = fuel_cost_for_jump(world.here, world.by_id[offer.target_system], world.save.ship)
     wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
     lines = ["Freeport merchants need a reliable new pilot. First Flight sponsors one delivery; acceptance also tracks it."]
@@ -6358,7 +6391,7 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> None:
         out_prompt(("[A]ccept " if page == len(pages) - 1 else "") + "[N]ext [P]rev [B]ack: ")
         key = read_command()
         if key in ("B", "Q"):
-            return
+            return False
         if key == "N" and page < len(pages) - 1:
             page += 1
         elif key == "P" and page:
@@ -6368,11 +6401,11 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> None:
                 accept_opening_assignment(world, offer)
             except MissionError as exc:
                 out_line(str(exc))
-            else:
-                world.checkpoint()
-                out_line("First Flight accepted and tracked. Return with [B]ack, then use [M]arket to buy your cargo.")
-            pause(p)
-            return
+                pause(p)
+                return False
+            world.checkpoint()
+            report_hop(world, [f"First Flight accepted and tracked. Next: {_opening_next_step(world, offer)}"])
+            return True
 
 
 def screen_pilot_guide(p: Palette, world: World) -> None:
@@ -6394,7 +6427,8 @@ def screen_pilot_guide(p: Palette, world: World) -> None:
         elif key == "P" and page:
             page -= 1
         elif key == "O" and offer is not None:
-            _screen_opening_offer(p, world, offer)
+            if _screen_opening_offer(p, world, offer):
+                return  # Straight back to the deck, which shows the next step as a result.
 
 
 def prepare_mission_jump(world: World, mission_id: int) -> int:
@@ -7294,6 +7328,13 @@ def navigation_route_lines(world: World, destination: int | None) -> list[str]:
 def _screen_auto_route(p: Palette, world: World, *, destination: int | None = None) -> None:
     """Screen-first route planner; each deliberate command flies one ordinary hop."""
     page, result, pages = 0, None, None
+    if destination is None:
+        # Nothing to plan without a destination: open the picker at once; Back leaves.
+        choices = sorted(((station.id, station.name) for station in world.galaxy
+                          if station.discovered and station.id != world.here.id), key=lambda item: item[1])
+        destination = _pick_trade_field("Charted Destination", choices)
+        if destination is None:
+            return
     while True:
         if pages is None:
             path = bfs_path(world.by_id, world.here.id, destination) if destination is not None else []

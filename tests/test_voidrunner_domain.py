@@ -996,17 +996,30 @@ def test_trade_opportunities_are_bounded_affordable_and_use_no_live_remote_quote
     assert vr.trade_opportunities(world) == candidates
 
 
-@pytest.mark.parametrize("constraint", ["empty_memory", "full_hold", "empty_stock", "no_cash", "no_demand"])
+@pytest.mark.parametrize("constraint", ["empty_memory", "empty_stock", "no_cash", "no_demand"])
 def test_trade_opportunities_honor_missing_information_and_resource_limits(constraint):
     world = _world_with_trade_opportunities()
     if constraint == "empty_memory": world.save.market_memory.clear()
-    if constraint == "full_hold": world.save.cargo = {"food": vr.cargo_capacity(world.save.ship)}
     if constraint == "empty_stock": world.save.market_depth[0] = {c: {"day": 0, "stock": 0, "demand": 0} for c in vr.COMMODITIES}
     if constraint == "no_cash": world.save.pilot.credits = 0
     if constraint == "no_demand":
         for quotes in world.save.market_memory.values():
             for quote in quotes.values(): quote["demand"] = 0
     assert vr.trade_opportunities(world) == []
+
+
+def test_a_full_hold_offers_somewhere_to_sell_rather_than_nothing():
+    """Nothing left to buy is not nothing left to plan (issue #415 review)."""
+    world = _world_with_trade_opportunities()
+    held = vr.cargo_capacity(world.save.ship)  # a hold filled at the local producing price
+    world.save.cargo = {"machinery": held}
+    world.save.cargo_basis = {"machinery": [[held, held * vr.price_for(world, 0, "machinery")]]}
+    candidates = vr.trade_opportunities(world)
+    assert candidates and all(quote["use_hold"] and quote["commodity"] == "machinery" for quote in candidates)
+    assert all(quote["quantity"] <= world.save.cargo["machinery"] for quote in candidates)
+    assert all(quote["procurement"] == 0 for quote in candidates)  # selling what is aboard buys nothing
+    world.save.cargo = {}
+    assert all(not quote["use_hold"] for quote in vr.trade_opportunities(world))
 
 
 def test_trade_opportunities_reserve_travel_cash_and_exclude_contract_consumption():
@@ -2814,20 +2827,29 @@ def test_general_route_pages_are_read_only_and_hide_unknown_details(monkeypatch,
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
 
 
-def test_general_route_is_screen_first_and_destination_cancel_preserves_preview(monkeypatch):
+def test_general_route_opens_on_a_destination_and_cancel_preserves_the_preview(monkeypatch):
+    """The planner has nothing to show without a destination, so it picks one first
+    (issue #415); cancelling a later change keeps the route already previewed."""
     world = _world_with_seed(42); chosen = next(s.id for s in world.galaxy if s.discovered and s.id != 0)
     destinations = iter([chosen, None]); choices_seen = []
     def pick(title, options):
         choices_seen.extend(options); return next(destinations)
     monkeypatch.setattr(vr, "_pick_trade_field", pick)
     monkeypatch.setattr(vr, "read_line_raw", lambda **kw: pytest.fail("Entry asked a question"))
-    keys = iter("DDB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    keys = iter("DB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output: vr._screen_auto_route(vr.Palette(False), world)
     text = output.getvalue()
-    assert "Choose a charted destination" in text
     assert text.count("Destination: " + world.by_id[chosen].name) == 2
     assert all(world.by_id[sid].discovered for sid, label in choices_seen)
     assert world.save.turn == 0
+
+
+def test_cancelling_the_opening_route_picker_leaves_without_a_planner(monkeypatch):
+    world = _world_with_seed(42)
+    monkeypatch.setattr(vr, "_pick_trade_field", lambda title, options: None)
+    monkeypatch.setattr(vr, "read_key", lambda: pytest.fail("Back from the picker must leave at once"))
+    with contextlib.redirect_stdout(io.StringIO()) as output: vr._screen_auto_route(vr.Palette(False), world)
+    assert "Route Planner" not in output.getvalue() and world.save.turn == 0
 
 
 def test_general_route_all_destinations_reachable_in_compact_picker(monkeypatch):
@@ -2851,7 +2873,7 @@ def test_general_route_all_destinations_reachable_in_compact_picker(monkeypatch)
     assert all(vr._visible_width(line) <= 20 for frame in frames for line in frame.splitlines())
 
 
-@pytest.mark.parametrize("commands", [b"CGBQQ", b"CG", b"CGD1BQQ", b"CGD1"])
+@pytest.mark.parametrize("commands", [b"CG1BQQ", b"CG1", b"CG1D1BQQ", b"CG1D1"])
 def test_real_general_route_back_and_eof_preserve_career(tmp_path, commands):
     import json, os, subprocess
     world = _world_with_seed(42)
@@ -2863,6 +2885,7 @@ def test_real_general_route_back_and_eof_preserve_career(tmp_path, commands):
         env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
     assert result.returncode == 0 and not result.stderr and b"Route Planner" in result.stdout
     if b"D1" in commands: assert b"Destination:" in result.stdout
+    assert b"Charted Destination" in result.stdout  # the planner picks before it plans (#415)
     assert (tmp_path / "77.json").read_bytes() == original
 
 
@@ -3881,7 +3904,7 @@ def test_spatial_map_station_info_pages_preserve_every_known_link(monkeypatch, w
     for station in world.galaxy: assert station.name in text
 
 
-@pytest.mark.parametrize("commands", [b"CVBQQ", b"CV", b"CVLIBBQQ", b"CVLI1", b"CGVB BQQ".replace(b" ",b"")])
+@pytest.mark.parametrize("commands", [b"CVBQQ", b"CV", b"CVLIBBQQ", b"CVLI1", b"CG1VB BQQ".replace(b" ",b"")])
 def test_real_spatial_map_back_eof_and_inspection_preserve_career(tmp_path, commands):
     import json, os, subprocess
     world = _world_with_seed(42)
@@ -12829,3 +12852,69 @@ def test_dump_is_absent_and_harmless_with_an_empty_hold(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()) as output, pytest.raises(EOFError):
         vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=False)
     assert "[D]Dump" not in output.getvalue()
+
+
+# --- #415: First Flight hand-off and route-planning entry points ----------------------
+
+
+def test_plural_reads_as_prose():
+    assert vr.plural(1, "jump") == "1 jump" and vr.plural(2, "jump") == "2 jumps" and vr.plural(0, "pilot") == "0 pilots"
+
+
+def test_accepting_first_flight_returns_to_the_deck_with_the_next_step(monkeypatch):
+    world = _world_with_seed(42)
+    offer = vr.opening_assignment_offer(world); assert offer is not None
+    pages = len(vr._mission_text_pages(["x"] * 40, overhead=5))  # plenty of N presses reach the last page
+    keys = iter(["O"] + ["N"] * 40 + ["A"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "pause", lambda p: pytest.fail("no acknowledgement pause on acceptance"))
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_pilot_guide(vr.Palette(False), world)  # returns on its own after acceptance
+    assert world.save.active_missions and world.save.active_missions[0].opening_assignment
+    assert any(line.startswith("First Flight accepted and tracked. Next: [M]arket") for line in world.hop_report)
+    page = _deck_page(world, monkeypatch)
+    assert "Result: First Flight accepted and tracked." in page
+
+
+def test_chart_route_planner_opens_the_destination_picker_first(monkeypatch):
+    world = _world_with_seed(42)
+    picked = []
+    monkeypatch.setattr(vr, "_pick_trade_field", lambda title, choices, **kw: picked.append(title) or None)
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._screen_auto_route(vr.Palette(False), world)
+    assert picked == ["Charted Destination"] and "Route Planner" not in output.getvalue()
+    dest = sorted(world.here.connections)[0]; world.by_id[dest].discovered = True
+    monkeypatch.setattr(vr, "_pick_trade_field", lambda title, choices, **kw: dest)
+    keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._screen_auto_route(vr.Palette(False), world)
+    assert "Route Planner" in output.getvalue() and "[J]ump next" in output.getvalue()
+
+
+def _world_with_a_trade_lead():
+    """Remember every neighbour, not just one: Freeport's first connection shares its
+    economy, so a two-station fixture has identical prices and no lead to plan from."""
+    world = _world_with_seed(42)
+    for sid in world.by_id[0].connections:
+        world.by_id[sid].discovered = True
+        world.save.current_system = sid
+        vr.remember_local_market(world)
+    world.save.current_system = 0
+    vr.remember_local_market(world)
+    world.save.discovered = [system.id for system in world.galaxy if system.discovered]
+    return world
+
+
+def test_ledger_route_draft_starts_from_the_best_lead(monkeypatch):
+    world = _world_with_a_trade_lead()
+    leads = vr.trade_opportunities(world)
+    assert leads, "a differing neighbour economy should offer a lead"
+    keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_trade_route(vr.Palette(False), world)
+    plain = " ".join(vr._ANSI_RE.sub("", output.getvalue()).split())
+    assert f"{vr.COMMODITIES[leads[0]['commodity']]['label']} x{leads[0]['quantity']}" in plain
+    assert "Food x1" not in plain or leads[0]["commodity"] == "food" and leads[0]["quantity"] == 1
+    keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_trading_ledger(vr.Palette(False), world)
+    assert "[O]pportunities [R]oute [M]arkets" in output.getvalue()
