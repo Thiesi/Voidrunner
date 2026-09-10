@@ -12154,3 +12154,144 @@ def test_combat_screen_discloses_the_salvage_fee_when_hull_is_low():
     low = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
     assert "Destruction: 30cr salvage fee" in low and f"hull patched to {vr.salvage_hull(world.save.ship, 30)}/{vr.hull_hp_max(world.save.ship)}" in low
     assert f"destruction costs {fee}cr salvage" in " ".join(vr.station_deck_lines(world))
+
+
+# --- #403: failed and expired contracts leave a record ---------------------------------
+
+
+def _escort_world(outcome: str):
+    world = _world_with_seed(42)
+    destination = sorted(world.here.connections)[0]
+    mission = vr.Mission(7, "escort", "Escort a convoy", 800, 0, destination, pirate_tier=1)
+    world.save.active_missions = [mission]
+    world.save.turn = 1
+    world.save.pending_travel = {"version": 1, "origin": 0, "destination": destination, "was_discovered": True,
+        "destroyed": False, "phase": "escorts", "primary": "random", "bounty": None,
+        "escorts": [mission.to_dict()], "escort_index": 0, "encounter": {}}
+    return world, mission
+
+
+@pytest.mark.parametrize("outcome", ["escaped", "destroyed"])
+def test_lost_escort_counts_once_and_logs_the_forfeited_reward(monkeypatch, outcome):
+    world, mission = _escort_world(outcome)
+    monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: outcome)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._resolve_escort_missions(vr.Palette(False), world, mission.target_system)
+    assert world.save.pilot.missions_failed == 1 and world.save.pilot.missions_expired == 0
+    assert world.save.pilot.missions_completed == 0 and not world.save.active_missions
+    assert any("Escort failed: Escort a convoy (lost 800cr)" in entry for entry in world.save.pilot.log)
+    # Resuming the same hop after the checkpoint must not count it twice.
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._resolve_escort_missions(vr.Palette(False), world, mission.target_system)
+    assert world.save.pilot.missions_failed == 1
+
+
+def test_lost_bounty_counts_as_failed_and_closed_warrant_does_not(monkeypatch):
+    for outcome, failed in (("destroyed", 1), ("reported", 0)):
+        world, pirate = _world_with_pending_fight()
+        combat = world.save.pending_travel["encounter"]["combat"]
+        combat["outcome"], combat["lines"] = outcome, ["cached"]
+        world.save.pending_travel["encounter"]["warrant"] = {"version": 1, "matches": False, "checked": True, "engaged": False}
+        with contextlib.redirect_stdout(io.StringIO()):
+            vr._resolve_bounty(vr.Palette(False), world, world.save.pending_travel)
+        assert world.save.pilot.missions_failed == failed and not world.save.active_missions
+
+
+def test_expiry_paths_count_as_expired_with_the_unpaid_reward():
+    world = _world_with_seed(42)
+    dest = sorted(world.here.connections)[0]
+    world.save.active_missions = [vr.Mission(1, "delivery", "Deliver goods", 300, 0, dest, commodity="food", quantity=2, deadline_turn=1),
+                                  vr.Mission(2, "scan", "Survey", 250, 0, dest, deadline_turn=1)]
+    world.save.turn = 2
+    messages = vr.expire_missions(world)
+    assert len(messages) == 2 and world.save.pilot.missions_expired == 2 and world.save.pilot.missions_failed == 0
+    assert "Mission expired: Deliver goods (unpaid 300cr)" in messages
+    world.save.pilot.missions_expired = 0
+    world, mission = _escort_world("escaped")
+    mission.deadline_turn = 0; world.save.pending_travel["escorts"] = [mission.to_dict()]; world.save.active_missions = [mission]
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._resolve_escort_missions(vr.Palette(False), world, mission.target_system)
+    assert world.save.pilot.missions_expired == 1 and world.save.pilot.missions_failed == 0
+
+
+def test_abandonment_counts_as_failed_and_names_the_forfeit():
+    world = _world_with_seed(42)
+    dest = sorted(world.here.connections)[0]
+    world.save.active_missions = [vr.Mission(3, "bounty", "Intercept raider", 500, 0, dest, pirate_tier=1)]
+    message = vr.abandon_mission(world, 3)
+    assert "forfeited 500cr" in message and "Cargo retained; no reward or fee." in message
+    assert world.save.pilot.missions_failed == 1 and not world.save.active_missions
+
+
+def test_retirement_forfeits_the_commissioned_reward_the_contract_showed():
+    """The dossier quotes what the contract was worth, commission included."""
+    world = _finale_world("legend")
+    target = sorted(world.here.connections)[0]
+    world.save.active_missions = [vr.Mission(4, "bounty", "Intercept raider", 1000, 0, target, pirate_tier=1)]
+    world.save.pilot.has_concord_commission = True
+    world.save.pilot.reputation[vr.FACTION_CONCORD] = 100
+    quoted = vr.bounty_reward_for(world, 1000)
+    assert quoted == 1250  # the commission the contract screen and every loss path show
+    assert f"forfeited {quoted:,}cr" in " ".join(vr.finish_career(world.save, "legend").pilot.log)
+    world.save.pilot.has_concord_commission = False
+    assert "forfeited 1,000cr" in " ".join(vr.finish_career(world.save, "legend").pilot.log)
+    world.save.active_missions = [vr.Mission(5, "delivery", "Deliver goods", 1000, 0, target, commodity="food", quantity=2)]
+    world.save.pilot.has_concord_commission = True
+    assert "forfeited 1,000cr" in " ".join(vr.finish_career(world.save, "legend").pilot.log)  # deliveries carry no commission
+
+
+def test_legacy_pilots_load_with_zero_loss_counters_and_records_show_them():
+    world = _world_with_seed(42)
+    data = world.save.to_dict()
+    for key in ("missions_failed", "missions_expired"): data["pilot"].pop(key)
+    restored = vr.SaveData.from_dict(data)
+    assert restored.pilot.missions_failed == 0 and restored.pilot.missions_expired == 0
+    data["pilot"]["missions_failed"] = -1
+    with pytest.raises(vr.ResumeError): vr.SaveData.from_dict(data)
+    world.save.pilot.missions_completed, world.save.pilot.missions_failed, world.save.pilot.missions_expired = 4, 2, 1
+    text = " ".join(vr.pilot_record_lines(world))
+    assert "Missions completed: 4; failed or abandoned: 2; expired: 1." in text
+    assert vr.career_accomplishments(world.save)["failed"] == 2
+
+
+def test_dossiers_record_losses_and_older_dossiers_still_load():
+    world = _world_with_seed(42)
+    world.save.pilot.missions_completed, world.save.pilot.missions_failed, world.save.pilot.missions_expired = 3, 2, 1
+    world.save.pilot.kills = 50
+    fresh = vr.finish_career(world.save, "combat")
+    dossier = fresh.retired_careers[-1]
+    assert dossier["failed"] == 2 and dossier["expired"] == 1
+    assert "3 missions completed, 2 failed, 1 expired." in " ".join(vr.career_dossier_lines(fresh))
+    data = fresh.to_dict()
+    for key in ("failed", "expired"): data["retired_careers"][0].pop(key)
+    old = vr.SaveData.from_dict(data)
+    assert "missions completed." in " ".join(vr.career_dossier_lines(old))
+    data["retired_careers"][0]["failed"] = 2  # half of the pair is malformed
+    with pytest.raises(vr.ResumeError): vr.SaveData.from_dict(data)
+
+
+def test_combat_lines_name_the_escort_at_stake_only_during_escort_fights():
+    world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 1, 50, 50)
+    world.save.pilot.credits = 10_000
+    plain = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
+    assert "fails the escort contract" not in plain
+    world, mission = _escort_world("escaped"); world.save.pilot.credits = 10_000
+    lines = vr.combat_display_lines(world, pirate, [], patrol=False)
+    evade = next(row for row in lines if row.startswith("[E]")); dump = next(row for row in lines if row.startswith("[D]"))
+    bribe = next(row for row in lines if row.startswith("[P]"))
+    assert evade.endswith("Escaping fails the escort contract.") and dump.endswith("Escaping fails the escort contract.")
+    assert bribe.endswith("An accepted bribe fails the escort contract.")
+
+
+def test_retiring_with_active_contracts_records_them_as_abandoned():
+    world = _world_with_seed(42); world.save.pilot.kills = 50
+    dest = sorted(world.here.connections)[0]
+    world.save.active_missions = [vr.Mission(1, "delivery", "Deliver goods", 300, 0, dest, commodity="food", quantity=2),
+                                  vr.Mission(2, "escort", "Escort a convoy", 800, 0, dest, pirate_tier=1)]
+    assert "2 active contract(s) count as abandoned" in " ".join(vr.career_finale_lines(world.save, "combat"))
+    import copy; before = copy.deepcopy(world.save.to_dict())
+    fresh = vr.finish_career(world.save, "combat")
+    assert fresh.retired_careers[-1]["failed"] == 2 and not fresh.active_missions
+    assert any("Abandoned at retirement: Escort a convoy (forfeited 800cr)" in entry for entry in fresh.pilot.log)
+    assert world.save.to_dict() == before  # a cancelled retirement leaves the live career untouched
+    assert vr.finish_career(world.save, "combat").retired_careers[-1]["failed"] == 2  # and repeating does not inflate it

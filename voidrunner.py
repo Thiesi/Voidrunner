@@ -826,6 +826,12 @@ class Pilot:
     missions_completed: int = 0
     kills: int = 0
     career_started: str = ""
+    # Contracts lost (failed escort/bounty fights, abandonment) and expired
+    # deadlines, so a record can distinguish a pilot who never took a job
+    # from one who lost every job they took (issue #403). Additive fields,
+    # safe default via from_dict's own .get() below -- no SCHEMA_VERSION bump.
+    missions_failed: int = 0
+    missions_expired: int = 0
     log: list[str] = field(default_factory=list)
     # How "wanted" the pilot currently is with Concord -- rises from a
     # caught (bribe-refused) customs bust or a bounty kill that turns out
@@ -877,6 +883,7 @@ class Pilot:
         return cls(
             handle=d["handle"], credits=d["credits"], reputation=dict(d["reputation"]),
             missions_completed=d.get("missions_completed", 0), kills=d.get("kills", 0),
+            missions_failed=d.get("missions_failed", 0), missions_expired=d.get("missions_expired", 0),
             career_started=d.get("career_started", ""), log=list(d.get("log", [])),
             notoriety=d.get("notoriety", 0), retirements=d.get("retirements", 0),
             highlights=list(d.get("highlights", [])), highest_rank_seen=d.get("highest_rank_seen", 0),
@@ -1325,7 +1332,7 @@ def _validate_save_document(data: dict) -> None:
     record(pilot, Pilot, "pilot")
     text(pilot["handle"], "callsign")
     text(pilot.get("career_started", ""), "career date")
-    for key in ("credits", "missions_completed", "kills", "retirements"):
+    for key in ("credits", "missions_completed", "missions_failed", "missions_expired", "kills", "retirements"):
         integer(pilot.get(key, 0), key)
     integer(pilot.get("notoriety", 0), "notoriety")
     integer(pilot.get("highest_rank_seen", 0), "rank", maximum=len(RANKS) - 1)
@@ -1473,8 +1480,10 @@ def _validate_save_document(data: dict) -> None:
         require(isinstance(dossier, dict), "career dossier")
         if type(dossier.get("version")) is int and dossier["version"] != 1:
             raise UnsupportedSave("The retired career uses an unsupported dossier version.")
-        _reject_unknown_save_fields(dossier, dossier_fields, "career dossier")
-        require(set(dossier) == dossier_fields, "career dossier fields")
+        optional_fields = {"failed", "expired"}  # Recorded from #403 onward; earlier dossiers lack both.
+        _reject_unknown_save_fields(dossier, dossier_fields | optional_fields, "career dossier")
+        require(dossier_fields <= set(dossier) and (set(dossier) & optional_fields) in (set(), optional_fields), "career dossier fields")
+        for key in optional_fields & set(dossier): integer(dossier[key], "dossier " + key)
         integer(dossier["version"], "dossier version", minimum=1, maximum=1)
         integer(dossier["number"], "dossier sequence", minimum=previous_number+1, maximum=pilot.get("retirements", 0))
         previous_number = dossier["number"]
@@ -2619,14 +2628,33 @@ def accept_opening_assignment(world: World, expected: Mission) -> None:
     world.save.tracked_mission_id = offer.id
 
 
+def record_mission_loss(world: World, mission: Mission, outcome: str) -> str:
+    """Count and log a contract that ends without payment: failed, expired or abandoned.
+
+    Every path that removes an active contract without paying it must call this
+    once, in the same checkpoint as the removal, so the pilot record and dossier
+    can show what was lost and why.
+    """
+    reward = mission_reward_for(world.save, mission.kind, mission.reward)
+    if outcome == "expired":
+        world.save.pilot.missions_expired += 1
+        message = f"Mission expired: {mission.description} (unpaid {reward:,}cr)"
+    elif outcome == "abandoned":
+        world.save.pilot.missions_failed += 1
+        message = f"Abandoned: {mission.description} (forfeited {reward:,}cr). Cargo retained; no reward or fee."
+    else:
+        world.save.pilot.missions_failed += 1
+        message = f"{mission.kind.title()} failed: {mission.description} (lost {reward:,}cr)"
+    world.save.pilot.note(message)
+    return message
+
+
 def expire_missions(world: World) -> list[str]:
     messages = []
     active = []
     for mission in world.save.active_missions:
         if mission_expired(world, mission):
-            message = f"Mission expired: {mission.description}"
-            world.save.pilot.note(message)
-            messages.append(message)
+            messages.append(record_mission_loss(world, mission, "expired"))
         else:
             active.append(mission)
     world.save.active_missions = active
@@ -3089,9 +3117,14 @@ def screen_faction_story(p: Palette, world: World, faction: str) -> str | None:
         page = 0
 
 
-def faction_perk_active(world: World, faction: str) -> bool:
+def perk_active(save: SaveData, faction: str) -> bool:
+    """Save-level core: retirement quotes payouts without a live `World`."""
     info = FACTION_MEMBERSHIPS[faction]
-    return bool(getattr(world.save.pilot, info["field"]) and world.save.pilot.reputation.get(faction, 0) > FACTION_PERK_SUSPEND_AT)
+    return bool(getattr(save.pilot, info["field"]) and save.pilot.reputation.get(faction, 0) > FACTION_PERK_SUSPEND_AT)
+
+
+def faction_perk_active(world: World, faction: str) -> bool:
+    return perk_active(world.save, faction)
 
 
 def faction_membership_status(world: World, faction: str) -> str:
@@ -3168,11 +3201,20 @@ def blackwake_made_available(world: World) -> bool:
             and world.save.pilot.reputation.get(FACTION_BLACKWAKE, 0) >= BLACKWAKE_MADE_THRESHOLD)
 
 
-def bounty_reward_for(world: World, base_reward: int) -> int:
-    """Evaluate the retained Concord credential and current standing at payout."""
-    if faction_perk_active(world, FACTION_CONCORD):
+def mission_reward_for(save: SaveData, kind: str, base_reward: int) -> int:
+    """One payout rule for every screen that names a contract's credits.
+
+    The Concord commission is evaluated at payout, so the figure a contract
+    quotes, the figure it pays and the figure retirement records as forfeited
+    are the same number (issue #403 review)."""
+    if kind in ("bounty", "escort") and perk_active(save, FACTION_CONCORD):
         return round(base_reward * (1 + CONCORD_COMMISSION_BOUNTY_BONUS))
     return base_reward
+
+
+def bounty_reward_for(world: World, base_reward: int) -> int:
+    """Evaluate the retained Concord credential and current standing at payout."""
+    return mission_reward_for(world.save, "bounty", base_reward)
 
 
 def screen_concord_commission(p: Palette, world: World) -> None:
@@ -3413,7 +3455,8 @@ CAREER_FINALES = {
 
 def career_accomplishments(save: SaveData) -> dict[str, int]:
     ledger = save.trading_ledger
-    return {"trader": ledger.sales_revenue-ledger.sales_cost, "explorer": len(save.discovered), "combat": save.pilot.kills}
+    return {"trader": ledger.sales_revenue-ledger.sales_cost, "explorer": len(save.discovered), "combat": save.pilot.kills,
+            "missions": save.pilot.missions_completed, "failed": save.pilot.missions_failed, "expired": save.pilot.missions_expired}
 
 
 def career_path_lines(save: SaveData) -> list[str]:
@@ -3440,12 +3483,20 @@ def career_finale_blocker(save: SaveData, finale: str) -> str | None:
 
 
 def finish_career(save: SaveData, finale: str) -> SaveData:
-    """Validate the deliberate ending; archive and reset share one saved payload."""
+    """Validate the deliberate ending; archive and reset share one saved payload.
+
+    Contracts still active at retirement end unpaid, so the dossier counts them
+    as abandoned and the new career's log names them. The retiring save itself
+    is never mutated: the finale screen builds the result before the final
+    confirmation, and a cancelled retirement must leave the career untouched."""
     if blocker := career_finale_blocker(save, finale): raise ValueError(blocker)
+    abandoned = [f"Abandoned at retirement: {m.description} (forfeited {mission_reward_for(save, m.kind, m.reward):,}cr)."
+                 for m in save.active_missions]
     dossier = {"version":1, "number":save.pilot.retirements+1, "seed":save.seed,
                "started":save.pilot.career_started, "ended":time.strftime("%Y-%m-%d"), "finale":finale,
                "rank":career_rank_index(save.pilot), "ship":save.ship.hull_class, "days":save.turn,
                "credits":save.pilot.credits, "kills":save.pilot.kills, "missions":save.pilot.missions_completed,
+               "failed":save.pilot.missions_failed + len(abandoned), "expired":save.pilot.missions_expired,
                "charted":len(save.discovered), "market_margin":career_accomplishments(save)["trader"],
                "highlights":list(save.pilot.highlights)}
     fresh = retire_pilot(save)
@@ -3453,6 +3504,8 @@ def finish_career(save: SaveData, finale: str) -> SaveData:
     info = CAREER_FINALES[finale]
     if info["tier"] is not None: setattr(fresh.ship, info["tier"] + "_tier", 1)
     fresh.pilot.log = [f"Retired as {info['label']} (retirement #{fresh.pilot.retirements}); a new career begins."]
+    for entry in abandoned:
+        fresh.pilot.note(entry)
     fresh.pilot.highlights = [info["closing"]]
     return fresh
 
@@ -3465,7 +3518,8 @@ def career_dossier_lines(save: SaveData) -> list[str]:
         info = CAREER_FINALES[item["finale"]]
         lines += [f"Career #{item['number']}: {info['label']}. {item['started'] or 'Unknown start'} to {item['ended']}.",
                   f"Seed {item['seed']}; {item['days']} days; {RANKS[item['rank']][1]}; {item['ship']}.",
-                  f"Final credits {item['credits']:,}cr; market margin {item['market_margin']:+,}cr; {item['charted']}/{GALAXY_SYSTEM_COUNT} charted; {item['kills']} victories; {item['missions']} missions.", info["closing"]]
+                  f"Final credits {item['credits']:,}cr; market margin {item['market_margin']:+,}cr; {item['charted']}/{GALAXY_SYSTEM_COUNT} charted; {item['kills']} victories; "
+                  f"{item['missions']} missions completed" + (f", {item['failed']} failed, {item['expired']} expired." if "failed" in item else "."), info["closing"]]
         lines.extend("* " + entry for entry in item["highlights"])
     return lines
 
@@ -3479,7 +3533,8 @@ def career_finale_lines(save: SaveData, selected: str) -> list[str]:
     gear = f"{info['tier'].title()} tier 1" if info["tier"] else "ordinary starting modules"
     lines += ["Selected ending: " + info["closing"],
               f"New Game+: a fresh galaxy, Shuttle with {gear}, full starting hull/fuel and {credits:,}cr including the accumulated retirement bonus.",
-              "Current cargo, contracts, faction/crew/story progress and career rank reset. Display style, lifetime score, retirement count and dossiers remain.",
+              "Current cargo, contracts, faction/crew/story progress and career rank reset. Display style, lifetime score, retirement count and dossiers remain."
+              + (f" {len(save.active_missions)} active contract(s) count as abandoned in the dossier." if save.active_missions else ""),
               f"Archive space: {len(save.retired_careers)}/{MAX_RETIRED_CAREERS}. The full current dossier and new career save together before acknowledgement.",
               "[S] Retire opens the final confirmation. [B] Back retains this career."]
     return lines
@@ -5938,9 +5993,7 @@ def abandon_mission(world: World, mission_id: int) -> str:
     world.save.active_missions.remove(mission)
     if world.save.tracked_mission_id == mission.id:
         world.save.tracked_mission_id = None
-    message = f"Abandoned: {mission.description}. Cargo retained; no reward or fee."
-    world.save.pilot.note(message)
-    return message
+    return record_mission_loss(world, mission, "abandoned")
 
 
 def preceding_bounties(world: World, mission: Mission) -> int:
@@ -5980,7 +6033,7 @@ def mission_bearing(world: World, mission: Mission) -> str:
 def mission_details(world: World, mission: Mission) -> list[str]:
     """Read-only terms and explicit estimates; never reveal remote market state."""
     path = mission_route(world, mission)
-    reward = bounty_reward_for(world, mission.reward) if mission.kind in ("bounty", "escort") else mission.reward
+    reward = mission_reward_for(world.save, mission.kind, mission.reward)
     target = world.by_id[mission.target_system]
     lines = [mission.description, f"Destination: {mission_bearing(world, mission)}",
              f"Target danger: {target.danger}" if target.discovered else "Target danger: uncharted"]
@@ -6448,7 +6501,7 @@ def pilot_record_lines(world: World, section: str = "O") -> list[str]:
             target = world.by_id[mission.target_system]
             deadline = "no deadline" if mission.deadline_turn is None else f"due day {mission.deadline_turn} inclusive ({mission.deadline_turn - world.save.turn} day(s) remaining)"
             kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
-            reward = bounty_reward_for(world, mission.reward) if mission.kind in ("bounty", "escort") else mission.reward
+            reward = mission_reward_for(world.save, mission.kind, mission.reward)
             lines.append(f"#{mission.id} {kind}: {mission.description}. Target: {target.name} ({target.x},{target.y}); {deadline}; reward {reward}cr.")
         if not world.save.active_missions: lines.append("No active missions.")
         return lines
@@ -6473,7 +6526,7 @@ def pilot_record_lines(world: World, section: str = "O") -> list[str]:
     lines.append("Crew: " + (", ".join(crew) if crew else "none") + f"; {wages}cr/jump.")
     discovered = sum(system.discovered for system in world.galaxy)
     lines.append(f"Systems charted: {discovered}/{len(world.galaxy)} ({round(discovered / len(world.galaxy) * 100)}%). Combat victories: {pilot.kills}.")
-    lines.append(f"Missions completed: {pilot.missions_completed}. Retirements: {pilot.retirements}.")
+    lines.append(f"Missions completed: {pilot.missions_completed}; failed or abandoned: {pilot.missions_failed}; expired: {pilot.missions_expired}. Retirements: {pilot.retirements}.")
     for faction in FACTION_MEMBERSHIPS:
         lines.append(f"{FACTION_LABEL[faction]}: {faction_membership_status(world, faction)}. Perks suspend at -50 or below.")
     event = world.save.active_event
@@ -7287,8 +7340,7 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
         mission = Mission.from_dict(missions[index])
         if mission_expired(world, mission):
             world.save.active_missions.remove(mission)
-            message = f"Mission expired: {mission.description}"
-            world.save.pilot.note(message)
+            message = record_mission_loss(world, mission, "expired")
             index += 1
             if travel is not None:
                 travel["escort_index"] = index
@@ -7321,7 +7373,7 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
                 lines.append("The convoy presses on.")
         else:
             world.save.active_missions.remove(mission)
-            world.save.pilot.note(f"Escort failed: {mission.description}")
+            record_mission_loss(world, mission, "failed")
             lines.append("You disengage -- the convoy is left defenseless. Escort contract failed."
                          if outcome == "escaped" else "Escort contract failed -- the convoy was lost.")
         index += 1
@@ -7372,8 +7424,7 @@ def _resolve_bounty(p: Palette, world: World, travel: dict) -> None:
     bounty = Mission.from_dict(travel["bounty"])
     if mission_expired(world, bounty):
         world.save.active_missions.remove(bounty)
-        message = f"Mission expired: {bounty.description}"
-        world.save.pilot.note(message)
+        message = record_mission_loss(world, bounty, "expired")
         travel["phase"] = "escorts"
         travel["encounter"] = {}
         world.checkpoint()
@@ -7410,7 +7461,7 @@ def _resolve_bounty(p: Palette, world: World, travel: dict) -> None:
         lines.append("Incorrect warrant closed. No bounty payout or mission credit; no notoriety penalty.")
     elif outcome == "destroyed":
         world.save.active_missions.remove(bounty)
-        world.save.pilot.note(f"Bounty failed: {bounty.description}")
+        record_mission_loss(world, bounty, "failed")
         lines.append(f"Bounty failed -- the {pirate.name} was too much this time.")
     # A cached terminal combat result remains until its parent commits rewards
     # and advances phase. A restart in between cannot repeat loot or the fight.
@@ -7558,9 +7609,11 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         paid = min(pilot.credits, salvage_fee(ship))
         lines.append(f"LOW HULL: one third of maximum hull or less. Destruction: {paid}cr salvage fee, all cargo lost, tow to Freeport"
                      + (f" with hull patched to {salvage_hull(ship, paid, hull_before)}/{hull_hp_max(ship)} (the fee is {salvage_fee(ship)}cr)." if paid < salvage_fee(ship) else "."))
+    travel = world.save.pending_travel
+    escort_at_stake = " Escaping fails the escort contract." if travel is not None and travel.get("phase") == "escorts" else ""
     lines += [
         "[F] Fight: fire once; a surviving enemy returns fire.",
-        f"[E] Evade: about {combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics):.0%} success; failure draws enemy fire.",
+        f"[E] Evade: about {combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics):.0%} success; failure draws enemy fire.{escort_at_stake}",
     ]
     if patrol:
         cost = notoriety_fine_cost(pilot.notoriety)
@@ -7570,11 +7623,12 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         chance = combat_evade_chance(world, pirate, dumped_cargo=bool(used), tactics=tactics, cargo_units=max(0, used - 1))
         lines.append(f"[D] Dump & evade: about {chance:.0%} success; " +
                      ("lose one unit of a random held commodity; failure draws fire."
-                      if used else "hold empty; same chance as Evade."))
+                      if used else "hold empty; same chance as Evade.") + escort_at_stake)
         cost = bribe_cost(pirate)
         lines.append((f"[P] Pay bribe: " if pilot.credits >= cost else "Bribe unavailable: ") +
                      f"{cost}cr only if accepted (about {bribe_chance(world, pirate):.0%}); "
-                     "Blackwake +2 if accepted; refusal draws enemy fire. " + ("Available." if pilot.credits >= cost else "UNAFFORDABLE; bribe unavailable."))
+                     "Blackwake +2 if accepted; refusal draws enemy fire. " + ("Available." if pilot.credits >= cost else "UNAFFORDABLE; bribe unavailable.")
+                     + (" An accepted bribe fails the escort contract." if escort_at_stake else ""))
     if details:
         lines += [f"Destruction: {salvage_fee(ship)}cr salvage fee, all cargo lost, tow to Freeport; paying less than the fee leaves the hull "
                   f"at a quarter of maximum plus the paid share of the rest, never full and never above the hull you brought into the fight; "
