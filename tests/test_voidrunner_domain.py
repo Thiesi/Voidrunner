@@ -3692,7 +3692,7 @@ def test_persist_updates_both_the_save_and_the_hall_of_fame(tmp_path):
 
 def test_screen_hall_of_fame_shows_no_pilots_message_when_empty(tmp_path, monkeypatch):
     world = _world_with_seed(139)
-    monkeypatch.setattr(vr, "read_key", lambda: " ")
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -3710,7 +3710,7 @@ def test_screen_hall_of_fame_marks_the_current_pilot(tmp_path, monkeypatch):
     vr.update_hall_of_fame(tmp_path, 6, other)
 
     world = _world_with_seed(140)
-    monkeypatch.setattr(vr, "read_key", lambda: " ")
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -4165,7 +4165,7 @@ def test_chart_screen_reserves_sgv_and_never_assigns_them_to_a_connection(monkey
 def test_screen_status_shows_hired_crew(monkeypatch):
     world = _world_with_seed(161)
     world.save.ship.has_gunner = True
-    monkeypatch.setattr(vr, "read_key", lambda: " ")
+    monkeypatch.setattr(vr, "read_key", lambda: "B")  # whitespace is absorbed at the prompt (#416)
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -4293,7 +4293,7 @@ def test_screen_status_shows_active_economy_event(monkeypatch):
         "economy": "Tech", "commodity": "electronics", "direction": "boom",
         "turns_remaining": 4, "description": "Electronics prices spike across every Tech system",
     }
-    monkeypatch.setattr(vr, "read_key", lambda: " ")
+    monkeypatch.setattr(vr, "read_key", lambda: "B")  # whitespace is absorbed at the prompt (#416)
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -6249,10 +6249,12 @@ def test_real_door_accepts_utf8_name_and_coalesces_crlf(tmp_path):
     assert json.loads(saves[0].read_text(encoding="utf-8"))["pilot"]["handle"] == "界Jörg"
 
 
-def test_real_pipe_lone_escape_returns_without_waiting_for_another_byte(tmp_path):
+def test_real_pipe_lone_escape_is_absorbed_without_blocking_the_next_key(tmp_path):
+    """The Escape itself now costs nothing at an action bar (#416), so what a real
+    pipe has to prove is that it does not swallow or delay the key after it."""
     world = _world_with_seed(42)
     vr.persist(world, tmp_path, 77)
-    with _door_stopped_at(tmp_path, b"\x1b", b"<key>"):
+    with _door_stopped_at(tmp_path, b"\x1bX", b"X"):
         saved, is_new, notice = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert not is_new and notice is None
     assert saved.turn == 0
@@ -12918,3 +12920,48 @@ def test_ledger_route_draft_starts_from_the_best_lead(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_trading_ledger(vr.Palette(False), world)
     assert "[O]pportunities [R]oute [M]arkets" in output.getvalue()
+
+
+# --- #416: idle keys do not redraw; wording -----------------------------------------------
+
+
+@pytest.mark.parametrize("screen,footer", [("screen_chart", "[G]Route planner"),
+                                           ("screen_missions", "[B]ack"),
+                                           ("screen_trading_ledger", "[O]pportunities")])
+def test_idle_keys_are_absorbed_on_hand_rolled_action_bars_too(monkeypatch, screen, footer):
+    """The rule holds on every action bar, not only the service pages (#416)."""
+    world = _world_with_seed(42)
+    keys = iter([" ", vr.IGNORED_KEY, "\t", "B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 24)
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        getattr(vr, screen)(vr.Palette(False), world)
+    assert vr._ANSI_RE.sub("", output.getvalue()).count(footer) == 1
+
+
+def test_idle_keys_at_an_action_bar_do_not_reprint_the_page(monkeypatch):
+    world = _world_with_seed(42)
+    keys = iter([" ", vr.IGNORED_KEY, "\t", "Q"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 24)
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr.screen_station_menu(vr.Palette(False), world) == "Q"
+    text = vr._ANSI_RE.sub("", output.getvalue())
+    assert text.count("Command Deck:") == 1 and text.count("[Q]Exit:") == 1
+    keys = iter(["?", "Q"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_station_menu(vr.Palette(False), world)
+    assert vr._ANSI_RE.sub("", output.getvalue()).count("Command Deck:") == 2  # an unknown hotkey still redraws
+
+
+def test_wording_uses_singular_forms_and_names_the_offer_refresh():
+    assert vr.hall_of_fame_lines([{"user_id": 1, "handle": "A"}], 1)[0].startswith("Top 1 pilot by")
+    assert vr.achievement_lines([], "combat", 1)[0].startswith("Top 0 local careers by")
+    world, mission = _mission_details_world()
+    world.checkpoint()
+    posted = world.save.mission_boards.get(world.save.current_system)
+    assert posted is not None
+    lines = []
+    import re
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.read_key = lambda: "B"
+        vr.screen_missions(vr.Palette(False), world)
+    assert re.search(r"New offers on day \d+", output.getvalue()) and "Refresh day" not in output.getvalue()

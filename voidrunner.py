@@ -5277,7 +5277,7 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choi
             count = len(current["choices"])
             span = "[1]" if count == 1 else f"[1-{count}]"
             controls = controls.replace(f"[1-{max_choices}]", span, 1)
-        out_prompt(controls); key = read_command(); out_line(key)
+        out_prompt(controls); key = read_command_at_prompt(); out_line(key)
         if key in ("B", "Q"): return None
         if key == "N": page = min(page + 1, len(pages) - 1)
         elif key == "P": page = max(0, page - 1)
@@ -5311,7 +5311,7 @@ def edit_door_draft(*, title: str, initial: dict, fields: list[tuple],
         for line in pages[page]:
             out_line(line)
         out_prompt(footer)
-        key = read_command()
+        key = read_command_at_prompt()
         out_line(key)
         if key == "B":
             return None
@@ -5389,7 +5389,7 @@ def screen_trade_route(p: Palette, world: World, *, initial: dict | None = None)
         for line in pages[page]:
             out_line(line)
         out_prompt(footer)
-        key = read_command()
+        key = read_command_at_prompt()
         out_line(key)
         if key == "B":
             return
@@ -5413,7 +5413,7 @@ def screen_remembered_markets(p: Palette, world: World) -> None:
         for line in pages[page]:
             out_line(line)
         out_prompt(footer)
-        key = read_command()
+        key = read_command_at_prompt()
         out_line(key)
         if key in ("B", "Q"):
             return
@@ -5510,7 +5510,7 @@ def screen_economy_opportunities(p: Palette, world: World) -> None:
         for line in pages[page]:
             out_line(line)
         out_prompt(footer)
-        key = read_command()
+        key = read_command_at_prompt()
         out_line(key)
         if key == "B":
             return
@@ -5534,7 +5534,7 @@ def screen_trading_ledger(p: Palette, world: World) -> None:
         for line in pages[page]:
             out_line(line)
         out_prompt(footer)
-        action = read_command()
+        action = read_command_at_prompt()
         out_line(action)
         if action in ("B", "Q"):
             return
@@ -5570,7 +5570,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
         for line in pages[page]:
             out_line(line)
         out_prompt(footer)
-        action = read_command()
+        action = read_command_at_prompt()
         out_line(action)
         if action in ("P", "S"):
             break
@@ -5800,8 +5800,28 @@ def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, pa
     page = min(page, len(pages) - 1)
     out_line(); out_line(f"{p.gold}{title} {page + 1}/{len(pages)}{RESET}")
     for line in pages[page]: out_line(line)
-    out_prompt(single_page_footer(footer, len(pages))); action = read_command(); out_line(action)
+    out_prompt(single_page_footer(footer, len(pages))); action = read_command_at_prompt(); out_line(action)
     return action, page, len(pages)
+
+
+def read_command_at_prompt() -> str:
+    """A command key at an action bar. Keys that can never be a hotkey (whitespace,
+    unsupported terminal keys) are absorbed at the prompt instead of returning to
+    the caller, which would reprint the whole page for nothing (issue #416).
+
+    Every action bar reads through here, not only the ones drawn by
+    `_draw_service_page`: the chart, the mission board, the star map, the route
+    planner and the draft editors all redraw on a keypress too, and a rule that
+    held on some screens and not others would be worse than no rule.
+
+    This is why no screen may treat whitespace as a hotkey: the Pilot Record and
+    Hall of Fame once left on an unlisted Space, which both cost a redraw for every
+    stray keypress and contradicted `B` being Back everywhere (issue #400)."""
+    while True:
+        key = read_command()
+        if key == IGNORED_KEY or key.isspace():
+            continue
+        return key
 
 
 def screen_shipyard(p: Palette, world: World) -> None:
@@ -6389,7 +6409,7 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
         for line in pages[page]:
             out_line(line)
         out_prompt(("[A]ccept " if page == len(pages) - 1 else "") + "[N]ext [P]rev [B]ack: ")
-        key = read_command()
+        key = read_command_at_prompt()
         if key in ("B", "Q"):
             return False
         if key == "N" and page < len(pages) - 1:
@@ -6419,7 +6439,7 @@ def screen_pilot_guide(p: Palette, world: World) -> None:
         for line in pages[page]:
             out_line(line)
         out_prompt(("[O]ffer " if offer is not None else "") + "[N]ext [P]rev [B]ack: ")
-        key = read_command()
+        key = read_command_at_prompt()
         if key in ("B", "Q"):
             return
         if key == "N" and page < len(pages) - 1:
@@ -6552,7 +6572,7 @@ def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, act
         for line in pages[page]:
             out_line(line)
         out_prompt(footer)
-        key = read_command()
+        key = read_command_at_prompt()
         out_line(key)
         if key in ("B", "Q"):
             return
@@ -6608,7 +6628,7 @@ def screen_mission_details(p: Palette, world: World, mission: Mission, *, active
         else:
             out_line("[A] on last page.")
         out_prompt(actions + " > ")
-        key = read_command()
+        key = read_command_at_prompt()
         if key in ("B", "Q"):
             return
         if key == "N":
@@ -6656,7 +6676,7 @@ def screen_missions(p: Palette, world: World) -> None:
         summary = [f"Active: {len(world.save.active_missions)}/{MAX_ACTIVE_MISSIONS}"]
         posted = world.save.mission_boards.get(world.save.current_system)
         if posted:
-            summary.append(f"Refresh day {posted['refresh_turn']}")
+            summary.append(f"New offers on day {posted['refresh_turn']}")
         footer = "[1-9] Details [N]ext [P]rev [B]ack > "
         max_pages = max(1, sum(len(rows) for _, _, rows in wrapped))
         overhead = 1 + len(_wrap_output(f"Contracts {max_pages}/{max_pages}", _OUTPUT_WIDTH).split("\r\n"))
@@ -6687,7 +6707,7 @@ def screen_missions(p: Palette, world: World) -> None:
         for line in summary:
             out_line(line)
         out_prompt(footer)
-        key = read_command()
+        key = read_command_at_prompt()
         if key in ("B", "Q"):
             return
         if key == "N":
@@ -6786,7 +6806,7 @@ def screen_status(p: Palette, world: World) -> None:
             if result: lines.insert(0, "Result: " + result)
             cache[section] = _service_pages(lines, title, footer)
         key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[section])
-        if key in ("B", "Q", " "): return
+        if key in ("B", "Q"): return
         if key == ">": page = min(page + 1, count - 1)
         elif key == "<": page = max(0, page - 1)
         elif key in ("O", "C", "H", "D"): section, page = key, 0
@@ -6802,7 +6822,7 @@ def screen_status(p: Palette, world: World) -> None:
 def hall_of_fame_lines(entries: list[dict], user_id: int) -> list[str]:
     if not entries:
         return ["No pilots recorded yet -- be the first."]
-    lines = [f"Top {len(entries)} pilots by best recorded credits. [YOU] marks your pilot when listed."]
+    lines = [f"Top {plural(len(entries), 'pilot')} by best recorded credits. [YOU] marks your pilot when listed."]
     for position, entry in enumerate(entries, 1):
         marker = " [YOU]" if entry.get("user_id") == user_id else ""
         lines.append(f"#{position}{marker} {entry.get('handle', '?')}: {entry.get('rank', '?')}. "
@@ -6815,7 +6835,7 @@ def achievement_lines(entries: list[dict], category: str, user_id: int) -> list[
     ranked = achievement_ranking(entries, category)
     if category == "wealth":
         return hall_of_fame_lines(ranked, user_id)
-    lines = [f"Top {len(ranked)} local {'pilots' if category == 'careers' else 'careers'} by {SCORE_CATEGORIES[category].lower()}. [YOU] marks your pilot."]
+    lines = [f"Top {plural(len(ranked), 'local pilot' if category == 'careers' else 'local career')} by {SCORE_CATEGORIES[category].lower()}. [YOU] marks your pilot."]
     explanations = []
     if category == "trading":
         explanations.append("Known-cost market margin before operating costs; excludes delivery pay, unknown-cost receipts and other income. Not total career profit.")
@@ -6859,7 +6879,7 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
                       "Local accomplishments; starting advantages and game rules may differ. No shared-seed competition."]
             cache[category] = _service_pages(lines, title, footer)
         key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[category])
-        if key in ("B", "Q", " "): return
+        if key in ("B", "Q"): return
         if key in ("1", "2", "3", "4", "5"):
             category, page = list(SCORE_CATEGORIES)[int(key) - 1], 0
         elif key in ("N", ">"): page = min(page + 1, count - 1)
@@ -6953,7 +6973,7 @@ def screen_chart(p: Palette, world: World) -> int | None:
         page = min(page, len(pages) - 1)
         out_line(); out_line(f"{p.gold}{title} {page + 1}/{len(pages)}{RESET}")
         for row in pages[page][0]: out_line(row)
-        out_prompt(single_page_footer(footer, len(pages))); key = read_command(); out_line(key)
+        out_prompt(single_page_footer(footer, len(pages))); key = read_command_at_prompt(); out_line(key)
         if key in ("B", "Q"): return None
         if key == ">": page = min(page + 1, len(pages) - 1); continue
         if key == "<": page = max(0, page - 1); continue
@@ -7165,7 +7185,7 @@ def _screen_map_info(world: World, sid: int, path: list[int], public_target: int
     while True:
         out_line(); out_line(f"{title} {page + 1}/{len(pages)}")
         for line in pages[page]: out_line(line)
-        out_prompt(footer); key = read_command(); out_line(key)
+        out_prompt(footer); key = read_command_at_prompt(); out_line(key)
         if key in ("B", "Q"): return
         if key == "N": page = min(page + 1, len(pages) - 1)
         elif key == "P": page = max(0, page - 1)
@@ -7205,7 +7225,7 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
             for row in spatial_map_grid(world, path, public_target=public_target, sector=sector,
                                         columns=_OUTPUT_WIDTH - 1, rows=_OUTPUT_HEIGHT - overhead): out_line(row)
             out_line(legend)
-        out_prompt(footer); key = read_command(); out_line(key)
+        out_prompt(footer); key = read_command_at_prompt(); out_line(key)
         if key in ("B", "Q"): return
         if key == "I":
             ids = map_system_ids(world, path, public_target)
@@ -7349,7 +7369,7 @@ def _screen_auto_route(p: Palette, world: World, *, destination: int | None = No
         for line in pages[page]:
             out_line(line)
         out_prompt(footer)
-        key = read_command()
+        key = read_command_at_prompt()
         out_line(key)
         if key in ("B", "Q"):
             return
@@ -8166,7 +8186,7 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
         action = "[R]estore  " if can_restore else ""
         out_prompt(action + "[N]ext [P]revious [B]ack: ")
         try:
-            key = read_command()
+            key = read_command_at_prompt()
         except EOFError:
             return RecoveryResult(None, 1)
         if key in ("B", "Q"):
