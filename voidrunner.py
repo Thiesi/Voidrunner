@@ -4083,11 +4083,6 @@ CREW_LETTERS = choice_letters("Q")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
-def _vis_len(text: str) -> int:
-    """Measure display width by stripping ANSI SGR escape sequences."""
-    return len(_ANSI_RE.sub("", text))
-
-
 def _box_inner_width() -> int:
     return max(1, min(77, _OUTPUT_WIDTH - 2))
 
@@ -4107,7 +4102,7 @@ def _box_title(p: "Palette", text: str, width: int | None = None, border_color: 
     dashes were originally counted for."""
     width = _box_inner_width() if width is None else min(width, _box_inner_width())
     head = f"── {text} "
-    dashes = "─" * max(1, width - _vis_len(head))
+    dashes = "─" * max(1, width - _visible_width(head))
     col = border_color if border_color is not None else p.accent
     return f"{col}{BOLD}╭{head}{dashes}╮{RESET}"
 
@@ -4125,8 +4120,8 @@ def _box_bottom(p: "Palette", width: int | None = None, border_color: str | None
 
 
 def _pad(text: str, width: int, align: str = "left") -> str:
-    """Pad text containing ANSI codes to a target visual column width."""
-    diff = max(0, width - _vis_len(text))
+    """Pad text containing ANSI codes to a target display column width."""
+    diff = max(0, width - _visible_width(text))
     if align == "right":
         return (" " * diff) + text
     if align == "center":
@@ -4185,57 +4180,87 @@ def draw_status_bar(p: Palette, world: World) -> None:
     out_line(f"{p.muted}{'─' * w}{RESET}")
 
 
-def screen_title(p: Palette, info: dict) -> None:
-    inner_w = _box_inner_width()
-    tagline = "[ a NetBBS door game ]"
-    top_dashes = max(1, inner_w - len(tagline) - 2)
-    top_border = (
-        f"{p.title}{BOLD}╔"
-        + "═" * top_dashes
-        + f"{p.muted}[ {p.accent}a NetBBS door game{p.muted} ]"
-        + f"{p.title}{BOLD}══╗{RESET}"
-    )
+TITLE_LOGO = ("█░░█ █▀▀█ ▀█▀ █▀▀▄   █▀▀▄ █░░█ █▄░█ █▄░█ █▀▀ █▀▀▄",
+              "░▀▄▀ █▄▄█ ░█░ █▄▄▀   █░▀▄ █▄▄█ █░▀█ █░▀█ ██▄ █░▀▄")
+TITLE_TAGLINE = "a NetBBS door game"
+TITLE_SUBTITLE = "Tactical Deep-Space Trading & Exploration"
 
-    logo_l1 = "█░░█ █▀▀█ ▀█▀ █▀▀▄   █▀▀▄ █░░█ █▄░█ █▄░█ █▀▀ █▀▀▄"
-    logo_l2 = "░▀▄▀ █▄▄█ ░█░ █▄▄▀   █░▀▄ █▄▄█ █░▀█ █░▀█ ██▄ █░▀▄"
-    sub = f"{p.accent}Tactical Deep-Space Trading & Exploration{RESET}"
 
+def _fit_text(text: str, width: int) -> str:
+    """Trim a single field to the box interior by display columns, never by code points."""
+    while text and _visible_width(text) > width:
+        text = text[:-1]
+    return text
+
+
+def title_rows(info: dict, inner_w: int) -> list[tuple[str, str, str]]:
+    """The splash as (kind, text, align) rows: the large composition when the logo
+    fits, otherwise a complete compact one (wordmark, wrapped subtitle, stacked
+    meta fields), following the portraits' rule of a whole composition or none.
+    Kinds: "blank", "logo", "wordmark", "sub", "rule", "meta"."""
     node = info.get("node_name", "NetBBS")
     handle = info.get("handle", "Pilot")
-    meta = (
-        f"  {p.muted}NODE:{RESET} {p.title}{node}{RESET}  │  "
-        f"{p.muted}PILOT:{RESET} {p.gold}{handle}{RESET}  │  "
-        f"{p.muted}GALAXY:{RESET} {p.title}48 Star Systems{RESET}"
-    )
-    if _vis_len(meta) > inner_w:
-        meta = (
-            f"  {p.muted}NODE:{RESET} {p.title}{node[:16]}{RESET}  │  "
-            f"{p.muted}PILOT:{RESET} {p.gold}{handle[:16]}{RESET}  │  "
-            f"{p.muted}GALAXY:{RESET} {p.title}48 Systems{RESET}"
-        )
+    rows: list[tuple[str, str, str]] = [("blank", "", "left")]
+    large = inner_w >= max(_visible_width(row) for row in TITLE_LOGO) + 2
+    if large:
+        rows += [("logo", row, "center") for row in TITLE_LOGO]
+    wordmark = "V O I D R U N N E R" if inner_w >= 19 else "VOIDRUNNER"
+    # Below the wordmark's width the letters wrap onto more rows; nothing is cut.
+    rows += [("wordmark", part, "center") for part in _wrap_output(wordmark, max(1, inner_w)).split("\r\n")]
+    rows.append(("blank", "", "left"))
+    rows += [("sub", line, "center") for line in _wrap_output(TITLE_SUBTITLE, max(1, inner_w - 2)).split("\r\n")]
+    rows += [("blank", "", "left"), ("rule", "", "left")]
+    fields = [("NODE", node), ("PILOT", handle), ("GALAXY", "48 Star Systems")]
+    one_line = "  " + "  │  ".join(f"{label}: {value}" for label, value in fields)
+    if large and _visible_width(one_line) <= inner_w:
+        rows.append(("meta", one_line, "left"))
+    else:
+        # Stack rather than clip: the callsign is caller-visible identity text and
+        # a valid 16-character wide-glyph handle must survive intact.
+        galaxy = "48 Star Systems" if _visible_width("  GALAXY: 48 Star Systems") <= inner_w else "48 Systems"
+        stacked = [("NODE", node), ("PILOT", handle), ("GALAXY", galaxy)]
+        for label, value in stacked:
+            # Wrap, never trim: a long or wide callsign continues on the next row.
+            parts = _wrap_output(f"{label}: {value}", max(1, inner_w - 2)).split("\r\n")
+            rows += [("meta", "  " + part, "left") for part in parts]
+    return rows
 
+
+def screen_title(p: Palette, info: dict) -> None:
+    inner_w = _box_inner_width()
+    edge = f"{p.title}{BOLD}"
+    tagline = f"[ {TITLE_TAGLINE} ]"
+    if inner_w >= len(tagline) + 3:
+        top_border = (f"{edge}╔" + "═" * (inner_w - len(tagline) - 2)
+                      + f"{p.muted}[ {p.accent}{TITLE_TAGLINE}{p.muted} ]" + f"{edge}══╗{RESET}")
+    else:
+        top_border = f"{edge}╔{'═' * inner_w}╗{RESET}"
+    styles = {"logo": f"{p.gold}{BOLD}", "wordmark": f"{p.gold}{BOLD}", "sub": p.accent, "meta": "", "blank": ""}
     out_line()
     out_line(top_border)
-    out_line(f"{p.title}{BOLD}║{RESET}{' ' * inner_w}{p.title}{BOLD}║{RESET}")
-    out_line(f"{p.title}{BOLD}║{RESET}{_pad(f'{p.gold}{BOLD}{logo_l1}{RESET}', inner_w, 'center')}{p.title}{BOLD}║{RESET}")
-    out_line(f"{p.title}{BOLD}║{RESET}{_pad(f'{p.gold}{BOLD}{logo_l2}{RESET}', inner_w, 'center')}{p.title}{BOLD}║{RESET}")
-    out_line(f"{p.title}{BOLD}║{RESET}{_pad(f'{p.gold}{BOLD}V O I D R U N N E R{RESET}', inner_w, 'center')}{p.title}{BOLD}║{RESET}")
-    out_line(f"{p.title}{BOLD}║{RESET}{' ' * inner_w}{p.title}{BOLD}║{RESET}")
-    out_line(f"{p.title}{BOLD}║{RESET}{_pad(sub, inner_w, 'center')}{p.title}{BOLD}║{RESET}")
-    out_line(f"{p.title}{BOLD}║{RESET}{' ' * inner_w}{p.title}{BOLD}║{RESET}")
-    out_line(f"{p.title}{BOLD}╠{'═' * inner_w}╣{RESET}")
-    out_line(f"{p.title}{BOLD}║{RESET}{_pad(meta, inner_w, 'left')}{p.title}{BOLD}║{RESET}")
-    out_line(f"{p.title}{BOLD}╚{'═' * inner_w}╝{RESET}")
+    for kind, text, align in title_rows(info, inner_w):
+        if kind == "rule":
+            out_line(f"{edge}╠{'═' * inner_w}╣{RESET}")
+            continue
+        if kind == "meta":
+            text = text.replace("NODE:", f"{p.muted}NODE:{RESET}").replace("PILOT:", f"{p.muted}PILOT:{RESET}").replace("GALAXY:", f"{p.muted}GALAXY:{RESET}")
+        body = f"{styles[kind]}{text}{RESET}" if text else ""
+        out_line(f"{edge}║{RESET}{_pad(body, inner_w, align)}{edge}║{RESET}")
+    out_line(f"{edge}╚{'═' * inner_w}╝{RESET}")
     out_line(f"{p.muted}A {info.get('node_name', 'NetBBS')} space trading door.{RESET}")
     out_line()
 
 
 def create_career(p: Palette, info: dict) -> str | None:
     out_line()
-    out_line(_box_title(p, "Pilot Commission Registration"))
-    welcome = f"  {p.gold}Welcome to the void, pilot.{RESET} No career dossier found for {info['handle']}."
-    pad_len = max(0, 77 - _vis_len(welcome))
-    out_line(f"{p.accent}│{RESET}{welcome}{' ' * pad_len}{p.accent}│{RESET}")
+    inner_w = _box_inner_width()
+    title = "Pilot Commission Registration"
+    if _visible_width(title) > inner_w - 5: title = "Registration"
+    out_line(_box_title(p, _fit_text(title, max(1, inner_w - 5))))
+    welcome = f"Welcome to the void, pilot. No career dossier found for {info['handle']}."
+    for index, row in enumerate(_wrap_output(welcome, max(1, inner_w - 2)).split("\r\n")):
+        styled = row.replace("Welcome to the void, pilot.", f"{p.gold}Welcome to the void, pilot.{RESET}") if index == 0 else row
+        out_line(f"{p.accent}│{RESET}{_pad('  ' + styled, inner_w, 'left')}{p.accent}│{RESET}")
     out_line(_box_bottom(p))
     out_prompt(f"  {p.muted}Pilot callsign [{info['handle']}]: {RESET}")
     entered = read_line_raw(max_len=16, allowed=lambda c: c.isalnum() or bool(unicodedata.combining(c)) or c == " ").strip()
