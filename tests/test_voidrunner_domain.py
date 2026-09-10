@@ -12515,3 +12515,29 @@ def test_contraband_milestones_follow_the_shorter_step_without_recycling():
     assert world.save.pilot.reputation["blackwake"] == 1  # a recovered loss mints nothing
     vr.record_contraband_trade(world, "weapons", 250)
     assert world.save.pilot.reputation["blackwake"] == 2
+
+
+# --- #408: bulk deliveries for large hulls ----------------------------------------------
+
+
+def test_delivery_ceiling_is_ten_for_a_shuttle_and_scales_with_larger_holds():
+    world = _world_with_seed(42)
+    assert vr.delivery_contract_ceiling(world.save.ship) == 10
+    world.save.ship.hull_class = "Carrier"; world.save.ship.cargo_tier = vr.UPGRADES["cargo"]["max_tier"]
+    capacity = vr.cargo_capacity(world.save.ship)
+    assert vr.delivery_contract_ceiling(world.save.ship) == capacity * 2 // 5 > 10
+
+
+def test_shuttle_boards_are_unchanged_and_carrier_boards_post_bulk_deliveries():
+    import random
+    world = _world_with_seed(42)
+    hops = vr.bfs_hops(world.by_id, world.here.id)
+    before = [vr._generate_mission(world, "delivery", hops, rng=random.Random(seed)) for seed in range(40)]
+    assert all(3 <= m.quantity <= 10 for m in before if m)
+    world.save.ship.hull_class = "Carrier"; world.save.ship.cargo_tier = vr.UPGRADES["cargo"]["max_tier"]
+    after = [vr._generate_mission(world, "delivery", hops, rng=random.Random(seed)) for seed in range(40)]
+    ceiling = vr.delivery_contract_ceiling(world.save.ship)
+    assert all(3 <= m.quantity <= ceiling for m in after if m) and any(m.quantity > 10 for m in after if m)
+    assert [m.target_system for m in before if m] == [m.target_system for m in after if m]  # same draw sequence
+    for small, big in zip(before, after):
+        if small and big and big.quantity > small.quantity: assert big.reward > small.reward
