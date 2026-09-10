@@ -5298,14 +5298,21 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
         current, choices = pages[-1]
         if current and (len(current) + len(rows) > capacity or (key is not None and key in choices)):
             pages.append(([], {}))
-        for row in rows:
+        remaining = [render(row, index) for row in rows] if render is not None else list(rows)
+        while remaining:
             current, choices = pages[-1]
-            if len(current) == capacity:
+            room = capacity - len(current)
+            if room <= 0:
                 pages.append(([], {}))
-                current, choices = pages[-1]
+                continue
+            chunk, remaining = remaining[:room], remaining[room:]
             if key is not None:
+                # The prefix is applied to each page's own slice, so an entry too
+                # tall for one page still shows the letter that selects it on every
+                # page it reaches (issue #411 review).
                 choices[key] = value
-            current.append(render(row, index) if render is not None else row)
+                chunk = keyed_rows(key, chunk)
+            current.extend(chunk)
     return pages if keys is not None else [rows for rows, _ in pages]
 
 
@@ -5609,6 +5616,12 @@ def trade_opportunities(world: World) -> list[dict]:
                     continue
                 try:
                     if use_hold:
+                        # Selling what is aboard buys nothing, but the trip still costs
+                        # fuel and wages; an unaffordable route is not an opportunity
+                        # (issue #415 review).
+                        unit_quote = trade_route_quote(world, sid, commodity, 1, use_hold=True)
+                        if world.save.pilot.credits < unit_quote["fuel_cash"] + unit_quote["wages"]:
+                            continue
                         quantity = min(held, memory.get("demand", held))
                     else:
                         unit_quote = trade_route_quote(world, sid, commodity, 1)
@@ -6631,10 +6644,8 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
         key = read_command_at_prompt()
         if key in ("B", "Q"):
             return False
-        if key == "N" and page < len(pages) - 1:
-            page += 1
-        elif key == "P" and page:
-            page -= 1
+        if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+            page = moved
         elif key == "A" and page == len(pages) - 1:
             try:
                 accept_opening_assignment(world, offer)
@@ -6661,10 +6672,8 @@ def screen_pilot_guide(p: Palette, world: World) -> None:
         key = read_command_at_prompt()
         if key in ("B", "Q"):
             return
-        if key == "N" and page < len(pages) - 1:
-            page += 1
-        elif key == "P" and page:
-            page -= 1
+        if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+            page = moved
         elif key == "O" and offer is not None:
             if _screen_opening_offer(p, world, offer):
                 return  # Straight back to the deck, which shows the next step as a result.
@@ -6893,10 +6902,13 @@ def screen_missions(p: Palette, world: World) -> None:
         if posted:
             summary.append(f"New offers on day {posted['refresh_turn']}")
         footer = "[1-9] Details [N]ext [P]rev [B]ack > "
+        # Measured like every other screen: the content column is one narrower than
+        # the terminal, and the board's own summary rows are part of its overhead.
+        width = max(1, _OUTPUT_WIDTH - 1)
         max_pages = max(1, sum(len(rows) for _, _, rows in wrapped))
-        overhead = 1 + len(_wrap_output(f"Contracts {max_pages}/{max_pages}", _OUTPUT_WIDTH).split("\r\n"))
-        overhead += sum(len(_wrap_output(line, _OUTPUT_WIDTH).split("\r\n")) for line in summary)
-        overhead += len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
+        overhead = 1 + len(_wrap_output(f"Contracts {max_pages}/{max_pages}", width).split("\r\n"))
+        overhead += sum(len(_wrap_output(line, width).split("\r\n")) for line in summary)
+        overhead += len(_wrap_output(footer, width).split("\r\n"))
         capacity = max(1, _OUTPUT_HEIGHT - overhead)
         pages = [([], [])]  # rows, selectable contracts; continued rows stay selectable
         for mission, active, rows in wrapped:
@@ -7147,9 +7159,8 @@ def _chart_pages_for(world: World, title: str, footer: str, result: str | None):
             letters.append((None, None))
             groups.append(paragraph)
             continue
-        letter = CHART_CONNECTION_LETTERS[index % len(CHART_CONNECTION_LETTERS)]
-        letters.append((letter, sid))
-        groups.append(keyed_rows(letter, paragraph))
+        letters.append((CHART_CONNECTION_LETTERS[index % len(CHART_CONNECTION_LETTERS)], sid))
+        groups.append(paragraph)  # `paginate` keys each page's slice for itself
         index += 1
     return paginate(groups, capacity, keys=letters)
 
@@ -7935,16 +7946,28 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
     if travel is None:
         origin = world.here
         dest = world.by_id[dest_id]
-        world.save.ship.fuel -= fuel_cost_for_jump(origin, dest, world.save.ship)
+        burn = fuel_cost_for_jump(origin, dest, world.save.ship)
+        world.save.ship.fuel -= burn
         world.save.turn += 1
         world.ship_destroyed_this_hop = False
         lines = [f"Jumping to {'the unknown' if not dest.discovered else dest.name}..."]
+        # What the jump itself cost. `pay_crew_wages` reports only promotions and
+        # resignations, so an ordinary staffed hop said nothing about fuel or wages
+        # and the deck's retained report was one line long (issue #410 review).
+        credits_before = world.save.pilot.credits
         lines.extend(expire_missions(world))
         tick_price_reversion(world)
         event_msg = tick_economy_event(world)
         if event_msg:
             lines.append(event_msg)
-        lines.extend(pay_crew_wages(world))
+        wage_messages = pay_crew_wages(world)
+        wages = max(0, credits_before - world.save.pilot.credits)
+        # The charge reads before what the day brought, which is the order the
+        # design states and the order a pilot asks in.
+        lines.insert(1, f"Departure: {plural(burn, 'fuel unit')} burned, {world.save.ship.fuel} left"
+                     + (f"; crew wages {wages}cr." if wages else ".")
+                     + f" {world.save.pilot.credits:,}cr on hand.")
+        lines.extend(wage_messages)
         lines.extend(settle_futures_contracts(world, legacy_only=True))
         was_discovered = dest.discovered
         dest.discovered = True
@@ -8387,10 +8410,8 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
             return RecoveryResult(None, 1)
         if key in ("B", "Q"):
             return RecoveryResult(None, 0)
-        if key == "N" and page < len(pages) - 1:
-            page += 1
-        elif key == "P" and page:
-            page -= 1
+        if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
+            page = moved
         elif key == "R" and can_restore:
             try:
                 confirmed = confirm("Restore this previous checkpoint?", p)

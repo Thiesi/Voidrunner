@@ -22,6 +22,7 @@ import importlib.util
 import io
 import random
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -5481,8 +5482,13 @@ def test_acknowledged_station_action_survives_forced_termination(
     reader = threading.Thread(target=_drain_until, args=(proc.stdout, output, ack, reached))
     reader.start()
     try:
-        proc.stdin.write(commands)
-        proc.stdin.flush()
+        # A list is written with a real gap between parts; see `_door_stopped_at`.
+        parts = commands if isinstance(commands, list) else [commands]
+        for index, part in enumerate(parts):
+            if index:
+                time.sleep(max(0.25, vr._INPUT_TIMEOUT * 5))
+            proc.stdin.write(part)
+            proc.stdin.flush()
         assert reached.wait(10), bytes(output).decode("utf-8", errors="replace")
         # Deliberately no menu-exit input, EOF or graceful quit.
         proc.kill()
@@ -5778,25 +5784,31 @@ def test_every_travel_checkpoint_resumes_to_the_same_career(
         assert actual == expected, (scenario, saved["pending_travel"], next_key)
 
 
-def _drain_until(stream, output: bytearray, marker: bytes, reached) -> None:
-    """Read a door's stdout in chunks until the marker appears or it closes.
+def _drain_until(stream, output: bytearray, markers, events) -> None:
+    """Read a door's stdout in chunks, setting each event as its marker appears.
 
     `read(1)` is the slowest possible drain and the subprocess tests dominate the
     suite's runtime; `read1` returns whatever has already arrived, so a marker is
-    still seen as soon as the door writes it (issue #422).
+    still seen as soon as the door writes it (issue #422). Markers are matched in
+    order, which lets a caller wait for a prompt before it writes, instead of
+    racing the door's startup (issue #416 review).
     """
+    if isinstance(markers, bytes):
+        markers, events = (markers,), (events,)
+    pending = list(zip(markers, events))
     while len(output) < 128_000:
         chunk = stream.read1(4096) if hasattr(stream, "read1") else stream.read(1)
         if not chunk:
             return
         output.extend(chunk)
-        if marker in output:
-            reached.set()
+        while pending and pending[0][0] in output:
+            pending.pop(0)[1].set()
+        if not pending:
             return
 
 
 @contextlib.contextmanager
-def _door_stopped_at(tmp_path, commands: bytes, acknowledgement: bytes):
+def _door_stopped_at(tmp_path, commands, acknowledgement: bytes, ready: bytes | None = None):
     """Run the shipped script, then force-kill while stdin is still open."""
     import json
     import os
@@ -5813,11 +5825,25 @@ def _door_stopped_at(tmp_path, commands: bytes, acknowledgement: bytes):
     reached = threading.Event()
     output = bytearray()
 
-    reader = threading.Thread(target=_drain_until, args=(proc.stdout, output, acknowledgement, reached))
+    prompt = threading.Event()
+    markers = (ready, acknowledgement) if ready else (acknowledgement,)
+    events = (prompt, reached) if ready else (reached,)
+    reader = threading.Thread(target=_drain_until, args=(proc.stdout, output, markers, events))
     reader.start()
     try:
-        proc.stdin.write(commands)
-        proc.stdin.flush()
+        # `ready` waits for the door's own prompt before writing, so the test does
+        # not race process startup; a list is then written with a real gap between
+        # parts, because a contiguous `ESC X` is an Alt or control-string sequence
+        # by design and a *lone* Escape only exists on the wire once the decoder's
+        # timeout has passed (issue #416 review).
+        if ready:
+            assert prompt.wait(15), bytes(output).decode("utf-8", errors="replace")
+        parts = commands if isinstance(commands, list) else [commands]
+        for index, part in enumerate(parts):
+            if index:
+                time.sleep(max(0.25, vr._INPUT_TIMEOUT * 5))
+            proc.stdin.write(part)
+            proc.stdin.flush()
         assert reached.wait(10), bytes(output).decode("utf-8", errors="replace")
         proc.kill()
         proc.wait(timeout=5)
@@ -6250,10 +6276,16 @@ def test_real_door_accepts_utf8_name_and_coalesces_crlf(tmp_path):
 
 def test_real_pipe_lone_escape_is_absorbed_without_blocking_the_next_key(tmp_path):
     """The Escape itself now costs nothing at an action bar (#416), so what a real
-    pipe has to prove is that it does not swallow or delay the key after it."""
+    pipe has to prove is that it does not swallow or delay the key after it.
+
+    The Escape and the key that follows are written as separate flushes, because a
+    contiguous `ESC X` is a control-string introducer, not a lone Escape; and the
+    acknowledgement is the deck redraw that only an accepted `X` produces, not the
+    letter itself, which the title screen already contains (issue #416 review).
+    """
     world = _world_with_seed(42)
     vr.persist(world, tmp_path, 77)
-    with _door_stopped_at(tmp_path, b"\x1bX", b"X"):
+    with _door_stopped_at(tmp_path, [b"\x1b", b"X"], b"[X]Compact", ready=b"[X]Expand"):
         saved, is_new, notice = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert not is_new and notice is None
     assert saved.turn == 0
@@ -13246,8 +13278,12 @@ def test_paginate_keeps_groups_whole_splits_oversized_ones_and_never_repeats_a_l
     assert coloured[0][2] == "<b1>"
     keyed = vr.paginate([["A one"], ["A two"], ["B three"]], 10,
                         keys=[("A", 1), ("A", 2), ("B", 3)])
-    assert [rows for rows, _ in keyed] == [["A one"], ["A two", "B three"]]  # a letter never repeats
-    assert [choices for _, choices in keyed] == [{"A": 1}, {"A": 2, "B": 3}]
+    assert [rows for rows, _ in keyed] == [["[A] A one"], ["[A] A two", "[B] B three"]]
+    assert [choices for _, choices in keyed] == [{"A": 1}, {"A": 2, "B": 3}]  # a letter never repeats
+    # An entry taller than a page carries its letter on every page it reaches (#411 review).
+    split = vr.paginate([["one", "two", "three"]], 2, keys=[("A", 7)])
+    assert [rows for rows, _ in split] == [["[A] one", "    two"], ["[A] three"]]
+    assert [choices for _, choices in split] == [{"A": 7}, {"A": 7}]
 
 
 @pytest.mark.parametrize("key,page,count,expected", [
@@ -13502,3 +13538,57 @@ def test_the_workshop_screen_fits_and_can_be_left(monkeypatch, width, height):
         assert all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert len(frame.splitlines()) <= height
         assert "[B]" in frame or "[Q]" in frame
+
+
+# --- late review findings on #410, #411 and #415 ----------------------------------------
+
+
+def test_the_hop_report_names_what_the_jump_cost(monkeypatch):
+    """An ordinary staffed hop reported only "Jumping to ..." (issue #410 review)."""
+    world = _world_with_seed(42)
+    world.save.ship.has_gunner = True
+    world.save.pilot.credits = 10_000
+    destination = sorted(world.here.connections)[0]
+    burn = vr.fuel_cost_for_jump(world.here, world.by_id[destination], world.save.ship)
+    monkeypatch.setattr(vr, "_resolve_random_travel_encounter", lambda p, w, d: None)
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
+    monkeypatch.setattr(vr, "pause", lambda p, msg=None: None)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(False), world, destination)
+    report = " ".join(world.hop_report)
+    assert f"{burn} fuel unit" in report and "on hand" in report
+    assert "crew wages" in report  # a gunner was paid, and the report says so
+    world.save.ship.has_gunner = False
+    world.hop_report = []
+    back = sorted(world.here.connections)[0]
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(False), world, back)
+    assert "crew wages" not in " ".join(world.hop_report)  # nothing to report with no crew
+
+
+def test_a_chart_entry_that_spans_pages_carries_its_letter_on_each(monkeypatch):
+    """A page showing only a continuation still has to show the key that picks it."""
+    import re
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 20); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 10)
+    world = _world_with_seed(42)
+    world.checkpoint()
+    pages = vr._chart_pages(world, "Navigation", "[G]Route planner [B]Back: ", None)
+    for rows, choices in pages:
+        shown = {match[0] for row in rows for match in re.findall(r"^\[([A-Z])\] ", row)}
+        assert set(choices) <= shown, (choices, rows)  # every offered letter is visible here
+    spanning = [page for page in pages if any(row.startswith("    ") for row in page[0])]
+    assert spanning or all(len(page[0]) <= 10 for page in pages)
+
+
+def test_a_hold_route_the_pilot_cannot_afford_to_fly_is_not_an_opportunity():
+    """Selling what is aboard buys nothing, but the trip still costs (issue #415 review)."""
+    world = _world_with_trade_opportunities()
+    held = vr.cargo_capacity(world.save.ship)
+    world.save.cargo = {"machinery": held}
+    world.save.cargo_basis = {"machinery": [[held, held * vr.price_for(world, 0, "machinery")]]}
+    world.save.ship.has_gunner = True
+    world.save.ship.fuel = 0  # every leg needs a paid top-up now
+    affordable = vr.trade_opportunities(world)
+    assert affordable and all(quote["use_hold"] for quote in affordable)
+    world.save.pilot.credits = 0
+    assert vr.trade_opportunities(world) == []  # no cash for fuel or wages, so no route
