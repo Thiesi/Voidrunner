@@ -819,7 +819,7 @@ def test_market_depth_split_orders_and_buyback_cannot_restore_station_demand():
     assert vr.market_depth_quote(world, 0, "food")["demand"] == 1
 
 
-def test_market_depth_old_career_and_future_wholesale_terms_remain_usable():
+def test_market_depth_old_career_and_wholesale_orders_follow_station_stock():
     import copy
     world = _world_with_seed(42)
     data = copy.deepcopy(world.save.to_dict()); data.pop("market_depth")
@@ -827,12 +827,16 @@ def test_market_depth_old_career_and_future_wholesale_terms_remain_usable():
     assert restored.save.market_depth == {} and vr.market_depth_quote(restored, 0, "food")["stock"] == 48
     restored.save.market_depth = {0: {"food": {"day": 0, "stock": 0, "demand": 0}}}
     restored.save.pilot.credits = 100000
+    with pytest.raises(vr.TradeError, match="station stock"):
+        vr.buy_futures_contract(restored, "food", 10, 5)
+    restored.save.turn = 4  # replenished stock (3/day) admits the order
     vr.buy_futures_contract(restored, "food", 10, 5)
-    restored.save.turn = 5
+    assert vr.market_depth_quote(restored, 0, "food")["stock"] == 2
+    restored.save.turn = 9
     vr.settle_futures_contracts(restored)
     assert restored.save.cargo["food"] == 10
-    assert restored.save.trading_ledger.since_day == 5
-    assert restored.save.market_depth[0]["food"] == {"day": 0, "stock": 0, "demand": 0}
+    assert restored.save.trading_ledger.since_day == 9
+    assert restored.save.market_depth[0]["food"] == {"day": 4, "stock": 2, "demand": 24}  # settlement leaves the pool alone
 
 
 def test_market_depth_observations_are_stale_and_reports_do_not_invent_quantities():
@@ -11894,3 +11898,146 @@ def test_customs_b_is_rejected_as_undisplayed_and_p_bribes(monkeypatch):
         vr.screen_customs(vr.Palette(False), world)
     plain = vr._ANSI_RE.sub("", output.getvalue())
     assert "Choose a displayed action" in plain and "[P]Pay bribe" in plain and "changes hands quietly" in plain
+
+
+# --- #401: futures orders reserve station stock ------------------------------------
+
+
+def _world_at_food_producer(seed: int = 42) -> "vr.World":
+    world = _world_with_seed(seed)
+    world.save.current_system = next(s.id for s in world.galaxy if "food" in vr.ECONOMY_PRODUCES[s.economy])
+    world.save.pilot.credits = 1_000_000
+    return world
+
+
+def test_futures_orders_reserve_station_stock_and_nudge_the_price():
+    world = _world_at_food_producer()
+    world.save.ship.hull_class = "Carrier"; world.save.ship.cargo_tier = vr.UPGRADES["cargo"]["max_tier"]
+    cap = vr.market_depth_limits(world.here.economy, "food")["stock"]
+    assert vr.cargo_capacity(world.save.ship) > cap
+    spot_before = vr.price_for(world, world.here.id, "food")
+    vr.buy_futures_contract(world, "food", 24, 5)
+    contract = world.save.active_futures[0]
+    assert contract.reserved == 24
+    assert vr.market_depth_quote(world, world.here.id, "food")["stock"] == cap - 24
+    assert vr.price_for(world, world.here.id, "food") > spot_before
+    with pytest.raises(vr.TradeError, match="in stock"):
+        vr.trade_cargo(world, "food", cap - 23, buying=True)
+    with pytest.raises(vr.TradeError, match="station stock"):
+        vr.buy_futures_contract(world, "food", cap - 23, 5)
+
+
+def test_spot_and_futures_volume_cannot_exceed_replenished_stock_over_time():
+    world = _world_at_food_producer()
+    limits = vr.market_depth_limits(world.here.economy, "food")
+    taken = 0
+    for day in range(30):
+        world.save.turn = day
+        kind = "futures" if day % 2 else "spot"
+        while True:
+            try:
+                if kind == "futures":
+                    if len(world.save.active_futures) >= vr.MAX_FUTURES_CONTRACTS:
+                        for order in list(world.save.active_futures):
+                            world.save.active_futures.remove(order)  # collected elsewhere; keep the reservation
+                    vr.buy_futures_contract(world, "food", 8, 5)
+                else:
+                    vr.trade_cargo(world, "food", 8, buying=True)
+                    world.save.cargo.clear(); world.save.cargo_basis.clear()
+                taken += 8
+            except vr.TradeError:
+                break
+    assert taken <= limits["stock"] + 29 * limits["stock_rate"]
+    assert taken >= limits["stock"]
+
+
+def test_futures_order_exceeding_stock_is_rejected_before_any_change():
+    import copy
+    world = _world_at_food_producer()
+    cap = vr.market_depth_limits(world.here.economy, "food")["stock"]
+    world.save.ship.cargo_tier = vr.UPGRADES["cargo"]["max_tier"]
+    world.save.ship.hull_class = "Carrier"
+    assert vr.cargo_capacity(world.save.ship) > cap
+    before = copy.deepcopy(world.save.to_dict())
+    with pytest.raises(vr.TradeError, match="station stock"):
+        vr.buy_futures_contract(world, "food", cap + 1, 5)
+    assert world.save.to_dict() == before
+
+
+def test_cancelling_returns_reserved_stock_bounded_by_the_station_ceiling():
+    world = _world_at_food_producer()
+    cap = vr.market_depth_limits(world.here.economy, "food")["stock"]
+    vr.buy_futures_contract(world, "food", 24, 5)
+    vr.buy_futures_contract(world, "food", 24, 5)
+    first, second = world.save.active_futures
+    assert vr.market_depth_quote(world, world.here.id, "food")["stock"] == cap - 48
+    message = vr.cancel_futures_contract(world, first.id)
+    assert "24 units returned" in message
+    assert vr.market_depth_quote(world, world.here.id, "food")["stock"] == cap - 24
+    world.save.turn += 40  # pool fully replenished meanwhile
+    world.save.current_system = world.here.connections[0]  # remote cancellation
+    vr.cancel_futures_contract(world, second.id)
+    origin = first.origin_system
+    assert vr.market_depth_quote(world, origin, "food")["stock"] == cap
+
+
+def test_settlement_does_not_consume_stock_a_second_time():
+    world = _world_at_food_producer()
+    cap = vr.market_depth_limits(world.here.economy, "food")["stock"]
+    vr.buy_futures_contract(world, "food", 10, 5)
+    world.save.turn = 5
+    assert vr.settle_futures_contracts(world) and world.save.cargo == {"food": 10}
+    assert vr.market_depth_quote(world, world.here.id, "food")["stock"] == min(cap, cap - 10 + 5 * vr.market_depth_limits(world.here.economy, "food")["stock_rate"])
+
+
+def test_legacy_and_unreserved_orders_keep_their_terms():
+    world = _world_at_food_producer()
+    cap = vr.market_depth_limits(world.here.economy, "food")["stock"]
+    legacy = vr.FuturesContract(id=1, commodity="food", quantity=4, locked_price=100, settle_turn=0)
+    unreserved = vr.FuturesContract(id=2, commodity="food", quantity=4, locked_price=100, settle_turn=9,
+                                    origin_system=world.here.id, principal=90)
+    world.save.active_futures = [legacy, unreserved]
+    world.save.next_futures_id = 3
+    data = vr.SaveData.from_dict(world.save.to_dict())
+    assert "reserved" not in data.active_futures[0].to_dict() and "reserved" not in data.active_futures[1].to_dict()
+    assert vr.settle_futures_contracts(world) == ["Futures contract settled: 4x Food delivered to your hold."]
+    assert vr.market_depth_quote(world, world.here.id, "food")["stock"] == cap
+    vr.cancel_futures_contract(world, 2)
+    assert vr.market_depth_quote(world, world.here.id, "food")["stock"] == cap
+    assert not world.save.active_futures
+
+
+@pytest.mark.parametrize("reserved", [-1, 25, "24", True])
+def test_corrupt_futures_reservation_uses_preserving_recovery(reserved):
+    world = _world_at_food_producer()
+    vr.buy_futures_contract(world, "food", 24, 5)
+    data = world.save.to_dict()
+    data["active_futures"][0]["reserved"] = reserved
+    with pytest.raises(vr.ResumeError):
+        vr.SaveData.from_dict(data)
+
+
+def test_reservation_on_a_legacy_order_is_rejected():
+    world = _world_at_food_producer()
+    legacy = vr.FuturesContract(id=1, commodity="food", quantity=4, locked_price=100, settle_turn=0)
+    world.save.active_futures = [legacy]
+    data = world.save.to_dict()
+    data["active_futures"][0]["reserved"] = 4
+    with pytest.raises(vr.ResumeError):
+        vr.SaveData.from_dict(data)
+
+
+def test_order_screens_show_stock_after_reservation(monkeypatch):
+    world = _world_at_food_producer()
+    cap = vr.market_depth_limits(world.here.economy, "food")["stock"]
+    keys = iter(["U", "B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: "10")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr._screen_buy_futures(vr.Palette(False), world, "food") is None
+    plain = " ".join(vr._ANSI_RE.sub("", output.getvalue()).split())
+    assert f"Station stock {cap}" in plain and f"{cap - 10} left after this order" in plain
+    vr.buy_futures_contract(world, "food", 10, 5)
+    keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._screen_futures_order(vr.Palette(False), world, world.save.active_futures[0])
+    assert "10 units reserved from that station's stock; cancelling returns them." in " ".join(output.getvalue().split())

@@ -966,6 +966,7 @@ class FuturesContract:
     settle_turn: int
     origin_system: int | None = None  # None: preserve legacy remote settlement.
     principal: int | None = None
+    reserved: int | None = None  # Station stock units reserved at signing (issue #401).
 
     def to_dict(self) -> dict:
         data = dataclasses.asdict(self)
@@ -973,6 +974,9 @@ class FuturesContract:
             # Legacy orders retain absent metadata when checkpointed again.
             del data["origin_system"]
             del data["principal"]
+        if self.reserved is None:
+            # Orders signed before stock reservation keep their absent key.
+            del data["reserved"]
         return data
 
     @classmethod
@@ -986,6 +990,10 @@ class FuturesContract:
                     or type(contract.settle_turn) is not int or contract.settle_turn < 0
                     or not isinstance(contract.commodity, str) or contract.commodity not in COMMODITIES):
                 raise ResumeError("The saved futures pickup terms cannot be read.")
+        if "reserved" in d:
+            if (contract.origin_system is None or type(contract.reserved) is not int
+                    or not 0 <= contract.reserved <= contract.quantity):
+                raise ResumeError("The saved futures stock reservation cannot be read.")
         return contract
 
 
@@ -1996,6 +2004,14 @@ def _consume_market_depth(world: World, commodity: str, quantity: int, *, buying
         key: pool[key] for key in ("day", "stock", "demand")}
 
 
+def _release_market_depth(world: World, system_id: int, commodity: str, quantity: int) -> None:
+    """Return reserved units to a station's stock pool, bounded by its ceiling."""
+    pool = market_depth_quote(world, system_id, commodity)
+    pool["stock"] = min(market_depth_limits(world.by_id[system_id].economy, commodity)["stock"], pool["stock"] + quantity)
+    world.save.market_depth.setdefault(system_id, {})[commodity] = {
+        key: pool[key] for key in ("day", "stock", "demand")}
+
+
 def remember_local_market(world: World) -> None:
     """Observe only docked, locally visible quotes, without consuming RNG."""
     if world.save.pending_travel is not None:
@@ -2318,18 +2334,24 @@ def buy_futures_contract(world: World, commodity: str, quantity: int, duration: 
     total = principal + fee
     if total > world.save.pilot.credits:
         raise TradeError(f"Need {total}cr including the nonrefundable {fee}cr fee.")
+    depth = market_depth_quote(world, world.here.id, commodity)
+    if quantity > depth["stock"]:
+        raise TradeError(f"Only {depth['stock']} units in station stock; orders reserve from it and it "
+                         f"replenishes {depth['stock_rate']}/day.")
     contract = FuturesContract(
         id=world.save.next_futures_id, commodity=commodity, quantity=quantity,
         locked_price=total, settle_turn=world.save.turn + duration,
-        origin_system=world.save.current_system, principal=principal,
+        origin_system=world.save.current_system, principal=principal, reserved=quantity,
     )
+    _consume_market_depth(world, commodity, quantity, buying=True)
+    _nudge_drift(world, world.here.id, commodity, min(0.05, quantity * 0.01))
     world.save.pilot.credits -= total
     record_contraband_trade(world, commodity, -total)
     world.save.active_futures.append(contract)
     world.save.next_futures_id += 1
     label = COMMODITIES[commodity]["label"]
     msg = (f"Futures contract: {quantity}x {label}, goods {principal}cr + fee {fee}cr. "
-           f"Pickup at {world.here.name} from day {contract.settle_turn}.")
+           f"Pickup at {world.here.name} from day {contract.settle_turn}; {quantity} units reserved from station stock.")
     world.save.pilot.note(msg)
     return msg
 
@@ -2342,10 +2364,14 @@ def cancel_futures_contract(world: World, contract_id: int) -> str:
         raise TradeError("That pickup order is no longer active.")
     world.save.active_futures.remove(contract)
     world.save.pilot.credits += contract.principal
+    if contract.reserved:
+        _release_market_depth(world, contract.origin_system, contract.commodity, contract.reserved)
     record_contraband_trade(world, contract.commodity, contract.principal)
     fee = contract.locked_price - contract.principal
     _ledger(world).cancelled_fees += fee
     msg = f"Order cancelled: {contract.principal}cr refunded; {fee}cr brokerage fee retained."
+    if contract.reserved:
+        msg += f" {contract.reserved} units returned to {world.by_id[contract.origin_system].name} stock."
     world.save.pilot.note(msg)
     return msg
 
@@ -4745,7 +4771,7 @@ def screen_futures(p: Palette, world: World, goods: list[str]) -> str | None:
             status = "ready" if world.save.turn >= contract.settle_turn else f"day {contract.settle_turn}"
             place = "legacy remote delivery" if contract.origin_system is None else world.by_id[contract.origin_system].name
             options.append((("order", contract), f"#{contract.id}: {contract.quantity} {COMMODITIES[contract.commodity]['label']}, {status}; {place}"))
-        notice = ["Wholesale orders: separate from spot stock; station pickup, 8% nonrefundable fee rounded up per unit.",
+        notice = ["Wholesale orders reserve station stock at signing; station pickup, 8% nonrefundable fee rounded up per unit.",
                   f"Outstanding orders: {len(world.save.active_futures)}/{MAX_FUTURES_CONTRACTS}"]
         if result: notice.insert(0, "Result: " + result)
         selected = _pick_trade_field(f"Futures Exchange: {world.save.pilot.credits:,}cr", options, max_choices=4, notice=notice, page_state=page_state)
@@ -4767,6 +4793,8 @@ def _screen_futures_order(p: Palette, world: World, contract: FuturesContract) -
             lines += [f"Pickup: {world.by_id[contract.origin_system].name}, from day {contract.settle_turn}.",
                       f"Paid {contract.principal}cr for goods + {fee}cr nonrefundable fee.",
                       "Collected on arrival/station entry when the full order fits; otherwise it waits.",
+                      (f"{contract.reserved} units reserved from that station's stock; cancelling returns them."
+                       if contract.reserved else "Signed before stock reservation: cancelling returns no stock."),
                       f"[X] Cancel: refund {contract.principal}cr, forfeit {fee}cr fee."]
         if result: lines.insert(0, "Result: " + result)
         footer = "[<>]Page " + ("[X]Cancel " if contract.origin_system is not None else "") + "[B]Back: "
@@ -4790,9 +4818,12 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
     quantity, duration, page, result = 1, FUTURES_DURATIONS[0], 0, None
     while True:
         principal, fee = futures_quote(world, commodity, quantity)
+        depth = market_depth_quote(world, world.here.id, commodity)
         lines = [f"Quantity: {quantity}; term: {duration} days.",
                  f"Pickup: {world.here.name}, from day {world.save.turn + duration}.",
                  f"Goods {principal}cr + nonrefundable fee {fee}cr = {principal + fee}cr.",
+                 f"Station stock {depth['stock']} (+{depth['stock_rate']}/day): {max(0, depth['stock'] - quantity)} left after this order."
+                 if quantity <= depth["stock"] else f"Station stock {depth['stock']} (+{depth['stock_rate']}/day): not enough for this order.",
                  "Full cargo space needed only at pickup. Cancellation refunds goods principal only; full holds leave orders waiting."]
         if result: lines.insert(0, "Result: " + result)
         footer = "[<>]Page [U]Units [T]Term [S]Sign [B]Back: "
