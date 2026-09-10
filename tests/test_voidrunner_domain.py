@@ -129,7 +129,7 @@ def test_market_memory_does_not_invent_history_from_legacy_discoveries():
 
 def test_market_memory_keeps_the_last_contraband_sale_quote_without_inventing_open_purchase():
     world = _world_with_seed(42)
-    world.save.cargo = {"weapons": 1}
+    _set_cargo(world, {"weapons": 1})
     vr.remember_local_market(world)
     quote = dict(world.save.market_memory[0]["weapons"])
     assert quote["buy"] is None and quote["sell"] > 0
@@ -211,13 +211,12 @@ def test_trade_route_quote_uses_stale_sale_data_and_exact_fuel_wage_budget(monke
 @pytest.mark.parametrize("quantity", [1, 2, 3, 4, 5])
 def test_trade_route_held_cargo_preview_matches_actual_fifo_disposal(quantity):
     world, destination = _world_with_market_memory()
-    world.save.cargo = {"food": 2}
+    vr._acquire_cargo(world, "food", 2, 60)
     vr._acquire_cargo(world, "food", 3, 100)
     quote = vr.trade_route_quote(world, destination, "food", quantity, use_hold=True)
-    cost, unknown = vr._dispose_cargo(world, "food", quantity, proceeds=quote["receipts"], kind="sale")
-    assert (quote["cargo_cost"], quote["unknown_units"]) == (cost, unknown)
+    cost = vr._dispose_cargo(world, "food", quantity, proceeds=quote["receipts"], kind="sale")
+    assert quote["cargo_cost"] == cost
     assert quote["procurement"] == 0
-    assert quote["margin"] is None
 
 
 def test_trade_route_known_hold_uses_actual_basis_not_current_purchase_price():
@@ -249,7 +248,7 @@ def test_trade_route_does_not_claim_an_underfilled_delivery_consumes_the_load():
 @pytest.mark.parametrize("deliveries,conflicts", [([3], []), ([3, 3], ["Delivery 2"]), ([4], ["Delivery 1"])])
 def test_trade_route_new_purchase_uses_older_cargo_as_delivery_buffer(deliveries, conflicts):
     world, destination = _world_with_market_memory()
-    world.save.cargo = {"food": 3}
+    _set_cargo(world, {"food": 3})
     world.save.active_missions = [vr.Mission(id=i, kind="delivery", description=f"Delivery {i}",
         reward=100, origin_system=0, target_system=destination, commodity="food", quantity=quantity)
         for i, quantity in enumerate(deliveries, 1)]
@@ -459,14 +458,9 @@ def test_real_market_memory_is_saved_after_trade_and_arrival_before_acknowledgem
         assert arrived.market_memory[0]["food"] == bought.market_memory[0]["food"]
 
 
-def test_trading_ledger_preserves_fifo_costs_and_unknown_legacy_stock(tmp_path):
+def test_trading_ledger_preserves_fifo_costs_across_a_restart(tmp_path):
     import json
     world = _world_with_seed(42)
-    world.save.cargo = {"food": 2}
-    legacy = world.save.to_dict()
-    legacy.pop("cargo_basis")
-    legacy.pop("trading_ledger")
-    world = vr.World(vr.SaveData.from_dict(legacy))
     first_cost = 3 * vr.price_for(world, 0, "food")
     vr.trade_cargo(world, "food", 3, buying=True)
     second_cost = 2 * vr.price_for(world, 0, "food")
@@ -477,20 +471,17 @@ def test_trading_ledger_preserves_fifo_costs_and_unknown_legacy_stock(tmp_path):
     unit = round(vr.price_for(world, 0, "food") * vr.SELL_SPREAD)
     vr.trade_cargo(world, "food", 3, buying=False)
     ledger = world.save.trading_ledger
-    assert ledger.uncosted_sales == 2 * unit
-    assert ledger.sales_revenue == unit and ledger.sales_cost == first_cost // 3
-    assert world.save.cargo_basis["food"] == [[2, first_cost * 2 // 3], [2, second_cost]]
-    vr.trade_cargo(world, "food", 4, buying=False)
+    assert ledger.sales_revenue == 3 * unit and ledger.sales_cost == first_cost
+    assert world.save.cargo_basis["food"] == [[2, second_cost]]
+    vr.trade_cargo(world, "food", 2, buying=False)
     assert ledger.sales_cost == first_cost + second_cost
     assert not world.save.cargo_basis and not world.save.cargo
     assert vr.SaveData.from_dict(json.loads(json.dumps(world.save.to_dict()))).trading_ledger == ledger
 
 
-def test_trading_ledger_partial_legacy_futures_keeps_exact_paid_remainder():
+def test_trading_ledger_partial_disposal_keeps_the_exact_paid_remainder():
     world = _world_with_seed(42)
-    world.save.active_futures = [vr.FuturesContract(id=1, commodity="food", quantity=3,
-                                                   locked_price=100, settle_turn=0)]
-    vr.settle_futures_contracts(world)
+    vr._acquire_cargo(world, "food", 3, 100)
     for expected in (33, 66, 100):
         vr.trade_cargo(world, "food", 1, buying=False)
         assert world.save.trading_ledger.sales_cost == expected
@@ -512,27 +503,25 @@ def test_trading_ledger_futures_basis_includes_fee_once_and_cancel_keeps_no_carg
     assert world.save.cargo == {"food": 3}
 
 
-def test_trading_ledger_delivery_allocates_mixed_receipts_and_consumes_basis_once():
+def test_trading_ledger_delivery_records_the_payment_and_consumes_basis_once():
     world = _world_with_seed(42)
-    world.save.cargo = {"food": 1}
-    cost = 2 * vr.price_for(world, 0, "food")
-    vr.trade_cargo(world, "food", 2, buying=True)
-    world.save.active_missions = [vr.Mission(id=1, kind="delivery", description="Mixed load",
+    cost = 3 * vr.price_for(world, 0, "food")
+    vr.trade_cargo(world, "food", 3, buying=True)
+    world.save.active_missions = [vr.Mission(id=1, kind="delivery", description="Full load",
         reward=100, origin_system=0, target_system=0, commodity="food", quantity=3)]
     vr.check_mission_completions(world)
     ledger = world.save.trading_ledger
-    assert (ledger.delivery_revenue, ledger.uncosted_deliveries, ledger.delivery_cost) == (67, 33, cost)
+    assert (ledger.delivery_revenue, ledger.delivery_cost) == (100, cost)
     assert ledger.sales_cost == ledger.sales_revenue == 0
     assert not world.save.cargo and not world.save.cargo_basis
     assert vr.check_mission_completions(world) == []
-    assert ledger.delivery_revenue == 67
+    assert ledger.delivery_revenue == 100
 
 
 @pytest.mark.parametrize("loss", ["dump", "destroy", "customs", "refused_bribe"])
 def test_trading_ledger_records_real_loss_paths(monkeypatch, loss):
     world = _world_with_seed(42)
     world.save.current_system = next(s.id for s in world.galaxy if s.economy == "Haven")
-    world.save.cargo = {"weapons": 1}
     cost = 2 * vr.price_for(world, world.here.id, "weapons")
     vr.trade_cargo(world, "weapons", 2, buying=True)
     if loss == "dump":
@@ -546,7 +535,7 @@ def test_trading_ledger_records_real_loss_paths(monkeypatch, loss):
         with contextlib.redirect_stdout(io.StringIO()):
             vr.screen_customs(vr.Palette(False), world)
     ledger = world.save.trading_ledger
-    assert ledger.cargo_loss_cost == cost and ledger.uncosted_losses == 1
+    assert ledger.cargo_loss_cost == cost
     assert not world.save.cargo and not world.save.cargo_basis
     assert ledger.sales_revenue == ledger.delivery_revenue == 0
 
@@ -690,9 +679,9 @@ def test_trading_ledger_retirement_starts_a_fresh_record():
     assert not fresh.cargo_basis and fresh.trading_ledger == vr.TradingLedger()
 
 
-def test_trading_ledger_zero_legacy_quantities_do_not_block_cargo_cleanup():
+def test_trading_ledger_zero_quantities_do_not_block_cargo_cleanup():
     world = _world_with_seed(42)
-    world.save.cargo = {"weapons": 0}
+    _set_cargo(world, {"weapons": 0})
     vr.dump_all_contraband(world)
     assert not world.save.cargo and world.save.trading_ledger.since_day is None
 
@@ -704,14 +693,13 @@ def test_trading_ledger_combat_dump_accounts_only_for_real_cargo(monkeypatch, qu
     if quantity:
         vr.trade_cargo(world, "food", 1, buying=True)
     else:
-        world.save.cargo = {"food": 0}  # Valid older saves can retain zero entries.
+        _set_cargo(world, {"food": 0})  # Valid older saves can retain zero entries.
     pirate = vr.generate_pirate(world, tier=1)
     monkeypatch.setattr(vr, "read_key", lambda: "D" if quantity else "E")  # Dump is only offered with cargo aboard (#414)
     monkeypatch.setattr(world.event_rng, "random", lambda: 0)
     with contextlib.redirect_stdout(io.StringIO()):
         assert vr.screen_combat(vr.Palette(False), world, pirate) == "escaped"
     assert world.save.trading_ledger.cargo_loss_cost == cost
-    assert world.save.trading_ledger.uncosted_losses == 0
     assert not world.save.cargo_basis
 
 
@@ -800,7 +788,7 @@ def test_market_depth_consumption_restart_and_replenishment_are_bounded(tmp_path
 def test_market_depth_rejected_trade_is_atomic_including_prices_basis_and_rng(buying):
     import copy
     world = _world_with_seed(42)
-    world.save.cargo = {"food": 10}
+    _set_cargo(world, {"food": 10})
     world.save.market_depth = {0: {"food": {"day": 0, "stock": 0, "demand": 0}}}
     before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
     with pytest.raises(vr.TradeError, match="stock|Station can buy"):
@@ -811,7 +799,7 @@ def test_market_depth_rejected_trade_is_atomic_including_prices_basis_and_rng(bu
 def test_market_depth_split_orders_and_buyback_cannot_restore_station_demand():
     world = _world_with_seed(42)
     world.save.ship.hull_class = "Carrier"; world.save.pilot.credits = 100000
-    world.save.cargo = {"food": 100}
+    _set_cargo(world, {"food": 100})
     for _ in range(96):
         vr.trade_cargo(world, "food", 1, buying=False)
     vr.trade_cargo(world, "food", 1, buying=True)
@@ -894,7 +882,7 @@ def test_market_depth_malformed_state_preserves_original_file(tmp_path, depth):
 @pytest.mark.parametrize("commands,buying", [(["P"], True), (["S"], False)])
 def test_market_depth_exhausted_pool_reports_reason_without_quantity_prompt(monkeypatch, commands, buying):
     import contextlib, io
-    world = _world_with_seed(42); world.save.cargo = {"food": 3}
+    world = _world_with_seed(42); _set_cargo(world, {"food": 3})
     world.save.market_depth = {0: {"food": {"day": 0, "stock": 0, "demand": 0}}}
     keys = iter(commands); monkeypatch.setattr(vr, "read_command", lambda: next(keys))
     monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: pytest.fail("Exhausted pool prompted for quantity"))
@@ -933,7 +921,7 @@ def test_market_depth_opening_assignment_does_not_quote_unavailable_procurement(
 
 
 def test_market_depth_contract_delivery_preserves_signed_terms_when_spot_demand_is_zero():
-    world = _world_with_seed(42); world.save.cargo = {"food": 3}
+    world = _world_with_seed(42); _set_cargo(world, {"food": 3})
     world.save.market_depth = {0: {"food": {"day": 0, "stock": 0, "demand": 0}}}
     world.save.active_missions = [vr.Mission(id=1, kind="delivery", description="Signed delivery", reward=500,
         origin_system=1, target_system=0, commodity="food", quantity=3)]
@@ -1016,13 +1004,13 @@ def test_a_full_hold_offers_somewhere_to_sell_rather_than_nothing():
     """Nothing left to buy is not nothing left to plan (issue #415 review)."""
     world = _world_with_trade_opportunities()
     held = vr.cargo_capacity(world.save.ship)  # a hold filled at the local producing price
-    world.save.cargo = {"machinery": held}
+    _set_cargo(world, {"machinery": held})
     world.save.cargo_basis = {"machinery": [[held, held * vr.price_for(world, 0, "machinery")]]}
     candidates = vr.trade_opportunities(world)
     assert candidates and all(quote["use_hold"] and quote["commodity"] == "machinery" for quote in candidates)
     assert all(quote["quantity"] <= world.save.cargo["machinery"] for quote in candidates)
     assert all(quote["procurement"] == 0 for quote in candidates)  # selling what is aboard buys nothing
-    world.save.cargo = {}
+    _set_cargo(world, {})
     assert all(not quote["use_hold"] for quote in vr.trade_opportunities(world))
 
 
@@ -1055,7 +1043,7 @@ def test_regional_economy_selects_local_bounded_regions_without_new_rng_calls():
     assert world.save.market_depth == {} and world.save.market_memory == {}
 
 
-def test_regional_economy_saved_scope_survives_restart_and_legacy_scope_remains_wide(tmp_path):
+def test_regional_economy_saved_scope_survives_a_restart(tmp_path):
     world = _world_with_seed(42); world.event_rng.seed(31); vr.tick_economy_event(world)
     ids = list(world.save.active_event["system_ids"]); vr.persist(world, tmp_path, 77)
     restored = vr.World(vr.load_or_create_save(tmp_path, 77, "Tester")[0])
@@ -1063,9 +1051,10 @@ def test_regional_economy_saved_scope_survives_restart_and_legacy_scope_remains_
     vr.tick_economy_event(restored)
     assert restored.save.active_event["system_ids"] == ids and restored.save.active_event["turns_remaining"] == remaining - 1
     assert restored.event_rng.getstate() == rng
-    legacy = dict(restored.save.active_event); del legacy["system_ids"]
-    restored.save.active_event = legacy; vr.tick_economy_event(restored)
-    assert set(vr.economy_event_system_ids(restored, legacy)) == {s.id for s in restored.galaxy if s.economy == legacy["economy"]}
+    # An event with no region was economy-wide under the retired schema (#421).
+    without_region = dict(restored.save.active_event); del without_region["system_ids"]
+    restored.save.active_event = without_region
+    with pytest.raises(vr.ResumeError): vr.SaveData.from_dict(restored.save.to_dict())
 
 
 @pytest.mark.parametrize("ids", [[], [True], [99], [1, 1], [1, 2, 3, 4], "1", [0]])
@@ -1353,7 +1342,7 @@ def test_real_mission_navigation_completes_delivery_once_before_retained_result(
     world=_world_with_seed(42); world.event_rng.seed(0)
     destination=sorted(world.here.connections)[0]
     mission=vr.Mission(1,"delivery","Navigation delivery",500,0,destination,commodity="food",quantity=3)
-    world.save.active_missions=[mission]; world.save.tracked_mission_id=1; world.save.cargo={"food":3}
+    world.save.active_missions=[mission]; world.save.tracked_mission_id=1; _set_cargo(world, {"food":3})
     if commands.startswith(b"CG"):
         for station in world.galaxy: station.discovered = station.id in (0, destination)
         world.sync_discovered()
@@ -1449,6 +1438,34 @@ def without_action_bar(monkeypatch):
         while rows and not rows[-1].strip(): rows.pop()
         return "\n".join(rows)
     return strip
+
+
+def _set_cargo(world, hold: dict, *, unit_cost: int | None = None) -> None:
+    """Replace the hold with costed goods.
+
+    Every unit in a schema-2 hold carries an acquisition-cost lot (issue #421), so
+    a test that just needs goods aboard says so here instead of writing the cargo
+    dict and leaving the basis behind. The lots are written directly rather than
+    through `_acquire_cargo`, which would also open the trading ledger.
+    """
+    world.save.cargo, world.save.cargo_basis = {}, {}
+    for commodity, quantity in hold.items():
+        _add_cargo(world, commodity, quantity, unit_cost=unit_cost)
+
+
+def _add_cargo(world, commodity: str, quantity, *, unit_cost: int | None = None) -> None:
+    """Hold exactly `quantity` costed units of one commodity; see `_set_cargo`."""
+    world.save.cargo.pop(commodity, None)
+    world.save.cargo_basis.pop(commodity, None)
+    if quantity <= 0:
+        world.save.cargo[commodity] = quantity  # a zero entry is still a valid hold
+        return
+    unit = vr.price_for(world, world.save.current_system, commodity) if unit_cost is None else unit_cost
+    world.save.cargo[commodity] = quantity
+    world.save.cargo_basis[commodity] = [[quantity, quantity * unit]]
+    if world.save.trading_ledger.since_day is None:
+        # A recorded lot is recorded activity; the validator requires both.
+        world.save.trading_ledger.since_day = world.save.turn
 
 
 def _world_with_seed(seed: int) -> "vr.World":
@@ -1712,7 +1729,7 @@ def test_delivery_mission_completes_on_arrival_with_enough_cargo():
                           origin_system=world.save.current_system, target_system=dest,
                           commodity="food", quantity=3, deadline_turn=None)
     _post_and_accept_test_mission(world, mission)
-    world.save.cargo["food"] = 5
+    _add_cargo(world, "food", 5)
     world.save.current_system = dest
 
     messages = vr.check_mission_completions(world)
@@ -1730,7 +1747,7 @@ def test_delivery_mission_does_not_complete_with_insufficient_cargo():
                           origin_system=world.save.current_system, target_system=dest,
                           commodity="food", quantity=3, deadline_turn=None)
     _post_and_accept_test_mission(world, mission)
-    world.save.cargo["food"] = 1
+    _add_cargo(world, "food", 1)
     world.save.current_system = dest
 
     messages = vr.check_mission_completions(world)
@@ -1834,7 +1851,7 @@ def test_destroyed_mid_hop_skips_customs_and_delivery_completion(monkeypatch):
     world = _world_with_seed(192)
     dest_id = world.here.connections[0]
     _accept_bounty(world, target_system=dest_id)
-    world.save.cargo[vr.CONTRABAND_COMMODITIES[0]] = 3
+    _add_cargo(world, vr.CONTRABAND_COMMODITIES[0], 3)
     world.by_id[dest_id].economy = "Industrial"  # not Haven, so contraband would normally risk a customs check
     world.event_rng.random = lambda: 0.0  # would force a customs check if reached
 
@@ -2037,13 +2054,13 @@ def test_revisiting_a_system_with_a_still_active_bounty_triggers_it_again(monkey
 # -- combat ------------------------------------------------------------
 
 
-def test_fight_round_damages_both_sides_and_is_driven_by_world_event_rng():
+def test_fire_damages_both_sides_and_is_driven_by_world_event_rng():
     world = _world_with_seed(9)
     world.event_rng = random.Random(1)
     pirate = vr.Pirate(name="Test Raider", tier=1, hp=35, hp_max=35)
     starting_hull = world.save.ship.hull_hp
 
-    dmg_to_pirate, dmg_to_player, lines = vr.fight_round(world, pirate)
+    dmg_to_pirate, dmg_to_player, lines = vr.tactical_round(world, pirate, vr.new_tactics(pirate), "F")
 
     assert dmg_to_pirate > 0
     assert pirate.hp == 35 - dmg_to_pirate
@@ -2061,8 +2078,8 @@ def test_higher_weapon_tier_deals_more_damage_with_same_rng_sequence():
     pirate_weak = vr.Pirate(name="X", tier=2, hp=100, hp_max=100)
     pirate_strong = vr.Pirate(name="X", tier=2, hp=100, hp_max=100)
 
-    dmg_weak, _, _ = vr.fight_round(world_weak, pirate_weak)
-    dmg_strong, _, _ = vr.fight_round(world_strong, pirate_strong)
+    dmg_weak, _, _ = vr.tactical_round(world_weak, pirate_weak, vr.new_tactics(pirate_weak), "F")
+    dmg_strong, _, _ = vr.tactical_round(world_strong, pirate_strong, vr.new_tactics(pirate_strong), "F")
 
     assert dmg_strong > dmg_weak
 
@@ -2077,8 +2094,8 @@ def test_shields_reduce_incoming_damage():
     pirate_a = vr.Pirate(name="Y", tier=3, hp=1000, hp_max=1000)  # never dies mid-round
     pirate_b = vr.Pirate(name="Y", tier=3, hp=1000, hp_max=1000)
 
-    _, dmg_bare, _ = vr.fight_round(world_bare, pirate_a)
-    _, dmg_shielded, _ = vr.fight_round(world_shielded, pirate_b)
+    _, dmg_bare, _ = vr.tactical_round(world_bare, pirate_a, vr.new_tactics(pirate_a), "F")
+    _, dmg_shielded, _ = vr.tactical_round(world_shielded, pirate_b, vr.new_tactics(pirate_b), "F")
 
     assert dmg_shielded <= dmg_bare
 
@@ -2154,7 +2171,7 @@ def test_squadron_encounter_stops_after_an_escape_not_a_full_win(monkeypatch):
 
 def test_destroy_ship_clears_cargo_and_returns_player_to_freeport_with_full_hull():
     world = _world_with_seed(12)
-    world.save.cargo["ore"] = 10
+    _add_cargo(world, "ore", 10)
     world.save.current_system = world.here.connections[0]
     world.save.ship.hull_hp = 0
     world.save.pilot.notoriety = 7
@@ -2355,7 +2372,7 @@ def test_pilot_save_round_trip_defaults_notoriety_for_old_saves_without_it():
 
 def test_customs_bribe_refused_raises_notoriety(monkeypatch):
     world = _world_with_seed(71)
-    world.save.cargo["narcotics"] = 5
+    _add_cargo(world, "narcotics", 5)
     world.save.pilot.credits = 10_000
     monkeypatch.setattr(world.event_rng, "random", lambda: 0.99)  # affordable but refused
     vr.read_key = lambda: "P"
@@ -2368,7 +2385,7 @@ def test_customs_bribe_refused_raises_notoriety(monkeypatch):
 
 def test_customs_cooperative_surrender_does_not_raise_notoriety():
     world = _world_with_seed(72)
-    world.save.cargo["narcotics"] = 5
+    _add_cargo(world, "narcotics", 5)
     vr.read_key = lambda: "S"
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -2379,7 +2396,7 @@ def test_customs_cooperative_surrender_does_not_raise_notoriety():
 
 def test_customs_successful_bribe_does_not_raise_notoriety():
     world = _world_with_seed(73)
-    world.save.cargo["narcotics"] = 5
+    _add_cargo(world, "narcotics", 5)
     world.save.pilot.credits = 10_000
     world.event_rng.random = lambda: 0.0  # always the bribe-succeeds branch
     vr.read_key = lambda: "P"
@@ -2547,7 +2564,7 @@ def test_not_stranded_with_cargo_even_at_zero_fuel_and_credits(monkeypatch):
     world.save.current_system = world.here.connections[0]
     world.save.ship.fuel = 0
     world.save.pilot.credits = 0
-    world.save.cargo["ore"] = 1
+    _add_cargo(world, "ore", 1)
     assert vr.is_stranded(world) is False
 
 
@@ -3158,7 +3175,7 @@ def test_general_route_delivery_estimates_allocate_cargo_in_resolution_order(ord
     if order == "reverse_arrivals": a.target_system=second
     if order == "expired_first": a.deadline_turn=0
     if order == "short_first": a.quantity=4
-    world.save.active_missions=[a,b]; world.save.cargo={"food":3}
+    world.save.active_missions=[a,b]; _set_cargo(world, {"food":3})
     before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate()
     lines=vr.route_mission_implications(world,path)
     rows={mission.id:next(line for line in lines if line.startswith(f"Contract #{mission.id}:")) for mission in (a,b)}
@@ -3343,7 +3360,7 @@ def test_first_mission_completion_records_a_highlight():
     mission = vr.Mission(id=1, kind="delivery", description="Haul food", reward=100,
                           origin_system=0, target_system=0, commodity="food", quantity=1)
     world.save.active_missions.append(mission)
-    world.save.cargo["food"] = 1
+    _add_cargo(world, "food", 1)
 
     msgs = vr.check_mission_completions(world)
 
@@ -3422,21 +3439,21 @@ def _some_contraband_commodity():
 def test_has_contraband_false_for_an_empty_or_legal_only_hold():
     world = _world_with_seed(124)
     assert not vr.has_contraband(world)
-    world.save.cargo["food"] = 5
+    _add_cargo(world, "food", 5)
     assert not vr.has_contraband(world)
 
 
 def test_has_contraband_true_once_any_illegal_good_is_in_cargo():
     world = _world_with_seed(125)
-    world.save.cargo[_some_contraband_commodity()] = 3
+    _add_cargo(world, _some_contraband_commodity(), 3)
     assert vr.has_contraband(world)
 
 
 def test_dump_all_contraband_clears_only_illegal_goods():
     world = _world_with_seed(126)
     contraband = _some_contraband_commodity()
-    world.save.cargo[contraband] = 7
-    world.save.cargo["food"] = 4
+    _add_cargo(world, contraband, 7)
+    _add_cargo(world, "food", 4)
 
     msg = vr.dump_all_contraband(world)
 
@@ -3447,7 +3464,7 @@ def test_dump_all_contraband_clears_only_illegal_goods():
 
 def test_dump_all_contraband_grants_no_credits():
     world = _world_with_seed(127)
-    world.save.cargo[_some_contraband_commodity()] = 10
+    _add_cargo(world, _some_contraband_commodity(), 10)
     before = world.save.pilot.credits
 
     vr.dump_all_contraband(world)
@@ -3466,7 +3483,7 @@ def test_screen_dump_contraband_does_nothing_without_contraband(monkeypatch):
 def test_screen_dump_contraband_declines_without_confirmation(monkeypatch):
     world = _world_with_seed(129)
     contraband = _some_contraband_commodity()
-    world.save.cargo[contraband] = 5
+    _add_cargo(world, contraband, 5)
     monkeypatch.setattr(vr, "confirm", lambda prompt, p: False)
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -3478,7 +3495,7 @@ def test_screen_dump_contraband_declines_without_confirmation(monkeypatch):
 def test_screen_dump_contraband_clears_cargo_on_confirmation(monkeypatch):
     world = _world_with_seed(130)
     contraband = _some_contraband_commodity()
-    world.save.cargo[contraband] = 5
+    _add_cargo(world, contraband, 5)
     monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -3496,7 +3513,7 @@ def test_station_menu_offers_dump_only_with_contraband_aboard(monkeypatch):
         vr.screen_station_menu(vr.Palette(truecolor=False), world)
     assert "[D]" not in buf.getvalue()
 
-    world.save.cargo[_some_contraband_commodity()] = 2
+    _add_cargo(world, _some_contraband_commodity(), 2)
     buf2 = io.StringIO()
     with contextlib.redirect_stdout(buf2):
         vr.screen_station_menu(vr.Palette(truecolor=False), world)
@@ -3989,11 +4006,11 @@ def test_gunner_adds_flat_combat_damage(monkeypatch):
     pirate = vr.Pirate(name="Target", tier=0, hp=999, hp_max=999)
     world.event_rng.randint = lambda a, b: a  # pin the random roll for a clean comparison
 
-    dmg_without, _, _ = vr.fight_round(world, pirate)
+    dmg_without, _, _ = vr.tactical_round(world, pirate, vr.new_tactics(pirate), "F")
 
     world.save.ship.has_gunner = True
     pirate2 = vr.Pirate(name="Target", tier=0, hp=999, hp_max=999)
-    dmg_with, _, _ = vr.fight_round(world, pirate2)
+    dmg_with, _, _ = vr.tactical_round(world, pirate2, vr.new_tactics(pirate2), "F")
 
     assert dmg_with == dmg_without + 3
 
@@ -4263,6 +4280,7 @@ def test_tick_economy_event_reasserts_drift_level_each_turn_while_active():
     world.save.active_event = {
         "economy": "Agricultural", "commodity": "food", "direction": "crash",
         "turns_remaining": 3, "description": "Food prices crash across every Agricultural system",
+        "system_ids": [system.id],
     }
 
     vr.tick_economy_event(world)
@@ -4277,6 +4295,7 @@ def test_tick_economy_event_counts_down_and_ends():
     world.save.active_event = {
         "economy": "Agricultural", "commodity": "food", "direction": "crash",
         "turns_remaining": 1, "description": "Food prices crash across every Agricultural system",
+        "system_ids": [next(s.id for s in world.galaxy if s.economy == "Agricultural")],
     }
 
     msg = vr.tick_economy_event(world)
@@ -4291,6 +4310,7 @@ def test_tick_economy_event_never_starts_a_second_one_while_active():
     world.save.active_event = {
         "economy": "Mining", "commodity": "ore", "direction": "boom",
         "turns_remaining": 5, "description": "Raw Ore prices spike across every Mining system",
+        "system_ids": [next(s.id for s in world.galaxy if s.economy == "Mining")],
     }
     world.event_rng.random = lambda: 0.0  # would otherwise always trigger a new one
 
@@ -4307,6 +4327,7 @@ def test_screen_market_tags_the_affected_commodity(monkeypatch):
     world.save.active_event = {
         "economy": "Agricultural", "commodity": "food", "direction": "crash",
         "turns_remaining": 5, "description": "Food prices crash across every Agricultural system",
+        "system_ids": [system.id],
     }
     monkeypatch.setattr(vr, "read_key", lambda: "Q")
 
@@ -4410,32 +4431,31 @@ def test_settle_futures_contracts_delivers_to_cargo_when_due():
     assert world.save.active_futures == []
 
 
-def test_legacy_futures_refund_when_cargo_is_full():
+def test_a_full_hold_makes_ready_goods_wait_without_refund_or_lost_fee():
     world = _world_with_seed(173)
     cap = vr.cargo_capacity(world.save.ship)
-    world.save.active_futures = [vr.FuturesContract(1, "food", cap, 200, 5)]
-    world.save.cargo["textiles"] = cap  # fill the hold with something else before settlement
+    world.save.active_futures = [vr.FuturesContract(1, "food", cap, 200, 5, 0, 180, cap)]
+    vr._acquire_cargo(world, "textiles", cap, 100)  # the hold is full of something else
     before_credits = world.save.pilot.credits
-    contract = world.save.active_futures[0]
     world.save.turn += 5
 
-    messages = vr.settle_futures_contracts(world)
-
-    assert len(messages) == 1
-    assert "refunded" in messages[0]
+    assert vr.settle_futures_contracts(world) == []
     assert "food" not in world.save.cargo
-    assert world.save.pilot.credits == before_credits + contract.locked_price
+    assert world.save.pilot.credits == before_credits
+    assert len(world.save.active_futures) == 1
 
 
-def test_legacy_futures_settle_regardless_of_current_location():
+def test_an_order_settles_only_at_the_station_that_holds_it():
     world = _world_with_seed(174)
-    world.save.active_futures = [vr.FuturesContract(1, "food", 2, 26, 5)]
+    world.save.active_futures = [vr.FuturesContract(1, "food", 2, 26, 5, 0, 24, 2)]
     world.save.current_system = world.by_id[0].connections[0]  # moved away before settlement
     world.save.turn += 5
 
-    messages = vr.settle_futures_contracts(world)
+    assert vr.settle_futures_contracts(world) == []
+    assert "food" not in world.save.cargo
 
-    assert len(messages) == 1
+    world.save.current_system = 0
+    assert len(vr.settle_futures_contracts(world)) == 1
     assert world.save.cargo.get("food") == 2
 
 
@@ -4496,13 +4516,12 @@ def test_futures_picker_pages_keep_terms_choices_and_return_position(monkeypatch
 
 
 @pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
-@pytest.mark.parametrize("kind",["draft","order","legacy"])
+@pytest.mark.parametrize("kind",["draft","order"])
 def test_futures_draft_and_order_pages_fit_and_preserve_all_terms(monkeypatch,width,height,kind):
     import re
     monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
     world=_world_with_seed(42);vr.buy_futures_contract(world,"food",2,5)
     contract=world.save.active_futures[0]
-    if kind=="legacy":contract.origin_system=None
     before=world.save.to_dict();frames=[];output=io.StringIO()
     def choose():
         frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0);frames.append(frame)
@@ -4516,8 +4535,7 @@ def test_futures_draft_and_order_pages_fit_and_preserve_all_terms(monkeypatch,wi
         if kind=="draft":vr._screen_buy_futures(vr.Palette(False),world,"food")
         else:vr._screen_futures_order(vr.Palette(False),world,contract)
     text=" ".join(" ".join(frames).split())
-    if kind=="legacy":assert "original remote" in text and "[X] Cancel" not in text
-    else:assert "nonrefundable" in text and "Pickup:" in text
+    assert "nonrefundable" in text and "Pickup:" in text
     assert world.save.to_dict()==before
 
 
@@ -4961,7 +4979,7 @@ def test_market_catalog_pages_preserve_goods_quotes_and_telemetry(monkeypatch,wi
     monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
     world=_world_with_seed(42)
     if haven:world.save.current_system=next(station.id for station in world.galaxy if station.economy=="Haven")
-    world.save.cargo={"weapons":1}
+    _set_cargo(world, {"weapons":1})
     before=world.save.to_dict();rng=world.event_rng.getstate()
     output=io.StringIO();frames=[]
     def choose():
@@ -5005,7 +5023,7 @@ def test_market_retains_trade_result_through_cancelled_quantity(monkeypatch):
 
 
 def test_prohibited_commodity_details_hide_buy_and_reject_unadvertised_purchase(monkeypatch):
-    world=_world_with_seed(42);world.save.cargo={"weapons":1};before=world.save.to_dict()
+    world=_world_with_seed(42);_set_cargo(world, {"weapons":1});before=world.save.to_dict()
     monkeypatch.setattr(vr,"read_key",lambda:"P")
     with contextlib.redirect_stdout(io.StringIO()) as output:result=vr._trade_commodity(vr.Palette(False),world,"weapons")
     assert "Buy prohibited" in output.getvalue() and "[P] Purchase" not in output.getvalue()
@@ -5028,7 +5046,7 @@ def test_real_market_catalog_browsing_cancel_and_eof_preserve_career(tmp_path,co
 @pytest.mark.parametrize("action",["buy","sell"])
 def test_market_retained_trade_result_is_durable_before_disconnect(tmp_path,action):
     world=_world_with_seed(42)
-    if action=="sell":world.save.cargo={"food":2}
+    if action=="sell":_set_cargo(world, {"food":2})
     world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
     command=b"MAP1\r" if action=="buy" else b"MAS1\r"
     marker=b"Result: Bought 1x Food" if action=="buy" else b"Result: Sold 1x Food"
@@ -5044,7 +5062,7 @@ def test_screen_market_contraband_catalog_keeps_labels_and_bounds(monkeypatch):
     haven = next(s for s in world.galaxy if s.economy == "Haven")
     world.save.current_system = haven.id
     haven.discovered = True
-    world.save.cargo = {"weapons": 5, "narcotics": 3}
+    _set_cargo(world, {"weapons": 5, "narcotics": 3})
     monkeypatch.setattr(vr, "read_key", lambda: "Q")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -5064,7 +5082,7 @@ def test_station_deck_pages_keep_telemetry_actions_and_exit_visible(monkeypatch,
     world.save.ship.has_gunner=True
     world.save.ship.hull_hp=1
     world.save.pilot.credits=5
-    world.save.cargo={"weapons":2}
+    _set_cargo(world, {"weapons":2})
     world.save.active_event={"description":"Regional supply disruption", "turns_remaining":3}
     before=world.save.to_dict()
     world._checkpoint=lambda _:pytest.fail("Browsing checkpointed")
@@ -5135,7 +5153,7 @@ def test_screen_station_menu_special_ops_fit_the_standard_page(monkeypatch):
     world = _world_with_seed(304)
     world.save.current_system = world.landmark["system_id"]
     world.by_id[world.save.current_system].discovered = True
-    world.save.cargo = {"weapons": 2}
+    _set_cargo(world, {"weapons": 2})
     world.save.pilot.reputation[vr.FACTION_CONCORD] = vr.CONCORD_COMMISSION_THRESHOLD
     world.save.pilot.reputation[vr.FACTION_BLACKWAKE] = vr.BLACKWAKE_MADE_THRESHOLD
     monkeypatch.setattr(vr, "read_key", lambda: "Q")
@@ -5204,7 +5222,7 @@ def test_navigation_chart_selects_last_connection_beyond_one_alphabet(monkeypatc
 @pytest.mark.parametrize("commands",[b"C><QQ",b"C",b"CAQQ",b"CA"])
 def test_real_responsive_chart_back_eof_and_rejected_jump_preserve_career(tmp_path,commands):
     import json,os,subprocess
-    world=_world_with_seed(42);world.save.ship.fuel=0;world.save.cargo={"food":1}
+    world=_world_with_seed(42);world.save.ship.fuel=0;_set_cargo(world, {"food":1})
     world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
     original=(tmp_path/"77.json").read_bytes()
     info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
@@ -5232,6 +5250,7 @@ def test_score_pages_retain_all_twenty_pilots_and_fields_without_reloading(tmp_p
     monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
     records=[{"user_id":i,"handle":f"Pilot-{i:02}","best_credits":1_000_000-i,"rank":vr.RANKS[-1][1],"kills":100+i,"missions_completed":200+i,"retirements":i} for i in range(1,26)]
     path=tmp_path/"leaderboard.json";path.write_text(json.dumps(records),encoding="utf-8");original_bytes=path.read_bytes()
+    vr.import_hall_of_fame(tmp_path)  # the old file reaches the rankings through `scores/` (#421)
     world=_world_with_seed(42);before=world.save.to_dict()
     output=io.StringIO();frames=[];loads=[];builds=[]
     original_load=vr._load_score_records;original_pages=vr._service_pages
@@ -5286,6 +5305,7 @@ def test_screen_hall_of_fame_records_are_complete_and_width_safe(monkeypatch):
     }]
     save_dir = Path(tempfile.mkdtemp())
     (save_dir / "leaderboard.json").write_text(json.dumps(entries), encoding="utf-8")
+    vr.import_hall_of_fame(save_dir)  # the old file reaches the screen through `scores/` (#421)
     monkeypatch.setattr(vr, "read_key", lambda: "B")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -5299,7 +5319,7 @@ def test_screen_hall_of_fame_records_are_complete_and_width_safe(monkeypatch):
 
 def test_screen_customs_large_contraband_stash_has_complete_width_safe_terms(monkeypatch):
     world = _world_with_seed(308)
-    world.save.cargo = {"weapons": 20, "narcotics": 15}
+    _set_cargo(world, {"weapons": 20, "narcotics": 15})
     world.save.pilot.credits = 50_000
     monkeypatch.setattr(vr, "read_key", lambda: "S")
     buf = io.StringIO()
@@ -5494,7 +5514,7 @@ def test_acknowledged_station_action_survives_forced_termination(
     world.save.ship.hull_hp = 50
     world.save.pilot.reputation = {f: 75 for f in vr.FACTIONS}
     if commands == b"DY":
-        world.save.cargo = {"weapons": 1}
+        _set_cargo(world, {"weapons": 1})
     vr.write_save(tmp_path, 77, world.save)
     info = tmp_path / "door_info.json"
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
@@ -5606,7 +5626,7 @@ def test_cancelled_career_does_not_create_save(tmp_path):
 
 def test_invalid_customs_input_waits_without_mutating_cargo(monkeypatch):
     world = _world_with_seed(42)
-    world.save.cargo = {"weapons": 2}
+    _set_cargo(world, {"weapons": 2})
     before = __import__("copy").deepcopy(world.save.to_dict())
     keys = iter(["?", "\r", "S"])
 
@@ -5754,13 +5774,15 @@ def test_every_travel_checkpoint_resumes_to_the_same_career(
                        dest_id, pirate_tier=0 if scenario.startswith("customs") else 2),
         ]
     if scenario in ("bounty_dump", "customs_surrender", "customs_bribe"):
-        world.save.cargo = {"weapons": 2}
+        _set_cargo(world, {"weapons": 2})
     if scenario in ("escorts", "escort_loss"):
-        # Deliberately shared legacy IDs: snapshots must distinguish the jobs.
+        # Two jobs to the same station with the same terms bar the reward: the
+        # snapshot, not the id, is what tells the resumed wave which one it is.
         world.save.active_missions = [
             vr.Mission(7, "escort", "Convoy A", 500, 0, dest_id, pirate_tier=2),
-            vr.Mission(7, "escort", "Convoy B", 600, 0, dest_id, pirate_tier=1),
+            vr.Mission(9, "escort", "Convoy B", 600, 0, dest_id, pirate_tier=1),
         ]
+        world.save.next_mission_id = 10
     if scenario.startswith("patrol"):
         world.save.pilot.notoriety = 20
     if scenario.endswith("loss"):
@@ -5769,7 +5791,8 @@ def test_every_travel_checkpoint_resumes_to_the_same_career(
         world.save.ship.shield_tier = 0
     # Exercise departure costs/settlement and arrival delivery in the same hop.
     world.save.ship.has_navigator = True
-    world.save.active_futures = [vr.FuturesContract(1, "food", 2, 40, world.save.turn + 1)]
+    world.save.active_futures = [vr.FuturesContract(1, "food", 2, 40, world.save.turn + 1,
+                                                   world.save.current_system, 36, 2)]
     world.save.active_missions.append(
         vr.Mission(8, "delivery", "Food delivery", 200, world.save.current_system,
                    dest_id, commodity="food", quantity=2, deadline_turn=world.save.turn + 5)
@@ -5886,6 +5909,37 @@ def _door_stopped_at(tmp_path, commands, acknowledgement: bytes, ready: bytes | 
         proc.stderr.close()
 
 
+def _schema_one_career(tmp_path, user_id: int = 77) -> bytes:
+    """Write a career this build no longer opens, and return its exact bytes."""
+    import json
+
+    data = dict(_world_with_seed(42).save.to_dict(), schema_version=1)
+    raw = json.dumps(data).encode("utf-8")
+    (tmp_path / f"{user_id}.json").write_bytes(raw)
+    return raw
+
+
+def test_a_real_launch_refuses_an_old_career_and_changes_nothing(tmp_path):
+    """The refusal is a screen with an offer, not an error (issue #421)."""
+    original = _schema_one_career(tmp_path)
+    with _door_stopped_at(tmp_path, b"B", b"[N] New career") as output:
+        assert b"Career refused" in output and b"saved before this version" in output
+    assert (tmp_path / "77.json").read_bytes() == original
+    assert not list(tmp_path.glob("77.recovery-*.json"))
+
+
+def test_a_real_launch_replaces_a_refused_career_only_after_registration(tmp_path):
+    original = _schema_one_career(tmp_path)
+    # Page to the offer, take it, accept the default callsign, confirm the launch.
+    with _door_stopped_at(tmp_path, [b">>>>>>>>", b"N", b"\rY"], b"Station Services",
+                          ready=b"Career refused"):
+        pass
+    archives = list(tmp_path.glob("77.recovery-*.json"))
+    assert len(archives) == 1 and archives[0].read_bytes() == original
+    replacement, is_new, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not is_new and replacement.schema_version == vr.SCHEMA_VERSION and replacement.turn == 0
+
+
 @pytest.mark.parametrize("commands", [b"CAYF", b"CRJF", b"CGD1JF"])
 def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkeypatch, commands):
     import json
@@ -5996,9 +6050,53 @@ def test_unreadable_resume_state_stops_without_replacing_career(tmp_path, broken
     assert not list(tmp_path.glob("*.corrupt-*"))
 
 
-def test_legacy_save_gains_resume_fields_without_regenerating_galaxy():
+def test_a_schema_one_career_is_refused_by_name_and_offered_a_replacement(tmp_path):
+    """No migration: the refusal is the product decision, not a failure (#421)."""
+    import json
+
     data = _world_with_seed(42).save.to_dict()
-    data.pop("pending_travel")
+    data["schema_version"] = 1
+    data.pop("contraband_standing_step")      # and a shape this build no longer knows
+    path = tmp_path / "77.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(vr.OutdatedSave, match="saved before this version"):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == before
+
+
+def test_replacing_a_refused_career_retains_it_as_a_recovery_copy(tmp_path):
+    import json
+
+    old = json.dumps(dict(_world_with_seed(42).save.to_dict(), schema_version=1)).encode()
+    (tmp_path / "77.json").write_bytes(old)
+    fresh = vr._new_career("Tester")
+
+    vr.replace_unsupported_career(tmp_path, 77, fresh)
+
+    archives = list(tmp_path.glob("77.recovery-*.json"))
+    assert len(archives) == 1 and archives[0].read_bytes() == old
+    resumed, is_new, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not is_new and resumed.pilot.handle == "Tester" and resumed.turn == 0
+
+
+def test_a_refused_career_is_not_replaced_when_it_cannot_be_retained(tmp_path):
+    import json
+
+    old = json.dumps(dict(_world_with_seed(42).save.to_dict(), schema_version=1)).encode()
+    (tmp_path / "77.json").write_bytes(old)
+    for index in range(vr.MAX_RECOVERY_COPIES):
+        (tmp_path / f"77.recovery-{index}.json").write_bytes(b"{}")
+
+    with pytest.raises(vr.SaveError, match="Recovery copies are full"):
+        vr.replace_unsupported_career(tmp_path, 77, vr._new_career("Tester"))
+
+    assert (tmp_path / "77.json").read_bytes() == old
+
+
+def test_a_docked_career_gains_its_resume_fields_without_regenerating_the_galaxy():
+    data = _world_with_seed(42).save.to_dict()
+    data.pop("pending_travel")   # both are optional while docked
     data.pop("event_rng_state")
     original = vr.generate_galaxy(data["seed"])
     world = vr.World(vr.SaveData.from_dict(data))
@@ -6084,6 +6182,8 @@ def test_inconsistent_resume_stops_before_rewriting_save(tmp_path, fault):
         "encounter": {"combat": {
             "pirate": {"name": "Raider", "tier": 2, "hp": 0, "hp_max": 50},
             "outcome": "won", "lines": [],
+            "tactics": vr.new_tactics(vr.Pirate("Raider", 2, 0, 50)),
+            "hull_before": world.save.ship.hull_hp,
         }},
     }
     combat = travel["encounter"]["combat"]
@@ -6474,7 +6574,7 @@ def test_mission_deadlines_are_inclusive_and_checked_before_rewards(kind, turn):
     world = _world_with_seed(42)
     world.save.turn = turn
     world.save.current_system = 1
-    world.save.cargo = {"food": 3}
+    _set_cargo(world, {"food": 3})
     world.save.active_missions = [
         vr.Mission(1, kind, "Deadline", 500, 0, 1, commodity="food", quantity=3, deadline_turn=5),
     ]
@@ -6515,7 +6615,9 @@ def test_already_charted_survey_is_unavailable_without_replacement():
     assert world.save.mission_boards[0]["offers"] == [mission.to_dict()]
 
 
-def test_legacy_duplicate_ids_repaired_only_after_pending_travel():
+def test_duplicate_contract_ids_are_refused_rather_than_renumbered():
+    """Shared ids were a retired schema's shape, repaired at every turn boundary;
+    schema 2 states the invariant and drops the repair (issue #421)."""
     world = _world_with_seed(42)
     world.save.active_missions = [
         vr.Mission(1, "escort", "A", 500, 0, 1, pirate_tier=1),
@@ -6527,19 +6629,21 @@ def test_legacy_duplicate_ids_repaired_only_after_pending_travel():
         "escorts": [m.to_dict() for m in world.save.active_missions], "escort_index": 0, "encounter": {},
     }
     world.save.event_rng_state = world.event_rng.getstate()
-    resumed = vr.World(vr.SaveData.from_dict(world.save.to_dict()))
-    resumed.checkpoint()
-    assert [m.id for m in resumed.save.active_missions] == [1, 1]
-    resumed.save.pending_travel = None
-    resumed.checkpoint()
-    ids = [m.id for m in resumed.save.active_missions]
-    assert len(set(ids)) == 2
-    assert resumed.save.next_mission_id > max(ids)
+    with pytest.raises(vr.ResumeError): vr.SaveData.from_dict(world.save.to_dict())
 
 
-def test_legacy_over_limit_career_keeps_every_contract():
+def test_a_new_offer_never_reuses_an_id_the_career_already_holds():
     world = _world_with_seed(42)
-    world.save.active_missions = [vr.Mission(1, "scan", f"Legacy {i}", 500, 0, 1) for i in range(5)]
+    world.save.active_missions = [vr.Mission(500, "scan", "Held", 500, 0, 1)]
+    world.save.next_mission_id = 1  # a counter left behind the ids it hands out
+    offers = vr.generate_mission_board(world)
+    assert offers and all(offer.id > 500 for offer in offers)
+
+
+def test_an_over_limit_career_keeps_every_contract():
+    world = _world_with_seed(42)
+    world.save.active_missions = [vr.Mission(i + 1, "scan", f"Old job {i}", 500, 0, 1) for i in range(5)]
+    world.save.next_mission_id = 6
     restored = vr.World(vr.SaveData.from_dict(world.save.to_dict()))
     assert len(restored.save.active_missions) == 5
     assert len({m.id for m in restored.save.active_missions}) == 5
@@ -6562,7 +6666,7 @@ def test_real_board_reopen_and_kill_retains_posted_terms(tmp_path):
 
 @pytest.mark.parametrize("kind", ["bounty", "escort"])
 @pytest.mark.parametrize("destroyed", [False, True])
-def test_resumed_legacy_expired_combat_job_cannot_pay_or_start_another_wave(kind, destroyed, monkeypatch):
+def test_a_resumed_expired_combat_job_cannot_pay_or_start_another_wave(kind, destroyed, monkeypatch):
     world = _world_with_seed(42)
     world.save.turn = 2
     expired = vr.Mission(1, kind, "Expired", 500, 0, 1, deadline_turn=1, pirate_tier=1)
@@ -6728,7 +6832,7 @@ def test_full_contract_details_fit_each_page_and_retain_back(monkeypatch, width,
     assert len(frames) == count
 
 
-def test_legacy_active_contract_list_is_paginated_and_selectable(monkeypatch):
+def test_a_long_active_contract_list_is_paginated_and_selectable(monkeypatch):
     world = _world_with_seed(42)
     world.save.active_missions = [vr.Mission(i + 1, "scan", f"Survey {i}", 500, 0, 1) for i in range(30)]
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40)
@@ -6751,7 +6855,7 @@ def test_legacy_active_contract_list_is_paginated_and_selectable(monkeypatch):
 def test_contract_terms_show_kind_obligations_and_cost_limits(kind):
     world, mission = _mission_details_world(kind)
     world.save.ship.has_navigator = True
-    world.save.cargo = {"food": 1}
+    _set_cargo(world, {"food": 1})
     lines = " ".join(vr.mission_details(world, mission))
     assert "inclusive" in lines and "Target danger: uncharted" in lines
     assert "Gross payout" in lines and "not total profit" in lines
@@ -6780,7 +6884,7 @@ def test_tracking_roundtrips_and_clears_with_contract_removal(tmp_path, action):
     assert vr.tracked_mission(world).id == mission.id
     if action == "complete":
         world.save.current_system = mission.target_system
-        world.save.cargo = {"food": 3}
+        _set_cargo(world, {"food": 3})
         vr.check_mission_completions(world)
     elif action == "expire":
         world.save.turn = 11
@@ -6796,7 +6900,7 @@ def test_abandonment_cancel_is_read_only_and_confirmed_action_keeps_cargo(monkey
     world, mission = _mission_details_world()
     vr.accept_mission(world, mission)
     vr.track_mission(world, mission.id)
-    world.save.cargo = {"food": 3}
+    _set_cargo(world, {"food": 3})
     before = copy.deepcopy(world.save.to_dict())
     keys = iter("DNB")
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
@@ -7000,7 +7104,7 @@ def test_trade_milestones_survive_splitting_losses_and_restart(tmp_path):
     assert split.save.pilot.reputation[vr.FACTION_BLACKWAKE] == 2000 // vr.CONTRABAND_STANDING_STEP
 
 
-def test_legacy_trade_ledger_defaults_preserve_existing_standing():
+def test_absent_contraband_totals_default_without_touching_standing():
     world = _world_with_seed(42)
     world.save.pilot.reputation[vr.FACTION_BLACKWAKE] = 80
     data = world.save.to_dict()
@@ -7036,7 +7140,7 @@ def test_new_futures_wait_for_origin_and_space_and_preserve_fee(tmp_path):
     assert vr.settle_futures_contracts(world) == []
     assert not world.save.cargo
     world.save.current_system = 0
-    world.save.cargo = {"ore": vr.cargo_capacity(world.save.ship)}
+    _set_cargo(world, {"ore": vr.cargo_capacity(world.save.ship)})
     assert vr.settle_futures_contracts(world) == []
     assert world.save.active_futures == [contract]
     assert world.save.pilot.credits == before - contract.locked_price
@@ -7121,7 +7225,8 @@ def test_pickup_arrival_and_delivery_reward_resume_exactly_once(monkeypatch):
     import copy
     world = _world_with_seed(42)
     dest = world.here.connections[0]
-    world.save.active_futures = [vr.FuturesContract(1, "food", 2, 22, 1, origin_system=dest, principal=20)]
+    world.save.active_futures = [vr.FuturesContract(1, "food", 2, 22, 1, origin_system=dest,
+                                                   principal=20, reserved=2)]
     world.save.active_missions = [vr.Mission(1, "delivery", "Pickup delivery", 500, 0, dest, commodity="food", quantity=2)]
     snapshots = []
     world._checkpoint = lambda current: snapshots.append(copy.deepcopy(current.save.to_dict()))
@@ -7215,11 +7320,20 @@ def test_explicit_null_futures_metadata_preserves_original_save(tmp_path, fields
     assert path.read_bytes() == before
 
 
-def test_legacy_futures_keep_absent_pickup_metadata_across_checkpoints():
-    original = vr.FuturesContract(1, "food", 1, 100, 5)
+def test_a_futures_order_round_trips_its_whole_shape():
+    original = vr.FuturesContract(1, "food", 1, 100, 5, 3, 92, 1)
     data = original.to_dict()
-    assert "origin_system" not in data and "principal" not in data
-    assert vr.FuturesContract.from_dict(data).to_dict() == data
+    assert set(data) == {"id", "commodity", "quantity", "locked_price", "settle_turn",
+                         "origin_system", "principal", "reserved"}
+    assert vr.FuturesContract.from_dict(data) == original
+
+
+@pytest.mark.parametrize("missing", ["origin_system", "principal", "reserved"])
+def test_a_futures_order_missing_its_pickup_terms_is_refused(missing):
+    """Remote-delivery orders were a retired schema's shape (issue #421)."""
+    data = vr.FuturesContract(1, "food", 1, 100, 5, 3, 92, 1).to_dict()
+    del data[missing]
+    with pytest.raises(vr.ResumeError): vr.FuturesContract.from_dict(data)
 
 
 @contextlib.contextmanager
@@ -7368,21 +7482,141 @@ def test_score_outside_top_twenty_retains_its_peak_on_return(tmp_path):
     assert vr.load_hall_of_fame(retained)[0]["best_credits"] == 9000
 
 
-def test_legacy_scores_are_preserved_and_new_counters_take_precedence(tmp_path):
+def test_the_old_leaderboard_is_imported_in_full_and_kept(tmp_path):
+    """Careers do not survive schema 2; Hall of Fame records do (issue #421)."""
     import json
 
-    legacy = [{"user_id": 77, "handle": "Old", "best_credits": 9000, "kills": 2}]
+    rows = [{"user_id": 77, "handle": "Old", "best_credits": 9000, "kills": 2},
+            {"user_id": 91, "handle": "Retired", "best_credits": 40_000, "retirements": 3}]
     path = tmp_path / "leaderboard.json"
-    path.write_text(json.dumps(legacy), encoding="utf-8")
+    path.write_text(json.dumps(rows), encoding="utf-8")
     original = path.read_bytes()
+
+    vr.import_hall_of_fame(tmp_path)
+
+    assert path.read_bytes() == original  # never rewritten, so a retry is free
+    imported = {entry["user_id"]: entry for entry in vr.load_hall_of_fame(tmp_path)}
+    assert imported[77]["best_credits"] == 9000 and imported[77]["kills"] == 2
+    assert imported[91]["best_credits"] == 40_000 and imported[91]["retirements"] == 3
+
+    # A pilot who does launch keeps the imported floor and their own newer counters.
     world = _world_with_seed(42)
     world.save.pilot.handle = "Renamed"
     world.save.pilot.kills = 10
     vr.persist(world, tmp_path, 77)
-    entry = vr.load_hall_of_fame(tmp_path)[0]
+    entry = next(e for e in vr.load_hall_of_fame(tmp_path) if e["user_id"] == 77)
     assert entry["best_credits"] == world.save.best_credits == 9000
     assert entry["handle"] == "Renamed" and entry["kills"] == 10
-    assert path.read_bytes() == original
+
+
+def test_importing_the_old_leaderboard_twice_changes_nothing_the_second_time(tmp_path):
+    import json
+
+    path = tmp_path / "leaderboard.json"
+    path.write_text(json.dumps([{"user_id": 77, "handle": "Old", "best_credits": 9000}]), encoding="utf-8")
+    vr.import_hall_of_fame(tmp_path)
+    stored = (tmp_path / "scores" / "77.json").read_bytes()
+    vr.import_hall_of_fame(tmp_path)
+    assert (tmp_path / "scores" / "77.json").read_bytes() == stored
+
+
+def test_the_import_takes_the_exclusion_a_restore_takes(tmp_path, monkeypatch):
+    """Not the bare gate (issue #421 review).
+
+    `pilot_session` releases the maintenance gate as soon as it owns its own
+    pilot lock and then plays on holding only that, so an import under the bare
+    gate could replace `scores/USER_ID.json` while its owner was checkpointing
+    it. `maintenance_session` probes every pilot lock and is the only exclusion
+    that answers "is anyone aboard".
+    """
+    import json
+
+    path = tmp_path / "leaderboard.json"
+    path.write_text(json.dumps([{"user_id": 77, "handle": "Old", "best_credits": 9000}]), encoding="utf-8")
+    taken, real = [], vr.maintenance_session
+
+    @contextlib.contextmanager
+    def watched(save_dir):
+        taken.append(save_dir)
+        with real(save_dir):
+            yield
+
+    monkeypatch.setattr(vr, "maintenance_session", watched)
+    vr.import_hall_of_fame(tmp_path)
+    assert taken == [tmp_path]
+    assert vr.load_hall_of_fame(tmp_path)[0]["best_credits"] == 9000
+
+
+def test_a_busy_node_skips_the_import_and_keeps_it_for_the_next_launch(tmp_path, monkeypatch):
+    import json
+
+    path = tmp_path / "leaderboard.json"
+    path.write_text(json.dumps([{"user_id": 77, "handle": "Old", "best_credits": 9000}]), encoding="utf-8")
+
+    @contextlib.contextmanager
+    def busy(save_dir):
+        raise vr.PilotBusy
+        yield  # pragma: no cover -- the raise is the whole point
+
+    monkeypatch.setattr(vr, "maintenance_session", busy)
+    vr.import_hall_of_fame(tmp_path)
+    assert not (tmp_path / "scores").exists()
+
+    monkeypatch.undo()
+    vr.import_hall_of_fame(tmp_path)
+    assert vr.load_hall_of_fame(tmp_path)[0]["best_credits"] == 9000
+
+
+def test_the_import_never_replaces_a_record_it_could_not_read(tmp_path, monkeypatch):
+    """A record that exists but will not read is not an absent record (#421 review).
+
+    Replacing it with the old leaderboard's row would discard counters and
+    achievement history this import cannot see -- and for a pilot whose career
+    was refused, nothing would ever republish them.
+    """
+    import json
+
+    (tmp_path / "leaderboard.json").write_text(
+        json.dumps([{"user_id": 77, "handle": "Old", "best_credits": 9000}]), encoding="utf-8")
+    stored = tmp_path / "scores" / "77.json"
+    stored.parent.mkdir(parents=True, exist_ok=True)
+    stored.write_text(json.dumps({"user_id": 77, "handle": "Current", "best_credits": 40_000,
+                                  "retirements": 2, "kills": 9, "missions_completed": 30}), encoding="utf-8")
+    original = stored.read_bytes()
+
+    monkeypatch.setattr(vr, "_read_score_json", lambda path, limit=vr.MAX_SAVE_BYTES:
+                        None if path == stored else
+                        json.loads(path.read_text(encoding="utf-8")))
+    vr.import_hall_of_fame(tmp_path)
+    assert stored.read_bytes() == original
+
+
+@pytest.mark.parametrize("version", [True, 1.0, "1"])
+def test_a_malformed_save_version_is_corruption_not_an_old_career(tmp_path, version):
+    """`True` and `1.0` compare equal to 1; neither is a schema-1 career (#421 review)."""
+    import json
+
+    data = dict(_world_with_seed(42).save.to_dict(), schema_version=version)
+    path = tmp_path / "77.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(vr.ResumeError) as raised:
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not isinstance(raised.value, vr.OutdatedSave)
+    assert path.read_bytes() == json.dumps(data).encode("utf-8")
+
+
+def test_a_replacement_that_cannot_be_written_reaches_the_caller_as_a_save_failure(tmp_path, monkeypatch):
+    """`main` translates `SaveError` here and nothing else (issue #421 review)."""
+    import json
+
+    old = json.dumps(dict(_world_with_seed(42).save.to_dict(), schema_version=1)).encode()
+    (tmp_path / "77.json").write_bytes(old)
+    real = vr._write_bytes_atomic
+    monkeypatch.setattr(vr, "_write_bytes_atomic", lambda path, data: (_ for _ in ()).throw(
+        OSError("disk gone")) if path.name == "77.json" else real(path, data))
+    with pytest.raises(vr.SaveError):
+        vr.replace_unsupported_career(tmp_path, 77, vr._new_career("Tester"))
+    assert (tmp_path / "77.json").read_bytes() == old
 
 
 def test_failed_score_write_is_repaired_from_saved_peak_after_spending_and_retirement(tmp_path, monkeypatch):
@@ -7475,20 +7709,34 @@ def test_oversized_career_and_unreadable_file_never_start_new(tmp_path, monkeypa
         vr.load_or_create_save(tmp_path, 77, "Tester")
 
 
-def test_legacy_optional_fields_and_overlimit_contracts_remain_compatible():
+def test_optional_fields_default_and_an_over_limit_career_keeps_every_contract():
     import json
 
     world = _world_with_seed(42)
-    world.save.active_missions = [vr.Mission(1, "bounty", "Old contract", 50, 0, 1, pirate_tier=1)] * 5
+    world.save.active_missions = [vr.Mission(i, "bounty", f"Old contract {i}", 50, 0, 1, pirate_tier=1)
+                                  for i in range(1, 6)]
+    world.save.next_mission_id = 6
     data = world.save.to_dict()
     for key in ("galaxy_version", "mission_boards", "best_credits", "active_futures", "pending_travel",
-                "event_rng_state", "next_mission_id", "flags", "market_drift"):
+                "event_rng_state"):
         data.pop(key)
     loaded = vr._decode_career(json.dumps(data).encode())
     assert loaded.galaxy_version == 1 and len(loaded.active_missions) == 5
     assert vr.generate_galaxy(loaded.seed) == vr.generate_galaxy(world.save.seed)
     resumed = vr.World(loaded)
     assert len({m.id for m in resumed.save.active_missions}) == 5
+
+
+@pytest.mark.parametrize("field", ["market_drift", "active_missions", "next_mission_id", "flags",
+                                   "contraband_standing_step"])
+def test_a_career_missing_a_field_only_a_retired_schema_omitted_is_refused(field):
+    """Those four defaulted for pre-overhaul careers; schema 2 writes them (#421)."""
+    import json
+
+    data = _world_with_seed(42).save.to_dict()
+    data.pop(field)
+    with pytest.raises(vr.ResumeError):
+        vr._decode_career(json.dumps(data).encode())
 
 
 def test_previous_checkpoint_tracks_changes_and_identical_writes_do_not_age_it(tmp_path):
@@ -7730,7 +7978,9 @@ def test_future_formats_never_offer_or_allow_downgrade_recovery(tmp_path, monkey
         elif kind == "pirate_field":
             travel["encounter"]["pirate"] = dict(pirate, future_rule=True)
         elif kind == "combat_field":
-            travel["encounter"]["combat"] = {"pirate": pirate, "outcome": None, "lines": [], "future_rule": True}
+            travel["encounter"]["combat"] = {"pirate": pirate, "outcome": None, "lines": [],
+                                             "tactics": vr.new_tactics(vr.Pirate(**pirate)),
+                                             "hull_before": 60, "future_rule": True}
         else:
             mission = vr.Mission(1, "bounty", "Raider", 100, 0, destination, pirate_tier=1).to_dict()
             future["active_missions"] = [mission]
@@ -7877,7 +8127,7 @@ def test_opening_assignment_rejection_is_atomic(reason):
         world.save.pilot.credits = 0
     elif reason == "full":
         other = next(c for c in vr.LEGAL_COMMODITIES if c != offer.commodity)
-        world.save.cargo = {other: vr.cargo_capacity(world.save.ship)}
+        _set_cargo(world, {other: vr.cargo_capacity(world.save.ship)})
     elif reason == "stale":
         offer.reward += 1
     elif reason == "capacity":
@@ -7905,7 +8155,7 @@ def test_opening_assignment_is_tracked_durable_and_pays_only_once_without_deadli
     before = world.save.pilot.credits
     world.save.current_system = offer.target_system
     world.save.turn = 100
-    world.save.cargo[offer.commodity] = 4
+    _add_cargo(world, offer.commodity, 4)
     assert len(vr.check_mission_completions(world)) == 1
     assert world.save.cargo[offer.commodity] == 1
     assert world.save.pilot.credits == before + offer.reward
@@ -8053,7 +8303,7 @@ def test_opening_quote_budgets_crew_and_return_fuel_before_acceptance():
     assert vr.opening_assignment_offer(world) is None
 
 
-def test_ordinary_legacy_missions_keep_their_serialized_shape():
+def test_an_ordinary_contract_keeps_its_serialized_shape():
     mission = vr.Mission(1, "delivery", "Old job", 100, 0, 1, commodity="food", quantity=3)
     assert "opening_assignment" not in mission.to_dict()
     loaded = vr.Mission.from_dict(mission.to_dict())
@@ -8122,7 +8372,7 @@ def test_opening_quote_avoids_cargo_already_promised_to_an_earlier_delivery():
     assert offer is not None
     assert (offer.target_system, offer.commodity) != (first.target_system, first.commodity)
     vr.accept_opening_assignment(world, offer)
-    world.save.cargo[offer.commodity] = offer.quantity
+    _add_cargo(world, offer.commodity, offer.quantity)
     world.save.current_system = offer.target_system
     vr.check_mission_completions(world)
     assert world.save.flags["opening_assignment_completed"]
@@ -8317,7 +8567,7 @@ def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch,
     monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
     monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
     world = _world_with_seed(42)
-    world.save.cargo["food"] = 3
+    _add_cargo(world, "food", 3)
     pirate = vr.generate_pirate(world, tier=2)
     snapshots, frames = [], []
     world._checkpoint = lambda current: snapshots.append(current.save.to_dict())
@@ -8385,7 +8635,7 @@ def test_combat_telemetry_unaffordable_actions_have_terms_without_hotkeys(patrol
     world.save.pilot.credits = 0
     pirate = vr.generate_pirate(world, tier=2)
     before, rng = world.save.to_dict(), world.event_rng.getstate()
-    text = " ".join(vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True))
+    text = " ".join(vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True, tactics=vr.new_tactics(pirate)))
     assert ("[S]" if patrol else "[B]") not in text
     assert "UNAFFORDABLE" in text
     assert str(vr.notoriety_fine_cost(0) if patrol else vr.bribe_cost(pirate)) + "cr" in text
@@ -8396,7 +8646,7 @@ def test_combat_telemetry_unaffordable_actions_have_terms_without_hotkeys(patrol
 def test_unaffordable_customs_bribe_is_harmless_and_keeps_inspection_pending(monkeypatch):
     import copy
     world = _world_with_seed(42)
-    world.save.cargo = {"weapons": 2, "food": 1}
+    _set_cargo(world, {"weapons": 2, "food": 1})
     world.save.pilot.credits = 0
     before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
     calls = []
@@ -8424,7 +8674,7 @@ def test_customs_pages_keep_complete_terms_without_mutation(monkeypatch, without
     monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
     monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
     world = _world_with_seed(42)
-    world.save.cargo = {"weapons": 2, "food": 1}
+    _set_cargo(world, {"weapons": 2, "food": 1})
     world.save.pilot.credits = credits
     before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
     frames, content = [], []
@@ -8456,7 +8706,7 @@ def test_customs_pages_keep_complete_terms_without_mutation(monkeypatch, without
 def test_customs_invalid_domain_decision_has_no_effects(action):
     import copy
     world = _world_with_seed(42)
-    world.save.cargo = {"weapons": 2}
+    _set_cargo(world, {"weapons": 2})
     before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
     with pytest.raises(ValueError): vr.resolve_customs(world, action)
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
@@ -8468,7 +8718,7 @@ def _world_waiting_at_customs():
     world.save.current_system = destination
     world.by_id[destination].discovered = True
     world.save.turn = 1
-    world.save.cargo = {"weapons": 2, "food": 1}
+    _set_cargo(world, {"weapons": 2, "food": 1})
     world.save.pending_travel = {"version": 1, "origin": 0, "destination": destination,
         "was_discovered": False, "destroyed": False, "phase": "customs", "primary": "random",
         "bounty": None, "escorts": [], "escort_index": 0, "encounter": {"inspect": True}}
@@ -8513,7 +8763,7 @@ def test_customs_result_checkpoint_and_replay_do_not_repeat_effects(tmp_path, de
         if decision == "accepted": assert saved.cargo["weapons"] == 2
         else:
             assert "weapons" not in saved.cargo
-            assert saved.trading_ledger.uncosted_losses == 2
+            assert saved.trading_ledger.cargo_loss_cost > 0
         if decision == "refused":
             assert saved.pilot.notoriety == vr.NOTORIETY_PER_CUSTOMS_BUST
             assert f"{cost}cr collected" in saved.pending_travel["encounter"]["result"][0]
@@ -8531,9 +8781,11 @@ def _world_with_pending_fight(*, tactics=None):
     destination = sorted(world.here.connections)[0]
     mission = vr.Mission(1, "bounty", "Intercept raider", 500, 0, destination, pirate_tier=2)
     world.save.active_missions = [mission]
-    pirate = vr.Pirate("Legacy raider", 2, 50, 50)
-    combat = {"pirate": vr.dataclasses.asdict(pirate), "outcome": None, "lines": []}
-    if tactics is not None: combat["tactics"] = tactics
+    pirate = vr.Pirate("Bounty raider", 2, 50, 50)
+    # Every saved fight carries its ruleset and the hull it opened with (#421).
+    combat = {"pirate": vr.dataclasses.asdict(pirate), "outcome": None, "lines": [],
+              "tactics": vr.new_tactics(pirate) if tactics is None else tactics,
+              "hull_before": world.save.ship.hull_hp}
     world.save.turn = 1
     world.save.pending_travel = {"version": 1, "origin": 0, "destination": destination,
         "was_discovered": True, "destroyed": False, "phase": "primary", "primary": "bounty",
@@ -8541,30 +8793,18 @@ def _world_with_pending_fight(*, tactics=None):
     return world, pirate
 
 
-def test_legacy_pending_fight_keeps_original_rules_and_random_sequence(tmp_path, monkeypatch):
-    import copy
-    world, pirate = _world_with_pending_fight()
-    world.event_rng.seed(91)
-    vr.persist(world, tmp_path, 77)
-    save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
-    assert "tactics" not in save.pending_travel["encounter"]["combat"]
-    resumed = vr.World(save)
-    expected = copy.deepcopy(resumed)
-    expected_pirate = copy.deepcopy(pirate)
-    vr.fight_round(expected, expected_pirate)
-    keys = iter(["G", "F"])
-    def choose():
-        try: return next(keys)
-        except StopIteration: raise EOFError
-    monkeypatch.setattr(vr, "read_key", choose)
-    monkeypatch.setattr(vr, "tactical_round", lambda *args: pytest.fail("Legacy fight changed rules"))
-    with contextlib.redirect_stdout(io.StringIO()), pytest.raises(EOFError):
-        vr.screen_combat(vr.Palette(False), resumed, pirate)
-    state = resumed.save.pending_travel["encounter"]["combat"]
-    assert "tactics" not in state
-    assert state["pirate"]["hp"] == expected_pirate.hp
-    assert resumed.save.ship.hull_hp == expected.save.ship.hull_hp
-    assert resumed.event_rng.getstate() == expected.event_rng.getstate()
+@pytest.mark.parametrize("missing", ["tactics", "hull_before"])
+def test_a_pending_fight_without_its_ruleset_or_hull_mark_is_refused(tmp_path, missing):
+    """Pre-tactics fights were a retired schema's shape; there is no fallback (#421)."""
+    import json
+    world, _ = _world_with_pending_fight()
+    document = world.save.to_dict()
+    del document["pending_travel"]["encounter"]["combat"][missing]
+    path = tmp_path / "77.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(vr.ResumeError): vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("field,value", [("version", 2), ("version", True), ("profile", "unknown"),
@@ -8581,7 +8821,7 @@ def test_invalid_tactical_metadata_preserves_saved_career(tmp_path, field, value
     assert path.read_bytes() == before
 
 
-def test_null_tactics_is_not_treated_as_a_legacy_fight(tmp_path):
+def test_null_tactics_is_rejected_rather_than_defaulted(tmp_path):
     import json
     world, _ = _world_with_pending_fight()
     document = world.save.to_dict()
@@ -8644,7 +8884,7 @@ def test_failed_tactical_disengagement_uses_and_advances_visible_intent(monkeypa
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(io.StringIO()), pytest.raises(EOFError):
         vr.screen_combat(vr.Palette(False), world, pirate)
-    assert world.save.ship.hull_hp == before - vr._tactical_incoming_damage(world.save.ship, 2, "volley", 9)
+    assert world.save.ship.hull_hp == before - vr._tactical_incoming_damage(world.save.ship, 2, "volley", 9, tactics)
     assert tactics["step"] == 2 and tactics["brace_ready"]
 
 
@@ -8674,30 +8914,30 @@ def test_tactical_seeded_probes_keep_fights_short_and_upgrade_threat_meaningful(
         ship.has_gunner = True; ship.hull_hp = vr.hull_hp_max(ship)
     results = {}
     for profile in vr.TACTICAL_PROFILES:
-        for strategy in ("legacy", "fire", "brace_volley"):
+        for strategy in ("v1_fire", "fire", "brace_volley"):
             wins = 0; rounds = []; damage = []
             for seed in range(64):
                 world = copy.deepcopy(template); world.event_rng.seed(seed)
                 start = world.save.ship.hull_hp; count = 0
                 for wave in range(waves):
                     pirate = vr.Pirate("Probe", tier, 20 + tier * 15, 20 + tier * 15)
-                    tactics = {"version": 1, "profile": profile, "step": 0, "brace_ready": True}
+                    version = 1 if strategy == "v1_fire" else 2
+                    tactics = {"version": version, "profile": profile, "step": 0, "brace_ready": True}
                     while pirate.hp > 0 and world.save.ship.hull_hp > 0:
                         assert count < 12
-                        if strategy == "legacy": vr.fight_round(world, pirate)
-                        else:
-                            action = "G" if strategy == "brace_volley" and vr.tactical_intent(tactics) == "volley" and tactics["brace_ready"] else "F"
-                            vr.tactical_round(world, pirate, tactics, action)
+                        action = "G" if strategy == "brace_volley" and vr.tactical_intent(tactics) == "volley" and tactics["brace_ready"] else "F"
+                        vr.tactical_round(world, pirate, tactics, action)
                         count += 1
                     if world.save.ship.hull_hp <= 0: break
                 wins += world.save.ship.hull_hp > 0; rounds.append(count); damage.append(start - world.save.ship.hull_hp)
             results[profile, strategy] = (wins, max(rounds), sum(damage))
-        old, fire, guarded = (results[profile, strategy] for strategy in ("legacy", "fire", "brace_volley"))
+        old, fire, guarded = (results[profile, strategy] for strategy in ("v1_fire", "fire", "brace_volley"))
         assert fire[1] <= 8 and guarded[1] <= 8
+        # Ruleset 2 exists because 1 was unwinnable at the top tiers (issue #406).
         if build == "starter":
-            assert old[0] == 0 and fire[0] >= 32 and guarded[0] >= fire[0]
+            assert fire[0] >= old[0] and fire[0] >= 32 and guarded[0] >= fire[0]
         else:
-            assert fire[0] == 64 and fire[2] > old[2] * 2
+            assert fire[0] == 64 and fire[2] <= old[2]
     if build == "carrier":
         assert results["Raider", "brace_volley"][2] < results["Raider", "fire"][2]
         assert results["Skirmisher", "fire"][2] < results["Skirmisher", "brace_volley"][2]
@@ -9000,7 +9240,8 @@ def _world_with_coordinated_squadron(*, engaged=False):
     pirates = [vr.Pirate("Hollow Fang", 4, 80, 80), vr.Pirate("Rust Wraith", 2, 50, 50)]
     world.save.pending_travel["encounter"] = {"kind": "pirate", "pirates": [vr.dataclasses.asdict(p) for p in pirates],
         "index": 0, "formation": {"version": 1, "engaged": engaged}, "combat": {
-            "pirate": vr.dataclasses.asdict(pirates[0]), "outcome": None, "lines": [], "tactics": vr.new_tactics(pirates[0])}}
+            "pirate": vr.dataclasses.asdict(pirates[0]), "outcome": None, "lines": [],
+            "tactics": vr.new_tactics(pirates[0]), "hull_before": world.save.ship.hull_hp}}
     return world, pirates
 
 
@@ -9053,21 +9294,26 @@ def test_squadron_cover_matches_disclosed_combined_damage(monkeypatch, braced, i
     for roll in (4, 9):
         world.save.ship.hull_hp = 400
         monkeypatch.setattr(world.event_rng, "randint", lambda low, high: roll)
-        expected = vr._tactical_incoming_damage(world.save.ship, pirates[0].tier, intent, roll, braced=braced, cover=6)
-        base = vr._tactical_incoming_damage(world.save.ship, pirates[0].tier, intent, roll)
+        expected = vr._tactical_incoming_damage(world.save.ship, pirates[0].tier, intent, roll, tactics, braced=braced, cover=6)
+        base = vr._tactical_incoming_damage(world.save.ship, pirates[0].tier, intent, roll, tactics)
         assert expected == ((base + 6 + 3) // 4 if braced else base + 6)
         actual, _ = vr.tactical_retaliation(world, pirates[0], dict(tactics), braced=braced)
         assert actual == expected and world.save.ship.hull_hp == 400 - actual
 
 
-def test_squadron_cover_ends_after_first_raider_and_legacy_pairs_keep_original_rules():
+def test_squadron_cover_ends_after_the_first_raider():
     world, _ = _world_with_coordinated_squadron(engaged=True)
     state = world.save.pending_travel["encounter"]
     assert vr.squadron_cover(world) == 6
     state["index"] = 1
     assert vr.squadron_cover(world) == 0 and "covering fire has ended" in " ".join(vr.squadron_terms(world))
-    state["index"] = 0; state.pop("formation")
-    assert vr.squadron_cover(world) == 0 and not vr.squadron_terms(world)
+
+
+def test_a_two_raider_encounter_without_its_formation_is_refused():
+    """Sequential pairs were a retired schema's shape (issue #421)."""
+    world, _ = _world_with_coordinated_squadron()
+    world.save.pending_travel["encounter"].pop("formation")
+    with pytest.raises(vr.ResumeError): vr.World(vr.SaveData.from_dict(world.save.to_dict()))
 
 
 @pytest.mark.parametrize("fault", ["version", "bool_version", "engaged", "extra", "null", "position", "kind", "target", "damage", "step"])
@@ -9281,7 +9527,7 @@ def test_survey_report_retains_every_contact_and_result_after_invalid_input(monk
 def test_review_combat_info_keeps_exchange_before_tactical_heading(monkeypatch, width, height):
     world = _world_with_seed(42); pirate = vr.Pirate("Raider", 0, 50, 50)
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
-    lines = vr.combat_display_lines(world, pirate, ["Your last shot hit."], patrol=False, details=True)
+    lines = vr.combat_display_lines(world, pirate, ["Your last shot hit."], patrol=False, details=True, tactics=vr.new_tactics(pirate))
     pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/P] Act [I] Info [< >]Page: ")
     assert pages[0][0] == "Last exchange:"
     assert lines.index("Your last shot hit.") < lines.index("Tactical Systems:")
@@ -9291,17 +9537,18 @@ def test_review_combat_info_keeps_exchange_before_tactical_heading(monkeypatch, 
 @pytest.mark.parametrize("cargo", [0, 1, 12, 24])
 def test_review_combat_dump_terms_disclose_actual_escape_probability(tier, cargo):
     import copy
-    world = _world_with_seed(42); world.save.cargo = {"food": cargo}
+    world = _world_with_seed(42); _set_cargo(world, {"food": cargo})
     before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
     pirate = vr.Pirate("Raider", tier, 80, 80)
-    line = next((row for row in vr.combat_display_lines(world, pirate, [], patrol=False) if row.startswith("[D]")), None)
+    tactics = vr.new_tactics(pirate)
+    line = next((row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics) if row.startswith("[D]")), None)
     after = copy.deepcopy(world)
     if not cargo:
         assert line is None  # an empty hold has nothing to dump, so the action is not offered (#414)
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         return
     vr._dispose_cargo(after, "food", 1)
-    assert f"{vr.evade_chance(after, pirate, dumped_cargo=True):.0%}" in line
+    assert f"{vr.combat_evade_chance(after, pirate, dumped_cargo=True, tactics=tactics):.0%}" in line
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
     assert "one unit" in line
 
@@ -9309,7 +9556,8 @@ def test_review_combat_dump_terms_disclose_actual_escape_probability(tier, cargo
 @pytest.mark.parametrize("hull", [20, 60])
 def test_review_combat_low_hull_warning_does_not_invent_one_hit_risk(hull):
     world = _world_with_seed(42); world.save.ship.hull_hp = hull
-    lines = " ".join(vr.combat_display_lines(world, vr.Pirate("Weak raider", 0, 20, 20), [], patrol=False))
+    weak = vr.Pirate("Weak raider", 0, 20, 20)
+    lines = " ".join(vr.combat_display_lines(world, weak, [], patrol=False, tactics=vr.new_tactics(weak)))
     assert "another hit may destroy" not in lines
     assert ("LOW HULL" in lines) == (hull <= 20)
 
@@ -9317,7 +9565,7 @@ def test_review_combat_low_hull_warning_does_not_invent_one_hit_risk(hull):
 @pytest.mark.parametrize("patrol", [False, True])
 def test_review_combat_kill_terms_name_both_factions_and_notoriety(patrol):
     world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 2, 50, 50)
-    lines = " ".join(vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True))
+    lines = " ".join(vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True, tactics=vr.new_tactics(pirate)))
     assert ("Concord -10" if patrol else "Concord +2") in lines
     assert ("Blackwake +3" if patrol else "Blackwake -1") in lines
     if patrol: assert "notoriety +3" in lines
@@ -9326,7 +9574,7 @@ def test_review_combat_kill_terms_name_both_factions_and_notoriety(patrol):
 
 @pytest.mark.parametrize("name,roll,label", [("Hollow Fang", 0.695, "70%"), ("Rust Wraith", 0.595, "60%")])
 def test_dump_preview_matches_actual_post_disposal_escape_boundary(monkeypatch, name, roll, label):
-    world = _world_with_seed(42); world.save.cargo = {"food": 1}
+    world = _world_with_seed(42); _set_cargo(world, {"food": 1})
     pirate = vr.Pirate(name, 0, 50, 50)
     # The actual new fight uses this opponent's initial intent, including Harry.
     line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate)) if row.startswith("[D]"))
@@ -9339,7 +9587,7 @@ def test_dump_preview_matches_actual_post_disposal_escape_boundary(monkeypatch, 
 @pytest.mark.parametrize("cargo", [0, 1])
 def test_tactical_dump_terms_include_harry_escape_penalty(cargo):
     import copy
-    world = _world_with_seed(42); world.save.cargo = {"food": cargo}
+    world = _world_with_seed(42); _set_cargo(world, {"food": cargo})
     pirate = vr.Pirate("Rust Wraith", 2, 50, 50)
     tactics = {"version": 1, "profile": "Skirmisher", "step": 0, "brace_ready": True}
     line = next((row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics) if row.startswith("[D]")), None)
@@ -9357,9 +9605,9 @@ def test_tactical_dump_terms_include_harry_escape_penalty(cargo):
 @pytest.mark.parametrize("details", [False, True])
 def test_real_exchange_text_starts_on_first_combat_page(monkeypatch, width, height, details):
     world = _world_with_seed(42); pirate = vr.Pirate("Rust Wraith", 1, 80, 80)
-    _, _, result = vr.fight_round(world, pirate)
+    _, _, result = vr.tactical_round(world, pirate, vr.new_tactics(pirate), "F")
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
-    lines = vr.combat_display_lines(world, pirate, result, patrol=False, details=details)
+    lines = vr.combat_display_lines(world, pirate, result, patrol=False, details=details, tactics=vr.new_tactics(pirate))
     pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/P] Act [I] Info [< >]Page: ")
     assert len(pages[0]) > 1 and result[0].split()[0] in " ".join(pages[0][1:])
     text = " ".join(" ".join(row for page in pages for row in page).split())
@@ -9369,7 +9617,7 @@ def test_real_exchange_text_starts_on_first_combat_page(monkeypatch, width, heig
 @pytest.mark.parametrize("patrol", [False, True])
 def test_peaceful_combat_action_discloses_its_standing_gain(patrol):
     world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 1, 50, 50)
-    lines = vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True)
+    lines = vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True, tactics=vr.new_tactics(pirate))
     action = next(row for row in lines if row.startswith("[S]" if patrol else "[P]"))
     assert ("Concord +2" if patrol else "Blackwake +2") in action
 
@@ -9646,7 +9894,7 @@ def test_bounty_combat_risk_terms_match_identification_state_without_rng(identit
         "checked": identity in ("confirmed", "mismatch"), "engaged": False}
     before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
     pirate = vr.Pirate("Opponent", 2, 50, 50)
-    text = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False, details=details, warrant=warrant))
+    text = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False, details=details, warrant=warrant, tactics=vr.new_tactics(pirate)))
     assert "After a bounty victory" not in text  # Old random inquiry no longer applies.
     if identity.startswith("unverified"):
         assert "12%" in text and "Concord -3" in text and "+2 notoriety" in text
@@ -9669,7 +9917,8 @@ def _world_at_workshop(key, tier=0):
     world.save.pilot.highest_rank_seen = len(vr.RANKS) - 1
     setattr(world.save.ship, key + "_tier", tier)
     quote = vr.workshop_quote(world, key)
-    world.save.cargo[quote["commodity"]] = quote["quantity"]
+    vr._acquire_cargo(world, quote["commodity"], quote["quantity"],
+                      quote["quantity"] * vr.price_for(world, world.here.id, quote["commodity"]))
     return world
 
 
@@ -9701,8 +9950,8 @@ def test_workshop_installation_uses_materials_and_cash_for_one_normal_tier(key, 
     assert world.save.pilot.credits == before["pilot"]["credits"] - (vr.UPGRADES[key]["cost"](tier) * 65 + 99) // 100
     assert world.save.cargo.get(quote["commodity"], 0) == 0
     assert world.save.trading_ledger.workshop_spend == quote["credits"]
-    assert world.save.trading_ledger.uncosted_workshop_materials == quote["quantity"]
-    assert world.save.trading_ledger.cargo_loss_cost == 0 and world.save.trading_ledger.uncosted_losses == 0
+    assert world.save.trading_ledger.workshop_material_cost == before["cargo_basis"][quote["commodity"]][0][1]
+    assert world.save.trading_ledger.cargo_loss_cost == 0
     assert world.save.pilot.missions_completed == 0 and world.save.pilot.reputation == before["pilot"]["reputation"]
     assert world.save.ship.fuel == before["ship"]["fuel"] and world.save.ship.hull_hp == before["ship"]["hull_hp"]
     assert world.save.turn == before["turn"] and world.event_rng.getstate() == rng
@@ -9726,31 +9975,28 @@ def test_workshop_rejected_installation_preserves_everything(key, condition):
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
 
 
-def test_workshop_material_accounting_consumes_unknown_then_fifo_without_fake_loss():
+def test_workshop_material_accounting_consumes_fifo_without_fake_loss():
     world = _world_at_workshop("engine", 1)
-    world.save.cargo = {"machinery": 5}; world.save.cargo_basis = {"machinery": [[4, 1000]]}
+    world.save.cargo = {"machinery": 5}; world.save.cargo_basis = {"machinery": [[5, 1250]]}
     vr.install_workshop_module(world, "engine")
     assert world.save.cargo == {"machinery": 1} and world.save.cargo_basis == {"machinery": [[1, 250]]}
     ledger = world.save.trading_ledger
-    assert (ledger.workshop_material_cost, ledger.uncosted_workshop_materials, ledger.workshop_spend) == (750, 1, 1430)
+    assert (ledger.workshop_material_cost, ledger.workshop_spend) == (1000, 1430)
     assert ledger.cargo_loss_cost == ledger.sales_cost == ledger.delivery_cost == 0
-    assert "materials 750cr recorded cost, plus 1 units of unknown cost" in " ".join(vr.trading_ledger_lines(world))
+    assert "materials 1,000cr recorded cost" in " ".join(vr.trading_ledger_lines(world))
     restored = vr.World(vr.SaveData.from_dict(world.save.to_dict()))
     assert restored.save.trading_ledger == ledger
 
 
-def test_legacy_ledger_defaults_workshop_counters_and_retirement_clears_them():
-    world = _world_with_seed(42); data = world.save.to_dict()
-    fields = ("workshop_spend", "workshop_material_cost", "uncosted_workshop_materials")
-    for field in fields: data["trading_ledger"].pop(field)
-    save = vr.SaveData.from_dict(data)
-    assert all(getattr(save.trading_ledger, field) == 0 for field in fields)
+def test_retirement_clears_the_workshop_counters():
+    fields = ("workshop_spend", "workshop_material_cost")
     upgraded = _world_at_workshop("cargo"); vr.install_workshop_module(upgraded, "cargo")
+    assert any(getattr(upgraded.save.trading_ledger, field) for field in fields)
     retired = vr.retire_pilot(upgraded.save)
     assert retired.ship.cargo_tier == 0 and all(getattr(retired.trading_ledger, field) == 0 for field in fields)
 
 
-@pytest.mark.parametrize("field", ["workshop_spend", "workshop_material_cost", "uncosted_workshop_materials"])
+@pytest.mark.parametrize("field", ["workshop_spend", "workshop_material_cost"])
 @pytest.mark.parametrize("value", [-1, "unknown"])
 def test_invalid_workshop_ledger_preserves_original_bytes(tmp_path, field, value):
     import json
@@ -9970,7 +10216,7 @@ def test_dismissal_unpaid_resignation_and_rehire_preserve_named_service(role):
 
 
 @pytest.mark.parametrize("role", ["gunner", "engineer", "navigator"])
-def test_legacy_hired_crew_keeps_base_bonus_and_starts_service_only_when_paid(role):
+def test_crew_without_a_service_record_keeps_the_base_bonus_until_paid(role):
     world = _world_with_seed(42); setattr(world.save.ship, "has_" + role, True)
     data = world.save.to_dict(); data["ship"].pop("crew_records")
     restored = vr.World(vr.SaveData.from_dict(data))
@@ -10016,15 +10262,13 @@ def test_invalid_named_crew_records_preserve_original_career(tmp_path, records):
 
 
 @pytest.mark.parametrize("paid,bonus", [(0, 3), (5, 4), (15, 5), (30, 6)])
-@pytest.mark.parametrize("legacy", [False, True])
-def test_promoted_gunner_bonus_matches_actual_fire_and_combat_info(monkeypatch, paid, bonus, legacy):
+def test_promoted_gunner_bonus_matches_actual_fire_and_combat_info(monkeypatch, paid, bonus):
     world = _world_with_named_crew("gunner", paid)
     pirate = vr.Pirate("Hollow Fang", 0, 80, 80)
     monkeypatch.setattr(world.event_rng, "randint", lambda low, high: low)
-    if legacy: damage, _, _ = vr.fight_round(world, pirate)
-    else: damage, _, _ = vr.tactical_round(world, pirate, vr.new_tactics(pirate), "F")
-    assert damage == (5 if legacy else 9) + bonus
-    assert f"gunner bonus +{bonus}" in " ".join(vr.combat_display_lines(world, pirate, [], patrol=False, details=True))
+    damage, _, _ = vr.tactical_round(world, pirate, vr.new_tactics(pirate), "F")
+    assert damage == 9 + bonus
+    assert f"gunner bonus +{bonus}" in " ".join(vr.combat_display_lines(world, pirate, [], patrol=False, details=True, tactics=vr.new_tactics(pirate)))
 
 
 @pytest.mark.parametrize("paid,percent", [(0, 25), (5, 30), (15, 35), (30, 40)])
@@ -10267,7 +10511,7 @@ def test_personal_crew_task_invalid_handover_is_atomic(role, fault):
     elif fault == "pending": world.save.pending_travel = {"phase": "departed"}
     elif fault == "wrong_location": world.save.current_system = 0
     elif role == "gunner": world.save.pilot.kills = 0
-    elif role == "engineer": world.save.cargo["machinery"] = 2; world.save.cargo_basis = {}
+    elif role == "engineer": _add_cargo(world, "machinery", 2)
     else:
         for system in world.galaxy: system.discovered = False
     before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
@@ -10284,7 +10528,7 @@ def test_personal_crew_task_rehire_keeps_baseline_and_acceptance_is_not_repeatab
     if role == "gunner": world.save.pilot.kills += 1
     elif role == "navigator":
         for system in [s for s in world.galaxy if not s.discovered][:3]: system.discovered = True
-    else: world.save.cargo["machinery"] = 3
+    else: _add_cargo(world, "machinery", 3)
     vr.hire_crew(world, role)
     assert vr.crew_assignment_record(world, role) == task
     before = copy.deepcopy(world.save.to_dict())
@@ -10309,17 +10553,17 @@ def test_navigator_personal_task_acceptance_is_possible_for_mature_charts(remain
     assert task["state"] == "complete"
 
 
-@pytest.mark.parametrize("unknown", [0, 1, 3])
-def test_engineer_personal_task_uses_delivery_fifo_and_gross_reward(unknown):
+@pytest.mark.parametrize("lots", [[[4, 400]], [[1, 100], [3, 300]], [[3, 300], [1, 100]]])
+def test_engineer_personal_task_uses_delivery_fifo_and_gross_reward(lots):
     world = _world_with_crew_task("engineer", ready=True)
-    world.save.cargo = {"machinery": 4}
-    world.save.cargo_basis = {"machinery": [[4 - unknown, (4 - unknown) * 100]]}
+    _set_cargo(world, {"machinery": 4})
+    world.save.cargo_basis = {"machinery": [list(lot) for lot in lots]}
     before = world.save.pilot.credits
     vr.complete_crew_assignment(world, "engineer")
     ledger = world.save.trading_ledger
     assert world.save.cargo == {"machinery": 1} and world.save.cargo_basis == {"machinery": [[1, 100]]}
-    assert ledger.delivery_revenue == 900 - unknown * 300 and ledger.uncosted_deliveries == unknown * 300
-    assert ledger.delivery_cost == (3 - unknown) * 100 and ledger.cargo_loss_cost == 0
+    assert ledger.delivery_revenue == 900
+    assert ledger.delivery_cost == 300 and ledger.cargo_loss_cost == 0
     assert world.save.pilot.credits == before + 900
 
 
@@ -10660,7 +10904,7 @@ def test_faction_commission_uses_actual_post_combat_standing_at_bounty_payout(mo
 def _world_at_faction_customs_phase(phase):
     world, _ = _world_with_pending_fight()
     world.save.active_missions = []
-    world.save.cargo = {"weapons": 1}
+    _set_cargo(world, {"weapons": 1})
     world.save.pilot.has_blackwake_made = True
     travel = world.save.pending_travel
     travel.update(phase=phase, primary="random", bounty=None, encounter={})
@@ -10718,7 +10962,7 @@ def _faction_case_world(faction, stage="idle", choice="aid"):
         world.here.discovered = True
         ending = vr.FACTION_STORIES[faction][choice]
         if ending["commodity"]:
-            world.save.cargo = {ending["commodity"]: ending["quantity"]}
+            _set_cargo(world, {ending["commodity"]: ending["quantity"]})
             world.save.cargo_basis = {ending["commodity"]: [[ending["quantity"], 100 * ending["quantity"]]]}
             world.save.trading_ledger.since_day = world.save.turn
     if stage == "complete": vr.faction_story_action(world, faction, "C")
@@ -10780,16 +11024,16 @@ def test_faction_case_previews_show_effective_capped_standing(faction, choice, s
         assert f"{vr.FACTION_LABEL[group]} {after-standing:+d}" in result
 
 
-@pytest.mark.parametrize("unknown", [0, 1, 3])
-def test_faction_case_material_handover_uses_fifo_and_separates_unknown_cost(unknown):
+@pytest.mark.parametrize("lots", [[[5, 500]], [[2, 200], [3, 300]], [[3, 300], [2, 200]]])
+def test_faction_case_material_handover_uses_fifo_costs(lots):
     world = _faction_case_world(vr.FACTION_BLACKWAKE, "committed")
-    world.save.cargo = {"electronics": 5}
-    world.save.cargo_basis = {"electronics": [[5-unknown, (5-unknown)*100]]}
+    _set_cargo(world, {"electronics": 5})
+    world.save.cargo_basis = {"electronics": [list(lot) for lot in lots]}
     vr.faction_story_action(world, vr.FACTION_BLACKWAKE, "C")
     ledger = world.save.trading_ledger
     assert world.save.cargo == {"electronics": 2}
-    assert ledger.delivery_cost == (3-unknown)*100
-    assert ledger.delivery_revenue == 1500-unknown*500 and ledger.uncosted_deliveries == unknown*500
+    assert ledger.delivery_cost == 300
+    assert ledger.delivery_revenue == 1500
     assert ledger.cargo_loss_cost == ledger.sales_cost == 0
 
 
@@ -10890,7 +11134,7 @@ def test_faction_case_checkpoint_failure_prevents_acknowledgement(monkeypatch, s
 @pytest.mark.parametrize("choice", ["hardline", "aid"])
 def test_faction_case_real_route_completes_both_legs_with_ordinary_costs(monkeypatch, tmp_path, faction, choice):
     world = _world_with_seed(42); ending = vr.FACTION_STORIES[faction][choice]
-    if ending["commodity"]: world.save.cargo = {ending["commodity"]: ending["quantity"]}
+    if ending["commodity"]: _set_cargo(world, {ending["commodity"]: ending["quantity"]})
     first, last = vr.faction_story_target(world, faction), vr.faction_story_target(world, faction, choice)
     outward, onward = vr.bfs_path(world.by_id, 0, first), vr.bfs_path(world.by_id, first, last)
     commands = iter("AR" + "J"*len(outward) + "BI" + ("H" if choice == "hardline" else "A") + "R" + "J"*len(onward) + "BC" + ("Y" if ending["commodity"] else "") + "B")
@@ -11040,7 +11284,7 @@ def test_career_rank_checkpoint_retains_reward_before_next_spend(tmp_path, thres
 
 @pytest.mark.parametrize("commands,marker", [(b"MAS1\rAP1\r",b"Result: Bought 1x Food"), (b"MAS1\r",b"Result: Sold 1x Food")])
 def test_career_rank_real_nested_market_peak_survives_kill(tmp_path, commands, marker):
-    world = _world_with_seed(42); world.save.pilot.credits = 4999; world.save.cargo = {"food":1}
+    world = _world_with_seed(42); world.save.pilot.credits = 4999; _set_cargo(world, {"food":1})
     world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
     assert world.save.pilot.highest_rank_seen == 0
     with _door_stopped_at(tmp_path,commands,marker):
@@ -11081,7 +11325,7 @@ def test_career_rank_retained_top_rank_keeps_real_retirement_available(monkeypat
 
 
 def test_career_rank_save_failure_stops_reward_before_ack(monkeypatch):
-    world=_world_with_seed(42); world.save.pilot.credits=4999; world.save.cargo={"food":1}
+    world=_world_with_seed(42); world.save.pilot.credits=4999; _set_cargo(world, {"food":1})
     output=io.StringIO(); keys=iter("AS"); monkeypatch.setattr(vr,"read_key",lambda:next(keys)); monkeypatch.setattr(vr,"read_line_raw",lambda **kw:"1")
     def fail(current):
         assert current.save.pilot.highest_rank_seen==1 and "Result: Sold" not in output.getvalue()
@@ -11556,10 +11800,11 @@ def test_achievement_summary_retains_every_dossier_at_capacity_and_legacy_gaps(t
     assert "135 completed careers; 128 recorded conclusions" in " ".join(vr.achievement_lines([record],"careers",77))
 
 
-def test_achievement_legacy_scores_never_fabricate_per_career_metrics(tmp_path):
+def test_achievement_imported_scores_never_fabricate_per_career_metrics(tmp_path):
     import json
-    legacy={"user_id":77,"handle":"Legacy","best_credits":10000,"retirements":9,"kills":80}
-    path=tmp_path/"leaderboard.json"; path.write_text(json.dumps([legacy]),encoding="utf-8"); original=path.read_bytes()
+    older={"user_id":77,"handle":"Older","best_credits":10000,"retirements":9,"kills":80}
+    path=tmp_path/"leaderboard.json"; path.write_text(json.dumps([older]),encoding="utf-8"); original=path.read_bytes()
+    vr.import_hall_of_fame(tmp_path)  # the old file reaches the rankings through `scores/` (#421)
     entries=vr._load_score_records(tmp_path)
     assert vr.achievement_ranking(entries,"wealth")[0]["best_credits"]==10000
     assert vr.achievement_ranking(entries,"careers")[0]["retirements"]==9
@@ -11808,7 +12053,7 @@ def test_faction_case_idle_route_is_unavailable_until_acceptance(monkeypatch,fac
 def test_career_rank_checkpoint_notice_survives_spending_until_deck(monkeypatch,tmp_path,width,height):
     import re
     world=_world_with_seed(42);world._checkpoint=lambda w:vr.persist(w,tmp_path,77)
-    world.save.pilot.credits=4999;world.save.cargo={"food":1};world.checkpoint()
+    world.save.pilot.credits=4999;_set_cargo(world, {"food":1});world.checkpoint()
     keys=iter("ASQ");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     monkeypatch.setattr(vr,"read_line_raw",lambda **kw:"1")
     with contextlib.redirect_stdout(io.StringIO()):vr.screen_market(vr.Palette(False),world)
@@ -11926,12 +12171,13 @@ def test_achievement_malformed_version_repairs_from_authoritative_save(tmp_path,
     assert type(json.loads(path.read_text(encoding="utf-8"))["achievements"]["version"]) is int
 
 
-@pytest.mark.parametrize("source,total,current", [("legacy",9,0),("score",9,0),("legacy",9,12)])
-def test_achievement_retirement_totals_survive_legacy_projection_restart_and_next_finale(tmp_path,source,total,current):
+@pytest.mark.parametrize("source,total,current", [("imported",9,0),("score",9,0),("imported",9,12)])
+def test_achievement_retirement_totals_survive_a_projection_restart_and_the_next_finale(tmp_path,source,total,current):
     import json
-    record={"user_id":77,"handle":"Legacy","best_credits":10000,"retirements":total,"kills":80}
-    path=tmp_path/"leaderboard.json" if source=="legacy" else tmp_path/"scores"/"77.json"
-    path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps([record] if source=="legacy" else record),encoding="utf-8")
+    record={"user_id":77,"handle":"Older","best_credits":10000,"retirements":total,"kills":80}
+    path=tmp_path/"leaderboard.json" if source=="imported" else tmp_path/"scores"/"77.json"
+    path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps([record] if source=="imported" else record),encoding="utf-8")
+    if source=="imported": vr.import_hall_of_fame(tmp_path)  # the old file gets there once, at launch (#421)
     world=_finale_world();world.save.pilot.retirements=current;world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
     expected=max(total,current);saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
     assert saved.pilot.retirements==expected and saved.retired_careers==[] and saved.pilot.credits==1200
@@ -11945,11 +12191,12 @@ def test_achievement_retirement_totals_survive_legacy_projection_restart_and_nex
 
 
 
-def test_achievement_readonly_snapshot_preserves_legacy_total_before_projection_repair(tmp_path):
+def test_achievement_readonly_snapshot_preserves_an_imported_total_before_projection_repair(tmp_path):
     import json
     world=_world_with_seed(42);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
-    legacy=tmp_path/"leaderboard.json";legacy.write_text(json.dumps([{"user_id":77,"handle":"Legacy","best_credits":10000,"retirements":9}]),encoding="utf-8")
-    paths=[legacy,tmp_path/"77.json",tmp_path/"scores"/"77.json"];before={p:p.read_bytes() for p in paths}
+    older=tmp_path/"leaderboard.json";older.write_text(json.dumps([{"user_id":77,"handle":"Older","best_credits":10000,"retirements":9}]),encoding="utf-8")
+    vr.import_hall_of_fame(tmp_path)
+    paths=[older,tmp_path/"77.json",tmp_path/"scores"/"77.json"];before={p:p.read_bytes() for p in paths}
     entries=vr._load_score_records(tmp_path)
     assert vr.achievement_ranking(entries,"careers")[0]["retirements"]==9 and "achievements" not in entries[0]
     assert {p:p.read_bytes() for p in paths}==before
@@ -12028,7 +12275,7 @@ def test_combat_b_is_harmless_and_p_pays_the_bribe(monkeypatch):
 
 
 def test_customs_b_is_rejected_as_undisplayed_and_p_bribes(monkeypatch):
-    world = _world_with_seed(42); world.save.cargo = {"weapons": 2}; world.save.pilot.credits = 10_000
+    world = _world_with_seed(42); _set_cargo(world, {"weapons": 2}); world.save.pilot.credits = 10_000
     monkeypatch.setattr(world.event_rng, "random", lambda: 0.0)
     keys = iter(["B", "P"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with pytest.raises(ValueError): vr.resolve_customs(world, "B")
@@ -12128,20 +12375,19 @@ def test_settlement_does_not_consume_stock_a_second_time():
     assert vr.market_depth_quote(world, world.here.id, "food")["stock"] == min(cap, cap - 10 + 5 * vr.market_depth_limits(world.here.economy, "food")["stock_rate"])
 
 
-def test_legacy_and_unreserved_orders_keep_their_terms():
+def test_a_cancelled_order_returns_exactly_the_stock_it_reserved():
     world = _world_at_food_producer()
     cap = vr.market_depth_limits(world.here.economy, "food")["stock"]
-    legacy = vr.FuturesContract(id=1, commodity="food", quantity=4, locked_price=100, settle_turn=0)
-    unreserved = vr.FuturesContract(id=2, commodity="food", quantity=4, locked_price=100, settle_turn=9,
-                                    origin_system=world.here.id, principal=90)
-    world.save.active_futures = [legacy, unreserved]
+    ready = vr.FuturesContract(id=1, commodity="food", quantity=4, locked_price=100, settle_turn=0,
+                               origin_system=world.here.id, principal=90, reserved=4)
+    later = vr.FuturesContract(id=2, commodity="food", quantity=4, locked_price=100, settle_turn=9,
+                               origin_system=world.here.id, principal=90, reserved=4)
+    world.save.active_futures = [ready, later]
     world.save.next_futures_id = 3
-    data = vr.SaveData.from_dict(world.save.to_dict())
-    assert "reserved" not in data.active_futures[0].to_dict() and "reserved" not in data.active_futures[1].to_dict()
+    vr._consume_market_depth(world, "food", 8, buying=True)
     assert vr.settle_futures_contracts(world) == ["Futures contract settled: 4x Food delivered to your hold."]
-    assert vr.market_depth_quote(world, world.here.id, "food")["stock"] == cap
     vr.cancel_futures_contract(world, 2)
-    assert vr.market_depth_quote(world, world.here.id, "food")["stock"] == cap
+    assert vr.market_depth_quote(world, world.here.id, "food")["stock"] == cap - 4
     assert not world.save.active_futures
 
 
@@ -12155,12 +12401,13 @@ def test_corrupt_futures_reservation_uses_preserving_recovery(reserved):
         vr.SaveData.from_dict(data)
 
 
-def test_reservation_on_a_legacy_order_is_rejected():
+def test_a_reservation_larger_than_the_order_is_rejected():
     world = _world_at_food_producer()
-    legacy = vr.FuturesContract(id=1, commodity="food", quantity=4, locked_price=100, settle_turn=0)
-    world.save.active_futures = [legacy]
+    world.save.active_futures = [vr.FuturesContract(id=1, commodity="food", quantity=4, locked_price=100,
+                                                    settle_turn=0, origin_system=world.here.id,
+                                                    principal=90, reserved=4)]
     data = world.save.to_dict()
-    data["active_futures"][0]["reserved"] = 4
+    data["active_futures"][0]["reserved"] = 5
     with pytest.raises(vr.ResumeError):
         vr.SaveData.from_dict(data)
 
@@ -12277,18 +12524,18 @@ def test_combat_screen_discloses_the_salvage_fee_when_hull_is_low():
     world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 1, 50, 50)
     fee = vr.salvage_fee(world.save.ship)
     world.save.ship.hull_hp = vr.hull_hp_max(world.save.ship)
-    calm = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
+    calm = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate)))
     assert f"{fee}cr salvage fee" not in calm
-    assert "notoriety stays" in " ".join(vr.combat_display_lines(world, pirate, [], patrol=False, details=True))
+    assert "notoriety stays" in " ".join(vr.combat_display_lines(world, pirate, [], patrol=False, details=True, tactics=vr.new_tactics(pirate)))
     world.save.pilot.notoriety = 6
-    patrol_details = " ".join(vr.combat_display_lines(world, pirate, [], patrol=True, details=True))
+    patrol_details = " ".join(vr.combat_display_lines(world, pirate, [], patrol=True, details=True, tactics=vr.new_tactics(pirate)))
     assert f"collects your {vr.notoriety_fine_cost(6)}cr fine and clears notoriety only once both are paid" in patrol_details
     world.save.pilot.notoriety = 0
     world.save.ship.hull_hp = 10
-    low = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
+    low = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate)))
     assert f"LOW HULL: one third of maximum hull or less. Destruction: {fee}cr salvage fee" in low
     world.save.pilot.credits = 30
-    low = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
+    low = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate)))
     assert "Destruction: 30cr salvage fee" in low and f"hull patched to {vr.salvage_hull(world.save.ship, 30)}/{vr.hull_hp_max(world.save.ship)}" in low
     assert f"destruction costs {fee}cr salvage" in " ".join(vr.station_deck_lines(world))
 
@@ -12377,7 +12624,7 @@ def test_retirement_forfeits_the_commissioned_reward_the_contract_showed():
     assert "forfeited 1,000cr" in " ".join(vr.finish_career(world.save, "legend").pilot.log)  # deliveries carry no commission
 
 
-def test_legacy_pilots_load_with_zero_loss_counters_and_records_show_them():
+def test_absent_loss_counters_default_to_zero_and_the_record_shows_them():
     world = _world_with_seed(42)
     data = world.save.to_dict()
     for key in ("missions_failed", "missions_expired"): data["pilot"].pop(key)
@@ -12419,11 +12666,11 @@ def test_the_combat_bar_keeps_its_labels_until_the_page_cannot_afford_them(monke
 def test_combat_lines_name_the_escort_at_stake_only_during_escort_fights():
     world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 1, 50, 50)
     world.save.pilot.credits = 10_000
-    plain = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
+    plain = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate)))
     assert "fails the escort contract" not in plain
     world, mission = _escort_world("escaped"); world.save.pilot.credits = 10_000
-    world.save.cargo = {"food": 1}  # Dump is only offered with something to dump (#414)
-    lines = vr.combat_display_lines(world, pirate, [], patrol=False)
+    _set_cargo(world, {"food": 1})  # Dump is only offered with something to dump (#414)
+    lines = vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate))
     evade = next(row for row in lines if row.startswith("[E]")); dump = next(row for row in lines if row.startswith("[D]"))
     bribe = next(row for row in lines if row.startswith("[P]"))
     assert evade.endswith("Escaping fails the escort contract.") and dump.endswith("Escaping fails the escort contract.")
@@ -12535,10 +12782,10 @@ def test_new_fights_use_ruleset_two_and_cached_fights_keep_their_curve():
     world = _world_with_seed(42); pirate = vr.Pirate("Probe", 3, 65, 65)
     tactics = vr.new_tactics(pirate)
     assert tactics["version"] == 2 and vr.tactical_threat_bonus(tactics) == (0, 3, 6, 8, 34)
-    assert vr.tactical_threat_bonus({"version": 1}) == (0, 3, 6, 20, 55) and vr.tactical_threat_bonus(None) == (0, 3, 6, 20, 55)
+    assert vr.tactical_threat_bonus({"version": 1}) == (0, 3, 6, 20, 55)
     ship = world.save.ship
-    v1 = vr._tactical_incoming_damage(ship, 3, "volley", 9, tactics={"version": 1})
-    v2 = vr._tactical_incoming_damage(ship, 3, "volley", 9, tactics={"version": 2})
+    v1 = vr._tactical_incoming_damage(ship, 3, "volley", 9, {"version": 1})
+    v2 = vr._tactical_incoming_damage(ship, 3, "volley", 9, {"version": 2})
     assert v1 == 47 and v2 == 28 and v2 < v1
 
 
@@ -12580,7 +12827,7 @@ def test_completed_legal_contracts_earn_concord_standing():
     world = _world_with_seed(42)
     dest = sorted(world.here.connections)[0]
     world.save.active_missions = [vr.Mission(1, "delivery", "Deliver", 300, 0, dest, commodity="food", quantity=2)]
-    world.save.cargo = {"food": 2}; world.save.current_system = dest
+    _set_cargo(world, {"food": 2}); world.save.current_system = dest
     assert vr.check_mission_completions(world) and world.save.pilot.reputation["concord"] == vr.CONCORD_STANDING_PER_CONTRACT
     world.save.active_missions = [vr.Mission(2, "scan", "Survey", 250, 0, 5)]
     vr.check_mission_completions(world, just_discovered=5)
@@ -12596,14 +12843,14 @@ def test_escort_completion_earns_concord_standing_and_a_lost_escort_does_not(mon
         assert world.save.pilot.reputation.get("concord", 0) == delta
 
 
-def test_a_legacy_milestone_count_is_rescaled_rather_than_re_awarded():
+def test_an_older_milestone_step_is_rescaled_rather_than_re_awarded():
     """The counter is standing already granted, so halving the step must not
     hand a loaded career free points for gains it was already paid for."""
     world = _world_with_seed(42)
     world.save.contraband_trade_balance = 1000
     world.save.contraband_trade_milestones = 2  # two points, awarded per 500cr
     data = world.save.to_dict()
-    data.pop("contraband_standing_step")  # a career saved before the step changed
+    data["contraband_standing_step"] = 500  # awarded before the step was halved
     restored = vr.SaveData.from_dict(data)
     assert restored.contraband_trade_milestones == 4  # 1,000cr of gain, now four 250cr steps
     reloaded = vr.World(restored)
@@ -12631,7 +12878,7 @@ def test_the_concord_standing_a_contract_pays_is_visible_before_and_after():
     assert f"+{vr.CONCORD_STANDING_PER_CONTRACT} for every delivery, survey or escort contract" in contact
     assert f"{vr.CONTRABAND_STANDING_STEP}cr of net contraband trading gain" in " ".join(
         vr.faction_contact_lines(world, vr.FACTION_BLACKWAKE))
-    world.save.cargo = {"food": 2}; world.save.current_system = dest
+    _set_cargo(world, {"food": 2}); world.save.current_system = dest
     assert "Concord standing" in " ".join(vr.check_mission_completions(world))
 
 
@@ -12818,7 +13065,7 @@ def test_contract_notes_appear_only_when_they_apply():
     text = " ".join(vr.mission_details(world, delivery))
     assert "not total profit" in text and "cargo already aboard" not in text
     assert "crew wages" not in text and "Survey scanning" not in text and "Remote danger" not in text
-    world.save.cargo = {"food": 1}
+    _set_cargo(world, {"food": 1})
     assert "as is cargo already aboard" in " ".join(vr.mission_details(world, delivery))
     world.save.ship.has_gunner = True
     assert "Budget keeps current crew wages" in " ".join(vr.mission_details(world, delivery))
@@ -12904,7 +13151,7 @@ def test_combat_action_bar_labels_every_verb_and_matches_the_body(monkeypatch):
     import re
     assert vr.combat_action_bar("F/G/E/D/P") == "[F] Fire [G] Guard [E] Evade [D] Dump [P] Pay bribe [I] Info [<>] Page: "
     world, pirate = _world_with_pending_fight(tactics={"version": 2, "profile": "Raider", "step": 0, "brace_ready": True})
-    world.save.pilot.credits = 10_000; world.save.cargo = {"food": 1}
+    world.save.pilot.credits = 10_000; _set_cargo(world, {"food": 1})
     monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 60)
     frames = []; output = io.StringIO()
     def choose():
@@ -12924,7 +13171,7 @@ def test_combat_action_bar_labels_every_verb_and_matches_the_body(monkeypatch):
 def test_dump_is_absent_and_harmless_with_an_empty_hold(monkeypatch):
     world, pirate = _world_with_pending_fight()
     world.save.pilot.credits = 0
-    lines = vr.combat_display_lines(world, pirate, [], patrol=False)
+    lines = vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate))
     assert not any(line.startswith("[D]") for line in lines)
     before = world.save.to_dict(); rng = world.event_rng.getstate()
     keys = iter(["D"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
@@ -13106,8 +13353,9 @@ def test_a_tagged_market_row_still_fits_one_line(monkeypatch):
     world.save.current_system = haven.id; haven.discovered = True
     contraband = vr.CONTRABAND_COMMODITIES[0]
     world.save.active_event = {"economy": haven.economy, "commodity": contraband, "direction": "crash",
-                               "turns_remaining": 4, "description": "Prices collapse"}
-    world.save.cargo = {contraband: 7}
+                               "turns_remaining": 4, "description": "Prices collapse",
+                               "system_ids": [haven.id]}
+    _set_cargo(world, {contraband: 7})
     rows = [row for row in vr.market_catalog_lines(world, [contraband]) if row.startswith("[")]
     assert rows and all(vr._visible_width(row) <= 79 for row in rows)
     assert "Illegal" in rows[0] and ("[CRASH]" in rows[0] or "[BOOM]" in rows[0])
@@ -13190,7 +13438,7 @@ def test_the_rescue_tow_prepares_the_station_it_tows_you_to(monkeypatch):
     world.save.turn += vr.MISSION_BOARD_DAYS + 1  # the old board has expired
     world.save.ship.fuel = 0
     world.save.pilot.credits = 0
-    world.save.cargo = {}
+    _set_cargo(world, {})
     assert vr.is_stranded(world)
     keys = iter(["Q"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     monkeypatch.setattr(vr, "pause", lambda p, msg=None: None)
@@ -13557,9 +13805,9 @@ def test_faction_and_workshop_blockers_name_what_is_missing():
     world.save.pilot.credits = quote["credits"] - 1
     assert str(quote["credits"]) in vr.workshop_blocker(world, key).replace(",", "")
     world.save.pilot.credits = quote["credits"]
-    world.save.cargo = {}
+    _set_cargo(world, {})
     assert vr.COMMODITIES[quote["commodity"]]["label"] in vr.workshop_blocker(world, key)
-    world.save.cargo = {quote["commodity"]: quote["quantity"]}
+    _set_cargo(world, {quote["commodity"]: quote["quantity"]})
     assert vr.workshop_blocker(world, key) is None  # every requirement met
     world.save.pending_travel = {"phase": "arrival"}
     assert vr.workshop_blocker(world, key) == "Finish the current journey first."
@@ -13633,7 +13881,7 @@ def test_a_hold_route_the_pilot_cannot_afford_to_fly_is_not_an_opportunity():
     """Selling what is aboard buys nothing, but the trip still costs (issue #415 review)."""
     world = _world_with_trade_opportunities()
     held = vr.cargo_capacity(world.save.ship)
-    world.save.cargo = {"machinery": held}
+    _set_cargo(world, {"machinery": held})
     world.save.cargo_basis = {"machinery": [[held, held * vr.price_for(world, 0, "machinery")]]}
     world.save.ship.has_gunner = True
     world.save.ship.fuel = 0  # every leg needs a paid top-up now

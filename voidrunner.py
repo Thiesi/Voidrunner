@@ -834,11 +834,10 @@ def notoriety_fine_cost(notoriety: int) -> int:
 # reach Cartel membership through trade (issue #407). Milestones still follow
 # lifetime net cash surplus, so buying and same-station recycling grant nothing.
 CONTRABAND_STANDING_STEP = 250
-# The step careers were awarded under before issue #407. A save without a
-# recorded step was counted in this one, and its awarded total is rescaled on
-# load -- the counter is standing already granted, so re-reading it against a
-# smaller step would mint points for gains that were already paid for.
-CONTRABAND_STANDING_LEGACY_STEP = 500
+# Every career records the step its milestones were awarded under, and the awarded
+# total is rescaled on load when that step differs from this one -- the counter is
+# standing already granted, so re-reading it against a smaller step would mint
+# points for gains that were already paid for (issue #407 review).
 
 
 # ---------------------------------------------------------------------------
@@ -1004,44 +1003,36 @@ class Mission:
 class FuturesContract:
     """Prepaid goods for station pickup after maturity.
 
-    Missing pickup metadata identifies old remote-delivery orders; preserve
-    their original settlement terms until consumed.
+    Every order names the station it is collected at, what the goods themselves
+    cost and how much stock it reserved. Orders that predate any of those three
+    were remote-delivery contracts under the retired schema (issue #421).
     """
     id: int
     commodity: str
     quantity: int
     locked_price: int  # total paid up front, including brokerage fee
     settle_turn: int
-    origin_system: int | None = None  # None: preserve legacy remote settlement.
-    principal: int | None = None
-    reserved: int | None = None  # Station stock units reserved at signing (issue #401).
+    origin_system: int  # the station the goods are collected at
+    principal: int  # the goods alone, without the nonrefundable fee
+    reserved: int  # station stock units reserved at signing (issue #401)
 
     def to_dict(self) -> dict:
-        data = dataclasses.asdict(self)
-        if self.origin_system is None and self.principal is None:
-            # Legacy orders retain absent metadata when checkpointed again.
-            del data["origin_system"]
-            del data["principal"]
-        if self.reserved is None:
-            # Orders signed before stock reservation keep their absent key.
-            del data["reserved"]
-        return data
+        return dataclasses.asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> "FuturesContract":
-        contract = cls(**{f.name: d[f.name] for f in dataclasses.fields(cls) if f.name in d})
-        if "origin_system" in d or "principal" in d:
-            if (type(contract.origin_system) is not int or not 0 <= contract.origin_system < GALAXY_SYSTEM_COUNT
-                    or type(contract.principal) is not int or type(contract.locked_price) is not int
-                    or not 0 <= contract.principal <= contract.locked_price
-                    or type(contract.quantity) is not int or contract.quantity < 1
-                    or type(contract.settle_turn) is not int or contract.settle_turn < 0
-                    or not isinstance(contract.commodity, str) or contract.commodity not in COMMODITIES):
-                raise ResumeError("The saved futures pickup terms cannot be read.")
-        if "reserved" in d:
-            if (contract.origin_system is None or type(contract.reserved) is not int
-                    or not 0 <= contract.reserved <= contract.quantity):
-                raise ResumeError("The saved futures stock reservation cannot be read.")
+        try:
+            contract = cls(**{f.name: d[f.name] for f in dataclasses.fields(cls)})
+        except KeyError as exc:
+            raise ResumeError("The saved futures pickup terms cannot be read.") from exc
+        if (type(contract.origin_system) is not int or not 0 <= contract.origin_system < GALAXY_SYSTEM_COUNT
+                or type(contract.principal) is not int or type(contract.locked_price) is not int
+                or not 0 <= contract.principal <= contract.locked_price
+                or type(contract.quantity) is not int or contract.quantity < 1
+                or type(contract.settle_turn) is not int or contract.settle_turn < 0
+                or not isinstance(contract.commodity, str) or contract.commodity not in COMMODITIES
+                or type(contract.reserved) is not int or not 0 <= contract.reserved <= contract.quantity):
+            raise ResumeError("The saved futures pickup terms cannot be read.")
         return contract
 
 
@@ -1171,9 +1162,8 @@ def _load_pending_travel(value: dict | None) -> dict | None:
         if "combat" in state:
             combat = state["combat"]
             _reject_unknown_save_fields(combat, {"pirate", "outcome", "lines", "tactics", "hull_before"}, "combat")
-            if "tactics" in combat:
-                _validate_tactics(combat["tactics"])
-            if "hull_before" in combat and (type(combat["hull_before"]) is not int or combat["hull_before"] <= 0):
+            _validate_tactics(combat["tactics"])
+            if type(combat["hull_before"]) is not int or combat["hull_before"] <= 0:
                 raise ValueError("invalid combat")
             pirates.append(combat["pirate"])
             if (combat["outcome"] not in (None, "won", "escaped", "destroyed", "reported")
@@ -1200,18 +1190,14 @@ class TradingLedger:
     since_day: int | None = None
     sales_revenue: int = 0
     sales_cost: int = 0
-    uncosted_sales: int = 0
     delivery_revenue: int = 0
     delivery_cost: int = 0
-    uncosted_deliveries: int = 0
     cargo_loss_cost: int = 0
-    uncosted_losses: int = 0
     fuel_spend: int = 0
     wages: int = 0
     cancelled_fees: int = 0
     workshop_spend: int = 0
     workshop_material_cost: int = 0
-    uncosted_workshop_materials: int = 0
 
 
 @dataclass
@@ -1344,6 +1330,16 @@ class UnsupportedSave(ResumeError):
     """Use a compatible game build; do not offer a potentially destructive downgrade."""
 
 
+class OutdatedSave(UnsupportedSave):
+    """A career written before schema 2. There is no migration (issue #421).
+
+    Not a broken save and not a newer build's save: this one is readable, this
+    build simply no longer implements the shapes it uses. It is offered a new
+    career instead of recovery, because rolling back to `.previous` would only
+    reach another document of the same retired schema.
+    """
+
+
 def _validate_save_document(data: dict) -> None:
     """Validate before coercion can hide wrong types or discard future fields."""
     def require(ok, field):
@@ -1359,9 +1355,7 @@ def _validate_save_document(data: dict) -> None:
         if set(value) - known:
             raise UnsupportedSave(f"The saved {field} contains unsupported fields.")
         for f in dataclasses.fields(cls):
-            legacy_defaults = {"market_drift", "active_missions", "next_mission_id", "flags"} if cls is SaveData else set()
-            if (f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
-                    and f.name not in legacy_defaults):
+            if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING:
                 require(f.name in value, field)
 
     def text(value, field):
@@ -1371,10 +1365,18 @@ def _validate_save_document(data: dict) -> None:
     def system(value, field):
         integer(value, field, maximum=GALAXY_SYSTEM_COUNT - 1)
 
-    record(data, SaveData, "career")
+    # First, before any field is looked at: a retired schema is refused by name,
+    # not reported as a missing field or an unsupported one (issue #421).
+    if not isinstance(data, dict):
+        raise ResumeError("The saved career is invalid.")
+    version = data.get("schema_version")
+    if type(version) is int and version == 1:
+        raise OutdatedSave("This career was saved before this version of the game.")
     for key, expected in (("schema_version", SCHEMA_VERSION), ("galaxy_version", 1)):
         if type(data.get(key, expected)) is not int or data.get(key, expected) != expected:
             raise UnsupportedSave("This career uses an unsupported save or galaxy version.")
+
+    record(data, SaveData, "career")
     style = data.get("display_style", "auto")
     require(type(style) is str and style in DISPLAY_STYLES, "display style")
     integer(data["seed"], "galaxy seed", minimum=-(2**63))
@@ -1384,7 +1386,7 @@ def _validate_save_document(data: dict) -> None:
         integer(data.get(key, 1), key, minimum=1)
     for key in ("best_credits", "contraband_trade_milestones"):
         integer(data.get(key, 0), key)
-    integer(data.get("contraband_standing_step", CONTRABAND_STANDING_LEGACY_STEP), "contraband milestone step", minimum=1)
+    integer(data["contraband_standing_step"], "contraband milestone step", minimum=1)
     integer(data.get("contraband_trade_balance", 0), "trade balance", minimum=-(2**63))
     pilot, ship = data["pilot"], data["ship"]
     record(pilot, Pilot, "pilot")
@@ -1437,7 +1439,12 @@ def _validate_save_document(data: dict) -> None:
             require(isinstance(lot, list) and len(lot) == 2, "cargo lot")
             integer(lot[0], "costed quantity", minimum=1)
             integer(lot[1], "acquisition cost")
-        require(sum(lot[0] for lot in lots) <= cargo[commodity], "costed cargo quantity")
+        require(sum(lot[0] for lot in lots) == cargo[commodity], "costed cargo quantity")
+    # Cargo of unrecorded cost was a retired schema's shape (issue #421). Disposal
+    # walks the lots, so a hold unit without one is not a missing figure -- it is a
+    # career that cannot be sold from.
+    for commodity, quantity in cargo.items():
+        require(quantity == 0 or commodity in basis, "costed cargo quantity")
     ledger = data.get("trading_ledger", {})
     record(ledger, TradingLedger, "trading ledger")
     for key, value in ledger.items():
@@ -1579,12 +1586,20 @@ def _validate_save_document(data: dict) -> None:
         if set(board) != {"refresh_turn", "offers"}:
             raise UnsupportedSave("The saved contract board contains unsupported fields.")
         posted.extend(board["offers"])
+    # Active contract ids are unique. Shared ids were a retired schema's shape,
+    # renumbered at every turn boundary; schema 2 states the invariant and keeps
+    # only the counter maintenance (issue #421). A posted offer keeps its id after
+    # acceptance, so the board is deliberately not part of this set.
+    contract_ids = set()
     for key, cls in (("active_missions", Mission), ("active_futures", FuturesContract), ("posted", Mission)):
         records = posted if key == "posted" else data.get(key, [])
         require(isinstance(records, list), key)
         for item in records:
             record(item, cls, key)
             integer(item["id"], "contract ID", minimum=1)
+            if cls is Mission and key == "active_missions":
+                require(item["id"] not in contract_ids, "contract ID")
+                contract_ids.add(item["id"])
             if cls is Mission:
                 require(not item.get("opening_assignment") or key == "active_missions", "opening assignment placement")
                 require(item["kind"] in ("delivery", "scan", "bounty", "escort"), "contract kind")
@@ -1615,24 +1630,24 @@ def _validate_save_document(data: dict) -> None:
         require(flags.get("archive_v1_recovered") is True, "archive completion")
     event = data.get("active_event")
     if event is not None:
-        event_fields = {"economy", "commodity", "direction", "turns_remaining", "description"}
+        event_fields = {"economy", "commodity", "direction", "turns_remaining", "description", "system_ids"}
         require(isinstance(event, dict), "economy event")
-        if set(event) - (event_fields | {"system_ids"}):
+        if set(event) - event_fields:
             raise UnsupportedSave("The saved economy event contains unsupported fields.")
+        # An event with no region was economy-wide under the retired schema (#421).
         require(event_fields <= set(event), "economy event")
         require(event["economy"] in ECONOMIES and event["commodity"] in COMMODITIES and
                 event["direction"] in ("boom", "crash"), "economy event")
         integer(event["turns_remaining"], "event duration", minimum=1, maximum=ECONOMY_EVENT_MAX_TURNS)
         text(event["description"], "economy news")
-        if "system_ids" in event:
-            ids = event["system_ids"]
-            require(isinstance(ids, list) and 1 <= len(ids) <= 3, "event region")
-            for sid in ids:
-                system(sid, "event station")
-            require(len(set(ids)) == len(ids), "event region")
-            economies = economies or galaxy_economies(data["seed"])
-            hops = galaxy_hops(data["seed"], ids[0])
-            require(all(economies[sid] == event["economy"] and 0 <= hops[sid] <= 2 for sid in ids), "event region")
+        ids = event["system_ids"]
+        require(isinstance(ids, list) and 1 <= len(ids) <= 3, "event region")
+        for sid in ids:
+            system(sid, "event station")
+        require(len(set(ids)) == len(ids), "event region")
+        economies = economies or galaxy_economies(data["seed"])
+        hops = galaxy_hops(data["seed"], ids[0])
+        require(all(economies[sid] == event["economy"] and 0 <= hops[sid] <= 2 for sid in ids), "event region")
 
 
 class World:
@@ -1648,8 +1663,7 @@ class World:
     def advance_station_state(self) -> None:
         """Turn processing: what happens because the day or the station changed.
 
-        Expiring contracts, repairing duplicate ids and preparing this station's
-        offer board are properties of *when and where* the career is, not of the
+        Expiring contracts and preparing this station's offer board are properties of *when and where* the career is, not of the
         action a caller just finished, and they were only reached because every
         commit ran them (issue #417). They now happen where a turn actually
         begins -- launch, docking, and a fresh career after retirement -- so a
@@ -1658,7 +1672,6 @@ class World:
         """
         if self.save.pending_travel is None:
             expire_missions(self)
-            _normalize_mission_ids(self.save)
             generate_mission_board(self)
 
     def commit(self) -> None:
@@ -1714,8 +1727,6 @@ class World:
         # Narration of the current hop, retained for the next deck page (issue #410).
         # Transient: rebuilt from what the hop prints; never persisted.
         self.hop_report: list[str] = []
-        if save.pending_travel is None:
-            _normalize_mission_ids(save)
         self.galaxy: list[GalaxySystem] = generate_galaxy(save.seed)
         self.by_id: dict[int, GalaxySystem] = {s.id: s for s in self.galaxy}
         for sid in save.discovered:
@@ -1753,6 +1764,9 @@ def _validate_pending_travel_consistency(save: SaveData) -> None:
         warrant = travel["encounter"].get("warrant")
         state = travel["encounter"]
         formation = state.get("formation")
+        if len(state.get("pirates", [])) == 2 and formation is None:
+            # Sequential two-raider waves were a retired schema's shape (issue #421).
+            raise ValueError("two-raider encounter without a formation")
         if formation is not None:
             if (travel["phase"] != "primary" or travel["primary"] != "random"
                     or state.get("kind") != "pirate" or len(state.get("pirates", [])) != 2):
@@ -1791,8 +1805,9 @@ def _validate_pending_travel_consistency(save: SaveData) -> None:
             pending.append(Mission.from_dict(travel["bounty"]))
         if travel["phase"] in ("primary", "escorts"):
             pending.extend(Mission.from_dict(m) for m in travel["escorts"][travel["escort_index"]:])
-        # Consume a copy as a multiset: legacy contracts can share both IDs and
-        # identical terms. A single active job cannot satisfy two pending jobs.
+        # Consume a copy as a multiset. Ids are unique, but matching on the whole
+        # snapshot is what proves the pending job is the accepted one, and one
+        # active job still cannot satisfy two pending ones.
         active = list(save.active_missions)
         for mission in pending:
             active.remove(mission)
@@ -2166,19 +2181,17 @@ def _remember_market_quote(world: World, system_id: int, commodity: str, unit: i
     return quote
 
 
-def cargo_cost_preview(world: World, commodity: str, quantity: int) -> tuple[int, int]:
-    """Read-only FIFO allocation matching disposal, including unknown older stock."""
-    lots = world.save.cargo_basis.get(commodity, [])
-    unknown = min(quantity, world.save.cargo.get(commodity, 0) - sum(lot[0] for lot in lots))
-    remaining = quantity - unknown
+def cargo_cost_preview(world: World, commodity: str, quantity: int) -> int:
+    """Read-only FIFO allocation matching disposal. Every unit has a basis lot."""
+    remaining = quantity
     cost = 0
-    for units, paid in lots:
+    for units, paid in world.save.cargo_basis.get(commodity, []):
         taken = min(remaining, units)
         cost += paid * taken // units
         remaining -= taken
         if not remaining:
             break
-    return cost, unknown
+    return cost
 
 
 def trade_route_quote(world: World, destination: int, commodity: str, quantity: int, *, use_hold: bool = False) -> dict:
@@ -2195,7 +2208,7 @@ def trade_route_quote(world: World, destination: int, commodity: str, quantity: 
     if use_hold:
         if quantity > world.save.cargo.get(commodity, 0):
             raise TradeError("That quantity is not in your hold.")
-        cost, unknown = cargo_cost_preview(world, commodity, quantity)
+        cost = cargo_cost_preview(world, commodity, quantity)
         procurement = 0
     else:
         if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
@@ -2206,7 +2219,6 @@ def trade_route_quote(world: World, destination: int, commodity: str, quantity: 
         if quantity > stock:
             raise TradeError(f"Only {stock} units in local stock. Reduce quantity or return after replenishment.")
         cost = procurement = quantity * price_for(world, world.here.id, commodity)
-        unknown = 0
     path = bfs_path(world.by_id, world.here.id, destination)
     legs = []
     origin = world.here.id
@@ -2235,11 +2247,11 @@ def trade_route_quote(world: World, destination: int, commodity: str, quantity: 
     demand_shortfall = observed_demand is not None and quantity > observed_demand
     return {"destination": destination, "commodity": commodity, "quantity": quantity, "use_hold": use_hold,
             "observed_day": remembered["day"], "unit_sale": remembered["sell"], "receipts": receipts,
-            "cargo_cost": cost, "unknown_units": unknown, "procurement": procurement, "legs": legs,
+            "cargo_cost": cost, "procurement": procurement, "legs": legs,
             "fuel": fuel, "fuel_cash": fuel_cash, "wages": wages,
             "cash_needed": procurement + fuel_cash + wages,
             "conflicts": conflicts, "observed_demand": observed_demand, "demand_shortfall": demand_shortfall,
-            "margin": None if unknown or conflicts or demand_shortfall else receipts - cost - fuel * 6 - wages,
+            "margin": None if conflicts or demand_shortfall else receipts - cost - fuel * 6 - wages,
             "feasible": all(burn <= fuel_capacity(world.save.ship) for _, burn in legs)}
 
 
@@ -2269,10 +2281,8 @@ ECONOMY_EVENT_BOOM_LEVEL = 1.3
 
 
 def economy_event_system_ids(world: World, event: dict) -> list[int]:
-    """Legacy events remain economy-wide; regional IDs are persisted explicitly."""
-    if "system_ids" in event:
-        return list(event["system_ids"])
-    return [system.id for system in world.galaxy if system.economy == event["economy"]]
+    """The stations an active event actually reaches; always recorded (issue #421)."""
+    return list(event["system_ids"])
 
 
 def _regional_economy_ids(world: World, economy: str, commodity: str, direction: str) -> list[int]:
@@ -2334,7 +2344,6 @@ def tick_economy_event(world: World) -> str | None:
 
 
 # New orders preserve a goods principal separately from their nonrefundable fee.
-FUTURES_PREMIUM = 1.08  # Legacy price multiplier; new fees use integer rounding.
 FUTURES_FEE_PERCENT = 8
 FUTURES_DURATIONS = (5, 10, 20)
 MAX_FUTURES_CONTRACTS = 8
@@ -2360,16 +2369,15 @@ def _acquire_cargo(world: World, commodity: str, quantity: int, cost: int) -> No
 
 
 def _dispose_cargo(world: World, commodity: str, quantity: int, *,
-                   proceeds: int = 0, kind: str = "loss") -> tuple[int, int]:
-    """Consume unknown legacy stock first, then FIFO lots; return cost/unknown units."""
+                   proceeds: int = 0, kind: str = "loss") -> int:
+    """Consume FIFO lots and record what they cost. Every unit has a lot."""
     if quantity == 0:
         if world.save.cargo.get(commodity) == 0:
             world.save.cargo.pop(commodity)
-        return 0, 0
+        return 0
     have = world.save.cargo[commodity]
     lots = world.save.cargo_basis.get(commodity, [])
-    unknown = min(quantity, have - sum(lot[0] for lot in lots))
-    remaining = quantity - unknown
+    remaining = quantity
     cost = 0
     while remaining:
         lot = lots[0]
@@ -2388,22 +2396,17 @@ def _dispose_cargo(world: World, commodity: str, quantity: int, *,
     else:
         world.save.cargo[commodity] = have - quantity
     ledger = _ledger(world)
-    unknown_receipts = proceeds * unknown // quantity
     if kind == "sale":
-        ledger.sales_revenue += proceeds - unknown_receipts
+        ledger.sales_revenue += proceeds
         ledger.sales_cost += cost
-        ledger.uncosted_sales += unknown_receipts
     elif kind == "delivery":
-        ledger.delivery_revenue += proceeds - unknown_receipts
+        ledger.delivery_revenue += proceeds
         ledger.delivery_cost += cost
-        ledger.uncosted_deliveries += unknown_receipts
     elif kind == "workshop":
         ledger.workshop_material_cost += cost
-        ledger.uncosted_workshop_materials += unknown
     else:
         ledger.cargo_loss_cost += cost
-        ledger.uncosted_losses += unknown
-    return cost, unknown
+    return cost
 
 
 def trade_cargo(world: World, commodity: str, quantity: int, *, buying: bool) -> str:
@@ -2493,42 +2496,33 @@ def cancel_futures_contract(world: World, contract_id: int) -> str:
     if world.save.pending_travel is not None:
         raise TradeError("Finish the journey before cancelling an order.")
     contract = next((c for c in world.save.active_futures if c.id == contract_id), None)
-    if contract is None or contract.origin_system is None:
+    if contract is None:
         raise TradeError("That pickup order is no longer active.")
     world.save.active_futures.remove(contract)
     world.save.pilot.credits += contract.principal
-    if contract.reserved:
-        _release_market_depth(world, contract.origin_system, contract.commodity, contract.reserved)
+    _release_market_depth(world, contract.origin_system, contract.commodity, contract.reserved)
     record_contraband_trade(world, contract.commodity, contract.principal)
     fee = contract.locked_price - contract.principal
     _ledger(world).cancelled_fees += fee
-    msg = f"Order cancelled: {contract.principal}cr refunded; {fee}cr brokerage fee retained."
-    if contract.reserved:
-        msg += f" {contract.reserved} units returned to {world.by_id[contract.origin_system].name} stock."
+    msg = (f"Order cancelled: {contract.principal}cr refunded; {fee}cr brokerage fee retained. "
+           f"{contract.reserved} units returned to {world.by_id[contract.origin_system].name} stock.")
     world.save.pilot.note(msg)
     return msg
 
 
-def settle_futures_contracts(world: World, *, legacy_only: bool = False) -> list[str]:
-    """Deliver ready pickup orders at their station; honor legacy terms once."""
+def settle_futures_contracts(world: World) -> list[str]:
+    """Deliver ready pickup orders at the station that holds them."""
     messages = []
     for contract in list(world.save.active_futures):
-        if world.save.turn < contract.settle_turn:
-            continue
-        legacy = contract.origin_system is None
-        if not legacy and (legacy_only or world.save.current_system != contract.origin_system):
+        if world.save.turn < contract.settle_turn or world.save.current_system != contract.origin_system:
             continue
         room = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
-        if room < contract.quantity and not legacy:
+        if room < contract.quantity:
             continue  # Ready goods wait; no automatic refund or lost fee.
         world.save.active_futures.remove(contract)
         label = COMMODITIES[contract.commodity]["label"]
-        if room < contract.quantity:
-            world.save.pilot.credits += contract.locked_price
-            msg = f"Legacy futures: no cargo room -- refunded {contract.locked_price}cr under original terms."
-        else:
-            _acquire_cargo(world, contract.commodity, contract.quantity, contract.locked_price)
-            msg = f"Futures contract settled: {contract.quantity}x {label} delivered to your hold."
+        _acquire_cargo(world, contract.commodity, contract.quantity, contract.locked_price)
+        msg = f"Futures contract settled: {contract.quantity}x {label} delivered to your hold."
         world.save.pilot.note(msg)
         messages.append(msg)
     return messages
@@ -2574,21 +2568,16 @@ def _validate_mission_boards(data: dict) -> dict[int, dict]:
         raise ResumeError("The saved contract boards cannot be read.") from exc
 
 
-def _normalize_mission_ids(save: SaveData) -> None:
-    """Repair legacy duplicate IDs while docked; never alter pending snapshots."""
-    records = [m.to_dict() for m in save.active_missions]
-    for board in save.mission_boards.values():
-        records.extend(board["offers"])
-    next_id = max([save.next_mission_id, 1] + [r["id"] + 1 for r in records])
-    seen = set()
-    for record in records:
-        if record["id"] in seen or record["id"] < 1:
-            record["id"] = next_id
-            next_id += 1
-        seen.add(record["id"])
-    for mission, record in zip(save.active_missions, records):
-        mission.id = record["id"]
-    save.next_mission_id = next_id
+def _advance_mission_ids(save: SaveData) -> None:
+    """Keep the id counter past every id the career already holds.
+
+    Derived state, not a saved invariant: a career edited by hand can carry an id
+    above the counter without being wrong, and the next offer must still not
+    collide with it. Renumbering duplicates retired with schema 1 (issue #421).
+    """
+    ids = [mission.id for mission in save.active_missions]
+    ids += [offer["id"] for board in save.mission_boards.values() for offer in board["offers"]]
+    save.next_mission_id = max([save.next_mission_id, 1] + [value + 1 for value in ids])
 
 
 def generate_mission_board(world: World) -> list[Mission]:
@@ -2596,7 +2585,7 @@ def generate_mission_board(world: World) -> list[Mission]:
     sid = world.save.current_system
     cached = world.save.mission_boards.get(sid)
     if cached is None or world.save.turn >= cached["refresh_turn"]:
-        _normalize_mission_ids(world.save)
+        _advance_mission_ids(world.save)
         rng = random.Random(f"voidrunner-board-v1:{world.save.seed}:{sid}:{world.save.turn}")
         hops = bfs_hops(world.by_id, sid)
         offers = []
@@ -2913,8 +2902,8 @@ TACTICAL_RULESET_VERSION = 2
 TACTICAL_THREAT_BONUS = TACTICAL_THREAT_BONUS_BY_VERSION[TACTICAL_RULESET_VERSION]
 
 
-def tactical_threat_bonus(tactics: dict | None) -> tuple[int, ...]:
-    return TACTICAL_THREAT_BONUS_BY_VERSION[tactics.get("version", 1) if tactics else 1]
+def tactical_threat_bonus(tactics: dict) -> tuple[int, ...]:
+    return TACTICAL_THREAT_BONUS_BY_VERSION[tactics["version"]]
 
 
 def new_tactics(pirate: Pirate, version: int = TACTICAL_RULESET_VERSION) -> dict:
@@ -2964,8 +2953,8 @@ def squadron_terms(world: World) -> list[str]:
     return lines
 
 
-def _tactical_incoming_damage(ship: Ship, tier: int, intent: str, roll: int, *, braced: bool = False, cover: int = 0,
-                              tactics: dict | None = None) -> int:
+def _tactical_incoming_damage(ship: Ship, tier: int, intent: str, roll: int, tactics: dict, *,
+                              braced: bool = False, cover: int = 0) -> int:
     raw = roll + tactical_threat_bonus(tactics)[tier]
     damage = max(1, (raw * TACTICAL_INTENTS[intent][1] + 99) // 100 - ship.shield_tier * 3)
     damage += cover
@@ -2974,8 +2963,8 @@ def _tactical_incoming_damage(ship: Ship, tier: int, intent: str, roll: int, *, 
 
 def tactical_retaliation(world: World, pirate: Pirate, tactics: dict, *, braced: bool = False) -> tuple[int, list[str]]:
     intent = tactical_intent(tactics)
-    damage = _tactical_incoming_damage(world.save.ship, pirate.tier, intent, world.event_rng.randint(4, 9), braced=braced,
-                                       cover=squadron_cover(world), tactics=tactics)
+    damage = _tactical_incoming_damage(world.save.ship, pirate.tier, intent, world.event_rng.randint(4, 9), tactics,
+                                       braced=braced, cover=squadron_cover(world))
     world.save.ship.hull_hp = max(0, world.save.ship.hull_hp - damage)
     tactics["step"] = (tactics["step"] + 1) % 3
     return damage, [f"The {pirate.name} uses {intent} and hits you for {damage} damage."]
@@ -3004,31 +2993,10 @@ def tactical_round(world: World, pirate: Pirate, tactics: dict, action: str) -> 
     return damage, received, lines
 
 
-def combat_evade_chance(world: World, pirate: Pirate, *, dumped_cargo: bool, tactics: dict | None = None, cargo_units: int | None = None) -> float:
+def combat_evade_chance(world: World, pirate: Pirate, *, dumped_cargo: bool, tactics: dict, cargo_units: int | None = None) -> float:
     chance = evade_chance(world, pirate, dumped_cargo=dumped_cargo, cargo_units=cargo_units)
-    if tactics is not None and tactical_intent(tactics) == "harry": chance = max(0.05, chance - 0.10)
+    if tactical_intent(tactics) == "harry": chance = max(0.05, chance - 0.10)
     return chance
-
-
-def fight_round(world: World, pirate: Pirate) -> tuple[int, int, list[str]]:
-    """One exchange of fire. Returns (damage_to_pirate, damage_to_player,
-    narrative lines) -- pure aside from consuming `world.event_rng`, so
-    the UI loop just prints and checks hp afterward."""
-    rng = world.event_rng
-    ship = world.save.ship
-    lines = []
-    dmg_to_pirate = rng.randint(5, 10) + ship.weapon_tier * 4 + gunner_bonus(ship)
-    pirate.hp = max(0, pirate.hp - dmg_to_pirate)
-    lines.append(f"You hit the {pirate.name} for {dmg_to_pirate} damage.")
-    if pirate.hp > 0:
-        raw = rng.randint(4, 9) + pirate.tier * 4
-        dmg_to_player = max(1, raw - ship.shield_tier * 3)
-        world.save.ship.hull_hp = max(0, world.save.ship.hull_hp - dmg_to_player)
-        lines.append(f"The {pirate.name} hits you for {dmg_to_player} damage.")
-    else:
-        dmg_to_player = 0
-        lines.append(f"The {pirate.name} is destroyed!")
-    return dmg_to_pirate, dmg_to_player, lines
 
 
 def evade_chance(world: World, pirate: Pirate, *, dumped_cargo: bool, cargo_units: int | None = None) -> float:
@@ -3069,7 +3037,7 @@ def _load_contraband_milestones(d: dict) -> int:
     purchase mints retroactive standing, and a large balance mints enough to
     unlock membership outright (issue #407 review)."""
     awarded = _validate_trade_total(d.get("contraband_trade_milestones", 0), nonnegative=True)
-    step = d.get("contraband_standing_step", CONTRABAND_STANDING_LEGACY_STEP)
+    step = d.get("contraband_standing_step", CONTRABAND_STANDING_STEP)
     if type(step) is not int or step <= 0:
         raise ResumeError("The saved contraband trading record cannot be read.")
     return awarded * step // CONTRABAND_STANDING_STEP
@@ -3680,7 +3648,7 @@ def check_rank_up(world: World) -> str | None:
 # path for game state (see this module's own docstring).
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class SaveError(OSError):
@@ -3843,22 +3811,29 @@ def restore_previous_career(save_dir: Path, user_id: int, expected: bytes) -> Sa
     path = _save_path(save_dir, user_id)
     original = _recovery_original(save_dir, user_id)
     if original is not None:
-        temporary = None
-        try:
-            with tempfile.NamedTemporaryFile(mode="wb", dir=save_dir, prefix=f".{user_id}.recovery-",
-                                             suffix=".tmp", delete=False) as archive:
-                temporary = Path(archive.name)
-                archive.write(original)
-                archive.flush()
-                os.fsync(archive.fileno())
-            # Only complete, closed archives enter the retained recovery namespace.
-            retained = temporary.with_name(temporary.name[1:]).with_suffix(".json")
-            os.replace(temporary, retained)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+        _archive_career(save_dir, user_id, original)
     _write_bytes_atomic(path, previous)
     return restored
+
+
+def _archive_career(save_dir: Path, user_id: int, original: bytes) -> None:
+    """Keep a career's exact bytes under the retained recovery namespace.
+
+    Only complete, closed archives enter that namespace, so a crash mid-write
+    leaves a temporary file rather than a half career.
+    """
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=save_dir, prefix=f".{user_id}.recovery-",
+                                         suffix=".tmp", delete=False) as archive:
+            temporary = Path(archive.name)
+            archive.write(original)
+            archive.flush()
+            os.fsync(archive.fileno())
+        os.replace(temporary, temporary.with_name(temporary.name[1:]).with_suffix(".json"))
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 class PilotBusy(Exception):
@@ -3983,6 +3958,40 @@ def write_save(save_dir: Path, user_id: int, save: SaveData) -> None:
     _write_bytes_atomic(path, new)
 
 
+def replace_unsupported_career(save_dir: Path, user_id: int, save: SaveData) -> None:
+    """Take a refused career's slot, once its replacement has been confirmed.
+
+    Not `write_save`'s retention, which decodes what it is about to replace and
+    refuses when it cannot: this document is readable-but-unsupported by design,
+    and replacing it is the caller's own explicit decision rather than a
+    checkpoint (issue #421).
+
+    The refused career is retained as a recovery copy rather than as `.previous`.
+    `.previous` is the *preceding checkpoint*, so the very next one would have
+    overwritten it and the retention would have been a promise for one turn; the
+    recovery namespace is the one that is never removed, and is already where a
+    rollback puts the career it replaces. Failing to archive fails the
+    replacement: taking the slot is not worth losing what was in it.
+    """
+    path = _save_path(save_dir, user_id)
+    new = _encode_career_checkpoint(save)
+    try:
+        original = _read_save_bytes(path)
+    except FileNotFoundError:
+        original = None
+    if original is not None:
+        if len(list(save_dir.glob(f"{user_id}.recovery-*.json"))) >= MAX_RECOVERY_COPIES:
+            raise SaveError("Recovery copies are full; ask your SysOp to archive them.")
+        try:
+            _archive_career(save_dir, user_id, original)
+        except OSError as exc:
+            raise SaveError("The refused career could not be retained; nothing was replaced.") from exc
+    try:
+        _write_bytes_atomic(path, new)
+    except OSError as exc:
+        raise SaveError("The replacement career could not be written.") from exc
+
+
 HALL_OF_FAME_SIZE = 20
 
 SCORE_CATEGORIES = {"wealth": "Wealth", "trading": "Trading", "exploration": "Exploration",
@@ -4082,30 +4091,73 @@ def _read_score_json(path: Path, limit: int = MAX_SAVE_BYTES):
     return None
 
 
-def _legacy_scores(save_dir: Path) -> dict[int, dict]:
-    """Import the pre-`scores/` leaderboard.
+def import_hall_of_fame(save_dir: Path) -> None:
+    """Move a pre-`scores/` `leaderboard.json` into `scores/`, at launch (issue #421).
 
-    The file is never rewritten, so once it has been *read* it is parsed once per
-    session rather than on every commit (issue #419). Only a successful read is
-    cached: an absent file, a transient `OSError` and a temporarily unreadable one
-    are indistinguishable here, and none of them may pin an empty result for the
-    session -- that would drop the legacy wealth and retirement floors and hand
-    out a wrong New Game+ bonus (issue #419 review).
+    Careers do not survive schema 2, but Hall of Fame records outlive careers by
+    design -- including for pilots who never launch again -- so they are the one
+    thing carried across. This belongs to the launch, not to a career: it runs
+    before the career is loaded and whatever the load then decides, so a node
+    whose only returning caller is refused still keeps its rankings.
+
+    Writing files a live pilot also writes needs `maintenance_session`, the same
+    exclusion a restore takes: the gate alone would not do, because
+    `pilot_session` releases the gate the moment it owns its own lock and then
+    plays on holding only that, so an import under the bare gate could replace
+    `scores/USER_ID.json` while its owner was checkpointing it. A launch that
+    cannot take the session skips the import rather than racing. Nothing is
+    deleted and each row is written only where it raises what is already there,
+    so this is complete-or-retry: every launch attempts what is still missing
+    until nothing is.
     """
-    cached = _LEGACY_SCORE_CACHE.get(save_dir)
-    if cached is not None:
-        return {user_id: dict(entry) for user_id, entry in cached.items()}
-    data = _read_score_json(save_dir / "leaderboard.json", 2 * 1024 * 1024)
-    entries = _legacy_score_entries(data)
-    if data is not None:
-        _LEGACY_SCORE_CACHE[save_dir] = {user_id: dict(entry) for user_id, entry in entries.items()}
-    return entries
+    entries = _leaderboard_entries(_read_score_json(save_dir / "leaderboard.json", 2 * 1024 * 1024))
+    if not entries:
+        return
+    try:
+        with maintenance_session(save_dir):
+            for user_id, entry in entries.items():
+                _import_one_score(save_dir, user_id, entry)
+    except (OSError, PilotBusy):
+        return  # A later launch retries; the source file is never removed.
 
 
-_LEGACY_SCORE_CACHE: dict[Path, dict[int, dict]] = {}
+def _import_one_score(save_dir: Path, user_id: int, entry: dict) -> None:
+    """Raise one pilot's stored record to the floors the old leaderboard holds."""
+    path = save_dir / "scores" / f"{user_id}.json"
+    try:
+        path.stat()
+    except FileNotFoundError:
+        held = False
+    except OSError:
+        return  # Cannot tell what is there; never replace on a guess.
+    else:
+        held = True
+    raw = _read_score_json(path)
+    if held and raw is None:
+        # A record that exists but will not read this second is not an absent
+        # record: replacing it would discard counters this import cannot see.
+        # The next launch tries again (issue #421 review).
+        return
+    if _future_score_achievements(raw):
+        return  # A newer build owns this record; never write over what it knows.
+    stored = _score_entry(raw, user_id)
+    if stored is None:
+        merged = dict(entry)
+    else:
+        best = max(stored["best_credits"], entry["best_credits"])
+        merged = dict(stored, best_credits=best, rank=rank_for(best),
+                      retirements=max(stored["retirements"], entry["retirements"]),
+                      kills=max(stored["kills"], entry["kills"]),
+                      missions_completed=max(stored["missions_completed"], entry["missions_completed"]))
+        if merged == stored:
+            return
+    try:
+        _write_json_atomic(path, merged)
+    except OSError:
+        pass  # A later launch retries this row; the others still go in.
 
 
-def _legacy_score_entries(data) -> dict[int, dict]:
+def _leaderboard_entries(data) -> dict[int, dict]:
     entries = {}
     for item in data if isinstance(data, list) else []:
         entry = _score_entry(item)
@@ -4122,20 +4174,13 @@ def _pilot_score(save_dir: Path, user_id: int) -> dict | None:
 
 def _load_score_records(save_dir: Path) -> list[dict]:
     """Read one snapshot without a display cut-off."""
-    entries = _legacy_scores(save_dir)
+    entries: dict[int, dict] = {}
     try:
         for path in (save_dir / "scores").glob("*.json"):
             if not path.stem.isascii() or not path.stem.isdecimal():
                 continue
             entry = _score_entry(_read_score_json(path), int(path.stem))
             if entry is not None:
-                prior = entries.get(entry["user_id"])
-                if prior:
-                    entry["best_credits"] = max(entry["best_credits"], prior["best_credits"])
-                    entry["rank"] = rank_for(entry["best_credits"])
-                    entry["retirements"] = max(entry["retirements"], prior["retirements"])
-                    if _score_achievements(entry.get("achievements"), entry["retirements"]) is None:
-                        entry.pop("achievements", None)
                 entries[entry["user_id"]] = entry
     except OSError:
         pass
@@ -4164,10 +4209,9 @@ def update_hall_of_fame(save_dir: Path, user_id: int, save: SaveData) -> None:
     raw = _read_score_json(save_dir / "scores" / f"{user_id}.json")
     if _future_score_achievements(raw):
         return
-    legacy = _legacy_scores(save_dir).get(user_id, {})
     prior = _pilot_score(save_dir, user_id) or {}
     pilot = save.pilot
-    best = max(save.best_credits, pilot.credits, prior.get("best_credits", 0), legacy.get("best_credits", 0))
+    best = max(save.best_credits, pilot.credits, prior.get("best_credits", 0))
     entry = {"user_id": user_id, "handle": pilot.handle, "best_credits": best,
              "rank": rank_for(best), "retirements": pilot.retirements,
              "kills": pilot.kills, "missions_completed": pilot.missions_completed,
@@ -4184,11 +4228,9 @@ def persist(world: World, save_dir: Path, user_id: int) -> None:
     world.sync_discovered()
     world.save.event_rng_state = world.event_rng.getstate()
     prior = _pilot_score(save_dir, user_id) or {}
-    legacy = _legacy_scores(save_dir).get(user_id, {})
     world.save.best_credits = max(world.save.best_credits, world.save.pilot.credits,
-                                  prior.get("best_credits", 0), legacy.get("best_credits", 0))
-    world.save.pilot.retirements = max(world.save.pilot.retirements,
-                                       prior.get("retirements", 0), legacy.get("retirements", 0))
+                                  prior.get("best_credits", 0))
+    world.save.pilot.retirements = max(world.save.pilot.retirements, prior.get("retirements", 0))
     write_save(save_dir, user_id, world.save)
     update_hall_of_fame(save_dir, user_id, world.save)
 
@@ -4407,13 +4449,13 @@ def screen_title(p: Palette, info: dict) -> None:
     out_line()
 
 
-def create_career(p: Palette, info: dict) -> str | None:
+def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str | None:
     out_line()
     inner_w = _box_inner_width()
     title = "Pilot Commission Registration"
     if _visible_width(title) > inner_w - 5: title = "Registration"
     out_line(_box_title(p, _fit_text(title, max(1, inner_w - 5))))
-    welcome = f"Welcome to the void, pilot. No career dossier found for {info['handle']}."
+    welcome = welcome or f"Welcome to the void, pilot. No career dossier found for {info['handle']}."
     for index, row in enumerate(_wrap_output(welcome, max(1, inner_w - 2)).split("\r\n")):
         styled = row.replace("Welcome to the void, pilot.", f"{p.gold}Welcome to the void, pilot.{RESET}") if index == 0 else row
         out_line(f"{p.accent}│{RESET}{_pad('  ' + styled, inner_w, 'left')}{p.accent}│{RESET}")
@@ -5147,7 +5189,7 @@ def screen_futures(p: Palette, world: World, goods: list[str]) -> str | None:
             options.append((("goods", commodity), f"Order {COMMODITIES[commodity]['label']}: {principal}+{fee}cr/unit"))
         for contract in world.save.active_futures:
             status = "ready" if world.save.turn >= contract.settle_turn else f"day {contract.settle_turn}"
-            place = "legacy remote delivery" if contract.origin_system is None else world.by_id[contract.origin_system].name
+            place = world.by_id[contract.origin_system].name
             options.append((("order", contract), f"#{contract.id}: {contract.quantity} {COMMODITIES[contract.commodity]['label']}, {status}; {place}"))
         notice = ["Wholesale orders reserve station stock at signing; station pickup, 8% nonrefundable fee rounded up per unit.",
                   f"Outstanding orders: {len(world.save.active_futures)}/{MAX_FUTURES_CONTRACTS}"]
@@ -5162,24 +5204,19 @@ def screen_futures(p: Palette, world: World, goods: list[str]) -> str | None:
 def _screen_futures_order(p: Palette, world: World, contract: FuturesContract) -> str | None:
     page, result = 0, None
     while True:
-        lines = [f"Quantity: {contract.quantity} {COMMODITIES[contract.commodity]['label']}."]
-        if contract.origin_system is None:
-            lines += ["Legacy order: original remote delivery/full-refund terms apply.",
-                      f"Settles on day {contract.settle_turn}; paid {contract.locked_price}cr."]
-        else:
-            fee = contract.locked_price - contract.principal
-            lines += [f"Pickup: {world.by_id[contract.origin_system].name}, from day {contract.settle_turn}.",
-                      f"Paid {contract.principal}cr for goods + {fee}cr nonrefundable fee.",
-                      "Collected on arrival/station entry when the full order fits; otherwise it waits.",
-                      (f"{contract.reserved} units reserved from that station's stock; cancelling returns them."
-                       if contract.reserved else "Signed before stock reservation: cancelling returns no stock."),
-                      f"[X] Cancel: refund {contract.principal}cr, forfeit {fee}cr fee."]
+        fee = contract.locked_price - contract.principal
+        lines = [f"Quantity: {contract.quantity} {COMMODITIES[contract.commodity]['label']}.",
+                 f"Pickup: {world.by_id[contract.origin_system].name}, from day {contract.settle_turn}.",
+                 f"Paid {contract.principal}cr for goods + {fee}cr nonrefundable fee.",
+                 "Collected on arrival/station entry when the full order fits; otherwise it waits.",
+                 f"{contract.reserved} units reserved from that station's stock; cancelling returns them.",
+                 f"[X] Cancel: refund {contract.principal}cr, forfeit {fee}cr fee."]
         if result: lines.insert(0, "Result: " + result)
-        footer = "[<>] Page " + ("[X] Cancel " if contract.origin_system is not None else "") + "[B] Back: "
+        footer = "[<>] Page [X] Cancel [B] Back: "
         key, page, count = _draw_service_page(p, f"Order #{contract.id}: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return None
         if (moved := page_step(key, page, count)) is not None: page = moved
-        elif key == "X" and contract.origin_system is not None:
+        elif key == "X":
             if confirm(f"Cancel order #{contract.id} for {contract.principal}cr? Fee is not refunded.", p):
                 try: message = cancel_futures_contract(world, contract.id)
                 except TradeError as exc:
@@ -5238,22 +5275,18 @@ def trading_ledger_lines(world: World) -> list[str]:
         f"Credits available: {world.save.pilot.credits:,}cr.",
         (f"Recorded activity since day {ledger.since_day}; today is day {world.save.turn}."
          if ledger.since_day is not None else "No activity recorded yet. Earlier career costs are unknown."),
-        f"Market sales with known cost: receipts {ledger.sales_revenue:,}cr - cargo {ledger.sales_cost:,}cr = margin {ledger.sales_revenue - ledger.sales_cost:+,}cr.",
-        f"Sales with unknown cargo cost: {ledger.uncosted_sales:,}cr receipts; profit unknown.",
-        f"Deliveries with known cost: payment {ledger.delivery_revenue:,}cr - cargo {ledger.delivery_cost:,}cr = margin {ledger.delivery_revenue - ledger.delivery_cost:+,}cr.",
-        f"Deliveries with unknown cargo cost: {ledger.uncosted_deliveries:,}cr receipts; profit unknown.",
+        f"Market sales: receipts {ledger.sales_revenue:,}cr - cargo {ledger.sales_cost:,}cr = margin {ledger.sales_revenue - ledger.sales_cost:+,}cr.",
+        f"Deliveries: payment {ledger.delivery_revenue:,}cr - cargo {ledger.delivery_cost:,}cr = margin {ledger.delivery_revenue - ledger.delivery_cost:+,}cr.",
         "Mixed delivery payments are divided by cargo quantity. Margins exclude operating costs and other career income or spending.",
-        f"Cargo lost or surrendered: {ledger.cargo_loss_cost:,}cr recorded cost, plus {ledger.uncosted_losses} units of unknown cost.",
+        f"Cargo lost or surrendered: {ledger.cargo_loss_cost:,}cr recorded cost.",
         f"Fuel purchases: {ledger.fuel_spend:,}cr. Crew wages paid: {ledger.wages:,}cr. Cancelled-order fees: {ledger.cancelled_fees:,}cr.",
-        f"Workshop installations: {ledger.workshop_spend:,}cr paid; materials {ledger.workshop_material_cost:,}cr recorded cost, plus {ledger.uncosted_workshop_materials} units of unknown cost.",
+        f"Workshop installations: {ledger.workshop_spend:,}cr paid; materials {ledger.workshop_material_cost:,}cr recorded cost.",
         "These totals begin when recorded, exclude earlier activity, repairs, fines and crew hiring, and are not total career profit.",
-        "HOLD - older unknown cargo is consumed first, then recorded purchases in order. Futures costs include brokerage.",
+        "HOLD - purchases are consumed in order. Futures costs include brokerage.",
     ]
     for commodity, quantity in world.save.cargo.items():
-        lots = world.save.cargo_basis.get(commodity, [])
-        known = sum(lot[0] for lot in lots)
-        cost = sum(lot[1] for lot in lots)
-        lines.append(f"{COMMODITIES[commodity]['label']}: {quantity} units; {known} costed at {cost:,}cr total; {quantity - known} with unknown cost.")
+        cost = sum(lot[1] for lot in world.save.cargo_basis.get(commodity, []))
+        lines.append(f"{COMMODITIES[commodity]['label']}: {quantity} units costed at {cost:,}cr total.")
     if not world.save.cargo:
         lines.append("Hold empty.")
     wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
@@ -5357,7 +5390,7 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
     lines.extend([
         f"Destination sell quote: {quote['unit_sale']}cr/unit, observed day {quote['observed_day']} ({age} days old).",
         f"Sale receipts if the full load arrives and the station buys it: {quote['receipts']:,}cr.",
-        f"Cargo acquisition cost: {quote['cargo_cost']:,}cr recorded; {quote['unknown_units']} units with unknown cost.",
+        f"Cargo acquisition cost: {quote['cargo_cost']:,}cr.",
         f"Buy now: {quote['procurement']:,}cr. Credits after buying: {world.save.pilot.credits - quote['procurement']:,}cr.",
         f"Fuel: {quote['fuel']} units, replacement value {quote['fuel'] * 6}cr. Additional fuel cash: {quote['fuel_cash']}cr with your current tank.",
         f"Crew wages: {quote['wages']}cr for {plural(len(quote['legs']), 'jump')}. Arrival day {world.save.turn + len(quote['legs'])} if uninterrupted.",
@@ -7791,7 +7824,7 @@ def _encounter_market_tip(p: Palette, world: World, dest: GalaxySystem) -> None:
 def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
     """Resolve each contract once per hop, including after a saved combat win.
 
-    Full mission snapshots avoid confusing legacy contracts that share an ID.
+    Full mission snapshots resolve the contract that was actually accepted.
     Advancing the index and awarding/failing a contract are one checkpoint.
     """
     travel = world.save.pending_travel
@@ -7969,7 +8002,6 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
                      + (f"; crew wages {wages}cr." if wages else ".")
                      + f" {world.save.pilot.credits:,}cr on hand.")
         lines.extend(wage_messages)
-        lines.extend(settle_futures_contracts(world, legacy_only=True))
         was_discovered = dest.discovered
         dest.discovered = True
         if not was_discovered:
@@ -8055,7 +8087,7 @@ def screen_notoriety_patrol(p: Palette, world: World) -> None:
     _screen_combat_session(p, world, patrol, patrol=True)
 
 
-def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, patrol: bool, details: bool = False, tactics: dict | None = None, warrant: dict | None = None, hull_before: int | None = None) -> list[str]:
+def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, patrol: bool, tactics: dict, details: bool = False, warrant: dict | None = None, hull_before: int | None = None) -> list[str]:
     """Read-only combat terms; no random draw or persisted presentation state."""
     ship, pilot = world.save.ship, world.save.pilot
     used = sum(world.save.cargo.values())
@@ -8072,18 +8104,16 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         f"Your hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}.",
         f"Cargo {used}/{cargo_capacity(ship)} used; Day {world.save.turn}.",
     ]
-    if tactics is not None:
-        intent = tactical_intent(tactics)
-        low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, cover=squadron_cover(world), tactics=tactics) for roll in (4, 9))
-        lines.append(f"{tactics['profile']} intent: {intent.upper()}; incoming {low}-{high} damage if it survives or you fail to disengage.")
-        if tactics["brace_ready"]:
-            low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, braced=True, cover=squadron_cover(world), tactics=tactics) for roll in (4, 9))
-            lines.append(f"[G] Guard: reduced shot (55%); incoming {low}-{high}. Fire recharges Guard.")
-        else: lines.append("Guard recharging: fire once before using G again.")
-        if details:
-            lines.append("Pattern: " + " > ".join(TACTICAL_PROFILES[tactics["profile"]]) + ".")
-            lines.append("Cover/harry reduce your shot; recovery exposes the enemy. Harry lowers escape chance by 10 percentage points, minimum 5%.")
-    else: lines.append("Original fight rules (no Guard).")
+    intent = tactical_intent(tactics)
+    low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, tactics, cover=squadron_cover(world)) for roll in (4, 9))
+    lines.append(f"{tactics['profile']} intent: {intent.upper()}; incoming {low}-{high} damage if it survives or you fail to disengage.")
+    if tactics["brace_ready"]:
+        low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, tactics, braced=True, cover=squadron_cover(world)) for roll in (4, 9))
+        lines.append(f"[G] Guard: reduced shot (55%); incoming {low}-{high}. Fire recharges Guard.")
+    else: lines.append("Guard recharging: fire once before using G again.")
+    if details:
+        lines.append("Pattern: " + " > ".join(TACTICAL_PROFILES[tactics["profile"]]) + ".")
+        lines.append("Cover/harry reduce your shot; recovery exposes the enemy. Harry lowers escape chance by 10 percentage points, minimum 5%.")
     if ship.hull_hp * 3 <= hull_hp_max(ship):
         paid = min(pilot.credits, salvage_fee(ship))
         lines.append(f"LOW HULL: one third of maximum hull or less. Destruction: {paid}cr salvage fee, all cargo lost, tow to Freeport"
@@ -8164,8 +8194,8 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             return combat["outcome"]
     warrant = encounter.get("warrant")
     formation = encounter.get("formation")
-    tactics = combat.get("tactics")  # Absence preserves an interrupted legacy fight.
-    hull_before = combat.get("hull_before")  # Absent in a legacy checkpoint; the floor then stands alone.
+    tactics = combat["tactics"]
+    hull_before = combat["hull_before"]
     ship = world.save.ship
     fine = notoriety_fine_cost(world.save.pilot.notoriety)
     page, details = 0, False
@@ -8177,7 +8207,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         if not patrol:
             if cargo_aboard: actions += "/D"  # Dump only means something with cargo aboard (issue #414)
             if can_pay: actions += "/P"
-        if tactics is not None and tactics["brace_ready"]: actions = actions.replace("F/", "F/G/")
+        if tactics["brace_ready"]: actions = actions.replace("F/", "F/G/")
         if warrant is not None and not warrant["engaged"]:
             if not warrant["checked"] and world.save.ship.fuel >= 1: actions += "/V"
             if warrant["checked"] and not warrant["matches"]: actions += "/R"
@@ -8208,7 +8238,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             continue
         lines = []
         outcome = None
-        engaging = (action in ("F", "E") or (action == "G" and tactics is not None and tactics["brace_ready"])
+        engaging = (action in ("F", "E") or (action == "G" and tactics["brace_ready"])
                     or (action == "D" and not patrol and cargo_aboard) or (action == "P" and not patrol and can_pay))
         if warrant is not None and engaging: warrant["engaged"] = True
         if formation is not None and engaging: formation["engaged"] = True
@@ -8216,9 +8246,8 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             lines, outcome = ["You withdraw before engaging; the bounty remains active."], "escaped"
         elif action == "R" and warrant is not None and warrant["checked"] and not warrant["matches"] and not warrant["engaged"]:
             lines, outcome = ["Incorrect identity reported; closing this warrant without a fight."], "reported"
-        elif action == "F" or (action == "G" and tactics is not None and tactics["brace_ready"]):
-            if tactics is None: _, _, lines = fight_round(world, pirate)
-            else: _, _, lines = tactical_round(world, pirate, tactics, action)
+        elif action == "F" or (action == "G" and tactics["brace_ready"]):
+            _, _, lines = tactical_round(world, pirate, tactics, action)
             if pirate.hp <= 0:
                 if world.save.pilot.kills == 0:
                     label = "Concord patrol vessel " if patrol else ""
@@ -8250,14 +8279,8 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
                 outcome = "escaped"
             else:
                 lines.append("Evasion failed -- they're still on you.")
-                if tactics is None:
-                    raw = world.event_rng.randint(4, 9) + pirate.tier * 4
-                    dmg = max(1, raw - ship.shield_tier * 3)
-                    ship.hull_hp = max(0, ship.hull_hp - dmg)
-                    lines.append(f"The {pirate.name} hits you for {dmg} damage.")
-                else:
-                    _, retaliation = tactical_retaliation(world, pirate, tactics)
-                    lines += retaliation
+                _, retaliation = tactical_retaliation(world, pirate, tactics)
+                lines += retaliation
         elif action == "P" and not patrol and can_pay:
             cost = bribe_cost(pirate)
             if world.event_rng.random() < bribe_chance(world, pirate):
@@ -8267,14 +8290,8 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
                 outcome = "escaped"
             else:
                 lines.append("They refuse the bribe and press the attack!")
-                if tactics is None:
-                    raw = world.event_rng.randint(4, 9) + pirate.tier * 4
-                    dmg = max(1, raw - ship.shield_tier * 3)
-                    ship.hull_hp = max(0, ship.hull_hp - dmg)
-                    lines.append(f"The {pirate.name} hits you for {dmg} damage.")
-                else:
-                    _, retaliation = tactical_retaliation(world, pirate, tactics)
-                    lines += retaliation
+                _, retaliation = tactical_retaliation(world, pirate, tactics)
+                lines += retaliation
         elif action == "S" and patrol and can_pay:
             world.save.pilot.credits -= fine
             world.save.pilot.notoriety = 0
@@ -8362,6 +8379,39 @@ def screen_customs(p: Palette, world: World) -> None:
             _encounter_result(p, world, state, outcome)
             return
 
+
+
+def screen_outdated_career(p: Palette, error: OutdatedSave) -> bool:
+    """Offer a new career in place of one this build no longer opens (issue #421).
+
+    A refusal is a first-class outcome, not an error: it names the reason,
+    changes nothing by itself, and asks. Declining leaves the file exactly as it
+    was, so a caller who would rather fetch the older build first can.
+    """
+    lines = ["Career refused", str(error),
+             "Nothing has been changed and your saved career is still on disk.",
+             "This build no longer plays careers of that vintage, and there is no upgrade "
+             "path for them; your Hall of Fame ranking is kept either way.",
+             "Beginning a new career takes the slot: the refused career is kept as a recovery "
+             "copy, the same place a rollback puts the career it replaces."]
+    pages = _mission_text_pages(lines, overhead=4)
+    page = 0
+    while True:
+        out_line()
+        for line in pages[page]:
+            out_line(line)
+        offer = "[N] New career " if page == len(pages) - 1 else ""
+        out_prompt(offer + "[<] Prev [>] Next [B] Back: ")
+        try:
+            key = read_command_at_prompt()
+        except EOFError:
+            return False
+        if key in ("B", "Q"):
+            return False
+        if (moved := page_step(key, page, len(pages))) is not None:
+            page = moved
+        elif key == "N" and page == len(pages) - 1:
+            return True
 
 
 @dataclass(frozen=True)
@@ -8460,6 +8510,9 @@ def main() -> int:
     # per process (PYTHONHASHSEED), which would silently start a fresh
     # career file on every standalone run.
     user_id = int(info.get("user_id", 0)) or zlib.crc32(info["handle"].encode())
+    # Before any pilot lock: the import needs the maintenance gate, and the gate
+    # must never be asked for by a session that already owns a pilot (issue #421).
+    import_hall_of_fame(save_dir)
 
     world = None
     lease = contextlib.ExitStack()
@@ -8468,8 +8521,14 @@ def main() -> int:
             lease.enter_context(pilot_session(save_dir, user_id))
         except OSError as exc:
             raise SaveError from exc
+        outdated = False
         try:
             save, is_new, notice = load_or_create_save(save_dir, user_id, info["handle"])
+        except OutdatedSave as exc:
+            screen_title(p, info)
+            if not screen_outdated_career(p, exc):
+                return 0
+            save, is_new, notice, outdated = _new_career(info["handle"]), True, None, True
         except ResumeError as exc:
             screen_title(p, info)
             recovery = screen_save_recovery(p, save_dir, user_id, exc)
@@ -8482,10 +8541,19 @@ def main() -> int:
         if notice:
             out_line(f"{p.wrong}{notice}{RESET}")
         if is_new:
-            callsign = create_career(p, info)
+            # After a refusal there *is* a dossier; it is simply not one this
+            # build opens, and saying otherwise would read as a bug (#421).
+            callsign = create_career(p, info, welcome=(
+                f"Welcome to the void, pilot. The dossier for {info['handle']} predates this "
+                "version of the game; this registers a new career in its place."
+                if outdated else None))
             if callsign is None:
                 return 0
             save.pilot.handle = callsign
+            if outdated:
+                # The refused career keeps its slot until its replacement is
+                # confirmed; a cancelled registration changes nothing (#421).
+                replace_unsupported_career(save_dir, user_id, save)
         else:
             out_line(f"{p.muted}Welcome back, {save.pilot.handle}. Day {save.turn}.{RESET}")
         world = World(save, checkpoint=lambda current: persist(current, save_dir, user_id))
