@@ -12,7 +12,7 @@ import random
 
 import pytest
 
-from .support import _add_cargo, _box_rows, _door_stopped_at, _mission_details_world, _set_cargo, _world_at_food_producer, _world_with_exploration_choice, _world_with_pending_fight, _world_with_seed, vr
+from .support import _add_cargo, _box_rows, _door_stopped_at, _mission_details_world, _set_cargo, _world_at_food_producer, _world_with_exploration_choice, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
 
 
 def test_fire_damages_both_sides_and_is_driven_by_world_event_rng():
@@ -290,8 +290,8 @@ def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch,
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
         frames.append(without_action_bar(vr._ANSI_RE.sub("", frame)))
         # A one-page screen drops its paging tokens (#412); the counter is the oracle.
-        bar = " ".join(frame.split())                        # a narrow bar wraps (#400)
-        assert "[I] Info" in bar and ("[<>] Page:" in bar or "/1" in bar)
+        bar = page_text(frame)                        # a narrow bar wraps (#400)
+        assert "[I] Info" in bar and ("[<>] Page:" in bar or "/1" in page_title(frame))
         if not state["fired"]:
             state["fired"] = True
             return "F"
@@ -314,7 +314,7 @@ def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch,
     # header and the echoed keypress would otherwise land between its two words. The
     # action bar is already gone -- `without_action_bar` took it off as it was written.
     def body(frame):
-        return [row for row in frame.splitlines()
+        return [row for row in page_rows(frame)
                 if not re.match(r"Combat [\d,]+cr \d+/\d+\s*$", row)
                 and not re.fullmatch(r"[A-Z0-9<>]", row)]
     text = " ".join(" ".join(row for frame in frames for row in body(frame)).split())
@@ -568,7 +568,7 @@ def test_bounty_identification_risk_is_visible_and_paging_is_read_only(monkeypat
     monkeypatch.setattr(vr, "read_key", choose)
     world._checkpoint = lambda current: pytest.fail("Identification browsing checkpointed")
     with contextlib.redirect_stdout(output), pytest.raises(EOFError): vr.screen_combat(vr.Palette(False), world, pirate)
-    text = " ".join(" ".join(frames).split())
+    text = page_text(frames)
     assert "[V] Verify" in text and "[W] Withdraw" in text
     assert "Identity mismatch confirmed" not in text
 
@@ -732,13 +732,13 @@ def test_squadron_terms_fit_and_show_cover_before_first_choice(monkeypatch, term
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         if len(frames) == 1:
-            assert "+6" in frame and "Hollow Fang" in " ".join(frame.split())
+            assert "+6" in frame and "Hollow Fang" in page_text(frame)
         page, count = map(int, re.search(r"Combat.*?(\d+)/(\d+)", frame, re.S).groups())
         if page == count: raise EOFError
         return ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output), pytest.raises(EOFError): vr.screen_combat(vr.Palette(False), world, pirates[0])
-    text = " ".join(" ".join(frames).split())
+    text = page_text(frames)
     assert "[T] Target" in text and "Rust Wraith" in text and "both raiders" in text
 
 
@@ -1105,7 +1105,7 @@ def test_order_screens_show_stock_after_reservation(monkeypatch):
     monkeypatch.setattr(vr, "read_line_raw", lambda **kw: "10")
     with contextlib.redirect_stdout(io.StringIO()) as output:
         assert vr._screen_buy_futures(vr.Palette(False), world, "food") is None
-    plain = " ".join(vr._ANSI_RE.sub("", output.getvalue()).split())
+    plain = page_text(output.getvalue())
     assert f"Station stock {cap}" in plain and f"{cap - 10} left after this order" in plain
     vr.buy_futures_contract(world, "food", 10, 5)
     keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
@@ -1219,7 +1219,7 @@ def test_offer_page_one_points_to_accept_without_offering_it(monkeypatch, termin
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output):
         vr.screen_mission_details(vr.Palette(False), world, mission, active=False)
-    first = " ".join(frames[0].split())
+    first = page_text(frames[0])
     assert "[A] on last page." in first and "[A] Accept" not in first
     assert not world.save.active_missions  # A on page 1 did not accept
 

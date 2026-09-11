@@ -13,7 +13,7 @@ import sys
 
 import pytest
 
-from .support import _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _escort_world, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_pending_fight, _world_with_seed, vr
+from .support import _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _escort_world, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
 
 
 @pytest.mark.parametrize("active", [False, True])
@@ -31,14 +31,14 @@ def test_mission_navigation_pages_preserve_chart_and_career(monkeypatch, termina
     output = io.StringIO(); frames=[]
     def choose():
         frame=output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
-        match=re.search(r"Contract Route #1 (\d+)/(\d+)", " ".join(frame.split()))
+        match=re.search(r"Contract Route #1 (\d+)/(\d+)", page_title(frame))
         assert match and len(frames) < 200
         return "B" if match[1] == match[2] else "N"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output): vr.screen_mission_navigation(vr.Palette(False),world,mission,active=active)
     assert all(len(frame.splitlines()) <= height for frame in frames)
     assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
-    text=" ".join(" ".join(frames).split())
+    text=page_text(frames)
     assert world.by_id[mission.target_system].name in text and "danger unknown" in text
     for sid in vr.mission_route(world,mission)[:-1]: assert world.by_id[sid].name not in text
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
@@ -667,7 +667,7 @@ def test_full_contract_details_fit_each_page_and_retain_back(monkeypatch, termin
     monkeypatch.setattr(vr, "read_key", key)
     with contextlib.redirect_stdout(output):
         vr.screen_mission_details(vr.Palette(False), world, mission, active=False)
-    body_rows = [row for row in vr._ANSI_RE.sub("", output.getvalue()).split("\r\n")
+    body_rows = [row for row in page_rows(output.getvalue())
                  if not row.startswith(("Contract #", "[R]", "[N]", "[P]", "[B]", "[A]"))]
     joined = " ".join(" ".join(body_rows).split())
     assert "EVERY jump" in joined and "including detours" in joined
@@ -1278,7 +1278,7 @@ def test_combat_action_bar_labels_every_verb_and_matches_the_body(monkeypatch):
     frame = vr._ANSI_RE.sub("", frames[0])
     bar = frame.rstrip().splitlines()[-1]
     keys = {part[1] for part in bar.split() if part.startswith("[") and len(part) > 2 and part[1] != "<"} - {"I"}
-    body_keys = {line[1] for line in frame.splitlines() if len(line) > 3 and line[0] == "[" and line[2] == "]" and line[3] == " "}
+    body_keys = {row[1] for row in page_rows(frame) if len(row) > 3 and row[0] == "[" and row[2] == "]" and row[3] == " "}
     assert keys == body_keys == {"F", "G", "E", "D", "P"}
     assert not re.search(r"\]\S", bar)                     # one hotkey style: `[K] Label` (#400)
 

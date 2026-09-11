@@ -18,6 +18,7 @@ import importlib.util
 import io
 import os
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -90,6 +91,70 @@ def _add_cargo(world, commodity: str, quantity, *, unit_cost: int | None = None)
     if world.save.trading_ledger.since_day is None:
         # A recorded lot is recorded activity; the validator requires both.
         world.save.trading_ledger.since_day = world.save.turn
+
+
+
+_BORDER = "╭╮╰╯│─═║╔╗╚╝├┤╠╣+-=|"
+
+
+def page_rows(frame: str) -> list[str]:
+    """The body rows of a drawn page, with the HUD frame taken off.
+
+    Screens draw inside their frame again (issue #486), so a test that reads a
+    page has to see past it: the border rows carry no content, the side borders
+    are not part of a row's text, and a sentence that wraps has a border between
+    its halves. Works the same on an unframed page, where there is nothing to
+    take off, and on the `plain` display style, where the frame is +, - and |.
+    """
+    rows: list[str] = []
+    for row in vr._ANSI_RE.sub("", frame).replace("\r\n", "\n").split("\n"):
+        row = row.strip()
+        if not row:
+            continue
+        if row[0] in "╭╰╔╚├╠" or re.match(r"\+[-=]{2,}", row):
+            continue  # a border row, titled or not
+        if all(character in _BORDER or character == " " for character in row):
+            continue  # what is left of one after a test cuts the title out
+        if re.fullmatch(r"[A-Za-z0-9<>?]", row):
+            continue  # the keypress a screen echoes when it ends a bar's row
+        if row[0] in "│║|":
+            row = row[1:]
+        if row[-1:] in "│║|":
+            row = row[:-1]
+        rows.append(row.strip())
+    return rows
+
+
+def page_title(frame: str) -> str:
+    """The title a page shows, wherever it is drawn.
+
+    A framed screen draws its title into the top border, which `page_rows`
+    drops; an unframed one prints it as the first row. Tests that look for the
+    page counter, or for the credits a screen puts in its title, read it here.
+    """
+    parts: list[str] = []
+    for row in vr._ANSI_RE.sub("", frame).replace("\r\n", "\n").split("\n"):
+        row = row.strip()
+        if not row or re.fullmatch(r"[A-Za-z0-9<>?]", row):
+            continue
+        if row[0] in "╭╔" or re.match(r"\+[-=]{2,}", row):
+            return row.strip("╭╮╔╗+ ").strip("─═- ")
+        if all(character in _BORDER or character == " " for character in row):
+            continue
+        # Unframed, a long title wraps: it runs to the row the counter lands on,
+        # and no further -- a page whose title has already been cut out must not
+        # have its body read as one.
+        parts.append(row)
+        if re.search(r"\d+/\d+", " ".join(parts)) or len(parts) == 2:
+            break
+    return " ".join(parts)
+
+
+def page_text(frame: str | list[str]) -> str:
+    """`page_rows` for one frame or a run of them, as one whitespace-normalised
+    string: what the caller read, in the order they read it."""
+    frames = [frame] if isinstance(frame, str) else list(frame)
+    return " ".join(" ".join(row for text in frames for row in page_rows(text)).split())
 
 
 def _world_with_seed(seed: int) -> "vr.World":

@@ -13,7 +13,7 @@ import sys
 
 import pytest
 
-from .support import _Sys, _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_exploration_choice, _world_with_seed, vr
+from .support import _Sys, _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_exploration_choice, _world_with_seed, page_text, page_title, vr
 
 
 # leave the bounty active forever, turning its target system into a
@@ -849,14 +849,14 @@ def test_general_route_pages_are_read_only_and_hide_unknown_details(monkeypatch,
     output = io.StringIO(); frames = []
     def choose():
         frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
-        match = re.search(r"Route Planner (\d+)/(\d+)", " ".join(frame.split()))
+        match = re.search(r"Route Planner (\d+)/(\d+)", page_title(frame))
         assert match and len(frames) < 200
         return "B" if match[1] == match[2] else "N"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): vr.screen_auto_route(vr.Palette(False), world, destination=target.id)
     assert all(len(frame.splitlines()) <= height for frame in frames)
     assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
-    text = " ".join(" ".join(frames).split())
+    text = page_text(frames)
     assert target.name in text and "Contract #1" in text
     for sid in path[:-1]: assert world.by_id[sid].name not in text
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
@@ -897,7 +897,7 @@ def test_general_route_all_destinations_reachable_in_compact_picker(monkeypatch,
     def choose():
         frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
         # Titles can wrap between words at 20 columns.
-        match = re.search(r"Charted Destination (\d+)/(\d+)", " ".join(frame.split()))
+        match = re.search(r"Charted Destination (\d+)/(\d+)", page_text(frame))
         assert match
         if match[1] != match[2]: return "N"
         return re.findall(r"\[(\d)\] ", frame)[-1]
@@ -932,7 +932,7 @@ def test_destination_picker_keeps_wrapped_names_on_one_page(monkeypatch, termina
     output=io.StringIO(); frames=[]
     def choose():
         frame=output.getvalue();frames.append(frame);output.seek(0);output.truncate(0)
-        match=re.search(re.escape(title)+r" (\d+)/(\d+)"," ".join(frame.split()))
+        match=re.search(re.escape(title)+r" (\d+)/(\d+)",page_text(frame))
         assert match
         return "B" if match[1]==match[2] else "N"
     monkeypatch.setattr(vr,"read_key",choose)
@@ -1020,7 +1020,7 @@ def test_map_list_advertises_only_available_view_actions(monkeypatch, terminal,w
     output=io.StringIO();frames=[]
     def choose():
         frame=output.getvalue();output.seek(0);output.truncate(0);frames.append(frame)
-        if "Charted Systems" in " ".join(frame.split()):
+        if "Charted Systems" in page_text(frame):
             assert ("[M] Map" in frame) is not compact
         return next(commands)
     monkeypatch.setattr(vr,"read_key",choose)
@@ -1409,11 +1409,11 @@ def test_customs_pages_keep_complete_terms_without_mutation(monkeypatch, termina
         frames.append(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
-        bar = " ".join(frame.split())                    # a narrow bar wraps (#400)
-        assert "[S] Surrender" in bar and ("[<>] Page:" in bar or "/1" in bar)
+        bar = page_text(frame)                    # a narrow bar wraps (#400)
+        assert "[S] Surrender" in bar and ("[<>] Page:" in bar or "/1" in page_title(frame))
         if not credits: assert "[B]" not in frame
         plain = vr._ANSI_RE.sub("", frame)
-        content.append(re.sub(r"^[\s>]*Customs\s+[\d,]+cr\s+\d+/\d+", "", without_action_bar(plain)))
+        content.append(page_text(re.sub(r"^[\s>]*Customs\s+[\d,]+cr\s+\d+/\d+", "", without_action_bar(plain))))
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         page, count = map(int, re.search(r"Customs.*?(\d+)/(\d+)", frame, re.S).groups())
         if page == count: raise EOFError

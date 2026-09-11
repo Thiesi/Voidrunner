@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from .support import _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _drain_until, _live_voidrunner, _set_cargo, _world_at_food_producer, _world_with_pending_fight, _world_with_seed, vr
+from .support import _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _drain_until, _live_voidrunner, _set_cargo, _world_at_food_producer, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
 
 
 def _world_with_market_memory():
@@ -660,12 +660,12 @@ def test_trade_route_draft_cancel_retains_original_and_fits_pages(monkeypatch, t
     output = io.StringIO(); frames = []
     def choose():
         frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
-        match = re.search(r"Route Draft (\d+)/(\d+)", " ".join(frame.split()))
+        match = re.search(r"Route Draft (\d+)/(\d+)", page_title(frame))
         assert match and len(frames) < 100
         if len(frames) == 1: return "H"
         return "B" if match[1] == match[2] else "N"
     monkeypatch.setattr(vr, "read_key", choose)
-    with contextlib.redirect_stdout(output): assert vr._edit_trade_route(world, initial) is None
+    with contextlib.redirect_stdout(output): assert vr._edit_trade_route(vr.Palette(False), world, initial) is None
     assert initial["use_hold"] is False and initial["quantity"] == 1
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
     assert all(len(frame.splitlines()) <= height for frame in frames)
@@ -680,7 +680,7 @@ def test_trade_route_draft_rejection_keeps_edits_until_apply(monkeypatch):
     keys = iter("UHSHS")
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: "3")
-    with contextlib.redirect_stdout(io.StringIO()) as output: result = vr._edit_trade_route(world, initial)
+    with contextlib.redirect_stdout(io.StringIO()) as output: result = vr._edit_trade_route(vr.Palette(False), world, initial)
     assert result == {**initial, "quantity": 3} and initial["quantity"] == 1
     assert "Cannot apply" in output.getvalue() and "Quantity: 3" in output.getvalue()
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
@@ -837,12 +837,12 @@ def test_market_depth_commodity_details_fit_every_page_without_replenishing(monk
     output = io.StringIO(); frames = []
     def choose():
         frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
-        match = re.search(r"Refined Metals Exchange (\d+)/(\d+)", " ".join(frame.split()))
+        match = re.search(r"Refined Metals Exchange (\d+)/(\d+)", page_title(frame))
         assert match and len(frames) < 100
         return "Q" if match[1] == match[2] else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): vr._trade_commodity(vr.Palette(False), world, "metals")
-    assert "Stock 3 (+6/day)" in " ".join(" ".join(frames).split())
+    assert "Stock 3 (+6/day)" in page_text(frames)
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
     assert all(len(frame.splitlines()) <= height for frame in frames)
     assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
@@ -1038,7 +1038,7 @@ def test_economy_opportunity_pages_reach_all_candidates_within_terminal_size(mon
     output = io.StringIO(); frames = []
     def choose():
         frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
-        match = re.search(r"Opportunities (\d+)/(\d+)", " ".join(frame.split()))
+        match = re.search(r"Opportunities (\d+)/(\d+)", page_title(frame))
         assert match and len(frames) < 300
         return "B" if match[1] == match[2] else "N"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -1653,7 +1653,7 @@ def test_futures_picker_pages_keep_terms_choices_and_return_position(monkeypatch
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):vr.screen_futures(vr.Palette(False),world,vr.LEGAL_COMMODITIES)
     assert opened==[world.save.active_futures[-1].id]
-    text=" ".join(" ".join(frames).split())
+    text=page_text(frames)
     assert "8%" in text and "Outstanding orders" in text
     assert world.save.to_dict()==before
 
@@ -1670,14 +1670,14 @@ def test_futures_draft_and_order_pages_fit_and_preserve_all_terms(monkeypatch, t
         frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0);frames.append(frame)
         assert len(frame.splitlines())<=height
         assert all(vr._visible_width(line)<=width for line in frame.splitlines())
-        assert "[B] Back:" in " ".join(frame.split())
+        assert "[B] Back:" in page_text(frame)
         page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
         return "B" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):
         if kind=="draft":vr._screen_buy_futures(vr.Palette(False),world,"food")
         else:vr._screen_futures_order(vr.Palette(False),world,contract)
-    text=" ".join(" ".join(frames).split())
+    text=page_text(frames)
     assert "nonrefundable" in text and "Pickup:" in text
     assert world.save.to_dict()==before
 
@@ -2533,7 +2533,7 @@ def test_cockpit_settlement_results_stay_inside_height_budget(monkeypatch, termi
         frames.append(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
-        assert "[Q] Exit:" in " ".join(frame.split())    # a narrow bar wraps (#400)
+        assert "[Q] Exit:" in page_text(frame)    # a narrow bar wraps (#400)
         page, count = map(int, re.search(r"Command Deck:.*?(\d+)/(\d+)", frame, re.S).groups())
         return "Q" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -2543,8 +2543,13 @@ def test_cockpit_settlement_results_stay_inside_height_budget(monkeypatch, termi
     content = []
     for frame in frames:
         plain = vr._ANSI_RE.sub("", frame)
-        assert plain.split("Command Deck:", 1)[0].strip() in ("", ">")
-        content.append(re.search(r"\d+/\d+\r\n(.*?)\r\n\[[<X]\]", plain, re.S).group(1))  # one-page decks drop Prev/Next (#412)
+        assert page_title(frame).startswith("Command Deck:")
+        rows = page_rows(frame)  # one-page decks drop Prev/Next (#412)
+        title, consumed = page_title(frame), ""
+        while rows and consumed != title and title.startswith(f"{consumed} {rows[0]}".strip()):
+            consumed = f"{consumed} {rows.pop(0)}".strip()  # unframed, the title is a row of its own
+        stop = next((index for index, row in enumerate(rows) if row.startswith(("[<", "[X"))), len(rows))
+        content.append(" ".join(rows[:stop]))
     text = " ".join(" ".join(content).split())
     for message in settled: assert text.count(message) == 1
 
@@ -2563,10 +2568,10 @@ def test_exploration_terms_fit_and_browsing_has_no_effects(monkeypatch, terminal
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
-        assert "Fuel 3" in " ".join(vr._ANSI_RE.sub("", frame).split())
+        assert "Fuel 3" in page_title(frame)
         page, count = map(int, re.search(r"(?:Derelict|Distress).*?(\d+)/(\d+)", frame, re.S).groups())
         if len(frames) == 1:
-            first = " ".join(frame.split())
+            first = page_text(frame)
             assert ("30%" in first) if kind == "derelict" else ("tank empty" in first)
             return "?"
         if page == count: raise EOFError
@@ -2575,7 +2580,7 @@ def test_exploration_terms_fit_and_browsing_has_no_effects(monkeypatch, terminal
     world._checkpoint = lambda current: pytest.fail("Browsing checkpointed")
     with contextlib.redirect_stdout(output), pytest.raises(EOFError):
         getattr(vr, "_encounter_" + ("derelict" if kind == "derelict" else "distress_call"))(vr.Palette(False), world)
-    text = " ".join(" ".join(frames).split())
+    text = page_text(frames)
     assert ("70%" in text and "30%" in text) if kind == "derelict" else "60-180cr" in text
     assert "[I] Ignore" in text
 
@@ -2608,11 +2613,11 @@ def test_survey_terms_before_and_after_scanning_fit_and_browsing_is_read_only(mo
         out = io.StringIO(); frames = []
         def choose():
             frame = out.getvalue(); out.seek(0); out.truncate(0); frames.append(frame)
-            assert "[B] Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
+            assert "[B] Back" in page_text(frame)
             assert len(frame.splitlines()) <= height
             assert all(vr._visible_width(row) <= width for row in frame.splitlines())
             assert world.save.to_dict() == saved and world.event_rng.getstate() == rng
-            if len(frames) == 1 and not surveyed and fuel == 2: assert "Tank empties" in " ".join(frame.split())
+            if len(frames) == 1 and not surveyed and fuel == 2: assert "Tank empties" in page_text(frame)
             page, count = map(int, re.search(r"Survey.*?(\d+)/(\d+)", frame, re.S).groups())
             if page == count: return "B"
             return ">"
@@ -2652,7 +2657,7 @@ def test_survey_report_retains_every_contact_and_result_after_invalid_input(monk
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(out): result = vr._do_scan(vr.Palette(False), world)
-    text = " ".join(" ".join(frames).split())
+    text = page_text(frames)
     assert "Survey complete" in result
     for sid in targets: assert world.by_id[sid].name in text and world.by_id[sid].station_name in text
     assert world.save.ship.fuel == 22
@@ -2702,7 +2707,7 @@ def test_specialist_directory_paging_keeps_all_named_sites_and_stable_keys(monke
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): vr.screen_specialists(vr.Palette(False), world)
     assert world.save.to_dict() == before
-    text = " ".join(" ".join(frames).split())
+    text = page_text(frames)
     for shop in vr.WORKSHOPS.values(): assert shop["name"] in text and shop["owner"] in text
 
 
@@ -2854,7 +2859,7 @@ def test_chart_departure_confirms_cost_and_danger_as_the_last_keystroke(monkeypa
     keys = iter([vr.CHART_CONNECTION_LETTERS[0], answer, "B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         selected = vr.screen_chart(vr.Palette(False), world)
-    plain = " ".join(vr._ANSI_RE.sub("", output.getvalue()).split())
+    plain = page_text(output.getvalue())
     cost = vr.fuel_cost_for_jump(world.here, world.by_id[dest], world.save.ship)
     name = world.by_id[dest].name if discovered else "an uncharted system"
     danger = f"danger {world.by_id[dest].danger}" if discovered else "danger unknown"

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from .support import _Sys, _VOIDRUNNER_PATH, _add_cargo, _box_rows, _door_stopped_at, _escort_world, _finale_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, vr
+from .support import _Sys, _VOIDRUNNER_PATH, _add_cargo, _box_rows, _door_stopped_at, _escort_world, _finale_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_text, vr
 
 
 def test_retire_pilot_increments_retirements_and_grants_cumulative_bonus():
@@ -1011,7 +1011,7 @@ def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, te
     world._checkpoint = lambda w: pytest.fail("Browsing archive wrote a checkpoint")
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
-        assert "[B] Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
+        assert "[B] Back" in page_text(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
@@ -1023,7 +1023,7 @@ def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, te
     for frame in frames:
         plain=vr._ANSI_RE.sub("",frame)
         body=plain[re.search(r"Archive.*?\d+/\d+",plain,re.S).end():]
-        bodies.append(without_action_bar(body))
+        bodies.append(page_text(without_action_bar(body)))
     assert " ".join(" ".join(bodies).split())==" ".join(" ".join(vr.archive_lines(world)).split())
 
 
@@ -1246,7 +1246,7 @@ def test_workshop_detail_pages_keep_terms_and_leave_career_untouched(monkeypatch
         page, count = map(int, match.groups())
         payload = plain[match.end():]
         payload = without_action_bar(payload)
-        contents.append(payload.strip().removeprefix(">").strip())
+        contents.append(page_text(payload).removeprefix("> ").strip())
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): assert vr.screen_workshop(vr.Palette(False), world, key) is None
@@ -1444,7 +1444,7 @@ def test_named_crew_roster_keeps_personality_progress_and_costs_without_writes(m
     world._checkpoint = lambda w: pytest.fail("Crew browsing checkpointed")
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
-        assert "[1-3] Task" in " ".join(vr._ANSI_RE.sub("",frame).split())
+        assert "[1-3] Task" in page_text(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
@@ -1452,7 +1452,7 @@ def test_named_crew_roster_keeps_personality_progress_and_costs_without_writes(m
         return "Q" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): vr.screen_crew(vr.Palette(False), world)
-    text = " ".join(" ".join(frames).split())
+    text = page_text(frames)
     for role in vr.CREW_ROLES: assert vr.crew_name(world, role) in text
     assert "14/15" in text and "5/15" in text and "cr/jump" in text
 
@@ -1537,7 +1537,7 @@ def test_crew_first_page_starts_with_available_specialist(monkeypatch, terminal,
     monkeypatch.setattr(vr, "read_key", lambda: "Q")
     output = io.StringIO()
     with contextlib.redirect_stdout(output): vr.screen_crew(vr.Palette(False), world)
-    text = " ".join(vr._ANSI_RE.sub("", output.getvalue()).split())
+    text = page_text(output.getvalue())
     assert "Gunner: Available" in text
     if width >= 40:
         assert vr.crew_name(world, "gunner") in text
@@ -1709,13 +1709,13 @@ def test_personal_crew_task_pages_keep_complete_terms_and_leave_no_writes(monkey
     world._checkpoint = lambda w: pytest.fail("Task browsing checkpointed")
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
-        assert "[B] Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
+        assert "[B] Back" in page_text(frame)
         assert len(frame.splitlines()) <= height and all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         page, count = map(int, re.search(r"Crew task.*?(\d+)/(\d+)", frame, re.S).groups())
         plain = vr._ANSI_RE.sub("", frame)
         body = re.sub(r"^[\s>]*Crew task\s+[\d,]+cr\s+\d+/\d+\s*", "", plain).split("[C] Complete")[0]
-        bodies.append(body)
+        bodies.append(page_text(body))
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): assert vr.screen_crew_assignment(vr.Palette(False), world, role) is None
@@ -1938,7 +1938,7 @@ def test_faction_contact_pages_preserve_all_terms_without_writes(monkeypatch, te
         match = re.search(r"[\d,]+cr\s+(\d+)/(\d+)", plain); assert match
         page, count = map(int, match.groups())
         body = re.sub(r"^[\s>]*\w+\s+[\d,]+cr\s+\d+/\d+\s*", "", plain)
-        bodies.append(without_action_bar(body))
+        bodies.append(page_text(without_action_bar(body)))
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -2166,12 +2166,12 @@ def test_faction_case_pages_preserve_full_terms_without_writes(monkeypatch, term
     monkeypatch.setattr(vr, "confirm", lambda *args: pytest.fail("Browsing opened a confirmation"))
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0)
-        assert "[B] Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
+        assert "[B] Back" in page_text(frame)
         assert len(frame.splitlines()) <= height and all(vr._visible_width(row) <= width for row in frame.splitlines())
         plain = vr._ANSI_RE.sub("", frame)
         page, count = map(int, re.search(r"[\d,]+cr\s+(\d+)/(\d+)", plain).groups())
         body = re.sub(r"^[\s>]*Case\s+[\d,]+cr\s+\d+/\d+\s*", "", plain)
-        bodies.append(without_action_bar(body))
+        bodies.append(page_text(without_action_bar(body)))
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -2418,7 +2418,7 @@ def test_career_rank_full_terms_fit_record_pages_without_mutation(monkeypatch, t
         plain=vr._ANSI_RE.sub("",frame); match=re.search(r"Overview\s+(\d+)/(\d+)",plain); assert match
         page,count=map(int,match.groups())
         body=re.sub(r"^[\s>]*Pilot Record:\s*Overview\s+\d+/\d+\s*","",plain)
-        bodies.append(body.split("[<")[0]); return "B" if page==count else ">"
+        bodies.append(page_text(body.split("[<")[0])); return "B" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):vr.screen_status(vr.Palette(False),world)
     text=" ".join(" ".join(bodies).split())
@@ -2592,7 +2592,7 @@ def test_career_finale_complete_terms_fit_every_page_without_writes(monkeypatch,
         assert len(frame.splitlines())<=height and all(vr._visible_width(row)<=width for row in frame.splitlines())
         plain=vr._ANSI_RE.sub("",frame); page,count=map(int,re.search(r"Career Finale\s+(\d+)/(\d+)",plain).groups())
         body=re.sub(r"^[\s>]*Career Finale\s+\d+/\d+\s*","",plain)
-        bodies.append(body.split("[1-4] Choose")[0]); return "B" if page==count else ">"
+        bodies.append(page_text(body.split("[1-4] Choose")[0])); return "B" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):assert vr.screen_career_finale(vr.Palette(False),world) is None
     assert " ".join(" ".join(bodies).split())==" ".join(" ".join(vr.career_finale_lines(world.save,finale)).split())
@@ -2614,7 +2614,7 @@ def test_career_dossier_pages_include_all_retained_highlights(monkeypatch, termi
         if first:first=False;return "D"
         plain=vr._ANSI_RE.sub("",frame); page,count=map(int,re.search(r"Dossiers\s+(\d+)/(\d+)",plain).groups())
         body=re.sub(r"^[\s>D]*Pilot Record:\s*Dossiers\s+\d+/\d+\s*","",plain)
-        bodies.append(body.split("[<")[0]); return "B" if page==count else ">"
+        bodies.append(page_text(body.split("[<")[0])); return "B" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):vr.screen_status(vr.Palette(False),world)
     text=" ".join(" ".join(bodies).split())
@@ -2802,7 +2802,7 @@ def test_achievement_category_pages_keep_snapshot_complete_terms_and_all_navigat
         plain=vr._ANSI_RE.sub("",frame)
         assert "[1-5] View" in " ".join(plain.split()) and "[B] Back:" in " ".join(plain.split())
         match=re.search(r"(\d+)/(\d+)",plain);page,count=map(int,match.groups())
-        bodies[list(vr.SCORE_CATEGORIES)[category]].append(plain[match.end():].split("[1-5] View")[0])
+        bodies[list(vr.SCORE_CATEGORIES)[category]].append(page_text(plain[match.end():].split("[1-5] View")[0]))
         if page<count:return "N"
         category+=1;return str(category+1) if category<5 else "B"
     monkeypatch.setattr(vr,"read_key",choose)
@@ -2996,7 +2996,7 @@ def test_career_rank_checkpoint_notice_survives_spending_until_deck(monkeypatch,
         frame=output.getvalue();output.seek(0);output.truncate(0)
         assert len(frame.splitlines())<=height and all(vr._visible_width(line)<=width for line in frame.splitlines())
         plain=vr._ANSI_RE.sub("",frame);match=re.search(r"Command Deck:.*?(\d+)/(\d+)",plain,re.S);assert match
-        page,count=map(int,match.groups());bodies.append(plain[match.end():].split("[<] Prev")[0])
+        page,count=map(int,match.groups());bodies.append(page_text(plain[match.end():].split("[<] Prev")[0]))
         return "Q" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):vr.screen_station_menu(vr.Palette(False),world)

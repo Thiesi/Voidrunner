@@ -4294,6 +4294,37 @@ def _box_outer_width() -> int:
     return _box_inner_width() + 2
 
 
+def _page_framed() -> bool:
+    """Whether a paged screen draws its box.
+
+    The boxed tactical HUD is what the game looked like before its screens were
+    made responsive; the frames were collateral of that work rather than
+    something any issue asked for (issue #486). A frame costs four columns and
+    one row, which is a fifth of the width a 20-column caller has, so below
+    these floors the flat layout stays -- the same "a complete compact
+    composition instead" rule the splash follows (issue #404).
+    """
+    return _OUTPUT_WIDTH >= 40 and _OUTPUT_HEIGHT >= 12
+
+
+def _page_content_width() -> int:
+    """Columns a paged screen's body rows occupy, the frame taken off.
+
+    Every paginator measures with this, so a framed page is filled with rows
+    that fit inside the frame: measuring at terminal width and then drawing a
+    box would wrap rows the height budget had already been spent on.
+    """
+    # Two columns of indent on the left, one of gutter on the right: a row that
+    # ends flush against the border reads as if it had been cut off.
+    return max(1, _box_inner_width() - 3) if _page_framed() else max(1, _OUTPUT_WIDTH - 1)
+
+
+def _page_frame_rows() -> int:
+    """Rows the frame costs a page. The title moves into the top border, so
+    only the bottom border is new."""
+    return 1 if _page_framed() else 0
+
+
 def _box_title(p: "Palette", text: str, width: int | None = None, border_color: str | None = None) -> str:
     """A `╭── {text} ───...───╮` title border sized so its right corner
     always lands on the same column as every other row in the same box
@@ -4308,6 +4339,13 @@ def _box_title(p: "Palette", text: str, width: int | None = None, border_color: 
     dashes = "─" * max(1, width - _visible_width(head))
     col = border_color if border_color is not None else p.accent
     return f"{col}{BOLD}╭{head}{dashes}╮{RESET}"
+
+
+def _box_top(p: "Palette", width: int | None = None, border_color: str | None = None) -> str:
+    """An untitled top border, for a page whose header goes in its body."""
+    width = _box_inner_width() if width is None else min(width, _box_inner_width())
+    col = border_color if border_color is not None else p.accent
+    return f"{col}{BOLD}╭{'─' * width}╮{RESET}"
 
 
 def _box_divider(p: "Palette", width: int | None = None, border_color: str | None = None) -> str:
@@ -4344,43 +4382,10 @@ def _gauge_bar(val: int, max_val: int, width: int = 10, p: Palette | None = None
     if p:
         col = p.correct if pct > 0.5 else (p.gold if pct > 0.2 else p.wrong)
         return f"{col}{'■' * filled}{p.muted}{'░' * empty}{RESET}"
-    return f"[{'■' * filled}{'░' * empty}]"
-
-
-def draw_status_bar(p: Palette, world: World) -> None:
-    ship = world.save.ship
-    pilot = world.save.pilot
-    danger = world.here.danger
-    danger_badge = (
-        f"{p.correct}[SECURE]{RESET}" if danger == 0
-        else (f"{p.gold}[CAUTION 1]{RESET}" if danger == 1 else f"{p.wrong}[DANGER {danger}]{RESET}")
-    )
-    cap = cargo_capacity(ship)
-    used = sum(world.save.cargo.values())
-    w = _box_outer_width()
-
-    line1 = (
-        f"{p.accent}{BOLD}{world.here.station_name}{RESET} "
-        f"{p.muted}({world.here.economy} │ Sector: {sector_for(world.here)}){RESET}  {danger_badge}"
-    )
-    out_line(line1)
-    fields = [
-        f"{p.gold}{BOLD}{pilot.credits:,} cr{RESET}",
-        f"{p.accent}Hull{RESET} {_gauge_bar(ship.hull_hp, hull_hp_max(ship), 8, p)} {ship.hull_hp}/{hull_hp_max(ship)}",
-        f"{p.accent}Fuel{RESET} {_gauge_bar(ship.fuel, fuel_capacity(ship), 8, p)} {ship.fuel}/{fuel_capacity(ship)}",
-        f"{p.accent}Hold{RESET} {_gauge_bar(used, cap, 6, p)} {used}/{cap}",
-        f"{p.muted}Day {world.save.turn}{RESET}",
-    ]
-    row = "  "
-    for field in fields:
-        candidate = field if row == "  " else f"{row}  │  {field}"
-        if row != "  " and _visible_width(candidate) > w:
-            out_line(row)
-            row = f"  {field}"
-        else:
-            row = f"  {field}" if row == "  " else candidate
-    out_line(row)
-    out_line(f"{p.muted}{'─' * w}{RESET}")
+    # Unbracketed: page bodies are flattened to plain text by `wrapped_group`,
+    # so this is the form every gauge on a page takes, and `[` now opens a
+    # hotkey everywhere the game prints (issue #400).
+    return f"{'■' * filled}{'░' * empty}"
 
 
 TITLE_LOGO = ("█░░█ █▀▀█ ▀█▀ █▀▀▄   █▀▀▄ █░░█ █▄░█ █▄░█ █▀▀ █▀▀▄",
@@ -4489,9 +4494,17 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
     """Read-only cockpit and service entries; action keys are stable on every page."""
     ship, pilot, here = world.save.ship, world.save.pilot, world.here
     wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}"))
+    used, hold = sum(world.save.cargo.values()), cargo_capacity(ship)
+    # Gauges first, numbers always: the bars are what the cockpit reads as at a
+    # glance, and they are the first thing to drop when the row will not fit.
+    telemetry = (f"{ship.hull_class}: Hull {_gauge_bar(ship.hull_hp, hull_hp_max(ship), 8)} {ship.hull_hp}/{hull_hp_max(ship)}"
+                 f" | Fuel {_gauge_bar(ship.fuel, fuel_capacity(ship), 8)} {ship.fuel}/{fuel_capacity(ship)}"
+                 f" | Cargo {_gauge_bar(used, hold, 6)} {used}/{hold}")
+    if _visible_width(telemetry) > _page_content_width():
+        telemetry = f"{ship.hull_class}: Hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}; Cargo {used}/{hold} used."
     lines = [f"Station Services: {here.station_name}",
              f"Day {world.save.turn} | {here.economy} | Danger {here.danger}",
-             f"{ship.hull_class}: Hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}; Cargo {sum(world.save.cargo.values())}/{cargo_capacity(ship)} used."]
+             telemetry]
     if has_contraband(world):
         lines.append("Contraband aboard: customs risk. [D] Dump Contraband")
     event = world.save.active_event
@@ -4521,7 +4534,7 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
     row = ""
     for action in actions:
         combined = f"{row}  |  {action}" if row else action
-        if row and _visible_width(_mission_plain(combined)) > max(1, _OUTPUT_WIDTH - 1):
+        if row and _visible_width(_mission_plain(combined)) > _page_content_width():
             lines.append(row); row = action
         else: row = combined
     if row: lines.append(row)
@@ -5059,7 +5072,7 @@ def portrait_pages(p: Palette, large: list[str], compact: list[str], details: li
 
 def _portrait_pages_for(p: Palette, large: list[str], compact: list[str], details: list[str], title: str,
                         footer: str, *, color: str | None = None, leading: list[str] | None = None) -> list[list[str]]:
-    width = max(1,_OUTPUT_WIDTH-1)
+    width = _page_content_width()
     art = list(large if _OUTPUT_WIDTH >= 40 and _OUTPUT_HEIGHT >= 16 else compact)
     capacity = page_capacity((leading or []) + art + details, title, footer)
     if len(art) > capacity or any(_visible_width(row) > width for row in art): art = list(compact)
@@ -5142,7 +5155,7 @@ def _market_row(head: str, depth: dict, held: int, tags: list[str]) -> str:
                 ""]
     rows = [head + detail + trailer for detail in optional]
     for row in rows:
-        if _visible_width(row) <= max(1, _OUTPUT_WIDTH - 1):
+        if _visible_width(row) <= _page_content_width():
             return row
     return rows[0]  # too narrow for any form: keep the whole row and let it wrap (#404)
 
@@ -5318,10 +5331,14 @@ def page_capacity(lines: list[str], title: str, footer: str) -> int:
     The counter in the title is sized for the worst case -- every content row on
     its own page -- so the capacity cannot change once paging has begun.
     """
-    width = max(1, _OUTPUT_WIDTH - 1)
+    width = _page_content_width()
+    bar_width = max(1, _OUTPUT_WIDTH - 1)
     max_pages = max(1, sum(len(_wrap_output(_mission_plain(line), width).split("\r\n")) for line in lines))
-    overhead = (len(_wrap_output(footer, width).split("\r\n"))
-                + len(_wrap_output(title + f" {max_pages}/{max_pages}", width).split("\r\n")) + 3)
+    # The header is one row when it fits the top border, and a border plus its
+    # wrapped rows when it does not; the action bar stays outside the box.
+    header_rows = _page_header_rows(f"{title} {max_pages}/{max_pages}")
+    overhead = (len(_wrap_output(footer, bar_width).split("\r\n"))
+                + header_rows + _page_frame_rows() + 3)
     return max(1, _OUTPUT_HEIGHT - overhead)
 
 
@@ -5365,7 +5382,7 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
 
 def wrapped_group(line: str) -> list[str]:
     """One display line as the rows it occupies."""
-    return _wrap_output(_mission_plain(line), max(1, _OUTPUT_WIDTH - 1)).split("\r\n")
+    return _wrap_output(_mission_plain(line), _page_content_width()).split("\r\n")
 
 
 def _trade_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
@@ -5514,7 +5531,7 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choi
                 return current["choices"][int(key) - 1]
 
 
-def edit_door_draft(*, title: str, initial: dict, fields: list[tuple],
+def edit_door_draft(p: "Palette", *, title: str, initial: dict, fields: list[tuple],
                     apply: Callable[[dict], object], error_type: type[Exception]) -> object | None:
     """Standalone synchronous draft editor: scalar fields, apply/back, retained errors.
 
@@ -5531,10 +5548,7 @@ def edit_door_draft(*, title: str, initial: dict, fields: list[tuple],
             lines.insert(0, "Cannot apply: " + error)
         pages = _trade_pages(lines, title, footer)
         page = min(page, len(pages) - 1)
-        out_line()
-        out_line(f"{title} {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, f"{title}", pages[page], page, len(pages))
         out_prompt(footer)
         key = read_command_at_prompt()
         out_line(key)
@@ -5559,7 +5573,7 @@ def edit_door_draft(*, title: str, initial: dict, fields: list[tuple],
                     break
 
 
-def _edit_trade_route(world: World, initial: dict) -> dict | None:
+def _edit_trade_route(p: Palette, world: World, initial: dict) -> dict | None:
     destinations = [(sid, world.by_id[sid].name) for sid in world.save.market_memory if sid != world.here.id]
     destinations.sort(key=lambda item: item[1])
 
@@ -5590,7 +5604,7 @@ def _edit_trade_route(world: World, initial: dict) -> dict | None:
         ("H", "Hold source", lambda d: "existing hold cargo" if d['use_hold'] else "buy new cargo here",
          lambda d: d.update(use_hold=not d['use_hold'])),
     ]
-    return edit_door_draft(title="Route Draft", initial=initial, fields=fields, apply=apply, error_type=TradeError)
+    return edit_door_draft(p, title="Route Draft", initial=initial, fields=fields, apply=apply, error_type=TradeError)
 
 
 def screen_trade_route(p: Palette, world: World, *, initial: dict | None = None) -> None:
@@ -5607,10 +5621,7 @@ def screen_trade_route(p: Palette, world: World, *, initial: dict | None = None)
     while True:
         pages = _trade_pages(trade_route_lines(world, **parameters), "Trade Route", footer)
         page = min(page, len(pages) - 1)
-        out_line()
-        out_line(f"Trade Route {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, "Trade Route", pages[page], page, len(pages))
         out_prompt(footer)
         key = read_command_at_prompt()
         out_line(key)
@@ -5619,7 +5630,7 @@ def screen_trade_route(p: Palette, world: World, *, initial: dict | None = None)
         if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
             page = moved
         elif key == "E":
-            edited = _edit_trade_route(world, parameters)
+            edited = _edit_trade_route(p, world, parameters)
             if edited is not None:
                 parameters, page = edited, 0
 
@@ -5629,10 +5640,7 @@ def screen_remembered_markets(p: Palette, world: World) -> None:
     pages = _trade_pages(remembered_market_lines(world), "Market Memory", footer)
     page = 0
     while True:
-        out_line()
-        out_line(f"Market Memory {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, "Market Memory", pages[page], page, len(pages))
         out_prompt(footer)
         key = read_command_at_prompt()
         out_line(key)
@@ -5730,10 +5738,7 @@ def screen_economy_opportunities(p: Palette, world: World) -> None:
     pages = _trade_pages(economy_opportunity_lines(world, candidates), "Opportunities", footer)
     page = 0
     while True:
-        out_line()
-        out_line(f"Opportunities {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, "Opportunities", pages[page], page, len(pages))
         out_prompt(footer)
         key = read_command_at_prompt()
         out_line(key)
@@ -5752,10 +5757,7 @@ def screen_trading_ledger(p: Palette, world: World) -> None:
     pages = _trade_pages(trading_ledger_lines(world), "Trading Ledger", footer)
     page = 0
     while True:
-        out_line()
-        out_line(f"Trading Ledger {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, "Trading Ledger", pages[page], page, len(pages))
         out_prompt(footer)
         action = read_command_at_prompt()
         out_line(action)
@@ -5786,10 +5788,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
     pages = _trade_pages(lines, title, footer)
     page = 0
     while True:
-        out_line()
-        out_line(f"{title} {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, f"{title}", pages[page], page, len(pages))
         out_prompt(footer)
         action = read_command_at_prompt()
         out_line(action)
@@ -6063,12 +6062,60 @@ def single_page_footer(footer: str, count: int) -> str:
     return stripped + " " if footer.endswith(" ") else stripped
 
 
+def _page_header(title: str, page: int, count: int) -> str:
+    """`Title n/m` for a page. Never trimmed: a title says which contract, order
+    or station the page is about, and half of one is worse than a second row."""
+    return f"{title} {page + 1}/{count}"
+
+
+def _header_fits_border(header: str) -> bool:
+    """Whether a page's header can be drawn into its top border.
+
+    `_box_title` needs five columns for the corners, the leading dashes and the
+    spaces around the text. A header that wants more is drawn as the page's
+    first row under a plain border, and `page_capacity` charges that row.
+    """
+    return _page_framed() and _visible_width(header) <= max(1, _box_inner_width() - 5)
+
+
+def _page_header_rows(header: str) -> int:
+    """Rows a page spends on its header, frame included."""
+    if not _page_framed():
+        return len(_wrap_output(header, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
+    if _header_fits_border(header):
+        return 1
+    return 1 + len(_wrap_output(header, _page_content_width()).split("\r\n"))
+
+
+def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) -> None:
+    """Draw one page of a list screen: its frame, its rows, and nothing else.
+
+    Every paged screen draws through here, so the frame is one decision rather
+    than thirty (issue #486). The action bar is deliberately left to the caller
+    and printed outside the box, where the cursor waits.
+    """
+    out_line()
+    header = _page_header(title, page, count)
+    if not _page_framed():
+        out_line(f"{p.gold}{header}{RESET}")
+        for row in rows: out_line(row)
+        return
+    inner = _box_inner_width()
+    if _header_fits_border(header):
+        out_line(_box_title(p, header))
+    else:
+        out_line(_box_top(p))
+        rows = _wrap_output(header, _page_content_width()).split("\r\n") + list(rows)
+    for row in rows:
+        out_line(f"{p.accent}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.accent}│{RESET}")
+    out_line(_box_bottom(p))
+
+
 def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, page: int, *, pages: list[list[str]] | None = None) -> tuple[str, int, int]:
     if pages is None:
         pages = _service_pages(lines, title, footer)
     page = min(page, len(pages) - 1)
-    out_line(); out_line(f"{p.gold}{title} {page + 1}/{len(pages)}{RESET}")
-    for line in pages[page]: out_line(line)
+    draw_page(p, title, pages[page], page, len(pages))
     out_prompt(single_page_footer(footer, len(pages))); action = read_command_at_prompt(); out_line(action)
     return action, page, len(pages)
 
@@ -6681,10 +6728,7 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
     pages = _mission_text_pages(lines, overhead=6)  # one row reserved for the acceptance pointer
     page = 0
     while True:
-        out_line()
-        out_line(f"First Flight {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, "First Flight", pages[page], page, len(pages))
         # The first screen of the game must not hide its one action (issue #412 review).
         out_line("[A] Accept contract" if page == len(pages) - 1 else "[A] on last page.")
         out_prompt(single_page_footer(("[A] Accept " if page == len(pages) - 1 else "") + "[N] Next [P] Prev [B] Back: ", len(pages)))
@@ -6708,13 +6752,10 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
 def screen_pilot_guide(p: Palette, world: World) -> None:
     page = 0
     while True:
-        pages = _mission_text_pages(pilot_guide_lines(world), overhead=5)
+        pages = _mission_text_pages(pilot_guide_lines(world), overhead=5 + _page_frame_rows())
         page = min(page, len(pages) - 1)
         offer = opening_assignment_offer(world)
-        out_line()
-        out_line(f"Pilot Guide {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, "Pilot Guide", pages[page], page, len(pages))
         out_prompt(("[O] Offer " if offer is not None else "") + "[N] Next [P] Prev [B] Back: ")
         key = read_command_at_prompt()
         if key in ("B", "Q"):
@@ -6842,10 +6883,7 @@ def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, act
                 lines.insert(0, result)
             pages = _trade_pages(lines, f"Contract Route #{mission.id}", footer)
         page = min(page, len(pages) - 1)
-        out_line()
-        out_line(f"Contract Route #{mission.id} {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, f"Contract Route #{mission.id}", pages[page], page, len(pages))
         out_prompt(footer)
         key = read_command_at_prompt()
         out_line(key)
@@ -6878,19 +6916,17 @@ def screen_mission_details(p: Palette, world: World, mission: Mission, *, active
         if active and not any(m.id == mission.id for m in world.save.active_missions):
             return
         lines = mission_details(world, mission)
-        max_pages = sum(len(_wrap_output(line, max(1, _OUTPUT_WIDTH - 1)).split("\r\n")) for line in lines)
+        max_pages = sum(len(_wrap_output(line, _page_content_width()).split("\r\n")) for line in lines)
         title = f"Contract #{mission.id} {max_pages}/{max_pages}"
         footer = "[R] Route [N] Next [P] Prev [B] Back > "
         pointer_rows = len(_wrap_output(f"[A] on the last page ({max_pages}; [N] Next).", max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
-        overhead = max(7, 1 + len(_wrap_output(title, _OUTPUT_WIDTH).split("\r\n"))
+        overhead = max(7, 1 + (1 if _page_framed() else len(_wrap_output(title, _OUTPUT_WIDTH).split("\r\n")))
+                       + _page_frame_rows()
                        + len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
                        + (2 if active else pointer_rows))
         pages = _mission_text_pages(lines, overhead=overhead)
         page = min(page, len(pages) - 1)
-        out_line()
-        out_line(f"{p.gold}Contract #{mission.id} {page + 1}/{len(pages)}{RESET}")
-        for row in pages[page]:
-            out_line(row)
+        draw_page(p, f"Contract #{mission.id}", pages[page], page, len(pages))
         actions = single_page_footer("[R] Route [N] Next [P] Prev [B] Back", len(pages))
         if active:
             toggle = "Untrack" if world.save.tracked_mission_id == mission.id else "Track"
@@ -6943,7 +6979,7 @@ def screen_missions(p: Palette, world: World) -> None:
             kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
             state = "TRACKED" if active and world.save.tracked_mission_id == mission.id else "ACTIVE" if active else "OFFER"
             label = _mission_plain(f"{state} {kind}: {world.by_id[mission.target_system].name} (+{mission.reward:,}cr)")
-            wrapped.append((mission, active, _wrap_output(label, max(1, _OUTPUT_WIDTH - 5)).split("\r\n")))
+            wrapped.append((mission, active, _wrap_output(label, max(1, _page_content_width() - 4)).split("\r\n")))
         summary = [f"Active: {len(world.save.active_missions)}/{MAX_ACTIVE_MISSIONS}"]
         posted = world.save.mission_boards.get(world.save.current_system)
         if posted:
@@ -6951,11 +6987,13 @@ def screen_missions(p: Palette, world: World) -> None:
         footer = "[1-9] Details [N] Next [P] Prev [B] Back > "
         # Measured like every other screen: the content column is one narrower than
         # the terminal, and the board's own summary rows are part of its overhead.
-        width = max(1, _OUTPUT_WIDTH - 1)
+        width = _page_content_width()
         max_pages = max(1, sum(len(rows) for _, _, rows in wrapped))
-        overhead = 1 + len(_wrap_output(f"Contracts {max_pages}/{max_pages}", width).split("\r\n"))
+        overhead = 1 + (1 if _page_framed()
+                        else len(_wrap_output(f"Contracts {max_pages}/{max_pages}", width).split("\r\n")))
+        overhead += _page_frame_rows()
         overhead += sum(len(_wrap_output(line, width).split("\r\n")) for line in summary)
-        overhead += len(_wrap_output(footer, width).split("\r\n"))
+        overhead += len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
         capacity = max(1, _OUTPUT_HEIGHT - overhead)
         pages = [([], [])]  # rows, selectable contracts; continued rows stay selectable
         for mission, active, rows in wrapped:
@@ -6972,14 +7010,11 @@ def screen_missions(p: Palette, world: World) -> None:
                     part = 0  # a continuation that opens a new page carries its key again
                 body.append(f"[{choice + 1}] {row}" if part == 0 else " " * len(f"[{choice + 1}] ") + row)
         page = min(page, len(pages) - 1)
-        out_line()
-        out_line(f"{p.gold}Contracts {page + 1}/{len(pages)}{RESET}")
-        for row in pages[page][0]:
-            out_line(row)
+        body = list(pages[page][0])
         if not entries:
-            out_line("No contracts currently available.")
-        for line in summary:
-            out_line(line)
+            body.append("No contracts currently available.")
+        body += summary
+        draw_page(p, "Contracts", body, page, len(pages))
         out_prompt(footer)
         key = read_command_at_prompt()
         if key in ("B", "Q"):
@@ -7142,7 +7177,14 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
     footer = "[1-5] View [N] Next [P] Prev [B] Back: "
     category, page, cache = "wealth", 0, {}
     while True:
+        # The same rule the registration box follows: a screen whose title will
+        # not fit its border names itself more briefly, rather than spending one
+        # of the caller's body rows on a header -- at forty columns that row is
+        # a ranked pilot. Measured against the widest counter the screen can
+        # show, so the title cannot change under the caller as pages are added.
         title = "Hall of Fame: " + SCORE_CATEGORIES[category]
+        if _page_framed() and not _header_fits_border(f"{title} 99/99"):
+            title = "Fame: " + SCORE_CATEGORIES[category]
         if category not in cache:
             lines = achievement_lines(entries, category, user_id)
             lines += ["Views: [1] Wealth, [2] Trading, [3] Exploration, [4] Combat, [5] Completed careers.",
@@ -7198,7 +7240,7 @@ def _chart_pages(world: World, title: str, footer: str, result: str | None):
 def _chart_pages_for(world: World, title: str, footer: str, result: str | None):
     entries = chart_entries(world, result)
     # Budget conservatively with one key prefix per wrapped continuation row.
-    wrapped = [(sid, _wrap_output(_mission_plain(text), max(1, _OUTPUT_WIDTH - 5)).split("\r\n")) for sid, text in entries]
+    wrapped = [(sid, _wrap_output(_mission_plain(text), max(1, _page_content_width() - 4)).split("\r\n")) for sid, text in entries]
     capacity = page_capacity(["[A] " + row for _, rows in wrapped for row in rows], title, footer)
     letters, groups, index = [], [], 0
     for sid, paragraph in wrapped:
@@ -7229,8 +7271,7 @@ def screen_chart(p: Palette, world: World) -> int | None:
         title = f"Navigation: Fuel {world.save.ship.fuel}/{fuel_capacity(world.save.ship)}"
         pages = _chart_pages(world, title, footer, result)
         page = min(page, len(pages) - 1)
-        out_line(); out_line(f"{p.gold}{title} {page + 1}/{len(pages)}{RESET}")
-        for row in pages[page][0]: out_line(row)
+        draw_page(p, title, pages[page][0], page, len(pages))
         out_prompt(single_page_footer(footer, len(pages))); key = read_command_at_prompt(); out_line(key)
         if key in ("B", "Q"): return None
         if (moved := page_step(key, page, len(pages))) is not None: page = moved; continue
@@ -7436,13 +7477,12 @@ def map_inspection_lines(world: World, sid: int, path: list[int], public_target:
     return lines
 
 
-def _screen_map_info(world: World, sid: int, path: list[int], public_target: int | None) -> None:
+def _screen_map_info(p: Palette, world: World, sid: int, path: list[int], public_target: int | None) -> None:
     title, footer = "Station Info", "[N] Next [P] Prev [B] Back: "
     pages = _trade_pages(map_inspection_lines(world, sid, path, public_target), title, footer)
     page = 0
     while True:
-        out_line(); out_line(f"{title} {page + 1}/{len(pages)}")
-        for line in pages[page]: out_line(line)
+        draw_page(p, f"{title}", pages[page], page, len(pages))
         out_prompt(footer); key = read_command_at_prompt(); out_line(key)
         if key in ("B", "Q"): return
         if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
@@ -7467,12 +7507,13 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
     if compact: lines.insert(0, "Spatial map needs 40 columns and 12 rows; exact list is available here.")
     pages = _trade_pages(lines, title, list_footer)
     while True:
-        out_line()
         if list_mode:
-            out_line(f"{title} {page + 1}/{len(pages)}")
-            for line in pages[page]: out_line(line)
+            # The exact list is a list screen; only the spatial grid below is
+            # full-bleed, and only it is measured unframed.
+            draw_page(p, title, pages[page], page, len(pages))
             footer = list_footer
         else:
+            out_line()
             heading = "Star Map: " + (SECTOR_NAMES[sector] if sector is not None else "Galaxy")
             xmin, xmax, ymin, ymax = map_bounds(sector)
             bounds = f"X {xmin}-{xmax}; Y {ymin}-{ymax}"
@@ -7491,7 +7532,7 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
                 ids = {sid for sid in ids if sector_for(world.by_id[sid]) == SECTOR_NAMES[sector]}
             options = sorted(((sid, map_label(world, sid, public_target)) for sid in ids), key=lambda item: item[1])
             selected = _pick_trade_field("Inspect Station", options)
-            if selected is not None: _screen_map_info(world, selected, path, public_target)
+            if selected is not None: _screen_map_info(p, world, selected, path, public_target)
         elif list_mode:
             if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
                 page = moved
@@ -7622,10 +7663,7 @@ def screen_auto_route(p: Palette, world: World, *, destination: int | None = Non
                 lines.insert(0, result)
             pages = _trade_pages(lines, "Route Planner", footer)
         page = min(page, len(pages) - 1)
-        out_line()
-        out_line(f"Route Planner {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, "Route Planner", pages[page], page, len(pages))
         out_prompt(footer)
         key = read_command_at_prompt()
         out_line(key)
@@ -8108,13 +8146,19 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     if result:
         lines.append("Last exchange:")
         for message in result:
-            lines.extend(_wrap_output(_mission_plain(message), max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
+            lines.extend(_wrap_output(_mission_plain(message), _page_content_width()).split("\r\n"))
     if details: lines.append("Tactical Systems:")
     if warrant is not None: lines += bounty_identification_lines(world, warrant)
     lines += squadron_terms(world)
+    opponent = f"{pirate.name} (tier {pirate.tier}): HP {_gauge_bar(pirate.hp, pirate.hp_max, 8)} {pirate.hp}/{pirate.hp_max}."
+    own = (f"Your hull {_gauge_bar(ship.hull_hp, hull_hp_max(ship), 8)} {ship.hull_hp}/{hull_hp_max(ship)};"
+           f" Fuel {_gauge_bar(ship.fuel, fuel_capacity(ship), 6)} {ship.fuel}/{fuel_capacity(ship)}.")
+    if max(_visible_width(opponent), _visible_width(own)) > _page_content_width():
+        opponent = f"{pirate.name} (tier {pirate.tier}): HP {pirate.hp}/{pirate.hp_max}."
+        own = f"Your hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}."
     lines += [
-        f"{pirate.name} (tier {pirate.tier}): HP {pirate.hp}/{pirate.hp_max}.",
-        f"Your hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}.",
+        opponent,
+        own,
         f"Cargo {used}/{cargo_capacity(ship)} used; Day {world.save.turn}.",
     ]
     intent = tactical_intent(tactics)
@@ -8407,12 +8451,11 @@ def screen_outdated_career(p: Palette, error: OutdatedSave) -> bool:
              "path for them; your Hall of Fame ranking is kept either way.",
              "Beginning a new career takes the slot: the refused career is kept as a recovery "
              "copy, the same place a rollback puts the career it replaces."]
-    pages = _mission_text_pages(lines, overhead=4)
+    title, lines = lines[0], lines[1:]
+    pages = _mission_text_pages(lines, overhead=4 + _page_header_rows(f"{title} 9/9") + _page_frame_rows())
     page = 0
     while True:
-        out_line()
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, title, pages[page], page, len(pages))
         offer = "[N] New career " if page == len(pages) - 1 else ""
         out_prompt(offer + "[<] Prev [>] Next [B] Back: ")
         try:
@@ -8464,12 +8507,11 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
         if preservation_problem is not None:
             lines += ["Automatic restoration is unavailable: " + preservation_problem,
                       "Please contact your SysOp for manual recovery."]
-    pages = _mission_text_pages(lines, overhead=4)
+    title, lines = lines[0], lines[1:]
+    pages = _mission_text_pages(lines, overhead=4 + _page_header_rows(f"{title} 9/9") + _page_frame_rows())
     page = 0
     while True:
-        out_line()
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, title, pages[page], page, len(pages))
         can_restore = candidate is not None and preservation_problem is None and page == len(pages) - 1
         action = "[R] Restore  " if can_restore else ""
         out_prompt(action + "[N] Next [P] Previous [B] Back: ")

@@ -12,7 +12,7 @@ import sys
 
 import pytest
 
-from .support import _Sys, _VOIDRUNNER_PATH, _mission_details_world, _world_with_seed, vr
+from .support import _Sys, _VOIDRUNNER_PATH, _mission_details_world, _world_with_seed, page_text, page_title, vr
 
 
 def test_generate_galaxy_is_a_pure_function_of_seed():
@@ -207,14 +207,14 @@ def test_spatial_map_and_exact_list_fit_terminal_and_preserve_career(monkeypatch
         frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
         assert len(frames) < 200
         if "Star Map:" in frame: return next(map_keys)
-        match = re.search(r"Charted Systems (\d+)/(\d+)", " ".join(frame.split()))
+        match = re.search(r"Charted Systems (\d+)/(\d+)", page_title(frame))
         assert match
         return "B" if match[1] == match[2] else "N"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): vr.screen_galaxy_map(vr.Palette(False), world)
     assert all(len(frame.splitlines()) <= height for frame in frames)
     assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
-    text = " ".join(" ".join(frames).split())
+    text = page_text(frames)
     for station in world.galaxy: assert station.name in text
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
 
@@ -318,14 +318,14 @@ def test_spatial_map_station_info_pages_preserve_every_known_link(monkeypatch, t
     output = io.StringIO(); frames=[]
     def choose():
         frame=output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
-        match=re.search(r"Station Info (\d+)/(\d+)", " ".join(frame.split()))
+        match=re.search(r"Station Info (\d+)/(\d+)", page_title(frame))
         assert match
         return "B" if match[1] == match[2] else "N"
     monkeypatch.setattr(vr, "read_key", choose)
-    with contextlib.redirect_stdout(output): vr._screen_map_info(world, 0, [], None)
+    with contextlib.redirect_stdout(output): vr._screen_map_info(vr.Palette(False), world, 0, [], None)
     assert all(len(frame.splitlines())<=height for frame in frames)
     assert all(vr._visible_width(line)<=width for frame in frames for line in frame.splitlines())
-    text=" ".join(" ".join(frames).split())
+    text=page_text(frames)
     for station in world.galaxy: assert station.name in text
 
 
@@ -419,7 +419,7 @@ def test_landmark_inspection_back_keeps_unclaimed_salvage(monkeypatch, terminal,
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): vr.screen_landmark(vr.Palette(False), world)
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
-    assert "Unclaimed salvage: 3000cr." in " ".join(" ".join(frames).split())
+    assert "Unclaimed salvage: 3000cr." in page_text(frames)
 
 
 def test_a_commit_generates_no_galaxy_once_the_seed_is_known(monkeypatch, tmp_path):

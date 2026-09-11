@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from .support import _VOIDRUNNER_PATH, _door_stopped_at, _escort_world, _finale_world, _mission_details_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, vr
+from .support import _VOIDRUNNER_PATH, _door_stopped_at, _escort_world, _finale_world, _mission_details_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_text, page_title, vr
 
 
 #
@@ -86,7 +86,7 @@ def test_pilot_record_pages_expose_every_retained_entry_once_without_rebuilding(
         frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0)
         assert len(frame.splitlines())<=height
         assert all(vr._visible_width(line)<=width for line in frame.splitlines())
-        assert "[B] Back:" in " ".join(frame.split())
+        assert "[B] Back:" in page_text(frame)
         if phase==0:phase=1;return section
         if phase==2:return "B"
         frames.append(frame)
@@ -95,7 +95,7 @@ def test_pilot_record_pages_expose_every_retained_entry_once_without_rebuilding(
         return ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):vr.screen_status(vr.Palette(False),world)
-    text=" ".join(" ".join(frames).split())
+    text=page_text(frames)
     markers=[f"END{i:03}" for i in range(35)] if section=="C" else [f"Highlight-{i:03}-END" for i in range(35)]+[f"Log-{i:03}-END" for i in range(80)]
     for marker in markers:assert text.count(marker)==1
     assert len(builds)==2
@@ -144,7 +144,7 @@ def test_screen_status_preserves_complete_mission_description(monkeypatch):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_status(vr.Palette(truecolor=False), world)
-    text = " ".join(vr._ANSI_RE.sub("", buf.getvalue()).split())
+    text = page_text(buf.getvalue())
     assert world.save.active_missions[0].description in text
     assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
@@ -175,8 +175,8 @@ def test_service_pages_retain_all_terms_and_fit_terminal(monkeypatch, terminal,w
     output=io.StringIO(); frames=[]
     def choose():
         frame=output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
-        plain=" ".join(vr._ANSI_RE.sub("",frame).split())
-        match=re.search(r"(?:Engineering Yard|Crew Roster): 100,000cr (\d+)/(\d+)",plain)
+        plain=page_text(frame)
+        match=re.search(r"(?:Engineering Yard|Crew Roster): 100,000cr (\d+)/(\d+)",page_title(frame))
         assert match and len(frames)<200
         assert "[B] Back" in plain or "[B] Back" in plain
         return "Q" if match[1]==match[2] else ">"
@@ -186,7 +186,7 @@ def test_service_pages_retain_all_terms_and_fit_terminal(monkeypatch, terminal,w
     assert all(len(frame.splitlines())<=height for frame in frames)
     assert all(vr._visible_width(line)<=width for frame in frames for line in frame.splitlines())
     # Check full terms without mixing page controls into wrapped phrases.
-    plain=" ".join(vr._ANSI_RE.sub(""," ".join(frames)).split())
+    plain=page_text(frames)
     for info in (vr.UPGRADES if screen=="yard" else vr.CREW_ROLES).values():
         for word in info["label"].split(): assert word in plain
     if screen=="yard":
@@ -203,7 +203,7 @@ def test_service_choices_keep_price_and_benefit_with_label_at_40_columns(monkeyp
     terminal(40, 12)
     output=io.StringIO();frames=[]
     def choose():
-        frame=output.getvalue();frames.append(" ".join(vr._ANSI_RE.sub("",frame).split()));output.seek(0);output.truncate(0)
+        frame=output.getvalue();frames.append(page_title(frame) + " " + page_text(frame));output.seek(0);output.truncate(0)
         match=re.search(r"1,200cr (\d+)/(\d+)",frames[-1]);assert match
         return "Q" if match[1]==match[2] else ">"
     monkeypatch.setattr(vr,"read_key",choose)
@@ -257,13 +257,13 @@ def test_market_catalog_pages_preserve_goods_quotes_and_telemetry(monkeypatch, t
         frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0);frames.append(frame)
         assert len(frame.splitlines())<=height
         assert all(vr._visible_width(line)<=width for line in frame.splitlines())
-        plain=" ".join(frame.split())
-        assert "[B] Back:" in plain and "[X] Futures" in plain and "1,200cr" in plain
+        plain=page_text(frame)
+        assert "[B] Back:" in plain and "[X] Futures" in plain and "1,200cr" in page_title(frame)
         page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
         return "Q" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):vr.screen_market(vr.Palette(False),world)
-    text=" ".join(" ".join(frames).split())
+    text=page_text(frames)
     for commodity in vr.LEGAL_COMMODITIES+["weapons"]:assert vr.COMMODITIES[commodity]["label"] in text
     assert "prohibited" in text or haven
     assert "Illegal" in text and "Stock" in text and "demand" in text and "hold" in text
@@ -338,7 +338,7 @@ def test_screen_market_contraband_catalog_keeps_labels_and_bounds(monkeypatch):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_market(vr.Palette(truecolor=False), world)
-    text = " ".join(vr._ANSI_RE.sub("", buf.getvalue()).split())
+    text = page_text(buf.getvalue())
     # The market row now reads "Stock N; demand N; hold N" so it fits an 80-column page (#412).
     assert "Illegal" in text and "demand" in text and "Cargo Hold: 8/" in text
     assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
@@ -363,9 +363,9 @@ def test_station_deck_pages_keep_telemetry_actions_and_exit_visible(monkeypatch,
         frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0)
         assert len(frame.splitlines())<=height
         assert all(vr._visible_width(line)<=width for line in frame.splitlines())
-        plain=" ".join(frame.split())
+        plain=page_text(frame)
         assert "[Q] Exit:" in plain
-        assert "5cr" in plain
+        assert "5cr" in page_title(frame)
         if expanded and not toggled:
             toggled=True
             return "X"
@@ -374,8 +374,8 @@ def test_station_deck_pages_keep_telemetry_actions_and_exit_visible(monkeypatch,
         return "Q" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):assert vr.screen_station_menu(vr.Palette(False),world)=="Q"
-    text=" ".join(" ".join(frames).split())
-    for phrase in ("Station Services", "CRITICAL HULL", "Contraband aboard", "Regional supply disruption", "LOW CASH", "Cargo 2/", "[M]", "[Y]", "[B]", "[C]", "[S]", "[H]", "[G]", "[T]"):
+    text=page_text(frames)
+    for phrase in ("Station Services", "CRITICAL HULL", "Contraband aboard", "Regional supply disruption", "LOW CASH", "2/24", "[M]", "[Y]", "[B]", "[C]", "[S]", "[H]", "[G]", "[T]"):
         assert phrase in text
     if expanded:assert "systems charted" in text and "Crew:" in text
     assert world.save.to_dict()==before
@@ -450,8 +450,8 @@ def test_navigation_chart_pages_preserve_all_connections_and_career(monkeypatch,
     output=io.StringIO();frames=[]
     def choose():
         frame=output.getvalue();frames.append(frame);output.seek(0);output.truncate(0)
-        plain=" ".join(vr._ANSI_RE.sub("",frame).split())
-        match=re.search(r"Navigation: Fuel 24/24 (\d+)/(\d+)",plain);assert match and len(frames)<300
+        plain=page_text(frame)
+        match=re.search(r"Navigation: Fuel 24/24 (\d+)/(\d+)",page_title(frame));assert match and len(frames)<300
         assert "[B] Back" in plain
         return "Q" if match[1]==match[2] else ">"
     monkeypatch.setattr(vr,"read_key",choose)
@@ -532,12 +532,12 @@ def test_score_pages_retain_all_twenty_pilots_and_fields_without_reloading(tmp_p
         frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0);frames.append(frame)
         assert len(frame.splitlines())<=height
         assert all(vr._visible_width(line)<=width for line in frame.splitlines())
-        assert "[B] Back:" in " ".join(frame.split())
+        assert "[B] Back:" in page_text(frame)
         page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
         return "B" if page==count else "N"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):vr.screen_hall_of_fame(vr.Palette(False),world,tmp_path,20)
-    text=" ".join(" ".join(frames).split())
+    text=page_text(frames)
     for i in range(1,21):
         assert text.count(f"Pilot-{i:02}")==1
         assert f"{1_000_000-i:,}cr" in text
@@ -581,7 +581,7 @@ def test_screen_hall_of_fame_records_are_complete_and_width_safe(monkeypatch):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_hall_of_fame(vr.Palette(truecolor=False), world, save_dir, 1)
-    text = " ".join(vr._ANSI_RE.sub("", buf.getvalue()).split())
+    text = page_text(buf.getvalue())
     assert "SixteenCharHandl" in text and "999,999cr" in text
     assert "[YOU]" in text and "combat victories 120" in text
     assert "missions 88" in text and "retirements 3" in text
@@ -596,7 +596,7 @@ def test_screen_customs_large_contraband_stash_has_complete_width_safe_terms(mon
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_customs(vr.Palette(truecolor=False), world)
-    text = " ".join(vr._ANSI_RE.sub("", buf.getvalue()).split())
+    text = page_text(buf.getvalue())
     assert "35 units" in text and "60% acceptance" in text and "no debt" in text
     assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
@@ -771,16 +771,59 @@ def test_commission_and_cartel_screens_fit_standard_terminal(monkeypatch, termin
         assert "Back" in output.getvalue() and "Standing:" in output.getvalue()
 
 
-def test_status_bar_separator_is_79_columns():
-    world = _world_with_seed(315)
-    p = vr.Palette(truecolor=False)
+@pytest.mark.parametrize("width,height", [(80, 24), (64, 20), (40, 16)])
+def test_paged_screens_draw_the_hud_frame_inside_the_height_budget(monkeypatch, terminal, width, height):
+    """The frame is drawn, and it is paid for.
+
+    Making the screens responsive dropped the box from all twenty-four of them
+    (issue #486). Restoring it only counts if the page still fits the terminal it
+    was negotiated for, which is what charging the frame to `page_capacity` buys;
+    without that the box would push a row off the bottom of every full page.
+    """
+    terminal(width, height)
+    world = _world_with_seed(486)
+    monkeypatch.setattr(vr, "read_command_at_prompt", lambda: "Q")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        vr.draw_status_bar(p, world)
-    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n") if line.strip()]
-    rule_line = [line for line in stripped if line.startswith("─") and set(line) == {"─"}]
-    assert len(rule_line) == 1
-    assert len(rule_line[0]) == 79
+        assert vr.screen_station_menu(vr.Palette(False), world) == "Q"
+    rows = [vr._ANSI_RE.sub("", row) for row in buf.getvalue().split("\r\n")]
+    assert [row for row in rows if row.startswith("╭")], "the Command Deck lost its frame"
+    assert [row for row in rows if row.startswith("╰")], "the Command Deck lost its frame"
+    _assert_box_rows_match_border(buf.getvalue(), f"deck@{width}x{height}")
+    assert len(rows) <= height, f"page overflows a {height}-row terminal: {len(rows)} rows"
+    assert "1/" in buf.getvalue(), "the page counter is the paging oracle and has to survive"
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (39, 24), (80, 11)])
+def test_page_stays_flat_where_the_frame_would_cost_more_than_it_gives(monkeypatch, terminal, width, height):
+    """Below the floors, the compact layout the responsive work introduced stays:
+    four columns is a fifth of a 20-column caller's screen (#404, #486)."""
+    terminal(width, height)
+    world = _world_with_seed(486)
+    monkeypatch.setattr(vr, "read_command_at_prompt", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert vr.screen_station_menu(vr.Palette(False), world) == "Q"
+    rows = [vr._ANSI_RE.sub("", row) for row in buf.getvalue().split("\r\n")]
+    assert not [row for row in rows if row.startswith(("╭", "╰"))], "framed below its floor"
+    assert "Command Deck" in buf.getvalue() and "1/" in buf.getvalue()
+
+
+def test_command_deck_gauges_hull_fuel_and_hold_then_falls_back_to_numbers(terminal):
+    """The gauges went with the frame, and they are the part of the cockpit a
+    caller reads at a glance. They are also the first thing to drop when the row
+    does not fit: the numbers never are."""
+    world = _world_with_seed(487)
+    ship = world.save.ship
+    terminal(80, 24)
+    wide = next(row for row in vr.station_deck_lines(world) if row.startswith(ship.hull_class))
+    assert "■" in wide or "░" in wide, f"no gauges in {wide!r}"
+    assert f"{ship.hull_hp}/{vr.hull_hp_max(ship)}" in wide
+    assert f"{ship.fuel}/{vr.fuel_capacity(ship)}" in wide
+    terminal(40, 16)
+    narrow = next(row for row in vr.station_deck_lines(world) if row.startswith(ship.hull_class))
+    assert "■" not in narrow and "░" not in narrow, f"gauges kept past the width: {narrow!r}"
+    assert f"Hull {ship.hull_hp}/{vr.hull_hp_max(ship)}" in narrow and "Cargo" in narrow
 
 
 def _use_decoded_input(monkeypatch, data):
@@ -938,13 +981,13 @@ def test_display_options_paging_and_back_write_nothing(monkeypatch, terminal, wi
         frames.append(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
-        assert "[B] Back:" in " ".join(frame.split())
+        assert "[B] Back:" in page_text(frame)
         page, count = map(int, re.search(r"(\d+)/(\d+)", frame).groups())
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output):
         vr.screen_display_options(vr.Palette(False), world)
-    combined = " ".join(" ".join(frames).split())
+    combined = page_text(frames)
     for word in ("Full palette", "16-color", "Monochrome", "Plain", "UTF-8"):
         assert word in combined
     assert world.save.to_dict() == before
@@ -978,7 +1021,7 @@ def test_viewport_visits_every_view_and_page_without_writes(monkeypatch, termina
         return str(view) if view<=3 else "B"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):vr.screen_viewport(vr.Palette(False),world)
-    text=" ".join(vr._ANSI_RE.sub(""," ".join(frames)).split())
+    text=page_text(frames)
     assert "Views:" in text and world.here.station_name in text and "Discovery" in text
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
@@ -999,7 +1042,7 @@ def test_refit_portrait_preview_pages_keep_terms_and_back_changes_nothing(monkey
         return ">" if page<count else "B"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):assert vr._hull_refit_screen(vr.Palette(False),world,"Freighter",15000) is None
-    text=" ".join(vr._ANSI_RE.sub(""," ".join(frames)).split())
+    text=page_text(frames)
     for term in ("15,000cr", "20,000cr", "Fuel stays at 7", "does not fill", "cannot be reversed"):
         assert term in text
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
@@ -1249,8 +1292,8 @@ def test_single_page_footers_drop_paging_tokens_but_keep_the_counter(monkeypatch
     monkeypatch.setattr(vr, "read_key", lambda: "B")
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_shipyard(vr.Palette(False), world)
-    plain = " ".join(vr._ANSI_RE.sub("", output.getvalue()).split())
-    assert " 1/1 " in plain and "[<] Prev" not in plain and "[R] Refuel [P] Repair" in plain
+    plain = page_text(output.getvalue())
+    assert "1/1" in page_title(output.getvalue()) and "[<] Prev" not in plain and "[R] Refuel [P] Repair" in plain
 
 
 def test_dump_is_absent_and_harmless_with_an_empty_hold(monkeypatch):
@@ -1326,7 +1369,7 @@ def test_ledger_route_draft_starts_from_the_best_lead(monkeypatch):
     keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_trade_route(vr.Palette(False), world)
-    plain = " ".join(vr._ANSI_RE.sub("", output.getvalue()).split())
+    plain = page_text(output.getvalue())
     assert f"{vr.COMMODITIES[leads[0]['commodity']]['label']} x{leads[0]['quantity']}" in plain
     assert "Food x1" not in plain or leads[0]["commodity"] == "food" and leads[0]["quantity"] == 1
     keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
