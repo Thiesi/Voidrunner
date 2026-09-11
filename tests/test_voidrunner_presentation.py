@@ -794,7 +794,7 @@ def test_paged_screens_draw_the_hud_frame_inside_the_height_budget(monkeypatch, 
     assert "1/" in buf.getvalue(), "the page counter is the paging oracle and has to survive"
 
 
-@pytest.mark.parametrize("width,height", [(39, 24), (80, 11), (20, 10)])
+@pytest.mark.parametrize("width,height", [(39, 24), (80, 11), (20, 10), (40, 5)])
 def test_a_terminal_below_the_floor_is_refused_before_a_career_is_touched(monkeypatch, tmp_path, width, height):
     """One layout, one floor (issue #495).
 

@@ -8547,15 +8547,17 @@ def main() -> int:
     except (TypeError, ValueError):
         _OUTPUT_WIDTH = 80
     try:
-        _OUTPUT_HEIGHT = max(10, min(200, int(info.get("terminal_height", 24))))
+        reported_height = int(info.get("terminal_height", 24))
+        # The clamp keeps rendering safe; the refusal below quotes what was reported.
+        _OUTPUT_HEIGHT = max(10, min(200, reported_height))
     except (TypeError, ValueError):
-        _OUTPUT_HEIGHT = 24
+        reported_height = _OUTPUT_HEIGHT = 24
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
     if _terminal_too_small():
         out_line()
         out_line(f"{p.wrong}Voidrunner needs at least {MINIMUM_WIDTH} columns by "
                  f"{MINIMUM_HEIGHT} rows.{RESET}")
-        out_line(f"{p.muted}This terminal reports {_OUTPUT_WIDTH}x{_OUTPUT_HEIGHT}. "
+        out_line(f"{p.muted}This terminal reports {_OUTPUT_WIDTH}x{reported_height}. "
                  f"Resize it, or reconnect with a larger window, and launch again. "
                  f"No career was opened or changed.{RESET}")
         return 0

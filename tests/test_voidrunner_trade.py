@@ -317,9 +317,10 @@ def test_trade_route_destination_picker_pages_keep_selection_and_back_available(
         pages.append(value)
         output.seek(0)
         output.truncate(0)
-        # At 20 columns the bar needs a row more than the glued style did (#400), so
-        # every label is now one row too tall for a shared page and the picker heads
-        # each page "Choice n" instead; the counter is the same either way.
+        # At the 40-column floor the bar needs a row more than the glued style
+        # did (#400), so every label is now one row too tall for a shared page
+        # and the picker heads each page "Choice n" instead; the counter is the
+        # same either way.
         match = re.search(r"(\d+)/(\d+)", " ".join(value.split()))
         assert match and len(pages) < 500
         return "1" if match[1] == match[2] else "N"
