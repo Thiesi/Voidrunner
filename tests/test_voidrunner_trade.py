@@ -259,7 +259,7 @@ def test_market_memory_rejects_malformed_quotes_without_rewriting(tmp_path, memo
     assert (tmp_path / "77.json").read_bytes() == malformed
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("screen", ["memory", "route"])
 def test_market_memory_and_route_pages_reach_the_end_within_terminal_size(monkeypatch, terminal, width, height, screen):
     import copy
@@ -304,7 +304,7 @@ def test_market_memory_and_route_pages_reach_the_end_within_terminal_size(monkey
         assert all(system.name in text for system in world.galaxy)
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_trade_route_destination_picker_pages_keep_selection_and_back_available(monkeypatch, terminal, width, height):
     import re
     terminal(width, height)
@@ -538,7 +538,7 @@ def test_trading_ledger_rejects_malformed_storage_without_overwriting(tmp_path, 
     assert (tmp_path / "77.json").read_bytes() == malformed
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_trading_ledger_pages_fit_and_do_not_write(monkeypatch, terminal, width, height):
     import copy
     world = _world_with_seed(42)
@@ -650,7 +650,7 @@ def test_market_memory_rejects_uncharted_observation_before_exposing_station(tmp
     assert (tmp_path / "77.json").read_bytes() == raw
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_trade_route_draft_cancel_retains_original_and_fits_pages(monkeypatch, terminal, width, height):
     import copy, re
     world, destination = _world_with_market_memory()
@@ -828,7 +828,7 @@ def test_market_depth_exhausted_pool_reports_reason_without_quantity_prompt(monk
     assert "station stock" in text if buying else "demand is exhausted" in text
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_market_depth_commodity_details_fit_every_page_without_replenishing(monkeypatch, terminal, width, height):
     import copy, re
     world = _world_with_seed(42); world.save.market_depth = {0: {"metals": {"day": 0, "stock": 3, "demand": 4}}}
@@ -1029,7 +1029,7 @@ def test_regional_economy_market_tags_only_affected_stations_and_preserves_legal
         assert "Illegal" in text and ("BOOM" in text) == (index == 0)
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_economy_opportunity_pages_reach_all_candidates_within_terminal_size(monkeypatch, terminal, width, height):
     import copy, re
     world = _world_with_trade_opportunities(); world.event_rng.seed(31); vr.tick_economy_event(world)
@@ -1627,7 +1627,7 @@ def test_screen_futures_lists_tradeable_goods_and_outstanding_contracts(monkeypa
     assert "Outstanding orders" in text
 
 
-@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height",[(40,12),(80,24)])
 def test_futures_picker_pages_keep_terms_choices_and_return_position(monkeypatch, terminal,width,height):
     import re
     terminal(width, height)
@@ -1658,7 +1658,7 @@ def test_futures_picker_pages_keep_terms_choices_and_return_position(monkeypatch
     assert world.save.to_dict()==before
 
 
-@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height",[(40,12),(80,24)])
 @pytest.mark.parametrize("kind",["draft","order"])
 def test_futures_draft_and_order_pages_fit_and_preserve_all_terms(monkeypatch, terminal,width,height,kind):
     import re
@@ -2509,7 +2509,7 @@ def test_opening_quote_avoids_cargo_already_promised_to_an_earlier_delivery():
     assert any(m.description == "Earlier order" for m in world.save.active_missions)
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("orders", [1, 3])
 def test_cockpit_settlement_results_stay_inside_height_budget(monkeypatch, terminal, width, height, orders):
     import re
@@ -2555,7 +2555,7 @@ def test_cockpit_settlement_results_stay_inside_height_budget(monkeypatch, termi
 
 
 @pytest.mark.parametrize("kind", ["derelict", "distress"])
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("style", ["auto", "plain"])
 def test_exploration_terms_fit_and_browsing_has_no_effects(monkeypatch, terminal, kind, width, height, style):
     import copy, re
@@ -2600,7 +2600,7 @@ def test_unavailable_survey_changes_nothing(fault):
     assert world.save.to_dict() == saved and world.event_rng.getstate() == rng
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("style", ["auto", "plain"])
 @pytest.mark.parametrize("fuel", [2, 24])
 def test_survey_terms_before_and_after_scanning_fit_and_browsing_is_read_only(monkeypatch, terminal, width, height, style, fuel):
@@ -2644,13 +2644,13 @@ def test_survey_report_retains_every_contact_and_result_after_invalid_input(monk
     import re
     world = _world_with_seed(42); world.save.ship.scanner_tier = 1
     targets = vr.survey_candidates(world)
-    terminal(20, 10)
+    terminal(40, 12)
     out = io.StringIO(); frames = []; chose = False; invalid = False
     def choose():
         nonlocal chose, invalid
         frame = out.getvalue(); out.seek(0); out.truncate(0); frames.append(frame)
-        assert len(frame.splitlines()) <= 10
-        assert all(vr._visible_width(row) <= 20 for row in frame.splitlines())
+        assert len(frame.splitlines()) <= 12
+        assert all(vr._visible_width(row) <= 40 for row in frame.splitlines())
         if not chose: chose = True; return "S"
         if not invalid: invalid = True; return "?"
         page, count = map(int, re.search(r"Survey.*?(\d+)/(\d+)", frame, re.S).groups())
@@ -2692,7 +2692,7 @@ def test_specialist_sites_are_distinct_deterministic_and_preserve_existing_world
         assert vr.specialist_stations(vr.World(vr.SaveData.from_dict(before))) == sites
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_specialist_directory_paging_keeps_all_named_sites_and_stable_keys(monkeypatch, terminal, width, height):
     import copy,re
     world = _world_with_seed(42)
@@ -2757,7 +2757,7 @@ def test_ship_portrait_damage_matches_real_hull_without_changing_ship(hull,condi
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng and vr.PORTRAITS==registry
 
 
-@pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height", [(40,12),(80,24)])
 @pytest.mark.parametrize("style", list(vr.DISPLAY_STYLES))
 def test_every_portrait_has_distinct_complete_bounded_composition(monkeypatch, terminal,width,height,style):
     terminal(width, height, style)

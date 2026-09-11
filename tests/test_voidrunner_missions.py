@@ -17,7 +17,7 @@ from .support import _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _escort_wor
 
 
 @pytest.mark.parametrize("active", [False, True])
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_mission_navigation_pages_preserve_chart_and_career(monkeypatch, terminal, active, width, height):
     import copy, re
     world, mission = _mission_details_world("scan")
@@ -133,7 +133,7 @@ def test_mission_navigation_large_legacy_queue_budgets_actual_page_number_width(
     world,mission=_mission_details_world("bounty")
     world.save.active_missions=[vr.Mission(i,"bounty","Legacy bounty",500,0,mission.target_system,pirate_tier=1) for i in range(1,1002)]
     mission=world.save.active_missions[-1]
-    terminal(20, 10)
+    terminal(40, 12)
     title=f"Contract Route #{mission.id}"; footer="[J] Jump next [N] Next [P] Prev [B] Back: "
     pages=vr._trade_pages(vr.mission_navigation_lines(world,mission,active=True),title,footer)
     assert len(pages)>999
@@ -142,8 +142,8 @@ def test_mission_navigation_large_legacy_queue_budgets_actual_page_number_width(
             vr.out_line(); vr.out_line(f"{title} {index+1}/{len(pages)}")
             for line in pages[index]: vr.out_line(line)
             vr.out_prompt(footer)
-        assert len(output.getvalue().splitlines())<=10
-        assert all(vr._visible_width(line)<=20 for line in output.getvalue().splitlines())
+        assert len(output.getvalue().splitlines())<=12
+        assert all(vr._visible_width(line)<=40 for line in output.getvalue().splitlines())
 
 
 @pytest.mark.parametrize("active,commands", [(False,b"B1RBBBQ"),(False,b"B1R"),(True,b"CRBQQ"),(True,b"CR")])
@@ -645,7 +645,7 @@ def test_acceptance_requires_last_details_page_and_checkpoints_before_ack(monkey
     assert not world.save.mission_boards[0]["offers"]
 
 
-@pytest.mark.parametrize("width,height", [(40, 24), (80, 24), (40, 12), (20, 10)])
+@pytest.mark.parametrize("width,height", [(40, 24), (80, 24), (40, 12)])
 def test_full_contract_details_fit_each_page_and_retain_back(monkeypatch, terminal, width, height):
     world, mission = _mission_details_world("escort")
     mission.description = "Very long objective " * 20
@@ -883,8 +883,10 @@ def test_queued_bounty_route_budgets_preceding_fights():
 def test_tiny_contract_board_splits_entries_and_keeps_selection(monkeypatch, terminal):
     import re
     world, mission = _mission_details_world("escort")
-    world.by_id[mission.target_system].name = "A particularly long system name that cannot fit one page"
-    terminal(20, 10)
+    # An offer line longer than a whole 40x12 page: the board has to split it and
+    # keep the selection key on every part (issue #411).
+    world.by_id[mission.target_system].name = "A particularly long system name " * 8
+    terminal(40, 12)
     output = io.StringIO()
     offset = 0
     frames = []
@@ -894,8 +896,8 @@ def test_tiny_contract_board_splits_entries_and_keeps_selection(monkeypatch, ter
         frame = output.getvalue()[offset:]
         offset = len(output.getvalue())
         frames.append(frame)
-        assert len(frame.split("\r\n")) <= 10
-        assert all(vr._visible_width(row) <= 20 for row in frame.split("\r\n"))
+        assert len(frame.split("\r\n")) <= 12
+        assert all(vr._visible_width(row) <= 40 for row in frame.split("\r\n"))
         plain = vr._ANSI_RE.sub("", frame)
         page, total = map(int, re.search(r"Contracts (\d+)/(\d+)", plain).groups())
         return "N" if page < total else "1" if not selected else "B"

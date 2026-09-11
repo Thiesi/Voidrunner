@@ -829,7 +829,7 @@ def test_missing_economy_event_fields_remain_recoverable_corruption(tmp_path, mo
     assert "[R] Restore" in output.getvalue()
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_recovery_pages_fit_terminal_and_restore_is_on_last_page(tmp_path, monkeypatch, terminal, width, height):
     _broken_career_with_previous(tmp_path)
     terminal(width, height)
@@ -922,7 +922,7 @@ def test_a_tagged_market_row_still_fits_one_line(monkeypatch):
     tagged = vr._market_row(head, depth, 7, ["Illegal", "[CRASH]"])
     assert tagged == head + " Hold 7. Illegal [CRASH]"  # depth gives way first, the hold last
     assert vr._visible_width(tagged) <= 79
-    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 20)  # too narrow for any form: keep everything and wrap
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40)  # the floor: the shortest form still wraps here
     narrow = [row for row in vr.market_catalog_lines(world, [contraband]) if row.startswith("[")]
     assert "Stock" in narrow[0] and "hold 7" in narrow[0]
 
@@ -1002,7 +1002,7 @@ def test_the_rescue_tow_prepares_the_station_it_tows_you_to(monkeypatch):
     assert vr.posted_mission_offers(world)  # the board of the station just entered
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_every_paged_screen_fits_and_offers_back_on_every_page(monkeypatch, terminal, width, height):
     """One table instead of a per-screen copy (issue #418).
 

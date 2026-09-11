@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from .support import _VOIDRUNNER_PATH, _door_stopped_at, _escort_world, _finale_world, _mission_details_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_text, page_title, vr
+from .support import _VOIDRUNNER_PATH, _door_stopped_at, _escort_world, _finale_world, _mission_details_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
 
 
 #
@@ -64,7 +64,7 @@ def _sgr_colour_runs(line: str) -> list[tuple[str, str]]:
     return runs
 
 
-@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height",[(40,12),(80,24)])
 @pytest.mark.parametrize("section",["C","H"])
 def test_pilot_record_pages_expose_every_retained_entry_once_without_rebuilding(monkeypatch, terminal,width,height,section):
     import re
@@ -160,7 +160,7 @@ def test_screen_status_credits_remain_complete_and_width_safe(monkeypatch):
     assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
 
-@pytest.mark.parametrize("width,height", [(20,10), (40,12), (80,24)])
+@pytest.mark.parametrize("width,height", [(40,12), (80,24)])
 @pytest.mark.parametrize("screen", ["yard", "crew"])
 @pytest.mark.parametrize("maxed", [False, True])
 def test_service_pages_retain_all_terms_and_fit_terminal(monkeypatch, terminal,width,height,screen,maxed):
@@ -243,7 +243,7 @@ def test_service_retained_upgrade_result_is_durable_without_menu_exit(tmp_path):
         assert saved.ship.cargo_tier==1 and saved.pilot.credits==before-cost
 
 
-@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height",[(40,12),(80,24)])
 @pytest.mark.parametrize("haven",[False,True])
 def test_market_catalog_pages_preserve_goods_quotes_and_telemetry(monkeypatch, terminal,width,height,haven):
     import re
@@ -344,7 +344,7 @@ def test_screen_market_contraband_catalog_keeps_labels_and_bounds(monkeypatch):
     assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
 
-@pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height", [(40,12),(80,24)])
 @pytest.mark.parametrize("expanded", [False,True])
 def test_station_deck_pages_keep_telemetry_actions_and_exit_visible(monkeypatch, terminal,without_action_bar,width,height,expanded):
     import re
@@ -383,7 +383,7 @@ def test_station_deck_pages_keep_telemetry_actions_and_exit_visible(monkeypatch,
 
 @pytest.mark.parametrize("key",list("MYBCSHGTQ"))
 def test_station_deck_service_keys_work_after_paging_and_expansion(monkeypatch, terminal,key):
-    terminal(20, 10)
+    terminal(40, 12)
     world=_world_with_seed(42)
     before=world.save.to_dict()
     commands=iter([">","X",">","<",key])
@@ -438,7 +438,7 @@ def test_screen_station_menu_special_ops_fit_the_standard_page(monkeypatch):
         assert key in text
 
 
-@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height",[(40,12),(80,24)])
 @pytest.mark.parametrize("discovered",[False,True])
 def test_navigation_chart_pages_preserve_all_connections_and_career(monkeypatch, terminal,width,height,discovered):
     import copy,re
@@ -515,7 +515,7 @@ def test_chart_retained_scan_result_is_checkpointed_before_disconnect(tmp_path):
         assert saved.ship.fuel == world.save.ship.fuel - 2
 
 
-@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height",[(40,12),(80,24)])
 def test_score_pages_retain_all_twenty_pilots_and_fields_without_reloading(tmp_path,monkeypatch, terminal,width,height):
     import json,re
     terminal(width, height)
@@ -794,19 +794,32 @@ def test_paged_screens_draw_the_hud_frame_inside_the_height_budget(monkeypatch, 
     assert "1/" in buf.getvalue(), "the page counter is the paging oracle and has to survive"
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (39, 24), (80, 11)])
-def test_page_stays_flat_where_the_frame_would_cost_more_than_it_gives(monkeypatch, terminal, width, height):
-    """Below the floors, the compact layout the responsive work introduced stays:
-    four columns is a fifth of a 20-column caller's screen (#404, #486)."""
-    terminal(width, height)
-    world = _world_with_seed(486)
-    monkeypatch.setattr(vr, "read_command_at_prompt", lambda: "Q")
-    buf = io.StringIO()
+@pytest.mark.parametrize("width,height", [(39, 24), (80, 11), (20, 10)])
+def test_a_terminal_below_the_floor_is_refused_before_a_career_is_touched(monkeypatch, tmp_path, width, height):
+    """One layout, one floor (issue #495).
+
+    The door used to carry a second, stripped presentation for terminals down to
+    twenty columns, and designing for that caller is what flattened the game for
+    everyone else. Below 40x12 it now says so and stops -- before the save
+    directory is touched, so a caller who resizes loses nothing.
+    """
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    monkeypatch.setenv("VOIDRUNNER_SAVE_DIR", str(tmp_path / "saves"))
+    monkeypatch.setattr(vr, "_load_door_info", lambda: {
+        "handle": "Thiesi", "user_id": 7, "terminal_width": width,
+        "terminal_height": height, "color_depth": "256", "node_name": "ReLink"})
+    monkeypatch.setattr(vr, "_default_save_dir", lambda: pytest.fail("a refused launch opened the save directory"))
+    class _Capture(io.StringIO):
+        reconfigure = staticmethod(lambda **kwargs: None)  # main() sets the encoding
+
+    buf = _Capture()
     with contextlib.redirect_stdout(buf):
-        assert vr.screen_station_menu(vr.Palette(False), world) == "Q"
-    rows = [vr._ANSI_RE.sub("", row) for row in buf.getvalue().split("\r\n")]
-    assert not [row for row in rows if row.startswith(("╭", "╰"))], "framed below its floor"
-    assert "Command Deck" in buf.getvalue() and "1/" in buf.getvalue()
+        assert vr.main() == 0
+    said = vr._ANSI_RE.sub("", buf.getvalue())
+    assert "at least 40 columns by 12 rows" in " ".join(said.split())
+    assert f"{width}x{height}" in said, "the caller is told what their terminal reports"
+    assert not (tmp_path / "saves").exists()
 
 
 def test_command_deck_gauges_hull_fuel_and_hold_then_falls_back_to_numbers(terminal):
@@ -893,7 +906,7 @@ def test_standalone_escape_does_not_capture_later_hotkeys(command):
     assert reader.read_key() == "Q"
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("screen", ["guide", "offer"])
 def test_opening_guide_and_offer_pages_fit_and_browsing_is_read_only(monkeypatch, terminal, width, height, screen):
     import copy
@@ -966,7 +979,7 @@ def test_display_output_color_and_art_keep_unicode_letters(monkeypatch, style, t
         assert artwork in text
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_display_options_paging_and_back_write_nothing(monkeypatch, terminal, width, height):
     import re
     terminal(width, height)
@@ -1002,7 +1015,7 @@ def test_plain_display_keeps_utf8_input_and_wide_backspace(monkeypatch):
     assert "\b \b\b \b" in output.getvalue()
 
 
-@pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height", [(40,12),(80,24)])
 @pytest.mark.parametrize("style", list(vr.DISPLAY_STYLES))
 def test_viewport_visits_every_view_and_page_without_writes(monkeypatch, terminal,width,height,style):
     import copy,re
@@ -1026,7 +1039,7 @@ def test_viewport_visits_every_view_and_page_without_writes(monkeypatch, termina
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
-@pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height", [(40,12),(80,24)])
 def test_refit_portrait_preview_pages_keep_terms_and_back_changes_nothing(monkeypatch, terminal,width,height):
     import copy,re
     world=_world_with_seed(42); world.save.pilot.credits=20000; world.save.ship.fuel=7
@@ -1157,7 +1170,7 @@ def test_dossiers_record_losses_and_older_dossiers_still_load():
     with pytest.raises(vr.ResumeError): vr.SaveData.from_dict(data)
 
 
-@pytest.mark.parametrize("width,labelled", [(20, False), (39, False), (40, True), (80, True)])
+@pytest.mark.parametrize("width,labelled", [(40, True), (48, True), (80, True)])
 def test_the_combat_bar_keeps_its_labels_until_the_page_cannot_afford_them(monkeypatch, width, labelled):
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
     bar = vr.combat_action_bar("F/E/D/P")
@@ -1270,16 +1283,19 @@ def test_chart_continuations_are_indented_and_still_selectable(monkeypatch, term
 
 
 def test_mission_board_and_picker_continuations_carry_one_key(monkeypatch, terminal):
-    terminal(30, 24)
+    terminal(40, 24)
     world, mission = _mission_details_world()
+    # Long enough to wrap at the floor, which is what makes it a continuation.
+    world.by_id[mission.target_system].name = "Xanthe Deep Survey Anchorage Station"
     monkeypatch.setattr(vr, "read_key", lambda: "B")
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_missions(vr.Palette(False), world)
-    rows = vr._ANSI_RE.sub("", output.getvalue()).split("\r\n")
-    assert sum(row.startswith("[1] OFFER") for row in rows) == 1 and any(row.startswith("    ") for row in rows)
+    rows = page_rows(output.getvalue())
+    assert sum(row.startswith("[1] OFFER") for row in rows) == 1
+    assert any(row.startswith("    ") for row in page_rows(output.getvalue(), keep_indent=True))
     keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
-        vr._pick_trade_field("Pick", [("x", "a very long option label that certainly wraps at thirty columns wide")])
+        vr._pick_trade_field("Pick", [("x", "a very long option label that certainly wraps at forty columns wide")])
     rows = vr._ANSI_RE.sub("", output.getvalue()).split("\r\n")
     assert sum(row.startswith("[1] a very long") for row in rows) == 1 and any(row.startswith("    ") for row in rows)
 

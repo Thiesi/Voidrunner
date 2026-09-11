@@ -836,7 +836,7 @@ def test_general_route_flies_only_one_leg_until_another_command(monkeypatch, out
     assert ("Last hop: arrived" if outcome == "arrive" else "Travel diverted") in output.getvalue()
 
 
-@pytest.mark.parametrize("width,height", [(20,10), (40,12), (80,24)])
+@pytest.mark.parametrize("width,height", [(40,12), (80,24)])
 def test_general_route_pages_are_read_only_and_hide_unknown_details(monkeypatch, terminal, width, height):
     import copy, re
     world, mission = _mission_details_world("delivery")
@@ -891,12 +891,12 @@ def test_general_route_all_destinations_reachable_in_compact_picker(monkeypatch,
     import re
     world = _world_with_seed(200)
     for station in world.galaxy: station.discovered = True
-    terminal(20, 10)
+    terminal(40, 12)
     options = sorted([(s.id, s.name) for s in world.galaxy], key=lambda item: item[1])
     output = io.StringIO(); frames = []
     def choose():
         frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
-        # Titles can wrap between words at 20 columns.
+        # Titles can wrap between words at the 40-column floor.
         match = re.search(r"Charted Destination (\d+)/(\d+)", page_text(frame))
         assert match
         if match[1] != match[2]: return "N"
@@ -904,8 +904,8 @@ def test_general_route_all_destinations_reachable_in_compact_picker(monkeypatch,
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): selected = vr._pick_trade_field("Charted Destination", options)
     assert selected == options[-1][0]
-    assert all(len(frame.splitlines()) <= 10 for frame in frames)
-    assert all(vr._visible_width(line) <= 20 for frame in frames for line in frame.splitlines())
+    assert all(len(frame.splitlines()) <= 12 for frame in frames)
+    assert all(vr._visible_width(line) <= 40 for frame in frames for line in frame.splitlines())
 
 
 @pytest.mark.parametrize("commands", [b"CG1BQQ", b"CG1", b"CG1D1BQQ", b"CG1D1"])
@@ -927,8 +927,9 @@ def test_real_general_route_back_and_eof_preserve_career(tmp_path, commands):
 @pytest.mark.parametrize("title", ["Charted Destination", "Destination", "Inspect Station"])
 def test_destination_picker_keeps_wrapped_names_on_one_page(monkeypatch, terminal,title):
     import re
-    terminal(20, 10)
-    options=[(1,"Alpha"),(2,"Beta"),(3,"Yellowstone Deep"),(4,"Zeta")]
+    terminal(40, 12)
+    # Long enough to wrap at the 40-column floor, which is what makes this a test.
+    options=[(1,"Alpha"),(2,"Beta"),(3,"Yellowstone Deep Survey Anchorage Station"),(4,"Zeta")]
     output=io.StringIO(); frames=[]
     def choose():
         frame=output.getvalue();frames.append(frame);output.seek(0);output.truncate(0)
@@ -941,14 +942,14 @@ def test_destination_picker_keeps_wrapped_names_on_one_page(monkeypatch, termina
     assert len(containing)==1
     assert "Yellowstone" in containing[0] and "Deep" in containing[0]
     keyed=re.findall(r"\[(\d)\] Yellowstone",containing[0])
-    assert len(keyed)==1 and re.search(r"^\s{4}Deep",containing[0],re.M)  # one key; the continuation is indented (#411)
-    assert all(len(frame.splitlines())<=10 for frame in frames)
-    assert all(vr._visible_width(line)<=20 for frame in frames for line in frame.splitlines())
+    assert len(keyed)==1 and re.search(r"^\s{4}\w",containing[0],re.M)  # one key; the continuation is indented (#411)
+    assert all(len(frame.splitlines())<=12 for frame in frames)
+    assert all(vr._visible_width(line)<=40 for frame in frames for line in frame.splitlines())
 
 
-@pytest.mark.parametrize("label",["Yellowstone Deep", "A very long station name " * 12])
+@pytest.mark.parametrize("label",["Yellowstone Deep Survey Anchorage " * 16, "A very long station name " * 24])
 def test_tiny_picker_keeps_oversized_label_as_one_read_through_choice(monkeypatch, terminal,label):
-    terminal(15, 10)
+    terminal(40, 12)
     output=io.StringIO();frames=[]
     def choose():
         frame=output.getvalue();frames.append(frame);output.seek(0);output.truncate(0)
@@ -960,8 +961,8 @@ def test_tiny_picker_keeps_oversized_label_as_one_read_through_choice(monkeypatc
     with contextlib.redirect_stdout(output):selected=vr._pick_trade_field("Charted Destination",[(77,label)])
     assert selected==77
     assert all("Choice 1" in frame for frame in frames)
-    assert all(len(frame.splitlines())<=10 for frame in frames)
-    assert all(vr._visible_width(line)<=15 for frame in frames for line in frame.splitlines())
+    assert all(len(frame.splitlines())<=12 for frame in frames)
+    assert all(vr._visible_width(line)<=40 for frame in frames for line in frame.splitlines())
     rows=[]
     for frame in frames:
         for row in frame.splitlines():
@@ -971,7 +972,7 @@ def test_tiny_picker_keeps_oversized_label_as_one_read_through_choice(monkeypatc
 
 
 def test_oversized_picker_ignores_selection_on_incomplete_parts(monkeypatch, terminal):
-    terminal(15, 10)
+    terminal(40, 12)
     output=io.StringIO();attempted=False
     def choose():
         nonlocal attempted
@@ -987,7 +988,7 @@ def test_oversized_picker_ignores_selection_on_incomplete_parts(monkeypatch, ter
 
 @pytest.mark.parametrize("back", [False, True])
 def test_oversized_picker_keeps_choice_identity_when_returning_from_next_option(monkeypatch, terminal, back):
-    terminal(15, 10)
+    terminal(40, 12)
     output = io.StringIO()
     returned = False
     frames = []
@@ -1011,7 +1012,7 @@ def test_oversized_picker_keeps_choice_identity_when_returning_from_next_option(
     assert selected == (None if back else 7)
 
 
-@pytest.mark.parametrize("width,height",[(20,10),(40,10),(39,24),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height",[(40,12),(48,14),(80,24)])
 def test_map_list_advertises_only_available_view_actions(monkeypatch, terminal,width,height):
     terminal(width, height)
     world=_world_with_seed(42);before=world.save.to_dict()
@@ -1392,7 +1393,7 @@ def test_unaffordable_customs_bribe_is_harmless_and_keeps_inspection_pending(mon
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("credits", [0, 10_000])
 @pytest.mark.parametrize("style", ["auto", "plain"])
 def test_customs_pages_keep_complete_terms_without_mutation(monkeypatch, terminal, without_action_bar, width, height, credits, style):
@@ -1684,7 +1685,7 @@ def test_faction_and_workshop_blockers_name_what_is_missing():
         vr.workshop_quote(world, "no-such-workshop")
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_the_workshop_screen_fits_and_can_be_left(monkeypatch, terminal, width, height):
     """`screen_workshop` takes a workshop key, so it is not in the generic table (#423)."""
     terminal(width, height)
