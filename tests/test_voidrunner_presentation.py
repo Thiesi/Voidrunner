@@ -46,6 +46,24 @@ def _assert_box_rows_match_border(text: str, label: str) -> None:
             )
 
 
+def _sgr_colour_runs(line: str) -> list[tuple[str, str]]:
+    """One rendered row as (colour, text) runs: the last SGR wins, a reset clears it.
+
+    Accurate for rows that carry colour and no other attribute, which is every
+    content row of a box.
+    """
+    runs, colour, position = [], "", 0
+    for match in vr._ANSI_RE.finditer(line):
+        chunk = line[position : match.start()]
+        if chunk:
+            runs.append((colour, chunk))
+        colour = "" if match.group(0) == vr.RESET else match.group(0)
+        position = match.end()
+    if line[position:]:
+        runs.append((colour, line[position:]))
+    return runs
+
+
 @pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
 @pytest.mark.parametrize("section",["C","H"])
 def test_pilot_record_pages_expose_every_retained_entry_once_without_rebuilding(monkeypatch, terminal,width,height,section):
@@ -678,6 +696,36 @@ def test_create_career_box_rows_fit_79_column_border(monkeypatch):
     border_lines = [line for line in stripped if line.startswith(("╭", "╰"))]
     assert len(border_lines) == 2
     assert {len(line) for line in border_lines} == {79}
+
+
+def test_create_career_greeting_holds_one_colour_and_highlights_the_callsign(monkeypatch, terminal):
+    """The greeting is one sentence and has to arrive in one colour.
+
+    Only its first clause used to be coloured, so the rest of the sentence --
+    including the whole of a wrapped second row -- arrived in the terminal's
+    default foreground, which on a caller's client is not necessarily
+    distinguishable from the colour this very box's border is drawn in
+    (playtest, 2026-09-11). The callsign is the one part allowed to differ.
+    """
+    terminal(64, 24, "auto")
+    p, handle = vr.Palette(truecolor=False), "SixteenCharHandl"
+    monkeypatch.setattr(vr, "read_line_raw", lambda max_len=16, allowed=None: "")
+    monkeypatch.setattr(vr, "confirm", lambda prompt, palette: True)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert vr.create_career(p, {"handle": handle}) == handle
+    rows = [row for row in buf.getvalue().split("\r\n") if vr._ANSI_RE.sub("", row).startswith("│")]
+    assert len(rows) > 1, "the greeting has to wrap here or this test proves nothing"
+    coloured: dict[str, list[str]] = {}
+    for row in rows:
+        for colour, text in _sgr_colour_runs(row):
+            body = text.strip("│ ")
+            if body:
+                coloured.setdefault(colour, []).append(body)
+    assert "" not in coloured, f"greeting text left in the terminal's own colour: {coloured.get('')}"
+    assert p.accent not in coloured, f"greeting text drawn in the border's colour: {coloured.get(p.accent)}"
+    assert coloured.pop(p.gold) == [handle], "the callsign is the one highlight in the greeting"
+    assert set(coloured) == {p.muted}, f"the greeting is split across colours: {set(coloured)}"
 
 
 def test_screen_crew_and_galaxy_map_boxes_match_79_columns(monkeypatch):

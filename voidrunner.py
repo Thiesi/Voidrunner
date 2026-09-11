@@ -4460,18 +4460,26 @@ def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str 
     title = "Pilot Commission Registration"
     if _visible_width(title) > inner_w - 5: title = "Registration"
     out_line(_box_title(p, _fit_text(title, max(1, inner_w - 5))))
-    welcome = welcome or f"Welcome to the void, pilot. No career dossier found for {info['handle']}."
-    for index, row in enumerate(_wrap_output(welcome, max(1, inner_w - 2)).split("\r\n")):
-        styled = row.replace("Welcome to the void, pilot.", f"{p.gold}Welcome to the void, pilot.{RESET}") if index == 0 else row
-        out_line(f"{p.accent}│{RESET}{_pad('  ' + styled, inner_w, 'left')}{p.accent}│{RESET}")
+    handle = info["handle"]
+    welcome = welcome or f"Welcome to the void, pilot. No career dossier found for {p.gold}{handle}{p.muted}."
+    # One colour for the whole greeting, with the callsign the one thing picked
+    # out of it. A wrapped row used to carry no colour of its own, so a sentence
+    # that spilled onto a second row arrived in two colours -- the continuation
+    # in the terminal's default foreground, which on a caller's client can be
+    # the colour this box's own border is drawn in.
+    active = p.muted
+    for index, row in enumerate(_wrap_output(f"{p.muted}{welcome}", max(1, inner_w - 2)).split("\r\n")):
+        styled = row if index == 0 else active + row
+        active = _active_sgr_after(row, active)
+        out_line(f"{p.accent}│{RESET}{_pad('  ' + styled + RESET, inner_w, 'left')}{p.accent}│{RESET}")
     out_line(_box_bottom(p))
-    out_prompt(f"  {p.muted}Pilot callsign [{info['handle']}]: {RESET}")
+    out_prompt(f"  {p.muted}Pilot callsign [{p.gold}{handle}{p.muted}]: {RESET}")
     entered = read_line_raw(max_len=16, allowed=lambda c: c.isalnum() or bool(unicodedata.combining(c)) or c == " ").strip()
-    callsign = entered or info["handle"]
+    callsign = entered or handle
     out_line()
     out_line(f"{p.muted}  Starting deployment: Freeport Anchorage{RESET}")
     out_line(f"{p.muted}  Vessel: Battered Shuttle  │  Starting Bank: 1,200 cr  │  Cargo: Empty Hold{RESET}")
-    if confirm(f"Launch {callsign}'s career?", p):
+    if confirm(f"Launch {p.gold}{callsign}{p.muted}'s career?", p):
         return callsign
     out_line(f"{p.muted}Career launch cancelled. No career was saved.{RESET}")
     return None
@@ -8549,8 +8557,8 @@ def main() -> int:
             # After a refusal there *is* a dossier; it is simply not one this
             # build opens, and saying otherwise would read as a bug (#421).
             callsign = create_career(p, info, welcome=(
-                f"Welcome to the void, pilot. The dossier for {info['handle']} predates this "
-                "version of the game; this registers a new career in its place."
+                f"Welcome to the void, pilot. The dossier for {p.gold}{info['handle']}{p.muted} "
+                "predates this version of the game; this registers a new career in its place."
                 if outdated else None))
             if callsign is None:
                 return 0
