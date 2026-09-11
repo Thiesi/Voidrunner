@@ -4310,22 +4310,27 @@ def _refuse_size(p: "Palette", reported_height: int) -> None:
     """
     size = f"{_OUTPUT_WIDTH}x{reported_height}"
     need = f"{MINIMUM_WIDTH}x{MINIMUM_HEIGHT}"
-    if reported_height >= 8 and _OUTPUT_WIDTH >= 30:
-        lines = ["", f"{p.wrong}Voidrunner needs at least {MINIMUM_WIDTH} columns by "
-                 f"{MINIMUM_HEIGHT} rows.{RESET}",
-                 f"{p.muted}This terminal reports {size}. Resize it, or reconnect with "
-                 f"a larger window, and launch again. No career was opened or "
-                 f"changed.{RESET}"]
-    elif reported_height >= 4:
-        lines = [f"{p.wrong}Voidrunner needs {need}.{RESET}",
-                 f"{p.muted}This is {size}.{RESET}",
-                 f"{p.muted}Resize and launch again.{RESET}"]
-    else:
-        lines = [f"{p.wrong}Voidrunner needs {need}; this is {size}.{RESET}"]
-    rows: list[str] = []
-    for line in lines:
-        rows.extend(_wrap_output(line, max(1, _OUTPUT_WIDTH)).split("\r\n"))
-    rows = rows[:max(1, reported_height)]
+    # Longest first. Both sizes are what makes the message actionable, so a
+    # shorter wording always beats a longer one with its tail cut off.
+    wordings = [
+        ["", f"{p.wrong}Voidrunner needs at least {MINIMUM_WIDTH} columns by "
+         f"{MINIMUM_HEIGHT} rows.{RESET}",
+         f"{p.muted}This terminal reports {size}. Resize it, or reconnect with a "
+         f"larger window, and launch again. No career was opened or changed.{RESET}"],
+        [f"{p.wrong}Voidrunner needs {need}.{RESET}", f"{p.muted}This is {size}.{RESET}",
+         f"{p.muted}Resize and launch again.{RESET}"],
+        [f"{p.wrong}Voidrunner needs {need}; this is {size}.{RESET}"],
+        [f"{p.wrong}Need {need}; is {size}.{RESET}"],
+        [f"{p.wrong}{need}>{size}{RESET}"],
+    ]
+    budget = max(1, reported_height)
+    for lines in wordings:
+        rows: list[str] = []
+        for line in lines:
+            rows.extend(_wrap_output(line, max(1, _OUTPUT_WIDTH)).split("\r\n"))
+        if len(rows) <= budget:
+            break
+    rows = rows[:budget]  # only a terminal too small for "40x12>1x1" reaches this
     for row in rows[:-1]:
         out_line(row)
     out(rows[-1])
