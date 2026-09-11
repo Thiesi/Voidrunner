@@ -4297,6 +4297,33 @@ def _box_outer_width() -> int:
 MINIMUM_WIDTH, MINIMUM_HEIGHT = 40, 12
 
 
+def _refuse_size(p: "Palette", reported_height: int) -> None:
+    """Say why, in the rows the terminal actually has.
+
+    A refusal that scrolls its own reason away is no better than a crash, and
+    these are by definition the smallest terminals there are: every line here
+    fits 40 columns, the message shrinks with the height, and the last line is
+    written without a newline so it cannot push itself off a one-row screen.
+    """
+    size = f"{_OUTPUT_WIDTH}x{reported_height}"
+    need = f"{MINIMUM_WIDTH}x{MINIMUM_HEIGHT}"
+    if reported_height >= 8:
+        lines = ["", f"{p.wrong}Voidrunner needs at least {MINIMUM_WIDTH} columns by "
+                 f"{MINIMUM_HEIGHT} rows.{RESET}",
+                 f"{p.muted}This terminal reports {size}. Resize it, or reconnect with "
+                 f"a larger window, and launch again. No career was opened or "
+                 f"changed.{RESET}"]
+    elif reported_height >= 4:
+        lines = [f"{p.wrong}Voidrunner needs {need}.{RESET}",
+                 f"{p.muted}This terminal reports {size}.{RESET}",
+                 f"{p.muted}Resize and launch again.{RESET}"]
+    else:
+        lines = [f"{p.wrong}Voidrunner needs {need}; this is {size}.{RESET}"]
+    for line in lines[:-1]:
+        out_line(line)
+    out(lines[-1])
+
+
 def _terminal_too_small() -> bool:
     """Whether this terminal is below the size the game is designed for.
 
@@ -8554,12 +8581,7 @@ def main() -> int:
         reported_height = _OUTPUT_HEIGHT = 24
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
     if _terminal_too_small():
-        out_line()
-        out_line(f"{p.wrong}Voidrunner needs at least {MINIMUM_WIDTH} columns by "
-                 f"{MINIMUM_HEIGHT} rows.{RESET}")
-        out_line(f"{p.muted}This terminal reports {_OUTPUT_WIDTH}x{reported_height}. "
-                 f"Resize it, or reconnect with a larger window, and launch again. "
-                 f"No career was opened or changed.{RESET}")
+        _refuse_size(p, reported_height)
         return 0
     save_dir = _default_save_dir()
     # Real NetBBS launches always carry a real positive user_id from the

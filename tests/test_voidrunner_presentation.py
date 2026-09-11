@@ -794,7 +794,7 @@ def test_paged_screens_draw_the_hud_frame_inside_the_height_budget(monkeypatch, 
     assert "1/" in buf.getvalue(), "the page counter is the paging oracle and has to survive"
 
 
-@pytest.mark.parametrize("width,height", [(39, 24), (80, 11), (20, 10), (40, 5)])
+@pytest.mark.parametrize("width,height", [(39, 24), (80, 11), (20, 10), (40, 5), (40, 1)])
 def test_a_terminal_below_the_floor_is_refused_before_a_career_is_touched(monkeypatch, tmp_path, width, height):
     """One layout, one floor (issue #495).
 
@@ -817,8 +817,12 @@ def test_a_terminal_below_the_floor_is_refused_before_a_career_is_touched(monkey
     with contextlib.redirect_stdout(buf):
         assert vr.main() == 0
     said = vr._ANSI_RE.sub("", buf.getvalue())
-    assert "at least 40 columns by 12 rows" in " ".join(said.split())
+    flat = " ".join(said.split())
+    assert "at least 40 columns by 12 rows" in flat or "needs 40x12" in flat
     assert f"{width}x{height}" in said, "the caller is told what their terminal reports"
+    # A refusal that scrolls its own reason away is no better than a crash, and
+    # these are the smallest terminals there are: the message has to fit in them.
+    assert said.count("\n") <= max(0, height - 1), f"the refusal scrolls itself off: {said!r}"
     assert not (tmp_path / "saves").exists()
 
 
