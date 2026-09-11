@@ -4296,6 +4296,11 @@ def _box_outer_width() -> int:
 
 MINIMUM_WIDTH, MINIMUM_HEIGHT = 40, 12
 
+# What the host writes after any door exits (`net/door_flow.py`): a blank line,
+# "Left <door>.", and "Press any key to continue...". A refusal that fills the
+# screen is scrolled away by them, so the rows they will take are not ours.
+HOST_EPILOGUE_ROWS = 3
+
 
 def _refuse_size(p: "Palette", reported_height: int) -> None:
     """Say why, in the screen the terminal actually has.
@@ -4323,7 +4328,7 @@ def _refuse_size(p: "Palette", reported_height: int) -> None:
         [f"{p.wrong}Need {need}; is {size}.{RESET}"],
         [f"{p.wrong}{need}>{size}{RESET}"],
     ]
-    budget = max(1, reported_height)
+    budget = max(1, reported_height - HOST_EPILOGUE_ROWS)
     for lines in wordings:
         rows: list[str] = []
         for line in lines:
