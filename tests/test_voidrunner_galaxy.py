@@ -195,7 +195,7 @@ def test_sector_assignment_does_not_touch_the_galaxy_rng():
         assert a.x == b.x and a.y == b.y and a.connections == b.connections
 
 
-@pytest.mark.parametrize("width,height", [(20,10), (40,12), (80,24)])
+@pytest.mark.parametrize("width,height", [(40,12), (80,24)])
 def test_spatial_map_and_exact_list_fit_terminal_and_preserve_career(monkeypatch, terminal, width, height):
     import copy, re
     world = _world_with_seed(144)
@@ -307,7 +307,7 @@ def test_route_screens_open_map_with_their_exact_path(monkeypatch):
                       {"path":vr.bfs_path(world.by_id,0,target.id), "public_target":target.id}]
 
 
-@pytest.mark.parametrize("width,height", [(20,10), (40,12), (80,24)])
+@pytest.mark.parametrize("width,height", [(40,12), (80,24)])
 def test_spatial_map_station_info_pages_preserve_every_known_link(monkeypatch, terminal, width, height):
     import re
     world = _world_with_seed(42)
@@ -402,7 +402,7 @@ def test_area_survey_charts_exact_range_without_time_or_rng(seed, tier, navigato
     assert world.save.to_dict() == saved
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_landmark_inspection_back_keeps_unclaimed_salvage(monkeypatch, terminal, width, height):
     import copy,re
     world = _world_with_seed(42); world.save.current_system = world.landmark["system_id"]
@@ -466,7 +466,7 @@ def test_the_pure_galaxy_caches_answer_from_the_seed_alone():
 def test_a_chart_entry_that_spans_pages_carries_its_letter_on_each(monkeypatch, terminal):
     """A page showing only a continuation still has to show the key that picks it."""
     import re
-    terminal(20, 10)
+    terminal(40, 12)
     world = _world_with_seed(42)
     world.checkpoint()
     pages = vr._chart_pages(world, "Navigation", "[G] Route planner [B] Back: ", None)

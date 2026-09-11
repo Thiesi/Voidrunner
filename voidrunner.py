@@ -4294,17 +4294,64 @@ def _box_outer_width() -> int:
     return _box_inner_width() + 2
 
 
-def _page_framed() -> bool:
-    """Whether a paged screen draws its box.
+MINIMUM_WIDTH, MINIMUM_HEIGHT = 40, 12
 
-    The boxed tactical HUD is what the game looked like before its screens were
-    made responsive; the frames were collateral of that work rather than
-    something any issue asked for (issue #486). A frame costs four columns and
-    one row, which is a fifth of the width a 20-column caller has, so below
-    these floors the flat layout stays -- the same "a complete compact
-    composition instead" rule the splash follows (issue #404).
+# What the host writes after any door exits (`net/door_flow.py`): a blank line,
+# "Left <door>.", and "Press any key to continue...". A refusal that fills the
+# screen is scrolled away by them, so the rows they will take are not ours.
+HOST_EPILOGUE_ROWS = 3
+
+
+def _refuse_size(p: "Palette", reported_height: int) -> None:
+    """Say why, in the screen the terminal actually has.
+
+    A refusal that scrolls its own reason away is no better than a crash, and
+    these are by definition the smallest screens there are -- in both
+    directions, so the message is chosen for the width as well as the height,
+    wrapped to the width rather than left to the terminal's soft wrap, cut to
+    the rows available, and ended without a newline so it cannot push itself
+    off a one-row screen. What survives a brutal cut is the front of the first
+    line, which is why the need comes before everything else.
     """
-    return _OUTPUT_WIDTH >= 40 and _OUTPUT_HEIGHT >= 12
+    size = f"{_OUTPUT_WIDTH}x{reported_height}"
+    need = f"{MINIMUM_WIDTH}x{MINIMUM_HEIGHT}"
+    # Longest first. Both sizes are what makes the message actionable, so a
+    # shorter wording always beats a longer one with its tail cut off.
+    wordings = [
+        ["", f"{p.wrong}Voidrunner needs at least {MINIMUM_WIDTH} columns by "
+         f"{MINIMUM_HEIGHT} rows.{RESET}",
+         f"{p.muted}This terminal reports {size}. Resize it, or reconnect with a "
+         f"larger window, and launch again. No career was opened or changed.{RESET}"],
+        [f"{p.wrong}Voidrunner needs {need}.{RESET}", f"{p.muted}This is {size}.{RESET}",
+         f"{p.muted}Resize and launch again.{RESET}"],
+        [f"{p.wrong}Voidrunner needs {need}; this is {size}.{RESET}"],
+        [f"{p.wrong}Need {need}; is {size}.{RESET}"],
+        [f"{p.wrong}{need}>{size}{RESET}"],
+    ]
+    budget = max(1, reported_height - HOST_EPILOGUE_ROWS)
+    for lines in wordings:
+        rows: list[str] = []
+        for line in lines:
+            rows.extend(_wrap_output(line, max(1, _OUTPUT_WIDTH)).split("\r\n"))
+        if len(rows) <= budget:
+            break
+    rows = rows[:budget]  # only a terminal too small for "40x12>1x1" reaches this
+    for row in rows[:-1]:
+        out_line(row)
+    out(rows[-1])
+
+
+def _terminal_too_small() -> bool:
+    """Whether this terminal is below the size the game is designed for.
+
+    There is one layout (issue #495). The door used to carry a second, stripped
+    one for terminals down to 20 columns, and designing for that caller is what
+    flattened the game for everyone else: art, gauges and rules were dropped so
+    content would fit a screen nobody dials in from, and the stripped result was
+    then what an 80-column caller saw too (issue #493). Below the floor the door
+    says so and stops, rather than keeping a second presentation alive.
+    """
+    return _OUTPUT_WIDTH < MINIMUM_WIDTH or _OUTPUT_HEIGHT < MINIMUM_HEIGHT
 
 
 def _page_content_width() -> int:
@@ -4316,13 +4363,13 @@ def _page_content_width() -> int:
     """
     # Two columns of indent on the left, one of gutter on the right: a row that
     # ends flush against the border reads as if it had been cut off.
-    return max(1, _box_inner_width() - 3) if _page_framed() else max(1, _OUTPUT_WIDTH - 1)
+    return max(1, _box_inner_width() - 3)
 
 
 def _page_frame_rows() -> int:
     """Rows the frame costs a page. The title moves into the top border, so
     only the bottom border is new."""
-    return 1 if _page_framed() else 0
+    return 1
 
 
 def _box_title(p: "Palette", text: str, width: int | None = None, border_color: str | None = None) -> str:
@@ -5073,7 +5120,9 @@ def portrait_pages(p: Palette, large: list[str], compact: list[str], details: li
 def _portrait_pages_for(p: Palette, large: list[str], compact: list[str], details: list[str], title: str,
                         footer: str, *, color: str | None = None, leading: list[str] | None = None) -> list[list[str]]:
     width = _page_content_width()
-    art = list(large if _OUTPUT_WIDTH >= 40 and _OUTPUT_HEIGHT >= 16 else compact)
+    # The large silhouette is the design; `compact` is the fallback for a page
+    # that cannot spare the rows, not for a narrow terminal (issue #495).
+    art = list(large if _OUTPUT_HEIGHT >= 16 else compact)
     capacity = page_capacity((leading or []) + art + details, title, footer)
     if len(art) > capacity or any(_visible_width(row) > width for row in art): art = list(compact)
     if len(art) > capacity or any(_visible_width(row) > width for row in art): art = []
@@ -6075,13 +6124,11 @@ def _header_fits_border(header: str) -> bool:
     spaces around the text. A header that wants more is drawn as the page's
     first row under a plain border, and `page_capacity` charges that row.
     """
-    return _page_framed() and _visible_width(header) <= max(1, _box_inner_width() - 5)
+    return _visible_width(header) <= max(1, _box_inner_width() - 5)
 
 
 def _page_header_rows(header: str) -> int:
     """Rows a page spends on its header, frame included."""
-    if not _page_framed():
-        return len(_wrap_output(header, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
     if _header_fits_border(header):
         return 1
     return 1 + len(_wrap_output(header, _page_content_width()).split("\r\n"))
@@ -6096,10 +6143,6 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
     """
     out_line()
     header = _page_header(title, page, count)
-    if not _page_framed():
-        out_line(f"{p.gold}{header}{RESET}")
-        for row in rows: out_line(row)
-        return
     inner = _box_inner_width()
     if _header_fits_border(header):
         out_line(_box_title(p, header))
@@ -6920,8 +6963,7 @@ def screen_mission_details(p: Palette, world: World, mission: Mission, *, active
         title = f"Contract #{mission.id} {max_pages}/{max_pages}"
         footer = "[R] Route [N] Next [P] Prev [B] Back > "
         pointer_rows = len(_wrap_output(f"[A] on the last page ({max_pages}; [N] Next).", max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
-        overhead = max(7, 1 + (1 if _page_framed() else len(_wrap_output(title, _OUTPUT_WIDTH).split("\r\n")))
-                       + _page_frame_rows()
+        overhead = max(7, 1 + 1 + _page_frame_rows()
                        + len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
                        + (2 if active else pointer_rows))
         pages = _mission_text_pages(lines, overhead=overhead)
@@ -6989,8 +7031,7 @@ def screen_missions(p: Palette, world: World) -> None:
         # the terminal, and the board's own summary rows are part of its overhead.
         width = _page_content_width()
         max_pages = max(1, sum(len(rows) for _, _, rows in wrapped))
-        overhead = 1 + (1 if _page_framed()
-                        else len(_wrap_output(f"Contracts {max_pages}/{max_pages}", width).split("\r\n")))
+        overhead = 1 + 1
         overhead += _page_frame_rows()
         overhead += sum(len(_wrap_output(line, width).split("\r\n")) for line in summary)
         overhead += len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
@@ -7104,7 +7145,7 @@ def screen_status(p: Palette, world: World) -> None:
     section, page, result = "O", 0, None
     cache = {}
     while True:
-        footer = "[<>] Page [O/C/H/D] View " if _OUTPUT_WIDTH < 30 else "[<] Prev [>] Next [O] Pilot [C] Jobs [H] Log [D] Dossiers "
+        footer = "[<] Prev [>] Next [O] Pilot [C] Jobs [H] Log [D] Dossiers "
         footer += "[R] Finale [B] Back: "
         title = "Pilot Record: " + {"O":"Overview", "C":"Contracts", "H":"History", "D":"Dossiers"}[section]
         if section not in cache:
@@ -7183,7 +7224,7 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
         # a ranked pilot. Measured against the widest counter the screen can
         # show, so the title cannot change under the caller as pages are added.
         title = "Hall of Fame: " + SCORE_CATEGORIES[category]
-        if _page_framed() and not _header_fits_border(f"{title} 99/99"):
+        if not _header_fits_border(f"{title} 99/99"):
             title = "Fame: " + SCORE_CATEGORIES[category]
         if category not in cache:
             lines = achievement_lines(entries, category, user_id)
@@ -7266,7 +7307,7 @@ def departure_terms(world: World, dest_id: int) -> str:
 def screen_chart(p: Palette, world: World) -> int | None:
     """Return a deliberately selected and confirmed adjacent destination, or Back."""
     page, result = 0, None
-    footer = "[<] Prev [>] Next [B] Back: " if _OUTPUT_WIDTH >= 30 else "[<] [>] [B] Back: "
+    footer = "[<] Prev [>] Next [B] Back: "
     while True:
         title = f"Navigation: Fuel {world.save.ship.fuel}/{fuel_capacity(world.save.ship)}"
         pages = _chart_pages(world, title, footer, result)
@@ -7499,7 +7540,7 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
         public_target = mission.target_system
     path = list(path)
     sector = SECTOR_NAMES.index(sector_for(world.here))
-    compact = _OUTPUT_WIDTH < 40 or _OUTPUT_HEIGHT < 12
+    compact = False  # one layout above the floor (issue #495)
     list_mode, page = compact, 0
     title = "Charted Systems"
     list_footer = "[N] Next [P] Prev " + ("" if compact else "[M] Map ") + "[I] Info [B] Back: "
@@ -8219,12 +8260,9 @@ def combat_action_bar(actions: str) -> str:
     """Every combat verb labelled like the other detail screens; Info and paging follow.
     There is no Back in a fight, so this does not reuse `_detail_action_bar`.
 
-    Below 40 columns the labels wrap to four rows and leave a ten-row page one row for
-    the fight itself, so a narrow terminal keeps the compact letter list -- the same
-    width switch the pilot record already uses for its own view keys."""
+    Every verb is named: the compact letter list this used below 40 columns went
+    with the terminals it was for (issue #495)."""
     keys = [key for key in actions.split("/") if key]
-    if _OUTPUT_WIDTH < 40:
-        return f"[{'/'.join(keys)}] Act [I] Info [<>] Page: "
     return "".join(f"[{key}] {COMBAT_LABELS[key]} " for key in keys) + "[I] Info [<>] Page: "
 
 
@@ -8553,10 +8591,15 @@ def main() -> int:
     except (TypeError, ValueError):
         _OUTPUT_WIDTH = 80
     try:
-        _OUTPUT_HEIGHT = max(10, min(200, int(info.get("terminal_height", 24))))
+        reported_height = int(info.get("terminal_height", 24))
+        # The clamp keeps rendering safe; the refusal below quotes what was reported.
+        _OUTPUT_HEIGHT = max(10, min(200, reported_height))
     except (TypeError, ValueError):
-        _OUTPUT_HEIGHT = 24
+        reported_height = _OUTPUT_HEIGHT = 24
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
+    if _terminal_too_small():
+        _refuse_size(p, reported_height)
+        return 0
     save_dir = _default_save_dir()
     # Real NetBBS launches always carry a real positive user_id from the
     # drop-file; this fallback only fires for standalone tinkering

@@ -1000,7 +1000,7 @@ def test_invalid_archive_progress_preserves_original_career(tmp_path, flags):
 
 
 @pytest.mark.parametrize("stage", ["idle", "started", "recovered", "complete"])
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("style", ["auto", "plain"])
 def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, terminal, without_action_bar, stage, width, height, style):
     import copy,re
@@ -1227,7 +1227,7 @@ def test_retirement_clears_the_workshop_counters():
 
 
 @pytest.mark.parametrize("key", ["cargo", "engine", "scanner"])
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("style", ["auto", "plain"])
 def test_workshop_detail_pages_keep_terms_and_leave_career_untouched(monkeypatch, terminal, without_action_bar, key, width, height, style):
     import copy,re
@@ -1432,7 +1432,7 @@ def test_promoted_navigator_survey_range_matches_actual_contacts(paid, bonus):
     assert f"+{bonus} survey hops" in " ".join(vr.crew_roster_lines(world))
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("style", ["auto", "plain"])
 def test_named_crew_roster_keeps_personality_progress_and_costs_without_writes(monkeypatch, terminal, width, height, style):
     import copy,re
@@ -1530,7 +1530,7 @@ def test_named_crew_survive_existing_salvage_recovery(recovery):
     assert world.save.ship.has_engineer and world.save.ship.crew_records == before
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_crew_first_page_starts_with_available_specialist(monkeypatch, terminal, width, height):
     world = _world_with_seed(42)
     terminal(width, height)
@@ -1697,7 +1697,7 @@ def test_invalid_personal_crew_assignment_preserves_original_file(tmp_path, task
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("style", ["auto", "plain"])
 @pytest.mark.parametrize("role", list(vr.CREW_ROLES))
 def test_personal_crew_task_pages_keep_complete_terms_and_leave_no_writes(monkeypatch, terminal, width, height, style, role):
@@ -1917,7 +1917,7 @@ def test_both_faction_memberships_can_be_joined_without_revoking_the_other(order
 
 @pytest.mark.parametrize("faction", vr.FACTIONS)
 @pytest.mark.parametrize("state", ["visitor", "eligible", "active", "suspended"])
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("style", ["auto", "plain"])
 def test_faction_contact_pages_preserve_all_terms_without_writes(monkeypatch, terminal, without_action_bar, faction, state, width, height, style):
     import copy,re
@@ -2155,7 +2155,7 @@ def test_faction_case_future_state_is_not_downgraded(tmp_path, record):
 
 @pytest.mark.parametrize("faction", vr.FACTIONS)
 @pytest.mark.parametrize("stage", ["idle", "accepted", "evidence", "committed", "complete"])
-@pytest.mark.parametrize("width,height,style", [(20, 10, "plain"), (40, 12, "auto"), (80, 24, "auto")])
+@pytest.mark.parametrize("width,height,style", [(40, 12, "plain"), (48, 14, "auto"), (80, 24, "auto")])
 def test_faction_case_pages_preserve_full_terms_without_writes(monkeypatch, terminal, without_action_bar, faction, stage, width, height, style):
     import copy,re
     world = _faction_case_world(faction, stage)
@@ -2405,7 +2405,7 @@ def test_career_rank_save_failure_stops_reward_before_ack(monkeypatch):
     with contextlib.redirect_stdout(output),pytest.raises(vr.SaveError): vr.screen_market(vr.Palette(False),world)
 
 
-@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height",[(40,12),(80,24)])
 def test_career_rank_full_terms_fit_record_pages_without_mutation(monkeypatch, terminal,width,height):
     import copy,re
     world=_world_with_seed(42); world.save.pilot.highest_rank_seen=2; world.save.pilot.credits=100
@@ -2580,7 +2580,7 @@ def test_career_finale_checkpoint_failure_stops_before_new_run_ack(monkeypatch,f
     with contextlib.redirect_stdout(output),pytest.raises(vr.SaveError):vr.screen_career_finale(vr.Palette(False),world)
 
 
-@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height",[(40,12),(80,24)])
 @pytest.mark.parametrize("finale",list(vr.CAREER_FINALES))
 def test_career_finale_complete_terms_fit_every_page_without_writes(monkeypatch, terminal,width,height,finale):
     import copy,re
@@ -2599,7 +2599,7 @@ def test_career_finale_complete_terms_fit_every_page_without_writes(monkeypatch,
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
-@pytest.mark.parametrize("width,height",[(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height",[(40,12),(80,24)])
 def test_career_dossier_pages_include_all_retained_highlights(monkeypatch, terminal,width,height):
     import copy,re
     world=_finale_world(); world.save.pilot.highlights=[f"Old highlight {i:02}" for i in range(vr.MAX_HIGHLIGHTS)]
@@ -2783,7 +2783,7 @@ def test_achievement_malformed_optional_summaries_do_not_break_scores_or_checkpo
     assert vr._load_score_records(tmp_path)[0]["achievements"]["careers"][0]["number"]==1
 
 
-@pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height", [(40,12),(80,24)])
 @pytest.mark.parametrize("style", list(vr.DISPLAY_STYLES))
 def test_achievement_category_pages_keep_snapshot_complete_terms_and_all_navigation(tmp_path,monkeypatch, terminal,width,height,style):
     import re
@@ -2979,7 +2979,7 @@ def test_faction_case_idle_route_is_unavailable_until_acceptance(monkeypatch,fac
     assert routes==[vr.faction_story_target(world,faction)] and checkpoints==["accepted"]
 
 
-@pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])
+@pytest.mark.parametrize("width,height", [(40,12),(80,24)])
 def test_career_rank_checkpoint_notice_survives_spending_until_deck(monkeypatch, terminal,tmp_path,width,height):
     import re
     world=_world_with_seed(42);world._checkpoint=lambda w:vr.persist(w,tmp_path,77)

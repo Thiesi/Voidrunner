@@ -97,7 +97,7 @@ def _add_cargo(world, commodity: str, quantity, *, unit_cost: int | None = None)
 _BORDER = "╭╮╰╯│─═║╔╗╚╝├┤╠╣+-=|"
 
 
-def page_rows(frame: str) -> list[str]:
+def page_rows(frame: str, *, keep_indent: bool = False) -> list[str]:
     """The body rows of a drawn page, with the HUD frame taken off.
 
     Screens draw inside their frame again (issue #486), so a test that reads a
@@ -108,10 +108,10 @@ def page_rows(frame: str) -> list[str]:
     """
     rows: list[str] = []
     for row in vr._ANSI_RE.sub("", frame).replace("\r\n", "\n").split("\n"):
-        row = row.strip()
-        if not row:
+        row = row.rstrip() if keep_indent else row.strip()
+        if not row.strip():
             continue
-        if row[0] in "╭╰╔╚├╠" or re.match(r"\+[-=]{2,}", row):
+        if row.lstrip()[0] in "╭╰╔╚├╠" or re.match(r"\+[-=]{2,}", row.lstrip()):
             continue  # a border row, titled or not
         if all(character in _BORDER or character == " " for character in row):
             continue  # what is left of one after a test cuts the title out
@@ -121,7 +121,7 @@ def page_rows(frame: str) -> list[str]:
             row = row[1:]
         if row[-1:] in "│║|":
             row = row[:-1]
-        rows.append(row.strip())
+        rows.append(row.rstrip() if keep_indent else row.strip())
     return rows
 
 

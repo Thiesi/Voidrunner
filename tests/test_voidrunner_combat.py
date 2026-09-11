@@ -271,7 +271,7 @@ def test_a_resumed_expired_combat_job_cannot_pay_or_start_another_wave(kind, des
         assert world.save.pending_travel["escort_index"] == 1
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("patrol", [False, True])
 @pytest.mark.parametrize("style", ["auto", "plain"])
 def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch, terminal, without_action_bar, width, height, patrol, style):
@@ -548,7 +548,7 @@ def test_bounty_warrant_truth_is_stable_and_does_not_consume_encounter_rng():
     assert 5 <= matches.count(False) <= 25
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("matches", [False, True])
 def test_bounty_identification_risk_is_visible_and_paging_is_read_only(monkeypatch, terminal, width, height, matches):
     import copy, re
@@ -719,7 +719,7 @@ def _world_with_coordinated_squadron(*, engaged=False):
     return world, pirates
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_squadron_terms_fit_and_show_cover_before_first_choice(monkeypatch, terminal, width, height):
     import copy, re
     world, pirates = _world_with_coordinated_squadron()
@@ -879,7 +879,7 @@ def test_squadron_target_order_has_profile_dependent_tradeoffs(monkeypatch, lead
     assert (damage[1] < damage[0]) == prefer_switch
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_review_combat_info_keeps_exchange_before_tactical_heading(monkeypatch, terminal, width, height):
     world = _world_with_seed(42); pirate = vr.Pirate("Raider", 0, 50, 50)
     terminal(width, height)
@@ -944,7 +944,7 @@ def test_tactical_dump_terms_include_harry_escape_penalty(cargo):
     assert f"{expected:.0%}" in line
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("details", [False, True])
 def test_real_exchange_text_starts_on_first_combat_page(monkeypatch, terminal, width, height, details):
     world = _world_with_seed(42); pirate = vr.Pirate("Rust Wraith", 1, 80, 80)
