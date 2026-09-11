@@ -4298,16 +4298,19 @@ MINIMUM_WIDTH, MINIMUM_HEIGHT = 40, 12
 
 
 def _refuse_size(p: "Palette", reported_height: int) -> None:
-    """Say why, in the rows the terminal actually has.
+    """Say why, in the screen the terminal actually has.
 
     A refusal that scrolls its own reason away is no better than a crash, and
-    these are by definition the smallest terminals there are: every line here
-    fits 40 columns, the message shrinks with the height, and the last line is
-    written without a newline so it cannot push itself off a one-row screen.
+    these are by definition the smallest screens there are -- in both
+    directions, so the message is chosen for the width as well as the height,
+    wrapped to the width rather than left to the terminal's soft wrap, cut to
+    the rows available, and ended without a newline so it cannot push itself
+    off a one-row screen. What survives a brutal cut is the front of the first
+    line, which is why the need comes before everything else.
     """
     size = f"{_OUTPUT_WIDTH}x{reported_height}"
     need = f"{MINIMUM_WIDTH}x{MINIMUM_HEIGHT}"
-    if reported_height >= 8:
+    if reported_height >= 8 and _OUTPUT_WIDTH >= 30:
         lines = ["", f"{p.wrong}Voidrunner needs at least {MINIMUM_WIDTH} columns by "
                  f"{MINIMUM_HEIGHT} rows.{RESET}",
                  f"{p.muted}This terminal reports {size}. Resize it, or reconnect with "
@@ -4315,13 +4318,17 @@ def _refuse_size(p: "Palette", reported_height: int) -> None:
                  f"changed.{RESET}"]
     elif reported_height >= 4:
         lines = [f"{p.wrong}Voidrunner needs {need}.{RESET}",
-                 f"{p.muted}This terminal reports {size}.{RESET}",
+                 f"{p.muted}This is {size}.{RESET}",
                  f"{p.muted}Resize and launch again.{RESET}"]
     else:
         lines = [f"{p.wrong}Voidrunner needs {need}; this is {size}.{RESET}"]
-    for line in lines[:-1]:
-        out_line(line)
-    out(lines[-1])
+    rows: list[str] = []
+    for line in lines:
+        rows.extend(_wrap_output(line, max(1, _OUTPUT_WIDTH)).split("\r\n"))
+    rows = rows[:max(1, reported_height)]
+    for row in rows[:-1]:
+        out_line(row)
+    out(rows[-1])
 
 
 def _terminal_too_small() -> bool:
