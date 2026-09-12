@@ -5590,7 +5590,7 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
         ]
         crew = [f"{crew_name(world, role)} ({info['label']}, {CREW_SERVICE_LEVELS[crew_level(ship, role)][1]})"
                 for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
-        lines.append(f"{p.slate}Crew{RESET} " + (f"{p.ink}" + ", ".join(crew) + RESET if crew else f"{p.slate}none{RESET}"))
+        lines.append(f"{p.slate}Crew{RESET} " + (f"{p.ink}" + ", ".join(crew) + RESET if crew else f"{p.ink}none{RESET}"))
     return lines
 
 
@@ -8559,7 +8559,7 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
                             chip("expired", str(pilot.missions_expired)),
                             chip("retirements", str(pilot.retirements))]))
     lines.append(f"{p.slate}Crew{RESET} "
-                 + (f"{p.ink}" + ", ".join(crew) + RESET if crew else f"{p.slate}none{RESET}")
+                 + (f"{p.ink}" + ", ".join(crew) + RESET if crew else f"{p.ink}none{RESET}")
                  + f"  {p.slate}wages{RESET} {p.ink}{wages}cr/jump{RESET}")
     lines += career_rank_terms(pilot)
     lines.append(f"[C] Jobs: {len(world.save.active_missions)} active. [H] Log: {len(pilot.highlights)} highlights, {len(pilot.log)} log entries.")

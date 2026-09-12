@@ -666,6 +666,19 @@ def test_a_neutral_standing_is_a_value_and_its_bar_is_not(monkeypatch):
         assert all(_role_runs(row)[bar] != p.ink for bar in bars), plain(row)
 
 
+def test_an_empty_crew_is_still_a_value(monkeypatch):
+    """`Crew none` had the label and the value in one colour: the populated
+    branch was `ink` and the empty one had drifted to the label role, so the
+    row said nothing about which half was which (#532)."""
+    p = _at(monkeypatch)
+    world = _world_with_seed(7)
+    rows = vr.pilot_record_lines(world, "O")
+    crew = [row for row in rows if plain(row).strip().startswith("Crew ")]
+    assert crew, [plain(row) for row in rows]
+    assert _role_of(crew[0], "Crew") == p.slate, plain(crew[0])
+    assert _role_of(crew[0], "none") == p.ink, plain(crew[0])
+
+
 def test_the_ledger_names_its_groups_instead_of_hyphenating_them(monkeypatch):
     """`HOLD -`, `TRAVEL -` and `LOCAL MARKET -` were headings wearing a hyphen
     in the middle of a paragraph; `section` is what the game says instead."""
