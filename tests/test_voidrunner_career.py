@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from .support import page_source, page_title, plain as plainly, _Sys, _VOIDRUNNER_PATH, _add_cargo, _box_rows, _door_stopped_at, _escort_world, _finale_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_text, vr
+from .support import plain_bytes, page_source, page_title, plain as plainly, _Sys, _VOIDRUNNER_PATH, _add_cargo, _box_rows, _door_stopped_at, _escort_world, _finale_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_text, vr
 
 
 def test_retire_pilot_increments_retirements_and_grants_cumulative_bonus():
@@ -541,7 +541,7 @@ def test_shipyard_offers_crew_option(monkeypatch):
     with contextlib.redirect_stdout(buf):
         vr.screen_shipyard(vr.Palette(truecolor=False), world)
 
-    assert "[K] Crew" in buf.getvalue()
+    assert "[K] Crew" in plainly(buf.getvalue())
 
 
 def test_shipyard_crew_row_letter_never_collides_with_an_upgrade_row():
@@ -1213,7 +1213,9 @@ def test_workshop_material_accounting_consumes_fifo_without_fake_loss():
     ledger = world.save.trading_ledger
     assert (ledger.workshop_material_cost, ledger.workshop_spend) == (1000, 1430)
     assert ledger.cargo_loss_cost == ledger.sales_cost == ledger.delivery_cost == 0
-    assert "materials 1,000cr recorded cost" in " ".join(vr.trading_ledger_lines(world))
+    shown = " ".join(" ".join(plainly(line) for line in vr.trading_ledger_lines(world)).split())
+    assert "Workshop materials 1,000cr recorded cost" in shown
+    assert "Workshop installations 1,430cr paid" in shown
     restored = vr.World(vr.SaveData.from_dict(world.save.to_dict()))
     assert restored.save.trading_ledger == ledger
 
@@ -2823,7 +2825,8 @@ def test_real_achievement_category_browsing_keeps_career_and_score_bytes(tmp_pat
     info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,timeout=10,
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
-    assert result.returncode==0 and not result.stderr and b"[1-5] View" in result.stdout
+    assert result.returncode==0 and not result.stderr
+    assert b"[1-5] View" in plain_bytes(result.stdout)
     assert {p:p.read_bytes() for p in paths}==before
 
 
@@ -2936,7 +2939,7 @@ def test_faction_case_route_becomes_available_only_after_committing_ending(monke
     routes=[];checkpoints=[];world._checkpoint=lambda w:checkpoints.append(w.save.faction_stories[faction]["stage"])
     output=io.StringIO();keys=iter("RARB")
     def choose():
-        key=next(keys);frame=output.getvalue();output.seek(0);output.truncate(0)
+        key=next(keys);frame=plainly(output.getvalue());output.seek(0);output.truncate(0)
         if world.save.faction_stories[faction]["stage"]=="evidence":
             assert "[R] Route" not in frame and world.save.to_dict()==before and world.event_rng.getstate()==rng
         else:assert "[R] Route" in frame
@@ -2953,7 +2956,7 @@ def test_faction_case_missing_haven_does_not_advertise_or_dispatch_hardline(monk
         if system.economy=="Haven":system.economy="Industrial"
     keys=iter("HAB");output=io.StringIO();seen=[]
     def choose():
-        key=next(keys);frame=output.getvalue();output.seek(0);output.truncate(0)
+        key=next(keys);frame=plainly(output.getvalue());output.seek(0);output.truncate(0)
         assert "[H] Hardline" not in frame
         if key=="A":assert world.save.faction_stories[vr.FACTION_BLACKWAKE]["stage"]=="evidence"
         return key
@@ -2970,7 +2973,7 @@ def test_faction_case_idle_route_is_unavailable_until_acceptance(monkeypatch,fac
     routes=[];checkpoints=[];world._checkpoint=lambda w:checkpoints.append(w.save.faction_stories[faction]["stage"])
     output=io.StringIO();keys=iter("RARB")
     def choose():
-        key=next(keys);frame=output.getvalue();output.seek(0);output.truncate(0)
+        key=next(keys);frame=plainly(output.getvalue());output.seek(0);output.truncate(0)
         if faction not in world.save.faction_stories:
             assert "[R] Route" not in frame and world.save.to_dict()==before and world.event_rng.getstate()==rng
         else:assert "[R] Route" in frame

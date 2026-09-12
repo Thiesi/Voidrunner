@@ -299,7 +299,8 @@ def test_prohibited_commodity_details_hide_buy_and_reject_unadvertised_purchase(
     world=_world_with_seed(42);_set_cargo(world, {"weapons":1});before=world.save.to_dict()
     monkeypatch.setattr(vr,"read_key",lambda:"P")
     with contextlib.redirect_stdout(io.StringIO()) as output:result=vr._trade_commodity(vr.Palette(False),world,"weapons")
-    assert "Buy prohibited" in output.getvalue() and "[P] Purchase" not in output.getvalue()
+    shown = plain(output.getvalue())
+    assert "Buy prohibited" in shown and "[P] Purchase" not in shown
     assert "prohibit" in result and world.save.to_dict()==before
 
 
@@ -405,7 +406,8 @@ def test_real_cockpit_paging_toggle_and_exit_preserve_career(tmp_path,commands):
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
     assert result.returncode==0 and not result.stderr
-    assert b"Command Deck:" in result.stdout and b"[X] Compact" in result.stdout
+    shown = plain_bytes(result.stdout)
+    assert b"Command Deck:" in shown and b"[X] Compact" in shown
     if b"M" in commands:
         assert b"COMMODITY" in plain_bytes(result.stdout) and b"Engineering Yard:" in plain_bytes(result.stdout)
     assert (tmp_path/"77.json").read_bytes()==original
@@ -652,7 +654,7 @@ def test_screen_missions_preserves_rewards_in_compact_entries(monkeypatch):
     output = buf.getvalue()
     assert "+5cr" in output and "+123,456cr" in output
     assert "[1]" in output and "[2]" in output
-    assert "Details" in output and "[B] Back" in output
+    assert "Details" in output and "[B] Back" in plain(output)
 
 
 def test_navigation_chart_keeps_danger_and_fuel_distinct_with_retained_rejection(monkeypatch):
@@ -763,7 +765,7 @@ def test_empty_mission_board_renders_clean_notice_and_back(monkeypatch):
         vr.screen_missions(p, world)
     output = buf.getvalue()
     assert "No contracts currently available" in output
-    assert "[B] Back" in output
+    assert "[B] Back" in plain(output)
 
 
 def test_commission_and_cartel_screens_fit_standard_terminal(monkeypatch, terminal):
@@ -955,7 +957,7 @@ def test_opening_guide_and_offer_pages_fit_and_browsing_is_read_only(monkeypatch
         assert len(rows) <= height, (width, height, rows)
         assert all(vr._visible_width(row) <= width for row in rows)
     if screen == "offer":
-        assert all("[A] Accept" not in page for page in pages[:-1])
+        assert all("[A] Accept" not in plain(page) for page in pages[:-1])
 
 
 @pytest.mark.parametrize("style", [None, True, [], {}, "unknown"])
@@ -1355,7 +1357,7 @@ def test_dump_is_absent_and_harmless_with_an_empty_hold(monkeypatch):
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(io.StringIO()) as output, pytest.raises(EOFError):
         vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=False)
-    assert "[D] Dump" not in output.getvalue()
+    assert "[D] Dump" not in plain(output.getvalue())
 
 
 def test_plural_reads_as_prose():
@@ -1388,7 +1390,8 @@ def test_chart_route_planner_opens_the_destination_picker_first(monkeypatch):
     keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_auto_route(vr.Palette(False), world)
-    assert "Route Planner" in output.getvalue() and "[J] Jump next" in output.getvalue()
+    shown = plain(output.getvalue())
+    assert "Route Planner" in shown and "[J] Jump next" in shown
 
 
 def _world_with_a_trade_lead():
@@ -1418,7 +1421,7 @@ def test_ledger_route_draft_starts_from_the_best_lead(monkeypatch):
     keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_trading_ledger(vr.Palette(False), world)
-    assert "[O] Opportunities [R] Route [M] Markets" in output.getvalue()
+    assert "[O] Opportunities [R] Route [M] Markets" in page_text(output.getvalue())
 
 
 @pytest.mark.parametrize("screen,footer", [("screen_chart", "[G] Route planner"),

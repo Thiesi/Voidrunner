@@ -772,7 +772,7 @@ def test_future_formats_never_offer_or_allow_downgrade_recovery(tmp_path, monkey
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         assert vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, error.value).save is None
-    assert "[R] Restore" not in output.getvalue()
+    assert "[R] Restore" not in plain(output.getvalue())
     with pytest.raises(vr.UnsupportedSave):
         vr.restore_previous_career(tmp_path, 77, previous)
     assert path.read_bytes() == original and not list(tmp_path.glob("77.recovery-*"))
@@ -781,7 +781,8 @@ def test_future_formats_never_offer_or_allow_downgrade_recovery(tmp_path, monkey
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"RYB", capture_output=True,
                             env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
     assert result.returncode == 0 and not result.stderr
-    assert b"[R] Restore" not in result.stdout and b"Pilot callsign" not in result.stdout
+    shown = plain_bytes(result.stdout)
+    assert b"[R] Restore" not in shown and b"Pilot callsign" not in shown
     assert path.read_bytes() == original and not list(tmp_path.glob("77.recovery-*"))
 
 
@@ -827,7 +828,7 @@ def test_missing_economy_event_fields_remain_recoverable_corruption(tmp_path, mo
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, error.value)
-    assert "[R] Restore" in output.getvalue()
+    assert "[R] Restore" in plain(output.getvalue())
 
 
 @pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
@@ -850,7 +851,7 @@ def test_recovery_pages_fit_terminal_and_restore_is_on_last_page(tmp_path, monke
         rows = page.splitlines()
         assert len(rows) <= height, (width, height, rows)
         assert all(vr._visible_width(row) <= width for row in rows)
-    assert any("[R] Restore" in page for page in chunks)
+    assert any("[R] Restore" in plain(page) for page in chunks)
 
 
 @pytest.mark.parametrize("fail", [False, True])

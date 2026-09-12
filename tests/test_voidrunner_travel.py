@@ -13,7 +13,7 @@ import sys
 
 import pytest
 
-from .support import plain, _Sys, _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_exploration_choice, _world_with_seed, page_text, page_title, vr
+from .support import plain, plain_bytes, _Sys, _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_exploration_choice, _world_with_seed, page_text, page_title, vr
 
 
 # leave the bounty active forever, turning its target system into a
@@ -952,7 +952,7 @@ def test_tiny_picker_keeps_oversized_label_as_one_read_through_choice(monkeypatc
     terminal(40, 12)
     output=io.StringIO();frames=[]
     def choose():
-        frame=output.getvalue();frames.append(frame);output.seek(0);output.truncate(0)
+        frame=plain(output.getvalue());frames.append(frame);output.seek(0);output.truncate(0)
         assert len(frames)<200
         if "[1] Pick" in frame:return "1"
         assert "[1]" not in frame
@@ -973,10 +973,14 @@ def test_tiny_picker_keeps_oversized_label_as_one_read_through_choice(monkeypatc
 
 def test_oversized_picker_ignores_selection_on_incomplete_parts(monkeypatch, terminal):
     terminal(40, 12)
-    output=io.StringIO();attempted=False
+    output=io.StringIO();attempted=False;frames=[]
     def choose():
         nonlocal attempted
-        frame=output.getvalue();output.seek(0);output.truncate(0)
+        frame=plain(output.getvalue());output.seek(0);output.truncate(0)
+        frames.append(frame)
+        # A guard its siblings have and this one did not: reading the bar for a
+        # key that styling had moved out of reach turned a failure into a hang.
+        assert len(frames)<200
         if not attempted:
             attempted=True
             assert "[1] Pick" not in frame
@@ -1020,7 +1024,7 @@ def test_map_list_advertises_only_available_view_actions(monkeypatch, terminal,w
     commands=iter(["M","N","P","B"] if compact else ["L","M","B"])
     output=io.StringIO();frames=[]
     def choose():
-        frame=output.getvalue();output.seek(0);output.truncate(0);frames.append(frame)
+        frame=plain(output.getvalue());output.seek(0);output.truncate(0);frames.append(frame)
         if "Charted Systems" in page_text(frame):
             assert ("[M] Map" in frame) is not compact
         return next(commands)
@@ -1125,7 +1129,7 @@ def test_charted_survey_has_no_promised_completion_or_contract_departure(destina
     keys=iter("JB");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     monkeypatch.setattr(world,"checkpoint",lambda:pytest.fail("Blocked survey saved"))
     with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_mission_navigation(vr.Palette(False),world,mission,active=True)
-    assert "[J] Jump next" not in output.getvalue()
+    assert "[J] Jump next" not in plain(output.getvalue())
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
@@ -1526,8 +1530,11 @@ def test_real_exploration_browsing_and_disconnect_preserve_pending_save(tmp_path
     with _door_stopped_at(tmp_path, b">?<", b": <") as output:
         # This echo exists only after both navigation keys and invalid input were read.
         # The prompt itself is matched by its trailing colon, because a one-page screen
-        # drops its paging tokens and no longer ends in "Page: " (#412).
-        assert b": >" in output and b": ?" in output and b": <" in output
+        # drops its paging tokens and no longer ends in "Page: " (#412). Read through
+        # `plain_bytes`: the action bar is styled now, so the colon and the key the
+        # caller typed are separated by the bar's closing reset (#532).
+        echoed = plain_bytes(output)
+        assert b": >" in echoed and b": ?" in echoed and b": <" in echoed
         assert path.read_bytes() == before
 
 

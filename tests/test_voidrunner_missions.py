@@ -662,7 +662,7 @@ def test_full_contract_details_fit_each_page_and_retain_back(monkeypatch, termin
         rows = frame.split("\r\n")
         assert len(rows) <= height
         assert all(vr._visible_width(row) <= width for row in rows)
-        assert "[B] Back" in frame
+        assert "[B] Back" in plain(frame)
         return "N" if len(frames) < count else "B"
     monkeypatch.setattr(vr, "read_key", key)
     with contextlib.redirect_stdout(output):

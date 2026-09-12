@@ -546,3 +546,165 @@ def test_every_palette_role_stays_distinct_in_both_depths():
     assert len(set(truecolour)) == len(roles)
     indexed = [getattr(vr.Palette(truecolor=False), role) for role in roles]
     assert len(set(indexed)) == len(roles)
+
+
+# ---------------------------------------------------------------------------
+# Issue #532: the action bar, and values that were declared as labels.
+# ---------------------------------------------------------------------------
+
+
+def _role_runs(drawn: str) -> dict[str, str]:
+    """Each visible run of text in a styled row, mapped to the colour in force.
+
+    The colour, not merely the last escape before the text: every component
+    writes its role and then `BOLD`, so "the sequence immediately preceding" is
+    the bold one on exactly the tokens these tests care most about.
+    """
+    runs, colour, cursor = {}, "", 0
+    for match in re.finditer(r"\x1b\[[0-9;]*m", drawn):
+        text = drawn[cursor:match.start()]
+        if text:
+            runs[text] = colour
+        body = match.group(0)[2:-1]
+        if body in ("", "0"):
+            colour = ""
+        elif body.startswith("38;"):
+            colour = match.group(0)
+        cursor = match.end()
+    if drawn[cursor:]:
+        runs[drawn[cursor:]] = colour
+    return runs
+
+
+def _role_of(drawn: str, word: str) -> str | None:
+    """The SGR in force over the run whose text is exactly `word`."""
+    for text, esc in _role_runs(drawn).items():
+        if text.strip() == word:
+            return esc
+    return None
+
+
+def _at(monkeypatch, width: int = 80, height: int = 24):
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
+    monkeypatch.setattr(vr, "_PALETTE", vr.Palette(truecolor=True))
+    return vr.pal()
+
+
+def test_the_action_bar_wears_the_same_roles_as_the_menu_above_it(monkeypatch):
+    """It was the one row on a Voidrunner screen with no palette role at all:
+    the same `[K] Label` one row higher, inside the box, came out with gold
+    keys, while outside it was the terminal's default foreground (#532)."""
+    p = _at(monkeypatch)
+    runs = _role_runs(vr.style_action_bar("[O] Pilot [C] Jobs [B] Back: "))
+    for key in ("[O]", "[C]", "[B]"):
+        assert runs.get(key) == p.gold, runs
+    for label in (" Pilot ", " Jobs ", " Back: "):
+        assert runs.get(label) == p.ink, runs
+
+
+def test_a_prompt_that_styles_itself_is_left_alone(monkeypatch):
+    """The rule `style_body_line` already follows: a component's decision beats
+    a pattern's guess, and thirty call sites print a prompt."""
+    p = _at(monkeypatch)
+    composed = f"{p.slate}Quantity (max {p.gold}12{p.slate}): {vr.RESET}"
+    assert vr.style_action_bar(composed) == composed
+
+
+def test_every_prompt_the_game_prints_carries_a_role(monkeypatch):
+    """No screen may end in a row of default-foreground text."""
+    _at(monkeypatch)
+    written = []
+    monkeypatch.setattr(vr, "out", lambda text: written.append(text))
+    vr.out_prompt("[<] Prev [>] Next [B] Back: ")
+    assert written and FOREGROUND.search(written[0]), written
+
+
+def test_a_body_row_is_still_read_as_prose(monkeypatch):
+    """`key_labels` is the action bar's rule, not every row's: `Press [B] to go
+    back` is a sentence with a key in it, not a key with a label after it."""
+    p = _at(monkeypatch)
+    runs = _role_runs(vr.style_body_line("Press [B] to go back."))
+    assert runs.get("[B]") == p.gold, runs
+    assert runs.get(" to go back.") == p.slate, runs
+
+
+def test_a_tables_headings_are_not_the_colour_of_its_labels(monkeypatch):
+    """`PILOT RANK BEST CR` was styled `label`, so a table's headings were the
+    colour of the sentence above them and the footnote below them, and the
+    table never announced itself as one (#532)."""
+    p = _at(monkeypatch)
+    heading = vr.table(["PILOT", "RANK"], [["Thiesi", "Rookie"]], "ll",
+                       styles=[["label", "value"]])[0]
+    assert _role_of(heading, "PILOT") == p.hull, heading
+    assert p.hull != p.slate
+
+
+def test_no_cockpit_row_shows_its_label_and_its_value_in_one_role(monkeypatch):
+    """`HULL ... 60/60 Intact` declared its fourth column `label`, so the row's
+    own value came out the colour of the row's label (#532)."""
+    p = _at(monkeypatch)
+    drawn = "".join(vr.ship_gauge_rows(_world_with_seed(7)))
+    for value in ("Intact", "Shuttle"):
+        assert _role_of(drawn, value) == p.ink, (value, plain(drawn))
+    assert _role_of(drawn, "HULL") == p.slate, plain(drawn)
+
+
+def test_a_neutral_standing_is_a_value_and_its_bar_is_not(monkeypatch):
+    """Absent severity means *value*, not *label* -- but the bar carrying the
+    same absence is chrome and must not turn ink with it (#532)."""
+    p = _at(monkeypatch)
+    rows = vr.pilot_record_lines(_world_with_seed(7), "O")
+    standing = [row for row in rows if "Neutral" in plain(row)]
+    assert standing, [plain(row) for row in rows]
+    for row in standing:
+        assert _role_of(row, "Neutral") == p.ink, plain(row)
+        bars = [text for text, esc in _role_runs(row).items()
+                if text and set(text) <= {"█", "░"}]
+        assert bars, plain(row)
+        assert all(_role_runs(row)[bar] != p.ink for bar in bars), plain(row)
+
+
+def test_the_ledger_names_its_groups_instead_of_hyphenating_them(monkeypatch):
+    """`HOLD -`, `TRAVEL -` and `LOCAL MARKET -` were headings wearing a hyphen
+    in the middle of a paragraph; `section` is what the game says instead."""
+    _at(monkeypatch)
+    lines = vr.trading_ledger_lines(_world_with_seed(7))
+    rules = [line[1:] for line in lines if line.startswith(vr.SECTION_MARK)]
+    assert rules == ["MARGINS", "HOLD", "TRAVEL", "LOCAL MARKET"], rules
+    for stale in ("HOLD - ", "TRAVEL - ", "LOCAL MARKET - "):
+        assert not any(stale in plain(line) for line in lines), stale
+
+
+@pytest.mark.parametrize("width,height", SIZES)
+def test_every_ledger_figure_survives_every_width(monkeypatch, width, height):
+    """Each spend row carries exactly one figure, so a dropped column is a row
+    with nothing on it -- which a first cut of this table did at forty columns
+    to `Cargo lost or surrendered`. Nothing there is optional; it stacks."""
+    _at(monkeypatch, width, height)
+    lines = vr.trading_ledger_lines(_world_with_seed(7))
+    text = plain("\n".join(lines))
+    spend = ("Cargo lost or surrendered", "Fuel purchases", "Crew wages paid",
+             "Cancelled-order fees", "Workshop installations", "Workshop materials")
+    for label in spend:
+        assert label in text, (label, width)
+    # Every one of them still carries its figure: six labels, six amounts.
+    tail = text[text.index(spend[0]):]
+    assert tail.count("cr") >= len(spend), tail
+
+
+def test_the_hall_of_fame_views_are_a_menu_not_a_sentence(monkeypatch):
+    """As prose, `Completed` matched the good-tone severity pattern, so one
+    view name in the list came out green for no reason (#532)."""
+    p = _at(monkeypatch)
+    rows = vr.hall_view_rows()
+    assert rows[0] == vr.SECTION_MARK + "VIEWS", rows[0]
+    drawn = "".join(rows[1:])
+    for number, label in enumerate(vr.SCORE_CATEGORIES.values(), 1):
+        assert _role_runs(drawn).get(f"[{number}]") == p.gold, drawn
+        assert label in plain(drawn), label
+    # The one that used to go green, and the role that made it.
+    assert p.mint not in drawn, drawn
+    assert p.mint in vr.style_body_line("Views: [5] Completed careers."), (
+        "the pattern still means what it means; the menu simply no longer asks it")

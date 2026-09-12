@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from .support import plain, shows_page, _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _drain_until, _live_voidrunner, _set_cargo, _world_at_food_producer, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
+from .support import plain, plain_bytes, shows_page, _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _drain_until, _live_voidrunner, _set_cargo, _world_at_food_producer, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
 
 
 def _world_with_market_memory():
@@ -333,7 +333,9 @@ def test_trade_route_destination_picker_pages_keep_selection_and_back_available(
     for page in pages:
         assert len(page.splitlines()) <= height, page
         assert all(vr._visible_width(row) <= width for row in page.splitlines())
-        assert "[B] Back" in " ".join(page.split())      # a narrow bar wraps (#400)
+        # A narrow bar wraps (#400), and its keys are coloured (#532), so this
+        # reads what a caller reads rather than the bytes that carried it.
+        assert "[B] Back" in " ".join(plain(page).split())
 
 
 def test_trade_route_editing_fields_and_cancelling_is_read_only(monkeypatch):
@@ -373,7 +375,10 @@ def test_real_market_memory_and_route_back_or_eof_preserve_career(tmp_path, comm
     if b"M" in commands:
         assert shows_page(result.stdout, "Market Memory")
     if b"E" in commands:
-        assert shows_page(result.stdout, "Route Draft") and b"Quantity 1-" in result.stdout
+        assert shows_page(result.stdout, "Route Draft")
+        # `out_prompt` styles the bar, and the quantity range inside it is a
+        # value, so the prompt is read through `plain_bytes` (issue #532).
+        assert b"Quantity 1-" in plain_bytes(result.stdout)
     assert (tmp_path / "77.json").read_bytes() == original
 
 
@@ -2814,7 +2819,8 @@ def test_real_viewport_browsing_preserves_career_bytes(tmp_path,commands):
     info=tmp_path/"door_info.json"; info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,timeout=10,
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
-    assert result.returncode==0 and not result.stderr and b"[1-3] View" in result.stdout
+    assert result.returncode==0 and not result.stderr
+    assert b"[1-3] View" in plain_bytes(result.stdout)
     assert (tmp_path/"77.json").read_bytes()==before
 
 

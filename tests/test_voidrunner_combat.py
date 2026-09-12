@@ -12,7 +12,7 @@ import random
 
 import pytest
 
-from .support import plain as plainly, _add_cargo, _box_rows, _door_stopped_at, _mission_details_world, _set_cargo, _world_at_food_producer, _world_with_exploration_choice, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
+from .support import plain, plain as plainly, _add_cargo, _box_rows, _door_stopped_at, _mission_details_world, _set_cargo, _world_at_food_producer, _world_with_exploration_choice, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
 
 
 def test_fire_damages_both_sides_and_is_driven_by_world_event_rng():
@@ -691,7 +691,8 @@ def test_preexisting_bounty_target_has_no_new_controls_or_undisclosed_penalty(mo
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_travel(vr.Palette(False), world, world.save.pending_travel["destination"])
     assert world.save.pilot.notoriety == 0
-    assert "[V] Verify" not in output.getvalue() and "[W] Withdraw" not in output.getvalue()
+    shown = plain(output.getvalue())
+    assert "[V] Verify" not in shown and "[W] Withdraw" not in shown
     assert world.save.pilot.missions_completed == 1
 
 

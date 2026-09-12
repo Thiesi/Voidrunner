@@ -307,7 +307,12 @@ class Palette:
         """A severity tone by name, for a component handed one as data."""
         return {"good": self.mint, "caution": self.amber, "danger": self.alarm,
                 "info": self.hull, "brand": self.plasma, "key": self.gold,
-                "value": self.ink, "label": self.slate}.get(name, self.ink)
+                "value": self.ink, "label": self.slate,
+                # A column heading is a section header, which `hull` already
+                # means. It was `label`, so a table's headings were the colour
+                # of the sentence above them and the footnote below them and
+                # the table never announced itself as one (issue #532).
+                "heading": self.hull}.get(name, self.ink)
 
 
 # The palette every component draws with. A screen is built by functions that
@@ -366,8 +371,19 @@ def out_line(text: str = "") -> None:
 
 
 def out_prompt(text: str) -> None:
-    """Write a prompt without relying on the terminal's soft wrapping."""
-    out(_wrap_output(text, max(1, _OUTPUT_WIDTH - 1)))
+    """Write a prompt without relying on the terminal's soft wrapping.
+
+    The action bar is styled here rather than at the thirty call sites that
+    print one (issue #532). It was the only row on a Voidrunner screen wearing
+    no palette role at all: the same `[K] Label` string one row higher, inside
+    the box, goes through `style_body_line` and comes out with gold keys, while
+    outside the box it was the terminal's default foreground -- and it is the
+    row a caller has to read to know what to press. A prompt that styles itself
+    is left exactly as it is, which is the rule `style_body_line` already
+    follows for a composed body row: a component's decision beats a pattern's
+    guess.
+    """
+    out(_wrap_output(style_action_bar(text), max(1, _OUTPUT_WIDTH - 1)))
 
 
 def clear_screen() -> None:
@@ -4853,6 +4869,14 @@ def badge(text: str, tone: str = "info") -> str:
     return f"{pal().tone(tone)}{BOLD}{text}{RESET}"
 
 
+def money(amount: int, *, signed: bool = False) -> str:
+    """A credit figure for a table cell. `gold` is hotkeys and credits and
+    nothing else, so a cell that holds one says so itself rather than taking
+    the generic value role its column declares (issue #532)."""
+    figure = f"{amount:+,}cr" if signed else f"{amount:,}cr"
+    return f"{pal().gold}{figure}{RESET}"
+
+
 def key_label(key: str, label: str, *, tone: str = "value") -> str:
     """`[K] Label` -- the one spelling of a hotkey in this game (issue #400),
     with the key gold and the label a value. Nothing else is ever gold."""
@@ -4942,7 +4966,7 @@ def table_records(headers: list[str], rows: list[list[str]], aligns: str = "",
 
     def heading_for(indices, column_widths) -> str:
         return (" " * gap).join(
-            _pad(_cell_style("label", headers[index]), column_widths[position],
+            _pad(_cell_style("heading", headers[index]), column_widths[position],
                  "right" if aligns[index] == "r" else ("center" if aligns[index] == "c" else "left"))
             for position, index in enumerate(indices)).rstrip()
 
@@ -5190,7 +5214,17 @@ _KEY_RE = re.compile(r"\[[^\[\]]{1,9}\]")
 _GAUGE_RE = re.compile(r"[▀-▐░-▓■]{2,}")
 
 
-def style_body_line(text: str) -> str:
+def style_action_bar(text: str) -> str:
+    """An action bar, coloured the way the service menu above it is coloured.
+
+    `[K]` gold, the label after it a value, the rest of the row prose --
+    which is exactly what `key_label` and `_menu_entry` do inside the box, so
+    the same hotkey reads the same whichever row it is printed on (issue #532).
+    """
+    return style_body_line(text, key_labels=True)
+
+
+def style_body_line(text: str, *, key_labels: bool = False) -> str:
     """Colour an unstyled body row by the role of each token.
 
     Rebuilt screens compose their rows out of components and arrive here
@@ -5201,6 +5235,12 @@ def style_body_line(text: str) -> str:
 
     A row that styles itself is returned untouched -- a component's decision
     always beats a pattern's guess.
+
+    With `key_labels`, the words after each hotkey are claimed as that key's
+    label and take the value role, which is how an action bar is spelled: a
+    footer is a row of `[K] Label` pairs, not a sentence with keys in it.
+    A body row is not read that way -- `Press [B] to go back` is prose -- so
+    only `style_action_bar` asks for it.
     """
     if not text or text.startswith(SECTION_MARK):
         return text
@@ -5215,11 +5255,21 @@ def style_body_line(text: str) -> str:
             return
         spans.append((start, end, styled))
 
-    for match in _KEY_RE.finditer(text):
+    keys = list(_KEY_RE.finditer(text))
+    for match in keys:
         inner = match.group(0)[1:-1]
         tone = {"CRASH": "danger", "BOOM": "good", "YOU": "brand"}.get(inner)
         claim(match.start(), match.end(),
               badge(match.group(0), tone) if tone else f"{p.gold}{BOLD}{match.group(0)}{RESET}")
+    if key_labels:
+        # Claimed before the shape-based passes below, so a label is one colour
+        # from end to end: `[R] Refuel` must not come out with `Refuel` in two
+        # roles because a word inside it happened to match a severity pattern.
+        for position, match in enumerate(keys):
+            end = keys[position + 1].start() if position + 1 < len(keys) else len(text)
+            if end > match.end():
+                label = text[match.end():end]
+                claim(match.end(), end, f"{p.ink}{label}{RESET}")
     for pattern, tone in _ROLE_TONES:
         for match in pattern.finditer(text):
             claim(match.start(), match.end(), f"{p.tone(tone)}{match.group(0)}{RESET}")
@@ -5409,8 +5459,12 @@ def ship_gauge_rows(world: World) -> list[str]:
         chance = notoriety_patrol_chance(world.save.pilot.notoriety)
         rows.append(["WANTED", gauge(chance, NOTORIETY_PATROL_MAX_CHANCE, cells, tone="danger"),
                      f"{round(chance * 100)}%", "patrol interest"])
+    # Column 3 is the hull's condition, the ship's class, the lot count, the
+    # crew roster -- every one of them a value a caller reads off the row. It
+    # was declared `label`, so it came out the colour of `HULL` and `FUEL` in
+    # column 0, which really are labels (issue #532).
     drawn = table(["", "", "", ""], rows, "llrl",
-                  styles=[["label", "value", "value", "label"] for _ in rows],
+                  styles=[["label", "value", "value", "value"] for _ in rows],
                   optional=(3,))[1:]  # the headers are the gauge labels themselves
     # Tinted before it is laid in: a row that carries the art is already styled,
     # so raw art would be the one thing on the deck with no role (#493 review).
@@ -6376,33 +6430,80 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
 
 
 def trading_ledger_lines(world: World) -> list[str]:
+    """The ledger as four named groups of figures, not as fifteen sentences.
+
+    Every fact here was already on the screen; what it lacked was shape (issue
+    #532). `HOLD -`, `TRAVEL -` and `LOCAL MARKET -` were headings wearing a
+    hyphen in the middle of a paragraph, and the money was prose, so almost
+    every character on the page was the prose role and 0.4% of it was a value.
+    `section` and `table` are what the rest of the game says instead, and the
+    sentences that really are sentences -- the caveats about what these totals
+    exclude -- stay sentences and stay prose.
+    """
     ledger = world.save.trading_ledger
     lines = [
         "[B] Back returns to the deck. This ledger is read-only.",
+        section("MARGINS"),
         f"Credits available: {world.save.pilot.credits:,}cr.",
         (f"Recorded activity since day {ledger.since_day}; today is day {world.save.turn}."
          if ledger.since_day is not None else "No activity recorded yet. Earlier career costs are unknown."),
-        f"Market sales: receipts {ledger.sales_revenue:,}cr - cargo {ledger.sales_cost:,}cr = margin {ledger.sales_revenue - ledger.sales_cost:+,}cr.",
-        f"Deliveries: payment {ledger.delivery_revenue:,}cr - cargo {ledger.delivery_cost:,}cr = margin {ledger.delivery_revenue - ledger.delivery_cost:+,}cr.",
-        "Mixed delivery payments are divided by cargo quantity. Margins exclude operating costs and other career income or spending.",
-        f"Cargo lost or surrendered: {ledger.cargo_loss_cost:,}cr recorded cost.",
-        f"Fuel purchases: {ledger.fuel_spend:,}cr. Crew wages paid: {ledger.wages:,}cr. Cancelled-order fees: {ledger.cancelled_fees:,}cr.",
-        f"Workshop installations: {ledger.workshop_spend:,}cr paid; materials {ledger.workshop_material_cost:,}cr recorded cost.",
-        "These totals begin when recorded, exclude earlier activity, repairs, fines and crew hiring, and are not total career profit.",
-        "HOLD - purchases are consumed in order. Futures costs include brokerage.",
     ]
-    for commodity, quantity in world.save.cargo.items():
-        cost = sum(lot[1] for lot in world.save.cargo_basis.get(commodity, []))
-        lines.append(f"{COMMODITIES[commodity]['label']}: {quantity} units costed at {cost:,}cr total.")
-    if not world.save.cargo:
+    lines += table(
+        ["", "IN", "CARGO", "MARGIN"],
+        [["Market sales", money(ledger.sales_revenue), money(ledger.sales_cost),
+          money(ledger.sales_revenue - ledger.sales_cost, signed=True)],
+         ["Deliveries", money(ledger.delivery_revenue), money(ledger.delivery_cost),
+          money(ledger.delivery_revenue - ledger.delivery_cost, signed=True)]],
+        "lrrr", styles=[["label", "value", "value", "value"] for _ in range(2)])
+    # Deliberately no optional column: every row here has exactly one figure,
+    # so a dropped column is a row with nothing on it -- which is what a first
+    # cut of this table did at forty columns to `Cargo lost or surrendered`.
+    # With nothing droppable the table stacks instead, and a stacked row still
+    # carries its figure.
+    lines += table(
+        ["", "", ""],
+        [["Cargo lost or surrendered", money(ledger.cargo_loss_cost), "recorded cost"],
+         ["Fuel purchases", money(ledger.fuel_spend), "paid"],
+         ["Crew wages paid", money(ledger.wages), "paid"],
+         ["Cancelled-order fees", money(ledger.cancelled_fees), "paid"],
+         ["Workshop installations", money(ledger.workshop_spend), "paid"],
+         ["Workshop materials", money(ledger.workshop_material_cost), "recorded cost"]],
+        "lrl", styles=[["label", "value", "label"] for _ in range(6)],
+        repeat_header=False)[1:]
+    lines += [
+        "Mixed delivery payments are divided by cargo quantity. Margins exclude operating costs and other career income or spending.",
+        "These totals begin when recorded, exclude earlier activity, repairs, fines and crew hiring, and are not total career profit.",
+        section("HOLD"),
+        "Purchases are consumed in order. Futures costs include brokerage.",
+    ]
+    if world.save.cargo:
+        lines += table(
+            ["", "UNITS", "COSTED AT"],
+            [[COMMODITIES[commodity]["label"], f"{quantity}",
+              money(sum(lot[1] for lot in world.save.cargo_basis.get(commodity, [])))]
+             for commodity, quantity in world.save.cargo.items()],
+            "lrr", styles=[["label", "value", "value"] for _ in world.save.cargo])
+    else:
         lines.append("Hold empty.")
     wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
-    lines.extend([
-        f"TRAVEL - tank {world.save.ship.fuel}/{fuel_capacity(world.save.ship)} units. Replacement fuel costs 6cr/unit; current crew wages {wage}cr/jump.",
-        f"LOCAL MARKET - {world.here.name}, {world.here.economy}.",
-        "Produces: " + ", ".join(COMMODITIES[c]["label"] for c in ECONOMY_PRODUCES[world.here.economy]) + ".",
-        "Demands: " + ", ".join(COMMODITIES[c]["label"] for c in ECONOMY_DEMANDS[world.here.economy]) + ".",
-    ])
+    lines.append(section("TRAVEL"))
+    p = pal()
+    # The unit belongs to the figure and has to be styled with it: a pre-styled
+    # cell is left alone by `table`, so a bare `/unit` after the closing reset
+    # would be the one token on the page wearing no role at all.
+    lines += table(
+        ["", ""],
+        [["Tank", f"{p.ink}{world.save.ship.fuel}/{fuel_capacity(world.save.ship)}{RESET} {p.slate}units{RESET}"],
+         ["Replacement fuel", f"{money(6)}{p.slate}/unit{RESET}"],
+         ["Crew wages", f"{money(wage)}{p.slate}/jump{RESET}"]],
+        "ll", styles=[["label", "value"] for _ in range(3)], repeat_header=False)[1:]
+    lines.append(section("LOCAL MARKET"))
+    lines += table(
+        ["", ""],
+        [["Station", f"{world.here.name}, {world.here.economy}"],
+         ["Produces", ", ".join(COMMODITIES[c]["label"] for c in ECONOMY_PRODUCES[world.here.economy])],
+         ["Demands", ", ".join(COMMODITIES[c]["label"] for c in ECONOMY_DEMANDS[world.here.economy])]],
+        "ll", styles=[["label", "value"] for _ in range(3)], repeat_header=False)[1:]
     return lines
 
 
@@ -8421,14 +8522,21 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
     for faction in FACTIONS:
         rep = pilot.reputation.get(faction, 0)
         label = "Allied" if rep >= 10 else ("Friendly" if rep >= 4 else ("Hostile" if rep <= -5 else "Neutral"))
-        tone = "good" if rep >= 4 else ("danger" if rep <= -5 else "label")
+        # The bar and the word carry the same severity but not the same absence
+        # of one: a neutral standing is still a *value* to read (issue #532),
+        # while a neutral bar is chrome and takes the tone every other unremark-
+        # able gauge on this screen takes.
+        tone = "good" if rep >= 4 else ("danger" if rep <= -5 else None)
         # -100..100 on the bar: hostile is a short bar, not an absent one.
-        standing_rows.append([FACTION_LABEL[faction], gauge(rep + 100, 200, cells, tone=tone),
-                              f"{rep:+d}", badge(label, tone),
+        standing_rows.append([FACTION_LABEL[faction],
+                              gauge(rep + 100, 200, cells, tone=tone or "info"),
+                              f"{rep:+d}", badge(label, tone or "value"),
                               faction_membership_status(world, faction)
                               if faction in FACTION_MEMBERSHIPS else ""])
     lines += table(["", "", "", "", ""], standing_rows, "llrll",
-                   styles=[["label", "value", "value", "value", "label"] for _ in standing_rows],
+                   # Column 4 is the membership state -- `Not joined` -- which
+                   # is a value like every other cell on the row (issue #532).
+                   styles=[["label", "value", "value", "value", "value"] for _ in standing_rows],
                    # The word repeats the number and its tone; the membership
                    # state is the only thing on the row nothing else says.
                    optional=(4, 3), repeat_header=False)[1:]
@@ -8543,7 +8651,7 @@ def hall_of_fame_lines(entries: list[dict], user_id: int) -> list[str]:
             str(entry.get("retirements", 0)),
             badge("[YOU]", "brand") if mine else "",
         ])
-        styles.append(["value", "value", "label", "value", "value", "value", "value", "value", "value"])
+        styles.append(["value"] * 9)
     lines += table(["", "PILOT", "RANK", "BEST CR", "", "WINS", "JOBS", "RUNS", ""],
                    # Only the bar is droppable. A pilot's recorded rank and
                    # their job and run counts are on no other Hall view, so a
@@ -8594,6 +8702,20 @@ def achievement_lines(entries: list[dict], category: str, user_id: int) -> list[
     return lines + explanations
 
 
+def hall_view_rows() -> list[str]:
+    """The Hall's own view switcher, as the menu it is.
+
+    It used to be a sentence -- `Views: [1] Wealth, ... [5] Completed careers.`
+    -- left to `style_body_line` to colour by pattern, and `Completed` matched
+    the good-tone severity pattern, so one view name in the list came out green
+    for no reason (issue #532). A menu is built with the menu component: a
+    component's decision beats a pattern's guess, which is the same rule that
+    settled the service grid's preview counts in #518.
+    """
+    return [section("VIEWS")] + menu_grid(
+        [(str(number), label) for number, label in enumerate(SCORE_CATEGORIES.values(), 1)])
+
+
 def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) -> None:
     entries = _load_score_records(save_dir)
     footer = "[1-5] View [N] Next [P] Prev [B] Back: "
@@ -8609,8 +8731,8 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
             title = "Fame: " + SCORE_CATEGORIES[category]
         if category not in cache:
             lines = achievement_lines(entries, category, user_id)
-            lines += ["Views: [1] Wealth, [2] Trading, [3] Exploration, [4] Combat, [5] Completed careers.",
-                      "Local accomplishments; starting advantages and game rules may differ. No shared-seed competition."]
+            lines += hall_view_rows()
+            lines += ["Local accomplishments; starting advantages and game rules may differ. No shared-seed competition."]
             cache[category] = _service_pages(lines, title, footer)
         key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[category])
         if key in ("B", "Q"): return
