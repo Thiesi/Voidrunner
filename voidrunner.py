@@ -199,7 +199,10 @@ class Palette:
             return ""
         if _OUTPUT_STYLE == "basic":
             color = {205: 95, 51: 96, 46: 92, 203: 91, 244: 37, 220: 93,
-                     81: 96, 24: 34, 255: 97, 103: 37, 84: 92, 215: 33}.get(idx256, 37)
+                     # 137 is `slate`, the label role: plain white at sixteen
+                     # colours, where there is no tan to move it to and amber
+                     # already holds 33.
+                     81: 96, 24: 34, 255: 97, 137: 37, 84: 92, 215: 33}.get(idx256, 37)
             return f"{ESC}[{color}m"
         if self._truecolor:
             r, g, b = rgb
@@ -234,8 +237,18 @@ class Palette:
 
     @property
     def slate(self) -> str:
-        """A label, a hint, a unit -- the words around the value."""
-        return self._sgr((127, 143, 174), 103)
+        """A label, a hint, a unit -- the words around the value.
+
+        Warm, and deliberately the one role drawn from outside the cockpit's own
+        hue (issue #519). It was `#7f8fae` / 103, a desaturated *blue* on a blue
+        screen, so a label read as the same colour one shade down rather than as
+        a different kind of thing: measured on the command deck, `deep`, `hull`,
+        `ink` and this were 78.7% of visible characters in one band. Warm rather
+        than neutral because it has to separate, not merely differ -- and
+        desaturated so it cannot be mistaken for `gold` or `amber`, which mean
+        money and hotkeys.
+        """
+        return self._sgr((179, 155, 125), 137)
 
     @property
     def mint(self) -> str:
@@ -355,6 +368,21 @@ def out_line(text: str = "") -> None:
 def out_prompt(text: str) -> None:
     """Write a prompt without relying on the terminal's soft wrapping."""
     out(_wrap_output(text, max(1, _OUTPUT_WIDTH - 1)))
+
+
+def clear_screen() -> None:
+    """Start a screen at the top of the terminal rather than below the last one.
+
+    A door owns the whole terminal for its session, so a new screen replaces the
+    one before it (issue #516). Voidrunner used to print each screen underneath
+    its predecessor, so a session was one long scroll and a caller's scrollback
+    filled with superseded copies of the command deck; War Dialer has always
+    cleared. It is unconditional rather than following the host's
+    `redraw_in_place` preference, which is opt-in because clearing a *menu*
+    costs scrollback a caller may still want -- a door's own screens are not
+    that.
+    """
+    out(f"{ESC}[2J{ESC}[H")
 
 
 def _wrap_output(text: str, width: int) -> str:
@@ -5012,6 +5040,27 @@ def menu_columns(entries: list[str], width: int | None = None) -> int:
     return 1
 
 
+#: `Name: 7 things` -- a service entry that previews how much is behind its key.
+_MENU_COUNT_RE = re.compile(r"^(?P<name>[^:]+: )(?P<count>\d[\d,]*)(?P<noun>.*)$")
+
+
+def _menu_entry(key: str, label: str) -> str:
+    """One `[K] Label` cell, with a preview count picked out as the value it is.
+
+    `Board: 4 offers` is a label and a value, not one phrase: the count is what
+    a caller scans the menu for, and colouring the whole entry alike buried it
+    (issue #518). Entries with no count -- `Status`, `Hall of Fame` -- are the
+    thing itself and stay a value throughout.
+    """
+    match = _MENU_COUNT_RE.match(label)
+    if not match:
+        return key_label(key, label)
+    p = pal()
+    body = (f"{p.slate}{match['name']}{RESET}{p.ink}{match['count']}{RESET}"
+            f"{p.slate}{match['noun']}{RESET}")
+    return f"{p.gold}{BOLD}[{key}]{RESET} {body}"
+
+
 def menu_grid(entries: list[tuple[str, str]], width: int | None = None) -> list[str]:
     """The service menu as an aligned grid of `[K] Label` entries.
 
@@ -5026,7 +5075,7 @@ def menu_grid(entries: list[tuple[str, str]], width: int | None = None) -> list[
     rows: list[str] = []
     for start in range(0, len(entries), columns):
         chunk = entries[start:start + columns]
-        cells = [_pad(key_label(key, _fit_text(label, max(1, cell - 4))), cell)
+        cells = [_pad(_menu_entry(key, _fit_text(label, max(1, cell - 4))), cell)
                  for key, label in chunk]
         rows.append("  ".join(cells).rstrip())
     return rows
@@ -5411,6 +5460,18 @@ def deck_alert_rows(world: World) -> list[str]:
             left = max(0, mission.deadline_turn - world.save.turn)
             detail += f"  {gauge(left, max(1, MISSION_BOARD_DAYS), 6, tone='caution' if left <= 2 else 'good')}"
         rows.append(alert("note", f"Tracked {kind}", detail, key_label("C", "chart")))
+    # The deck replaces the resume banner now that a screen clears (issue #516),
+    # and everything that banner said is on this screen already -- the station,
+    # the day and the credits in the status band, the tracked contract two rows
+    # up -- except a futures order that has come due. That is the one thing on it
+    # a caller had to act on, so it belongs here rather than on a screen wiped
+    # before it can be read.
+    ready = sum(1 for order in world.save.active_futures
+                if world.save.turn >= order.settle_turn)
+    if ready:
+        rows.append(alert("caution", "Futures mature",
+                          f"{plural(ready, 'order')} ready to settle",
+                          key_label("M", "market")))
     if world.save.flags.get("archive_v1_started") and not archive_finished(world):
         rows.append(alert("note", "Archive", archive_objective(world), key_label("N", "contacts")))
     if wage and pilot.credits >= wage:
@@ -5427,8 +5488,14 @@ def deck_service_entries(world: World) -> list[tuple[str, str]]:
     goods = len(LEGAL_COMMODITIES) + sum(1 for c in CONTRABAND_COMMODITIES
                                          if world.here.economy == "Haven" or world.save.cargo.get(c, 0) > 0)
     offers = len(posted_mission_offers(world))
-    entries = [("M", f"Market {goods} goods"), ("Y", "Yard repair/refit"), ("B", f"Board {offers} offers"),
-               ("C", f"Chart {len(world.here.connections)} links"), ("S", "Status"), ("H", "Hall of Fame"),
+    # `Board: 4 offers`, not `Board 4 offers`: without the colon the label reads
+    # as a sentence -- subject "Board 4", verb "offers" -- which is how a caller
+    # came to ask what the numbers meant (issue #518). The counts agree in
+    # number too; `Chart 1 links` was reported from a real screen.
+    entries = [("M", f"Market: {plural(goods, 'good')}"), ("Y", "Yard repair/refit"),
+               ("B", f"Board: {plural(offers, 'offer')}"),
+               ("C", f"Chart: {plural(len(world.here.connections), 'link')}"),
+               ("S", "Status"), ("H", "Hall of Fame"),
                ("G", "Guide"), ("N", "Archive"), ("T", "Ledger"),
                ("V", "Viewport"), ("O", "Display"), ("Q", "Disembark")]
     if landmark_available_here(world):
@@ -7271,7 +7338,7 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
     and printed outside the box, where the cursor waits.
     """
     global _LAST_PAGE_DRAWN
-    out_line()
+    clear_screen()
     header = _page_header(title, page, count)
     inner = _box_inner_width()
     if _header_fits_border(header):

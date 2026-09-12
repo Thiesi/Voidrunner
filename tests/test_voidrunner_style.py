@@ -469,3 +469,80 @@ def test_drawing_a_page_twice_over_reveals_it_once(monkeypatch):
     assert again == first, "an unchanged redraw revealed itself again"
     assert len(paused) > again, "paging to a new page did not reveal it"
     assert sum(paused) <= vr.MOTION_REVEAL_BUDGET * 2 + 1e-9
+
+
+# -- in-place redraw, service labels and the label hue ---------------------
+
+
+def test_a_screen_replaces_the_one_before_it(monkeypatch):
+    """A door owns the terminal, so a new screen clears rather than scrolls.
+
+    Voidrunner printed every screen underneath its predecessor, so a session was
+    one long scroll and a caller's history filled with superseded copies of the
+    command deck (issue #516). War Dialer has always cleared.
+    """
+    written: list[str] = []
+    monkeypatch.setattr(vr, "out", written.append)
+    vr.draw_page(vr.pal(), "TEST", ["a row"], 0, 1)
+    assert "".join(written).startswith("\x1b[2J\x1b[H")
+
+
+def test_every_paged_screen_goes_through_the_one_clearing_path():
+    """One choke point, not a clear sprinkled per screen -- which is how both
+    games lost their presentation to slices that each looked fine."""
+    source = vr.__file__ and open(vr.__file__, encoding="utf-8").read()
+    assert source.count("[2J") == 1, "the clear belongs in clear_screen() alone"
+
+
+@pytest.mark.parametrize("label,count,noun", [
+    ("Market: 7 goods", "7", " goods"),
+    ("Board: 4 offers", "4", " offers"),
+    ("Chart: 1 link", "1", " link"),
+])
+def test_a_preview_count_is_styled_as_the_value_it_is(label, count, noun):
+    """`Board: 4 offers` is a label and a value, not one phrase: colouring the
+    whole entry alike buried the number a caller scans the menu for (#518)."""
+    p = vr.pal()
+    drawn = vr._menu_entry("B", label)
+    runs = dict((text, esc) for esc, text in re.findall(r"(\x1b\[[0-9;]*m)([^\x1b]*)", drawn) if text)
+    assert runs.get(count) == p.ink, drawn
+    assert runs.get(noun) == p.slate, drawn
+
+
+def test_an_entry_with_no_count_stays_a_value():
+    p = vr.pal()
+    drawn = vr._menu_entry("S", "Status")
+    assert p.ink in drawn and "Status" in plain(drawn)
+
+
+def test_a_service_label_reads_as_a_label_not_a_sentence():
+    """`Board 4 offers` parses as subject "Board 4", verb "offers"."""
+    world = _world_with_seed(7)
+    entries = dict((key, label) for key, label in vr.deck_service_entries(world))
+    for key in ("M", "B", "C"):
+        assert ": " in entries[key], entries[key]
+    # And counts agree with their noun: `Chart 1 links` was a real screen.
+    for label in entries.values():
+        match = re.match(r"^[^:]+: (\d+) (\w+?)(s?)$", label)
+        if match:
+            number, _noun, plural_s = match.groups()
+            assert (number != "1") == bool(plural_s), label
+
+
+def test_labels_are_off_the_cockpits_own_hue():
+    """Labels were `#7f8fae`, a desaturated blue on a blue cockpit (#519), so a
+    label read as the same colour one shade down rather than a different kind
+    of thing."""
+    p = vr.Palette(truecolor=True)
+    rgb = re.search(r"38;2;(\d+);(\d+);(\d+)", p.slate)
+    red, green, blue = (int(value) for value in rgb.groups())
+    assert not (blue > red and blue >= green), (red, green, blue)
+
+
+def test_every_palette_role_stays_distinct_in_both_depths():
+    p = vr.Palette(truecolor=True)
+    roles = ["hull", "deep", "plasma", "gold", "ink", "slate", "mint", "amber", "alarm"]
+    truecolour = [getattr(p, role) for role in roles]
+    assert len(set(truecolour)) == len(roles)
+    indexed = [getattr(vr.Palette(truecolor=False), role) for role in roles]
+    assert len(set(indexed)) == len(roles)
