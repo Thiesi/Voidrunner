@@ -6478,7 +6478,11 @@ def trading_ledger_lines(world: World) -> list[str]:
     ]
     if world.save.cargo:
         lines += table(
-            ["", "UNITS", "COSTED AT"],
+            # `TOTAL COST`, not `COSTED AT`: the figure is the whole holding's
+            # basis, and the sentence this replaced said "total" out loud. A
+            # caller comparing it against a per-unit market price would read a
+            # five-lot holding's basis as one lot's (issue #532 review).
+            ["", "UNITS", "TOTAL COST"],
             [[COMMODITIES[commodity]["label"], f"{quantity}",
               money(sum(lot[1] for lot in world.save.cargo_basis.get(commodity, [])))]
              for commodity, quantity in world.save.cargo.items()],

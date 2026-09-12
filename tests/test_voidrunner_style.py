@@ -694,6 +694,19 @@ def test_every_ledger_figure_survives_every_width(monkeypatch, width, height):
     assert tail.count("cr") >= len(spend), tail
 
 
+def test_the_hold_says_its_cost_is_the_whole_holdings(monkeypatch):
+    """The prose this table replaced suffixed the figure with "total", and the
+    figure is the sum over every lot. Without the qualifier a caller comparing
+    it against a per-unit market price misreads a multi-lot holding (#532)."""
+    _at(monkeypatch)
+    world = _world_with_seed(7)
+    world.save.cargo = {"machinery": 5}
+    world.save.cargo_basis = {"machinery": [[5, 1250]]}
+    text = " ".join(" ".join(plain(line) for line in vr.trading_ledger_lines(world)).split())
+    assert "TOTAL COST" in text, text
+    assert "1,250cr" in text, text
+
+
 def test_the_hall_of_fame_views_are_a_menu_not_a_sentence(monkeypatch):
     """As prose, `Completed` matched the good-tone severity pattern, so one
     view name in the list came out green for no reason (#532)."""
