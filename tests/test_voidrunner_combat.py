@@ -12,7 +12,7 @@ import random
 
 import pytest
 
-from .support import _add_cargo, _box_rows, _door_stopped_at, _mission_details_world, _set_cargo, _world_at_food_producer, _world_with_exploration_choice, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
+from .support import plain as plainly, _add_cargo, _box_rows, _door_stopped_at, _mission_details_world, _set_cargo, _world_at_food_producer, _world_with_exploration_choice, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
 
 
 def test_fire_damages_both_sides_and_is_driven_by_world_event_rng():
@@ -170,7 +170,7 @@ def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkey
     assert saved["ship"]["fuel"] < initial["ship"]["fuel"]
 
     # A fresh executable must resume the opponent, not reveal a station menu.
-    with _door_stopped_at(tmp_path, b"I", b"Tactical Systems:") as output:
+    with _door_stopped_at(tmp_path, b"I", b"TACTICAL SYSTEMS") as output:
         assert b"Resuming your interrupted journey" in output
         assert b"Freeport Anchorage" not in output
         assert json.loads((tmp_path / "77.json").read_text(encoding="utf-8")) == saved
@@ -318,7 +318,9 @@ def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch,
                 if not re.match(r"Combat [\d,]+cr \d+/\d+\s*$", row)
                 and not re.fullmatch(r"[A-Z0-9<>]", row)]
     text = " ".join(" ".join(row for frame in frames for row in body(frame)).split())
-    for label in ("Last exchange:", "damage.", "Tactical Systems:", "Cargo 3/24 used", "Your hull", "Fuel", "Shields Tier"):
+    # The fight's groups are named by rules across the frame now, which are
+    # border rows; what is left in the body is the readings themselves.
+    for label in ("damage.", "3/24", "Your hull", "Fuel", "Shields Tier"):
         assert label in text
     if patrol: assert "clear notoriety" in text and "no salvage" in text
     else: assert "one unit" in text and "only if accepted" in text and "refusal draws" in text
@@ -422,7 +424,8 @@ def test_tactical_intent_displayed_damage_range_matches_resolution(monkeypatch, 
     pirate = vr.Pirate("Probe", 2, 200, 200)
     tactics = {"version": 1, "profile": profile, "step": step, "brace_ready": True}
     lines = vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics, details=True)
-    label = next(line for line in lines if (line.startswith("[G]") if action == "G" else " intent: " in line))
+    label = next(plainly(line) for line in lines
+                 if (plainly(line).startswith("[G]") if action == "G" else " intent " in plainly(line)))
     low, high = map(int, re.search(r"incoming (\d+)-(\d+)", label).groups())
     monkeypatch.setattr(world.event_rng, "randint", lambda lo, hi: hi)
     _, received, _ = vr.tactical_round(world, pirate, tactics, action)
@@ -460,7 +463,7 @@ def test_tactical_brace_checkpoint_survives_real_kill_and_invalid_repeat(tmp_pat
         assert combat["tactics"]["version"] == vr.TACTICAL_RULESET_VERSION and not combat["tactics"]["brace_ready"]
         assert combat["tactics"]["step"] == 1 and 0 < combat["pirate"]["hp"] < combat["pirate"]["hp_max"]
     before = (tmp_path / "77.json").read_bytes()
-    with _door_stopped_at(tmp_path, b"GI", b"Tactical Systems:"):
+    with _door_stopped_at(tmp_path, b"GI", b"TACTICAL SYSTEMS"):
         assert (tmp_path / "77.json").read_bytes() == before
 
 
@@ -560,7 +563,6 @@ def test_bounty_identification_risk_is_visible_and_paging_is_read_only(monkeypat
         frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
-        if len(frames) == 1: assert "12%" in frame
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         page, count = map(int, re.search(r"Combat.*?(\d+)/(\d+)", frame, re.S).groups())
         if page == count: raise EOFError
@@ -570,6 +572,9 @@ def test_bounty_identification_risk_is_visible_and_paging_is_read_only(monkeypat
     with contextlib.redirect_stdout(output), pytest.raises(EOFError): vr.screen_combat(vr.Palette(False), world, pirate)
     text = page_text(frames)
     assert "[V] Verify" in text and "[W] Withdraw" in text
+    # The mismatch rate is on the identification panel, wherever the
+    # terminal's height put it.
+    assert "12%" in text
     assert "Identity mismatch confirmed" not in text
 
 
@@ -594,7 +599,9 @@ def test_bounty_identification_choices_resolve_contract_with_explicit_consequenc
         assert world.save.pilot.credits == credits + 500 + 160
         assert world.save.pilot.notoriety == (0 if matches else vr.NOTORIETY_PER_WRONG_BOUNTY_KILL)
         assert world.save.pilot.reputation[vr.FACTION_CONCORD] == (2 if matches else -1)
-    if "V" in commands: assert "Identity confirmed" in output.getvalue() if matches else "Identity mismatch confirmed" in output.getvalue()
+    if "V" in commands:
+        said = plainly(output.getvalue())
+        assert "Identity confirmed" in said if matches else "Identity mismatch confirmed" in said
 
 
 @pytest.mark.parametrize("fault", ["checked", "engaged", "fuel"])
@@ -885,8 +892,9 @@ def test_review_combat_info_keeps_exchange_before_tactical_heading(monkeypatch, 
     terminal(width, height)
     lines = vr.combat_display_lines(world, pirate, ["Your last shot hit."], patrol=False, details=True, tactics=vr.new_tactics(pirate))
     pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/P] Act [I] Info [< >]Page: ")
-    assert pages[0][0] == "Last exchange:"
-    assert lines.index("Your last shot hit.") < lines.index("Tactical Systems:")
+    assert plainly(pages[0][0]) == "LAST EXCHANGE"
+    kinds = [plainly(line) for line in lines]
+    assert kinds.index("Your last shot hit.") < kinds.index("TACTICAL SYSTEMS")
 
 
 @pytest.mark.parametrize("tier", [0, 4])
@@ -953,7 +961,7 @@ def test_real_exchange_text_starts_on_first_combat_page(monkeypatch, terminal, w
     lines = vr.combat_display_lines(world, pirate, result, patrol=False, details=details, tactics=vr.new_tactics(pirate))
     pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/P] Act [I] Info [< >]Page: ")
     assert len(pages[0]) > 1 and result[0].split()[0] in " ".join(pages[0][1:])
-    text = " ".join(" ".join(row for page in pages for row in page).split())
+    text = " ".join(" ".join(plainly(row) for page in pages for row in page).split())
     for entry in result: assert " ".join(entry.split()) in text
 
 
@@ -1111,7 +1119,7 @@ def test_order_screens_show_stock_after_reservation(monkeypatch):
     keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr._screen_futures_order(vr.Palette(False), world, world.save.active_futures[0])
-    assert "10 units reserved from that station's stock; cancelling returns them." in " ".join(output.getvalue().split())
+    assert "10 units reserved from that station's stock; cancelling returns them." in " ".join(plainly(output.getvalue()).split())
 
 
 @pytest.mark.parametrize("hull_class", list(vr.HULL_REFITS))
@@ -1155,7 +1163,9 @@ def test_title_box_rows_share_one_display_width_at_every_width(monkeypatch, widt
     assert rows and {vr._visible_width(row) for row in rows} == {vr._box_outer_width()}
     plain = " ".join(" ".join(rows).split())
     assert ("V O I D R U N N E R" if width >= 21 else "VOIDRUNNER") in plain
-    assert "PILOT:" in plain and handle in plain and "NODE: ReLink" in plain
+    # The splash's meta fields are chips now (issue #493), so the colon went
+    # with the label; a starfield strip opens the large composition.
+    assert "PILOT" in plain and handle in plain and "NODE ReLink" in plain
     if width == 80:
         assert len(rows) == 11 and "Tactical Deep-Space Trading & Exploration" in plain and "48 Star Systems" in plain
     if width < 51:
@@ -1165,7 +1175,7 @@ def test_title_box_rows_share_one_display_width_at_every_width(monkeypatch, widt
 def test_title_large_composition_is_unchanged_at_eighty_columns(monkeypatch):
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80)
     rows = vr.title_rows({"node_name": "Central BBS", "handle": "Alice"}, vr._box_inner_width())
-    assert [kind for kind, _, _ in rows] == ["blank", "logo", "logo", "wordmark", "blank", "sub", "blank", "rule", "meta"]
+    assert [kind for kind, _, _ in rows] == ["stars", "logo", "logo", "wordmark", "blank", "sub", "blank", "rule", "meta"]
     assert rows[-1][1] == "  NODE: Central BBS  │  PILOT: Alice  │  GALAXY: 48 Star Systems"
 
 
@@ -1187,9 +1197,12 @@ def test_market_rows_fit_eighty_columns_without_filler_status():
     goods = vr.LEGAL_COMMODITIES + vr.CONTRABAND_COMMODITIES
     world.save.current_system = next(s.id for s in world.galaxy if s.economy == "Haven")
     lines = vr.market_catalog_lines(world, goods)
-    assert all(vr._visible_width(line) <= 79 for line in lines if line.startswith("["))
-    assert not any(line.endswith(" Normal") for line in lines) and any("Illegal" in line for line in lines)
-    assert "Only jumps advance days" in lines[1]
+    # The catalogue's own rows fit without wrapping; the notes below it are
+    # prose, and prose wraps.
+    assert all(vr._visible_width(line) <= 79 for line in lines if plainly(line).startswith("["))
+    catalog = plainly(" ".join(lines))
+    assert " Normal" not in catalog and "Illegal" in catalog
+    assert "Only jumps advance days" in catalog
 
 
 def test_contract_notes_appear_only_when_they_apply():

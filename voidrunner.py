@@ -95,13 +95,54 @@ ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
 _OUTPUT_WIDTH = 80
 _OUTPUT_HEIGHT = 24
 _OUTPUT_STYLE = "auto"
-DISPLAY_STYLES = {"auto": "Full palette", "basic": "16-color", "mono": "Monochrome", "plain": "Plain / ASCII artwork"}
+DISPLAY_STYLES = {"auto": "Full palette", "fast": "Full palette, no motion", "basic": "16-color",
+                  "mono": "Monochrome", "plain": "Plain / ASCII artwork"}
+# How much of a terminal each preset asks for, so a preview is never drawn above
+# what the caller's own preset has said their terminal can do.
+PRESET_DEPTH = {"auto": 3, "fast": 3, "basic": 2, "mono": 1, "plain": 0}
 _ASCII_ART_TRANSLATION = str.maketrans({
     **{chr(code): "|" for code in (0x2502, 0x2551)},
     **{chr(code): "+" for code in (0x251C, 0x2524, 0x2554, 0x2557, 0x255A, 0x255D, 0x2560, 0x2563, 0x256D, 0x256E, 0x256F, 0x2570)},
     **{chr(code): "#" for code in (0x2580, 0x2584, 0x2588, 0x25A0)},
     chr(0x2500): "-", chr(0x2550): "=", chr(0x2591): ".", chr(0x2605): "*",
+    # The presentation vocabulary (issue #493 §4). Everything the component
+    # library can draw has an ASCII substitute, so the `plain` preset is a
+    # deliberate rendering rather than a bag of replacement characters. The
+    # components ask `glyph()` for these by name; the table is the backstop for
+    # a glyph that reaches `out()` from authored text instead.
+    chr(0x2581): ".", chr(0x2582): ".", chr(0x2583): ":", chr(0x2585): "=",
+    chr(0x2586): "+", chr(0x2587): "*",
+    chr(0x27E6): "<", chr(0x27E7): ">", chr(0x25C8): "*", chr(0x25B2): "!",
+    chr(0x25C6): "*", chr(0x25CF): "o", chr(0x25CB): ".", chr(0x25E4): ">",
+    chr(0x258C): ">", chr(0x2022): "-", chr(0x00B7): "-", chr(0x2192): "-",
+    chr(0x25BC): "v", chr(0x2013): "-", chr(0x2014): "-",
 })
+
+# Name -> (Unicode, ASCII). One vocabulary, one substitution per glyph, asked
+# for by role rather than typed as a literal: a screen that wants a severity
+# marker says `glyph("danger")`, so the `plain` preset stays a designed
+# rendering and a new glyph cannot arrive without its substitute (issue #493).
+_GLYPHS = {
+    "credits": ("◈", "$"), "brand": ("◤", ">"), "cursor": ("▌", ">"),
+    "danger": ("▲", "!"), "note": ("◆", "*"), "info": ("●", "o"),
+    "crew_on": ("●", "o"), "crew_off": ("○", "."),
+    "chip_l": ("⟦", "<"), "chip_r": ("⟧", ">"),
+    "dot": ("·", "-"), "arrow": ("→", "->"), "rise": ("▲", "^"),
+    "fall": ("▼", "v"), "flat": ("─", "-"),
+    "fill": ("█", "#"), "track": ("░", "."),
+}
+# Eight sparkline levels and their ASCII ramp, lightest first.
+_SPARK = ("▁▂▃▄▅▆▇█", ".. :-=+*#".replace(" ", ""))
+
+
+def glyph(name: str) -> str:
+    """One glyph from the vocabulary, in the form this preset can draw."""
+    unicode_form, ascii_form = _GLYPHS[name]
+    return ascii_form if _OUTPUT_STYLE == "plain" else unicode_form
+
+
+def _spark_ramp() -> str:
+    return _SPARK[1] if _OUTPUT_STYLE == "plain" else _SPARK[0]
 
 
 # ---------------------------------------------------------------------------
@@ -132,9 +173,23 @@ def _load_door_info() -> dict:
 
 
 class Palette:
-    """Same six-color palette as retro_trivia.py's own -- see that
-    module's class docstring for why a real nearest-256 algorithm is
-    overkill here too."""
+    """Voidrunner's presentation palette (issue #493 §4).
+
+    Nine named roles, not nine colours a screen may pick from: *what a token
+    is* decides its colour, so the same fact is the same colour on every
+    screen, and chrome is never the colour of content. Truecolour is the
+    design target; the 256-colour index beside each RGB is the first
+    degradation, `basic` the second (a 16-colour terminal), and `mono`/`plain`
+    drop styling entirely by returning an empty sequence from `_sgr` -- which
+    is why every component can be written once and still render in all four
+    presets.
+
+    The four legacy names (`title`, `accent`, `correct`, `wrong`, `muted`)
+    remain as aliases of the roles they always meant: hundreds of call sites
+    outside the rebuilt screens still use them, and renaming them would say
+    nothing about the colour anyone sees. A real nearest-256 algorithm is
+    overkill here for the same reason as in `retro_trivia.py`.
+    """
 
     def __init__(self, truecolor: bool):
         self._truecolor = truecolor
@@ -143,36 +198,121 @@ class Palette:
         if _OUTPUT_STYLE in ("mono", "plain"):
             return ""
         if _OUTPUT_STYLE == "basic":
-            color = {205: 95, 51: 96, 46: 92, 203: 91, 244: 37, 220: 93}.get(idx256, 37)
+            color = {205: 95, 51: 96, 46: 92, 203: 91, 244: 37, 220: 93,
+                     81: 96, 24: 34, 255: 97, 103: 37, 84: 92, 215: 33}.get(idx256, 37)
             return f"{ESC}[{color}m"
         if self._truecolor:
             r, g, b = rgb
             return f"{ESC}[38;2;{r};{g};{b}m"
         return f"{ESC}[38;5;{idx256}m"
 
+    # -- the nine roles ----------------------------------------------------
     @property
-    def title(self) -> str:
+    def hull(self) -> str:
+        """Frames, section headers, station names."""
+        return self._sgr((95, 215, 255), 81)
+
+    @property
+    def deep(self) -> str:
+        """Frame shadow, gauge tracks, separators -- chrome behind chrome."""
+        return self._sgr((29, 59, 87), 24)
+
+    @property
+    def plasma(self) -> str:
+        """The brand, the rank, the cursor: one accent per screen."""
         return self._sgr((255, 90, 190), 205)
 
     @property
+    def gold(self) -> str:
+        """Hotkeys and credits. Nothing else, ever."""
+        return self._sgr((255, 200, 60), 220)
+
+    @property
+    def ink(self) -> str:
+        """A value: the thing the caller actually reads off the row."""
+        return self._sgr((232, 240, 255), 255)
+
+    @property
+    def slate(self) -> str:
+        """A label, a hint, a unit -- the words around the value."""
+        return self._sgr((127, 143, 174), 103)
+
+    @property
+    def mint(self) -> str:
+        return self._sgr((108, 242, 160), 84)
+
+    @property
+    def amber(self) -> str:
+        return self._sgr((255, 179, 71), 215)
+
+    @property
+    def alarm(self) -> str:
+        return self._sgr((255, 92, 108), 203)
+
+    # -- legacy aliases ----------------------------------------------------
+    @property
+    def title(self) -> str:
+        return self.plasma
+
+    @property
     def accent(self) -> str:
-        return self._sgr((100, 220, 255), 51)
+        return self.hull
 
     @property
     def correct(self) -> str:
-        return self._sgr((110, 255, 130), 46)
+        return self.mint
 
     @property
     def wrong(self) -> str:
-        return self._sgr((255, 100, 100), 203)
+        return self.alarm
 
     @property
     def muted(self) -> str:
-        return self._sgr((150, 150, 160), 244)
+        return self.slate
 
-    @property
-    def gold(self) -> str:
-        return self._sgr((255, 200, 60), 220)
+    def gradient(self, text: str, start: tuple[int, int, int], end: tuple[int, int, int],
+                 fallback: str | None = None) -> str:
+        """Ramp one colour into another across `text`, where the terminal can.
+
+        Truecolour is the design target and this is the one place it buys
+        something a 256-colour palette cannot fake, so it degrades rather than
+        approximating: a 256-colour terminal gets the whole run in one role
+        colour, `basic` gets its nearest, and mono/plain get the characters.
+        """
+        if _OUTPUT_STYLE in ("mono", "plain") or not text:
+            return text
+        if not self._truecolor or _OUTPUT_STYLE == "basic":
+            return f"{fallback if fallback is not None else self.hull}{text}{RESET}"
+        steps = max(1, len(text) - 1)
+        pieces = []
+        for index, character in enumerate(text):
+            r, g, b = (round(a + (z - a) * index / steps) for a, z in zip(start, end))
+            pieces.append(f"{ESC}[38;2;{r};{g};{b}m{character}")
+        return "".join(pieces) + RESET
+
+    def tone(self, name: str) -> str:
+        """A severity tone by name, for a component handed one as data."""
+        return {"good": self.mint, "caution": self.amber, "danger": self.alarm,
+                "info": self.hull, "brand": self.plasma, "key": self.gold,
+                "value": self.ink, "label": self.slate}.get(name, self.ink)
+
+
+# The palette every component draws with. A screen is built by functions that
+# take a `world` and return rows -- `station_deck_lines`, `market_catalog_lines`
+# and thirty more -- and threading a palette through every one of them would
+# say nothing except "this file has a palette". It is a module-level setting in
+# exactly the way `_OUTPUT_WIDTH` and `_OUTPUT_STYLE` already are, set once by
+# `main()` from the drop file's colour depth.
+_PALETTE = Palette(truecolor=False)
+
+
+def pal() -> Palette:
+    return _PALETTE
+
+
+def set_palette(palette: Palette) -> None:
+    global _PALETTE
+    _PALETTE = palette
 
 
 def apply_display_style(style: str) -> None:
@@ -180,6 +320,23 @@ def apply_display_style(style: str) -> None:
     if type(style) is not str or style not in DISPLAY_STYLES:
         raise ValueError("Unknown display style.")
     _OUTPUT_STYLE = style
+
+
+@contextlib.contextmanager
+def display_style(style: str):
+    """Build something as another preset would draw it, then put the preset back.
+
+    Only the Display Options screen needs this, and it needs it for a good
+    reason: a preset previews itself there, which means composing one row of a
+    screen in a palette the caller is not currently using.
+    """
+    global _OUTPUT_STYLE
+    previous = _OUTPUT_STYLE
+    _OUTPUT_STYLE = style
+    try:
+        yield
+    finally:
+        _OUTPUT_STYLE = previous
 
 
 def out(text: str = "") -> None:
@@ -305,6 +462,35 @@ def _visible_width(text: str) -> int:
     return sum(_char_width(ch) for ch in ANSI_ESCAPE_RE.sub("", text))
 
 
+def wrap_styled(text: str, width: int, hang: int = 0) -> list[str]:
+    """Wrap a styled row and keep its colour across the break.
+
+    `_wrap_output` is ANSI-aware about *width*, but a row it breaks in the
+    middle of a coloured span continues in the terminal's default foreground:
+    the escape that opened the span is on the previous row. Every styled body
+    row goes through here instead, so the second half of a wrapped sentence is
+    the colour the first half was, and each row is closed with a reset so the
+    frame drawn after it is never tinted by the content.
+    """
+    # A row that indents itself is a detail under something; its continuations
+    # belong under the same edge, or the card it belongs to stops reading as one.
+    indent = len(text) - len(text.lstrip(" "))
+    if indent >= max(1, width) // 2:
+        indent = 0
+    rows, active = [], ""
+    # A hanging indent: the row opens at the margin and its continuations sit
+    # under its text, so a severity glyph keeps a column of its own. Every row
+    # is measured at the narrower width, which costs the first one two columns
+    # and keeps the wrap one pass instead of two.
+    head = _wrap_output(text[indent:], max(1, width - indent - hang)).split("\r\n")
+    for index, row in enumerate(head):
+        carried = (active + row) if active else row
+        active = _active_sgr_after(row, active)
+        lead = " " * (indent + (hang if index else 0))
+        rows.append(lead + (carried + RESET if ANSI_ESCAPE_RE.search(carried) else carried))
+    return rows
+
+
 def _active_sgr_after(text: str, active: str) -> str:
     for match in ANSI_ESCAPE_RE.finditer(text):
         sequence = match.group(0)
@@ -353,6 +539,39 @@ class _StdioBytes:
             ]
             self.kernel.PeekNamedPipe.restype = wintypes.BOOL
             self.handle = msvcrt.get_osfhandle(self.fd)
+
+    def waiting(self) -> bool:
+        """Whether a byte is already there, without taking it.
+
+        Motion asks this, and only this: a skip must not swallow the key that
+        skipped it, because that key is usually the caller's next command and
+        eating it would make an animation cost a keystroke. Peeking is also the
+        only safe question to ask here -- reading a raw byte would cut a UTF-8
+        character or an escape sequence in half behind the decoder's back.
+        """
+        if self.fd is None:
+            return True  # an in-memory scripted stream: nobody is watching
+        try:
+            if self.kernel is None:
+                import select
+
+                return bool(select.select([self.fd], [], [], 0)[0])
+            import ctypes
+            import msvcrt
+            from ctypes import wintypes
+
+            kind = self.kernel.GetFileType(self.handle)
+            if kind == 2:
+                return bool(msvcrt.kbhit())
+            if kind != 3:
+                return False
+            available = wintypes.DWORD()
+            if not self.kernel.PeekNamedPipe(self.handle, None, 0, None,
+                                             ctypes.byref(available), None):
+                return True  # a broken pipe is not something to animate through
+            return bool(available.value)
+        except (OSError, ValueError):
+            return True
 
     def __call__(self, timeout: float | None) -> bytes | None:
         if self.fd is None:
@@ -557,14 +776,67 @@ _INPUT_READER = None
 _INPUT_STREAM = None
 
 
-def read_key() -> str:
-    """Read one decoded character or one harmless unsupported terminal key."""
+def input_reader() -> "_DoorInput":
+    """The decoder this session reads keys through, opened on first use.
+
+    `main` opens it before the first page so motion knows there is a terminal
+    on the other end: without it the first screen of every returning session
+    could not reveal, because nothing had read a key yet.
+    """
     global _INPUT_READER, _INPUT_STREAM
     stream = sys.stdin.buffer
     if _INPUT_STREAM is not stream:
         _INPUT_STREAM = stream
         _INPUT_READER = _DoorInput(_StdioBytes(stream))
-    return _INPUT_READER.read_key()
+    return _INPUT_READER
+
+
+def read_key() -> str:
+    """Read one decoded character or one harmless unsupported terminal key."""
+    return input_reader().read_key()
+
+
+# ---------------------------------------------------------------------------
+# Motion (issue #493 §3). Reveals, ticks and drains, under three rules that are
+# not negotiable: any keypress ends the effect immediately; nothing an effect
+# does can delay a commit or hold up input; and every effect is absent from the
+# presets that exist because a caller wants less -- `fast`, `mono` and `plain`.
+#
+# The design doc's older "no animation delays" rule is replaced by these.
+# ---------------------------------------------------------------------------
+
+MOTION_REVEAL_BUDGET = 0.18  # seconds for a whole page, however tall it is
+MOTION_TICK = 0.045
+
+
+def motion_enabled() -> bool:
+    return _OUTPUT_STYLE in ("auto", "basic")
+
+
+def motion_interrupted() -> bool:
+    """True once the caller has typed anything, or when nothing is animating.
+
+    No input reader means there is no live terminal on the other end -- a
+    scripted test driving the screens directly, a screen drawn before the door
+    has opened stdin -- and an effect nobody is watching is only a delay, so it
+    is skipped rather than slept through.
+    """
+    if not motion_enabled():
+        return True
+    reader = _INPUT_READER
+    if reader is None or not isinstance(reader.read_byte, _StdioBytes):
+        return True
+    return reader.read_byte.waiting()
+
+
+def motion_pause(seconds: float) -> bool:
+    """Wait, unless the caller has already answered. Returns False if skipped."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if motion_interrupted():
+            return False
+        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    return True
 
 
 def read_command() -> str:
@@ -3555,11 +3827,32 @@ def career_path_lines(save: SaveData) -> list[str]:
               "explorer": ((12,30,GALAXY_SYSTEM_COUNT), ("Local","Scout","Pathfinder","Cartographer")),
               "combat": ((5,20,50), ("Unproven","Escort","Defender","Ace"))}
     labels = {key:names[sum(progress[key] >= mark for mark in marks)] for key,(marks,names) in stages.items()}
-    return [f"Trader ({labels['trader']}): {progress['trader']:+,}cr known-cost market margin; stages 5,000 / 20,000 / 50,000cr.",
-            "Market margin excludes deliveries, unknown-cost receipts and other income. It is before operating costs, not total career profit.",
-            f"Explorer ({labels['explorer']}): {progress['explorer']}/{GALAXY_SYSTEM_COUNT} systems charted; stages 12 / 30 / all systems.",
-            f"Combat ({labels['combat']}): {progress['combat']} combat victories; stages 5 / 20 / 50.",
-            "Paths are independent. Reach a final stage for its career conclusion and starting equipment; [R] Finale shows the terms."]
+    p = pal()
+    # A narrower bar than the cockpit's: three of them share a row with a
+    # reading and a target, and the bar is the least precise of the three.
+    cells = max(6, min(12, _page_content_width() // 5))
+    rows, styles = [], []
+    for key, (marks, _names) in stages.items():
+        reached = sum(progress[key] >= mark for mark in marks)
+        # The bar runs to the next stage the path can reach, or is full at the
+        # last one: three paths on one screen only compare if they share a scale.
+        floor = 0 if not reached else marks[reached - 1]
+        ceiling = marks[reached] if reached < len(marks) else marks[-1]
+        done = reached >= len(marks)
+        value = f"{progress[key]:+,}cr" if key == "trader" else f"{progress[key]}"
+        rows.append([f"{key.title()} ({labels[key]}):",
+                     gauge(1 if done else progress[key] - floor, 1 if done else max(1, ceiling - floor),
+                           cells, tone="brand" if done else None),
+                     value,
+                     badge("final", "good") if done
+                     else f"{p.slate}of{RESET} {p.ink}{ceiling:,}{RESET}"])
+        styles.append(["label", "value", "value", "value"])
+    lines = table(["", "", "", ""], rows, "llrl", styles=styles, repeat_header=False)[1:]
+    lines += ["Progress is market margin, systems charted and combat victories.",
+              "Stages: trader 5,000 / 20,000 / 50,000cr, explorer 12 / 30 / all systems, combat 5 / 20 / 50 victories.",
+              "Market margin excludes deliveries, unknown-cost receipts and other income. It is before operating costs, not total career profit.",
+              "Paths are independent. Reach a final stage for its career conclusion and starting equipment; [R] Finale shows the terms."]
+    return lines
 
 
 def career_finale_blocker(save: SaveData, finale: str) -> str | None:
@@ -3615,9 +3908,28 @@ def career_dossier_lines(save: SaveData) -> list[str]:
 
 
 def career_finale_lines(save: SaveData, selected: str) -> list[str]:
-    lines = ["Choose how this career ends. Selection alone changes nothing."] + career_path_lines(save)
+    p = pal()
+    lines = [f"{p.plasma}{BOLD}{_mission_plain(save.pilot.handle)}{RESET}  "
+             f"{p.slate}{career_rank(save.pilot)}{RESET}  {p.gold}{glyph('credits')} {save.pilot.credits:,}cr{RESET}  "
+             + "  ".join([chip("day", str(save.turn)), chip("careers", str(save.pilot.retirements + 1))]),
+             "Choose how this career ends. Selection alone changes nothing.",
+             section("PATHS")]
+    lines += career_path_lines(save)
+    lines.append(section("ENDINGS"))
+    endings, styles, blockers = [], [], []
     for index, (finale, info) in enumerate(CAREER_FINALES.items(), 1):
-        lines.append(f"[{index}] {info['label']}{' [SELECTED]' if finale == selected else ''}: {career_finale_blocker(save, finale) or 'Available.'}")
+        blocker = career_finale_blocker(save, finale)
+        endings.append([key_label(str(index), info["label"], tone="value" if not blocker else "label"),
+                        badge("[SELECTED]", "brand") if finale == selected else ""])
+        styles.append(["value", "value"])
+        blockers.append(blocker)
+    # The requirement is a sentence, not a column: it is longer than the two
+    # things beside it put together, and it belongs under its own ending.
+    _, records = table_records(["", ""], endings, "ll", styles=styles)
+    for record, blocker in zip(records, blockers):
+        lines.append("\n".join(record + [
+            f"  {p.slate}{blocker}{RESET}" if blocker else f"  {badge('Available', 'good')}"]))
+    lines.append(section("NEW GAME+"))
     info = CAREER_FINALES[selected]
     credits = 1200 + (save.pilot.retirements+1)*RETIREMENT_STARTING_CREDITS_BONUS
     gear = f"{info['tier'].title()} tier 1" if info["tier"] else "ordinary starting modules"
@@ -4429,10 +4741,456 @@ def _gauge_bar(val: int, max_val: int, width: int = 10, p: Palette | None = None
     if p:
         col = p.correct if pct > 0.5 else (p.gold if pct > 0.2 else p.wrong)
         return f"{col}{'■' * filled}{p.muted}{'░' * empty}{RESET}"
-    # Unbracketed: page bodies are flattened to plain text by `wrapped_group`,
-    # so this is the form every gauge on a page takes, and `[` now opens a
-    # hotkey everywhere the game prints (issue #400).
+    # Unstyled: the caller asked for no palette. `[` opens a hotkey everywhere
+    # the game prints (issue #400), so the bar is never bracketed.
     return f"{'■' * filled}{'░' * empty}"
+
+
+# ---------------------------------------------------------------------------
+# The component library (issue #493 §4).
+#
+# Voidrunner ships as a single self-contained file a SysOp can point straight
+# at, so this is the game's own vocabulary rather than something shared with
+# the host or the other bundled door. Everything a screen draws is built from
+# these nine, which is what makes the presentation contract enforceable: a
+# gauge is the same gauge on the deck, in the yard and in a fight, and a later
+# slice cannot quietly flatten one screen without flattening all of them.
+#
+# Every component returns *styled* text. Page bodies used to be flattened to
+# plain before printing (`wrapped_group`), which is the single mechanism that
+# deleted the game's colour; they are not any more, so a component's output
+# survives all the way to the terminal.
+# ---------------------------------------------------------------------------
+
+
+def gauge(value: int, maximum: int, cells: int = 10, *, ramp: bool = True,
+          tone: str | None = None) -> str:
+    """A filled bar. `ramp` colours it by how full it is; `tone` overrides.
+
+    The track is `deep` rather than absent so the bar's full length reads as a
+    scale even when it is nearly empty -- an eighth of a bar with nothing
+    behind it looks like a short bar, not a low reading.
+    """
+    p = pal()
+    fraction = 0.0 if maximum <= 0 else max(0.0, min(1.0, value / maximum))
+    filled = round(fraction * cells)
+    if tone is not None:
+        colour = p.tone(tone)
+    elif ramp:
+        colour = p.mint if fraction > 0.5 else (p.amber if fraction > 0.2 else p.alarm)
+    else:
+        colour = p.hull
+    return (f"{colour}{glyph('fill') * filled}{RESET}"
+            f"{p.deep}{glyph('track') * (cells - filled)}{RESET}")
+
+
+def sparkline(values, *, tone: str = "info") -> str:
+    """A run of values as one row of relative heights.
+
+    Scaled between the run's own extremes, not from zero: a price series that
+    moves 4% is a flat line from zero and a readable shape from its own range,
+    and the shape is the entire point of putting it on a trading screen.
+    """
+    ramp = _spark_ramp()
+    numbers = [float(value) for value in values]
+    if not numbers:
+        return ""
+    low, high = min(numbers), max(numbers)
+    span = high - low
+    marks = [ramp[0] if span <= 0 else ramp[min(len(ramp) - 1, int((value - low) / span * len(ramp)))]
+             for value in numbers]
+    return f"{pal().tone(tone)}{''.join(marks)}{RESET}"
+
+
+def trend_arrow(values) -> str:
+    """Which way the last move went, as a toned glyph."""
+    p = pal()
+    numbers = [float(value) for value in values]
+    if len(numbers) < 2 or numbers[-1] == numbers[0]:
+        return f"{p.slate}{glyph('flat')}{RESET}"
+    if numbers[-1] > numbers[0]:
+        return f"{p.mint}{glyph('rise')}{RESET}"
+    return f"{p.alarm}{glyph('fall')}{RESET}"
+
+
+def chip(label: str, value: str | None = None, *, tone: str = "value") -> str:
+    """A bracketed label/value pair: one fact, picked out of a band of them."""
+    p = pal()
+    body = f"{p.slate}{label}{RESET}" if value is None else f"{p.slate}{label} {p.tone(tone)}{value}{RESET}"
+    return f"{p.deep}{glyph('chip_l')}{RESET}{body}{p.deep}{glyph('chip_r')}{RESET}"
+
+
+def badge(text: str, tone: str = "info") -> str:
+    """A short state word carried at the end of a row, in its severity's tone."""
+    return f"{pal().tone(tone)}{BOLD}{text}{RESET}"
+
+
+def key_label(key: str, label: str, *, tone: str = "value") -> str:
+    """`[K] Label` -- the one spelling of a hotkey in this game (issue #400),
+    with the key gold and the label a value. Nothing else is ever gold."""
+    p = pal()
+    return f"{p.gold}{BOLD}[{key}]{RESET} {p.tone(tone)}{label}{RESET}"
+
+
+def alert_glyphs() -> str:
+    """The severity marks an alert row can open with, in this preset."""
+    return "".join(glyph(name) for name in ("danger", "note", "info"))
+
+
+def alert(tone: str, title: str, detail: str = "", action: str = "") -> str:
+    """One severity row: glyph, what happened, and the key that answers it."""
+    p = pal()
+    mark = {"danger": "danger", "caution": "danger", "good": "info"}.get(tone, "note")
+    row = f"{p.tone(tone)}{glyph(mark)} {BOLD}{title}{RESET}"
+    if detail:
+        row += f" {p.slate}{detail}{RESET}"
+    if action:
+        row += f"  {action}"
+    return row
+
+
+def verbatim(text: str) -> str:
+    """Mark a cell as already composed, so `table` does not colour it.
+
+    A `table` colours any cell that carries no styling of its own, which is
+    right for the figures screens hand it and wrong for a sample that is meant
+    to have no colour -- the Display Options preview of `mono` and `plain`.
+    The reset says "this is finished" in the one alphabet the rule reads.
+    """
+    return text if ANSI_ESCAPE_RE.search(text) else f"{RESET}{text}"
+
+
+def _cell_style(role: str, text: str) -> str:
+    p = pal()
+    return f"{p.tone(role)}{text}{RESET}" if text else ""
+
+
+def _fit_columns(headers, rows, keep, optional, gap, width):
+    """Drop optional columns, worst-priority first, until the set fits."""
+    keep = list(keep)
+    while True:
+        widths = [max([_visible_width(headers[index])] +
+                      [_visible_width(row[index]) for row in rows]) for index in keep]
+        if sum(widths) + gap * max(0, len(keep) - 1) <= width:
+            return keep, widths, True
+        droppable = [index for index in optional if index in keep]
+        if not droppable:
+            return keep, widths, False
+        keep.remove(droppable[-1])
+
+
+def table_records(headers: list[str], rows: list[list[str]], aligns: str = "",
+                  *, styles: list[list[str]] | None = None, optional: tuple[int, ...] = (),
+                  gap: int = 2, width: int | None = None) -> tuple[str, list[list[str]]]:
+    """A real table: every column starts on the same display column on every row.
+
+    `aligns` is one character per column (`l`/`r`/`c`). `styles` gives a role
+    name per cell, defaulting to a slate heading and ink body. `optional` lists
+    column indices in the order they may be dropped when the table will not fit
+    -- a narrow terminal loses the least useful column first.
+
+    When dropping every optional column still is not enough, the table does not
+    overflow and wrap into rubble: each record *stacks*, its first column on a
+    row of its own and the rest aligned and indented under it. That is the
+    40-column form of a table, and it is still a table -- every stacked column
+    starts on the same display column as its neighbours on every record.
+
+    Returns the heading and one list of display rows per record, because a
+    stacked record is two rows and the screens that key their rows need to know
+    which rows belong to which.
+    """
+    width = _page_content_width() if width is None else width
+    columns = len(headers)
+    aligns = (aligns + "l" * columns)[:columns]
+    present = [index for index in range(columns)
+               if _visible_width(headers[index]) or any(_visible_width(row[index]) for row in rows)]
+    keep, widths, fits = _fit_columns(headers, rows, present, optional, gap, width)
+
+    def cell(number: int, index: int, cell_width: int) -> str:
+        role = styles[number][index] if styles is not None else "value"
+        align = "right" if aligns[index] == "r" else ("center" if aligns[index] == "c" else "left")
+        text = rows[number][index]
+        return _pad(text if ANSI_ESCAPE_RE.search(text) else _cell_style(role, text), cell_width, align)
+
+    def heading_for(indices, column_widths) -> str:
+        return (" " * gap).join(
+            _pad(_cell_style("label", headers[index]), column_widths[position],
+                 "right" if aligns[index] == "r" else ("center" if aligns[index] == "c" else "left"))
+            for position, index in enumerate(indices)).rstrip()
+
+    if fits or len(keep) < 2:
+        heading = heading_for(keep, widths)
+        records = [[(" " * gap).join(cell(number, index, widths[position])
+                                     for position, index in enumerate(keep)).rstrip()]
+                   for number in range(len(rows))]
+        return heading, records
+
+    # Stacking is a change of shape, not a loss of content, so the columns
+    # dropped while trying to stay on one row come back: a 40-column caller
+    # reads the same facts as an 80-column one, in two rows instead of one.
+    lead, rest = present[0], present[1:]
+    indent = 2
+    # Tighten the gutter before dropping a column: one space between columns
+    # still reads as a table, and a lost column is a lost fact.
+    for tight in (gap, 1):
+        narrowed, rest_widths, stacked_fits = _fit_columns(
+            headers, rows, rest, (), tight, max(1, width - indent))
+        if stacked_fits:
+            rest, gap = narrowed, tight
+            break
+    else:
+        # A column the screen named `optional` is one whose figure the caller
+        # can read on another screen, and it stays dropped: the alternative is
+        # four rows per chart destination at the floor, which is worse for the
+        # one thing that screen is for. A column that must never go is simply
+        # not named optional -- the Hall of Fame's counts are not (#493 review).
+        rest, rest_widths, _ = _fit_columns(headers, rows, rest, optional, 1, max(1, width - indent))
+        gap = 1
+        stacked_fits = False
+    room = max(1, width - indent)
+    if stacked_fits:
+        bands = [(rest, rest_widths)]
+    else:
+        # Still too wide for one row: the tail runs on to a second and a third
+        # rather than overflowing. Every band is its own little table -- each of
+        # its columns starts on the same display column on every record -- and
+        # the alternative here is a lost figure, which a stack is meant to avoid.
+        bands, band, widths_so_far = [], [], []
+        for position, index in enumerate(rest):
+            column = rest_widths[position]
+            if band and sum(widths_so_far) + gap * len(band) + column > room:
+                bands.append((band, widths_so_far))
+                band, widths_so_far = [], []
+            band.append(index)
+            widths_so_far.append(column)
+        if band:
+            bands.append((band, widths_so_far))
+    heading = "\n".join(" " * indent + heading_for(columns, band_widths)
+                        for columns, band_widths in bands)
+    records = []
+    for number in range(len(rows)):
+        tails = [" " * indent + (" " * gap).join(
+            cell(number, index, band_widths[position])
+            for position, index in enumerate(columns)).rstrip()
+            for columns, band_widths in bands]
+        records.append([cell(number, lead, 0).rstrip()] + tails)
+    return heading, records
+
+
+def table(headers: list[str], rows: list[list[str]], aligns: str = "",
+          *, styles: list[list[str]] | None = None, optional: tuple[int, ...] = (),
+          gap: int = 2, width: int | None = None, repeat_header: bool = True) -> list[str]:
+    """`table_records` as one flat list of rows, heading first."""
+    heading, records = table_records(headers, rows, aligns, styles=styles, optional=optional,
+                                     gap=gap, width=width)
+    # Column headings belong on every page of the table they head: a caller who
+    # pages to the second half of the market is reading unlabelled numbers
+    # otherwise. `sticky` is what tells the paginator so.
+    # A record is one entry, its rows joined: the paginator keeps a whole entry
+    # on one page where it fits, and a stacked record whose second row landed on
+    # the next page would be a price with nothing to buy.
+    # A heading that runs to more than one row is not repeated: the paginator
+    # carries a heading as a single row, and a half-carried one would be worse
+    # than none. That only happens at the narrowest widths, where a record is
+    # already stacked into bands.
+    repeat_header = repeat_header and "\n" not in heading
+    out_rows = [sticky(heading) if repeat_header else heading]
+    for record in records:
+        joined = "\n".join(record)
+        out_rows.append(table_member(joined) if repeat_header else joined)
+    return out_rows
+
+
+def menu_columns(entries: list[str], width: int | None = None) -> int:
+    """Three menu columns at >=72 usable columns, two at >=52, one below."""
+    width = _page_content_width() if width is None else width
+    widest = max([_visible_width(entry) for entry in entries] or [1])
+    for count in (3, 2):
+        floor = 72 if count == 3 else 52
+        if width >= floor and (widest + 2) * count - 2 <= width:
+            return count
+    return 1
+
+
+def menu_grid(entries: list[tuple[str, str]], width: int | None = None) -> list[str]:
+    """The service menu as an aligned grid of `[K] Label` entries.
+
+    The grid is filled row-major with every cell the same width, so the keys
+    line up down the screen; that column of gold is what makes a menu scannable
+    rather than a paragraph of options separated by pipes.
+    """
+    width = _page_content_width() if width is None else width
+    plain = [f"[{key}] {label}" for key, label in entries]
+    columns = menu_columns(plain, width)
+    cell = (width - 2 * (columns - 1)) // columns
+    rows: list[str] = []
+    for start in range(0, len(entries), columns):
+        chunk = entries[start:start + columns]
+        cells = [_pad(key_label(key, _fit_text(label, max(1, cell - 4))), cell)
+                 for key, label in chunk]
+        rows.append("  ".join(cells).rstrip())
+    return rows
+
+
+def portrait(art: list[str], tint: str = "info") -> list[str]:
+    """Authored ANSI-free art in one tone. Whole composition or none."""
+    colour = pal().tone(tint)
+    return [f"{colour}{row}{RESET}" for row in art]
+
+
+# A body row that is really a rule across the frame, naming the group under it.
+# The marker is a control character: it measures zero columns, so a section row
+# costs the paginator exactly the width of its label, and `draw_page` swaps the
+# whole row for a `├─ LABEL ─────┤` divider when it prints it.
+SECTION_MARK = "\x01"
+
+
+def section(label: str) -> str:
+    """Name the group of rows that follows, as a rule across the page frame."""
+    return SECTION_MARK + label
+
+
+# A table's column headings, and the body rows they head. Marked the same
+# zero-width way as a section rule, so a screen says what a row *is* and the
+# paginator decides where it goes: the headings are repeated at the top of
+# every page that carries one of their rows, and nowhere else -- a page of
+# trailing footnotes is not a page of the table.
+STICKY_MARK = "\x02"
+MEMBER_MARK = "\x03"
+
+
+def sticky(row: str) -> str:
+    return STICKY_MARK + row
+
+
+def table_member(row: str) -> str:
+    return MEMBER_MARK + row
+
+
+def beside(rows: list[str], art: list[str], *, width: int | None = None, gap: int = 3) -> list[str]:
+    """Put authored art to the right of a block of rows, or leave the rows alone.
+
+    Whole composition or none, the same rule the portraits already follow: a
+    silhouette with its nose cut off by the frame is worse than no silhouette,
+    so the art is only laid in when every one of its rows fits in the space the
+    block's widest row leaves over.
+    """
+    width = _page_content_width() if width is None else width
+    if not art:
+        return list(rows)
+    art_width = max(_visible_width(row) for row in art)
+    body_width = max([_visible_width(row) for row in rows] or [0])
+    if body_width + gap + art_width > width or len(art) > len(rows):
+        return list(rows)
+    top = (len(rows) - len(art)) // 2
+    out_rows = []
+    for index, row in enumerate(rows):
+        piece = art[index - top] if 0 <= index - top < len(art) else ""
+        out_rows.append(_pad(row, body_width + gap) + piece if piece else row)
+    return out_rows
+
+
+def status_band(world: "World") -> list[str]:
+    """Where the caller is, who they are, and what the ship is carrying.
+
+    The two rows every station screen could open with, and the deck does: the
+    station and its character on one, the career on the other. Facts only
+    repeat here where a caller reads them at a glance -- the credits are also
+    in the page title, because a trader checks them constantly.
+    """
+    p = pal()
+    here, pilot = world.here, world.save.pilot
+    danger_tone = "good" if here.danger <= 1 else ("caution" if here.danger <= 3 else "danger")
+    first = (f"{p.hull}{BOLD}{here.station_name.upper()}{RESET}  "
+             f"{p.slate}{here.economy}{RESET} {p.deep}{glyph('dot')}{RESET} {p.slate}{sector_for(here)}{RESET}  "
+             + badge(f"{'DANGER' if here.danger > 3 else 'CAUTION' if here.danger > 1 else 'CALM'} {here.danger}", danger_tone))
+    second = "  ".join([
+        f"{p.slate}Day{RESET} {p.ink}{world.save.turn}{RESET}",
+        f"{p.slate}Rank{RESET} {p.plasma}{career_rank(pilot)}{RESET}",
+        f"{p.gold}{glyph('credits')} {pilot.credits:,}cr{RESET}",
+    ])
+    return [first, second]
+
+
+# Words a body row carries that mean something stronger than prose. Matched
+# whole-word and case-sensitively where the game shouts them, so an ordinary
+# sentence containing "risk" is not repainted as an alarm.
+_ROLE_TONES = (
+    (re.compile(r"\b(LOW FUEL|CRITICAL HULL|WANTED|DESTROYED|LOST|FAILED|OVERDUE|PROHIBITED)\b"), "danger"),
+    (re.compile(r"\b(Illegal|ILLEGAL|CRASH|Contraband|CONTRABAND|Danger|CAUTION|WARNING)\b"), "caution"),
+    (re.compile(r"\b(BOOM|Promoted|Completed|COMPLETE|Delivered|Rescued)\b"), "good"),
+)
+# A number, a credit figure, a ratio, a percentage, a signed delta: the values
+# a caller reads off a row.
+_VALUE_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?(?:\s?cr|%|/\d[\d,]*)?")
+# Gold is hotkeys and credits and nothing else, so a credit figure is claimed
+# before the generic value pass that would paint it as an ordinary number.
+_CREDIT_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?\s?cr\b")
+# Every escape this game writes is an SGR colour. Anything else on a body row
+# -- a cursor jump, a clear-screen -- arrived inside data: a score file's
+# callsign, a name out of a save. It is removed before the row is styled, so a
+# row cannot be taken for "already styled" because a caller put an escape in
+# their handle (issue #493 review).
+_FOREIGN_ESCAPE = re.compile(r"\x1b\[[0-9;]*[a-ln-zA-Z]"
+                             r"|\x1b\([AB0-2]|\x1b[78HDM]"
+                             r"|\x1b(?!\[[0-9;]*m)"
+                             # \x01-\x03 are this file's own row marks,
+                             # stripped by `draw_page` as it prints.
+                             r"|[\x00\x04-\x08\x0b-\x1a\x1c-\x1f\x7f]")
+_KEY_RE = re.compile(r"\[[^\[\]]{1,9}\]")
+_GAUGE_RE = re.compile(r"[▀-▐░-▓■]{2,}")
+
+
+def style_body_line(text: str) -> str:
+    """Colour an unstyled body row by the role of each token.
+
+    Rebuilt screens compose their rows out of components and arrive here
+    already styled; this is what every *other* row in the game gets, and it is
+    why no page prints a body row with no colour on it. The rule is the same
+    one the components follow: a hotkey is gold, a value is ink, a severity
+    word takes its tone, and the prose around them is slate.
+
+    A row that styles itself is returned untouched -- a component's decision
+    always beats a pattern's guess.
+    """
+    if not text or text.startswith(SECTION_MARK):
+        return text
+    text = _FOREIGN_ESCAPE.sub("", text)
+    if ANSI_ESCAPE_RE.search(text):
+        return text
+    p = pal()
+    spans: list[tuple[int, int, str]] = []
+
+    def claim(start: int, end: int, styled: str) -> None:
+        if any(start < other_end and end > other_start for other_start, other_end, _ in spans):
+            return
+        spans.append((start, end, styled))
+
+    for match in _KEY_RE.finditer(text):
+        inner = match.group(0)[1:-1]
+        tone = {"CRASH": "danger", "BOOM": "good", "YOU": "brand"}.get(inner)
+        claim(match.start(), match.end(),
+              badge(match.group(0), tone) if tone else f"{p.gold}{BOLD}{match.group(0)}{RESET}")
+    for pattern, tone in _ROLE_TONES:
+        for match in pattern.finditer(text):
+            claim(match.start(), match.end(), f"{p.tone(tone)}{match.group(0)}{RESET}")
+    for match in _GAUGE_RE.finditer(text):
+        claim(match.start(), match.end(), f"{p.hull}{match.group(0)}{RESET}")
+    for match in _CREDIT_RE.finditer(text):
+        claim(match.start(), match.end(), f"{p.gold}{match.group(0)}{RESET}")
+    for match in _VALUE_RE.finditer(text):
+        claim(match.start(), match.end(), f"{p.ink}{match.group(0)}{RESET}")
+
+    spans.sort()
+    out_parts, cursor = [], 0
+    for start, end, styled in spans:
+        if start > cursor:
+            out_parts.append(f"{p.slate}{text[cursor:start]}{RESET}")
+        out_parts.append(styled)
+        cursor = end
+    if cursor < len(text):
+        out_parts.append(f"{p.slate}{text[cursor:]}{RESET}")
+    return "".join(out_parts)
 
 
 TITLE_LOGO = ("█░░█ █▀▀█ ▀█▀ █▀▀▄   █▀▀▄ █░░█ █▄░█ █▄░█ █▀▀ █▀▀▄",
@@ -4448,6 +5206,25 @@ def _fit_text(text: str, width: int) -> str:
     return text
 
 
+def starfield(width: int, seed_text: str) -> str:
+    """A strip of sky above the logo, the same every time for the same caller.
+
+    Seeded from the node and callsign rather than the clock: a splash that
+    reshuffles itself on every launch reads as noise, and one that is always
+    this pilot's own sky reads as a place. `random` is not used -- the galaxy's
+    own generator must keep its exact call sequence (see the module docstring).
+    """
+    if width <= 0:
+        return ""
+    digest = zlib.crc32(seed_text.encode("utf-8"))
+    row = []
+    for column in range(width):
+        digest = (digest * 1103515245 + 12345) & 0x7FFFFFFF
+        pick = digest % 23
+        row.append("." if pick == 0 else ("'" if pick == 1 else ("*" if pick == 2 else " ")))
+    return "".join(row)
+
+
 def title_rows(info: dict, inner_w: int) -> list[tuple[str, str, str]]:
     """The splash as (kind, text, align) rows: the large composition when the logo
     fits, otherwise a complete compact one (wordmark, wrapped subtitle, stacked
@@ -4455,10 +5232,13 @@ def title_rows(info: dict, inner_w: int) -> list[tuple[str, str, str]]:
     Kinds: "blank", "logo", "wordmark", "sub", "rule", "meta"."""
     node = info.get("node_name", "NetBBS")
     handle = info.get("handle", "Pilot")
-    rows: list[tuple[str, str, str]] = [("blank", "", "left")]
+    rows: list[tuple[str, str, str]] = []
     large = inner_w >= max(_visible_width(row) for row in TITLE_LOGO) + 2
     if large:
+        rows.append(("stars", starfield(inner_w, f"{node}/{handle}"), "left"))
         rows += [("logo", row, "center") for row in TITLE_LOGO]
+    else:
+        rows.append(("blank", "", "left"))
     wordmark = "V O I D R U N N E R" if inner_w >= 19 else "VOIDRUNNER"
     # Below the wordmark's width the letters wrap onto more rows; nothing is cut.
     rows += [("wordmark", part, "center") for part in _wrap_output(wordmark, max(1, inner_w)).split("\r\n")]
@@ -4490,15 +5270,28 @@ def screen_title(p: Palette, info: dict) -> None:
                       + f"{p.muted}[ {p.accent}{TITLE_TAGLINE}{p.muted} ]" + f"{edge}══╗{RESET}")
     else:
         top_border = f"{edge}╔{'═' * inner_w}╗{RESET}"
-    styles = {"logo": f"{p.gold}{BOLD}", "wordmark": f"{p.gold}{BOLD}", "sub": p.accent, "meta": "", "blank": ""}
+    styles = {"logo": f"{p.gold}{BOLD}", "wordmark": f"{p.gold}{BOLD}", "sub": p.accent,
+              "meta": "", "blank": "", "stars": p.deep}
     out_line()
     out_line(top_border)
     for kind, text, align in title_rows(info, inner_w):
         if kind == "rule":
-            out_line(f"{edge}╠{'═' * inner_w}╣{RESET}")
+            # The one place truecolour buys something a palette cannot fake.
+            out_line(f"{edge}╠{RESET}{p.gradient('═' * inner_w, (95, 215, 255), (255, 90, 190), p.title)}{edge}╣{RESET}")
+            continue
+        if kind == "logo":
+            out_line(f"{edge}║{RESET}{_pad(p.gradient(text, (255, 200, 60), (255, 90, 190), f'{p.gold}{BOLD}'), inner_w, align)}{edge}║{RESET}")
             continue
         if kind == "meta":
-            text = text.replace("NODE:", f"{p.muted}NODE:{RESET}").replace("PILOT:", f"{p.muted}PILOT:{RESET}").replace("GALAXY:", f"{p.muted}GALAXY:{RESET}")
+            # The fields are chips: three facts, each picked out of the strip.
+            # Only a row that actually opens a chip is given one to close --
+            # a long callsign continues on a row of its own, and a stray
+            # closing bracket on it would read as a second, empty field.
+            opened = any(f"{label}:" in text for label in ("NODE", "PILOT", "GALAXY"))
+            for label in ("NODE", "PILOT", "GALAXY"):
+                text = text.replace(f"{label}:", f"{p.deep}{glyph('chip_l')}{p.slate}{label}{RESET}")
+            if opened:
+                text = text.replace("  │  ", f"{p.deep}{glyph('chip_r')}{RESET}  ") + f"{p.deep}{glyph('chip_r')}{RESET}"
         body = f"{styles[kind]}{text}{RESET}" if text else ""
         out_line(f"{edge}║{RESET}{_pad(body, inner_w, align)}{edge}║{RESET}")
     out_line(f"{edge}╚{'═' * inner_w}╝{RESET}")
@@ -4537,61 +5330,146 @@ def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str 
     return None
 
 
-def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
-    """Read-only cockpit and service entries; action keys are stable on every page."""
-    ship, pilot, here = world.save.ship, world.save.pilot, world.here
-    wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}"))
+def ship_gauge_rows(world: World) -> list[str]:
+    """The cockpit: four gauges, aligned, with the silhouette beside them.
+
+    Gauges first, numbers always. The bars are what the cockpit reads as at a
+    glance and the numbers are what a decision is made on, so neither is ever
+    the thing that gives way -- what gives way is the silhouette, then the
+    gauge's width, both handled by `beside` and `_gauge_cells`.
+    """
+    p = pal()
+    ship = world.save.ship
     used, hold = sum(world.save.cargo.values()), cargo_capacity(ship)
-    # Gauges first, numbers always: the bars are what the cockpit reads as at a
-    # glance, and they are the first thing to drop when the row will not fit.
-    telemetry = (f"{ship.hull_class}: Hull {_gauge_bar(ship.hull_hp, hull_hp_max(ship), 8)} {ship.hull_hp}/{hull_hp_max(ship)}"
-                 f" | Fuel {_gauge_bar(ship.fuel, fuel_capacity(ship), 8)} {ship.fuel}/{fuel_capacity(ship)}"
-                 f" | Cargo {_gauge_bar(used, hold, 6)} {used}/{hold}")
-    if _visible_width(telemetry) > _page_content_width():
-        telemetry = f"{ship.hull_class}: Hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}; Cargo {used}/{hold} used."
-    lines = [f"Station Services: {here.station_name}",
-             f"Day {world.save.turn} | {here.economy} | Danger {here.danger}",
-             telemetry]
-    if has_contraband(world):
-        lines.append("Contraband aboard: customs risk. [D] Dump Contraband")
-    event = world.save.active_event
-    if event:
-        lines.append(f"Economy event: {event['description']} ({event['turns_remaining']} day(s) left). [T] Ledger for affected stations.")
+    cells = _gauge_cells()
+    rows = [["HULL", gauge(ship.hull_hp, hull_hp_max(ship), cells), f"{ship.hull_hp}/{hull_hp_max(ship)}",
+             hull_condition(ship)],
+            ["FUEL", gauge(ship.fuel, fuel_capacity(ship), cells), f"{ship.fuel}/{fuel_capacity(ship)}",
+             f"{ship.hull_class}"],
+            ["HOLD", gauge(used, hold, cells, tone="info"), f"{used}/{hold}",
+             plural(sum(1 for quantity in world.save.cargo.values() if quantity > 0), "lot")]]
+    crew = [role for role in CREW_ROLES if getattr(ship, f"has_{role}")]
+    if crew or world.save.pilot.notoriety:
+        pips = "".join(glyph("crew_on") if role in crew else glyph("crew_off") for role in CREW_ROLES)
+        rows.append(["CREW", f"{p.mint}{pips}{RESET}",
+                     f"{len(crew)}/{len(CREW_ROLES)}",
+                     ", ".join(CREW_ROLES[role]["label"] for role in crew) or "flying alone"])
+    if world.save.pilot.notoriety:
+        # Scaled against the chance the notoriety actually buys, not against the
+        # raw count, which has no ceiling: a full bar means a full patrol risk.
+        chance = notoriety_patrol_chance(world.save.pilot.notoriety)
+        rows.append(["WANTED", gauge(chance, NOTORIETY_PATROL_MAX_CHANCE, cells, tone="danger"),
+                     f"{round(chance * 100)}%", "patrol interest"])
+    drawn = table(["", "", "", ""], rows, "llrl",
+                  styles=[["label", "value", "value", "label"] for _ in rows],
+                  optional=(3,))[1:]  # the headers are the gauge labels themselves
+    # Tinted before it is laid in: a row that carries the art is already styled,
+    # so raw art would be the one thing on the deck with no role (#493 review).
+    return beside(drawn, portrait(ship_portrait(ship, "compact"),
+                                  "danger" if hull_condition(ship) == "Critical" else
+                                  "caution" if hull_condition(ship) != "Intact" else "info"))
+
+
+def _gauge_cells() -> int:
+    """Gauge width for this terminal: generous where there is room, never gone."""
+    return max(6, min(20, _page_content_width() // 3))
+
+
+def deck_alert_rows(world: World) -> list[str]:
+    """What the caller has to do something about, worst first, each with its key.
+
+    These used to be ordinary sentences mixed in among the status lines, which
+    is how a critical hull read exactly like a crew wage. Severity is now the
+    row's colour and its glyph, and the key that answers it is on the same row.
+    """
+    ship, pilot, here = world.save.ship, world.save.pilot, world.here
+    rows: list[str] = []
+    if ship.hull_hp * 5 <= hull_hp_max(ship):
+        rows.append(alert("danger", "CRITICAL HULL",
+                          f"destruction costs {salvage_fee(ship)}cr salvage", key_label("Y", "repair")))
     costs = [fuel_cost_for_jump(here, world.by_id[sid], ship) for sid in here.connections]
     if costs and ship.fuel < min(costs):
-        lines.append(f"LOW FUEL: no connected jump affordable in fuel; minimum {min(costs)}. [Y] Refuel at 6cr/unit.")
-    if ship.hull_hp * 5 <= hull_hp_max(ship):
-        lines.append(f"CRITICAL HULL: [Y] repair before risking another encounter; destruction costs {salvage_fee(ship)}cr salvage.")
-    if wage:
-        lines.append(f"Crew wages: {wage}cr/jump." + (" LOW CASH: next wages exceed credits." if pilot.credits < wage else ""))
+        rows.append(alert("danger", "LOW FUEL", f"cheapest jump needs {min(costs)}",
+                          key_label("Y", "refuel 6cr/unit")))
+    if has_contraband(world):
+        rows.append(alert("caution", "Contraband aboard", "customs risk at this station",
+                          key_label("D", "jettison")))
+    wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}"))
+    if wage and pilot.credits < wage:
+        rows.append(alert("caution", "Wages unaffordable", f"{wage}cr due next jump",
+                          key_label("K", "crew")))
+    event = world.save.active_event
+    if event:
+        rows.append(alert("caution", event["description"],
+                          f"{plural(event['turns_remaining'], 'day')} left", key_label("T", "ledger")))
     mission = tracked_mission(world)
     if mission is not None:
         kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
-        deadline = "no deadline" if mission.deadline_turn is None else f"due day {mission.deadline_turn}"
-        lines.append(f"Tracked {kind}: {mission_bearing(world, mission)}; {deadline}. [C] Chart, then [R] contract route.")
+        due = "no deadline" if mission.deadline_turn is None else f"due day {mission.deadline_turn}"
+        detail = f"{mission_bearing(world, mission)} {glyph('dot')} {due}"
+        if mission.deadline_turn is not None:
+            left = max(0, mission.deadline_turn - world.save.turn)
+            detail += f"  {gauge(left, max(1, MISSION_BOARD_DAYS), 6, tone='caution' if left <= 2 else 'good')}"
+        rows.append(alert("note", f"Tracked {kind}", detail, key_label("C", "chart")))
     if world.save.flags.get("archive_v1_started") and not archive_finished(world):
-        lines.append(f"Archive: {archive_objective(world)} [N] Contacts / Route.")
-    lines += crew_assignment_recap(world)
-    lines += faction_story_recap(world)
-    actions = ["[M] Commodity Market", "[Y] Engineering Yard", "[B] Mission Board",
-               "[C] Navigation Chart", "[S] Pilot Status", "[H] Hall of Fame",
-               "[G] Pilot Guide", "[N] Archive Contacts", "[T] Trading Ledger", "[V] Viewport", "[O] Display Options", "[Q] Disembark & Save"]
-    if landmark_available_here(world): actions.append(f"[L] {world.landmark['label']}")
-    actions += ["[P] Concord Contacts", "[W] Blackwake Contacts"]
-    row = ""
-    for action in actions:
-        combined = f"{row}  |  {action}" if row else action
-        if row and _visible_width(_mission_plain(combined)) > _page_content_width():
-            lines.append(row); row = action
-        else: row = combined
-    if row: lines.append(row)
+        rows.append(alert("note", "Archive", archive_objective(world), key_label("N", "contacts")))
+    if wage and pilot.credits >= wage:
+        rows.append(alert("good", "Crew paid", f"{wage}cr per jump", key_label("K", "roster")))
+    for line in crew_assignment_recap(world) + faction_story_recap(world):
+        rows.append(alert("note", line))
+    return rows
+
+
+# The service menu, as (key, label) with a short "what is in there" tail. The
+# tail is what turns a wall of twelve identical entries into a screen a caller
+# can read: it says how many offers are on the board without opening it.
+def deck_service_entries(world: World) -> list[tuple[str, str]]:
+    goods = len(LEGAL_COMMODITIES) + sum(1 for c in CONTRABAND_COMMODITIES
+                                         if world.here.economy == "Haven" or world.save.cargo.get(c, 0) > 0)
+    offers = len(posted_mission_offers(world))
+    entries = [("M", f"Market {goods} goods"), ("Y", "Yard repair/refit"), ("B", f"Board {offers} offers"),
+               ("C", f"Chart {len(world.here.connections)} links"), ("S", "Status"), ("H", "Hall of Fame"),
+               ("G", "Guide"), ("N", "Archive"), ("T", "Ledger"),
+               ("V", "Viewport"), ("O", "Display"), ("Q", "Disembark")]
+    if landmark_available_here(world):
+        entries.append(("L", world.landmark["label"]))
+    entries += [("P", "Concord"), ("W", "Blackwake")]
+    return entries
+
+
+def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
+    """The Command Deck: a status band, the cockpit, the alerts, the services.
+
+    Four named groups rather than a stack of sentences (issue #493 §5). Action
+    keys are stable on every page, so a caller who has paged past the service
+    grid can still press one.
+    """
+    ship, pilot, here = world.save.ship, world.save.pilot, world.here
+    lines = list(status_band(world))
+    lines.append(section("SHIP"))
+    lines += ship_gauge_rows(world)
+    alerts = deck_alert_rows(world)
+    if alerts:
+        lines.append(section("ALERTS"))
+        lines += alerts
+    lines.append(section("STATION SERVICES"))
+    lines += menu_grid(deck_service_entries(world))
     if expanded:
-        lines.extend([f"Pilot: {pilot.handle}. Rank: {career_rank(pilot)}.",
-                      f"System: {here.name} ({here.x},{here.y}). Sector: {sector_for(here)}.",
-                      f"Commitments: {len(world.save.active_missions)} contract(s); {len(world.save.active_futures)} futures order(s).",
-                      f"Progress: {sum(system.discovered for system in world.galaxy)}/{len(world.galaxy)} systems charted; {pilot.kills} combat victories; {pilot.missions_completed} missions completed."])
-        crew = [f"{crew_name(world, role)} ({info['label']}, {CREW_SERVICE_LEVELS[crew_level(ship, role)][1]})" for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
-        lines.append("Crew: " + (", ".join(crew) if crew else "none") + ".")
+        p = pal()
+        lines.append(section("DOSSIER"))
+        charted = sum(system.discovered for system in world.galaxy)
+        lines += [
+            f"{p.slate}Pilot{RESET} {p.ink}{pilot.handle}{RESET}  {p.slate}System{RESET} "
+            f"{p.ink}{here.name} ({here.x},{here.y}){RESET}  {p.slate}Sector{RESET} {p.ink}{sector_for(here)}{RESET}",
+            "  ".join([chip("charted", f"{charted}/{len(world.galaxy)}"),
+                       chip("kills", str(pilot.kills)),
+                       chip("contracts", str(pilot.missions_completed)),
+                       chip("open", str(len(world.save.active_missions))),
+                       chip("orders", str(len(world.save.active_futures)))]),
+        ]
+        crew = [f"{crew_name(world, role)} ({info['label']}, {CREW_SERVICE_LEVELS[crew_level(ship, role)][1]})"
+                for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
+        lines.append(f"{p.slate}Crew{RESET} " + (f"{p.ink}" + ", ".join(crew) + RESET if crew else f"{p.slate}none{RESET}"))
     return lines
 
 
@@ -4628,7 +5506,9 @@ def screen_station_menu(p: Palette, world: World) -> str:
         choice, page, count = _draw_service_page(p, f"Command Deck: {world.save.pilot.credits:,}cr", lines, footer, page)
         if (moved := page_step(choice, page, count)) is not None: page = moved
         elif choice == "X": expanded, page = not expanded, 0
-        elif choice in "MYBCSHGTQLDPWONV" and len(choice) == 1:
+        # Every key the deck advertises is a key the deck answers -- `K` opens
+        # the roster the crew alert names, rather than redrawing (#493 review).
+        elif choice in "MYBCSHGTQKLDPWONV" and len(choice) == 1:
             return choice
 
 
@@ -4704,19 +5584,50 @@ def screen_faction_story(p: Palette, world: World, faction: str) -> str | None:
 def screen_display_options(p: Palette, world: World) -> None:
     page, result = 0, None
     styles = list(DISPLAY_STYLES)
+    blurbs = {"auto": "the terminal's own colour depth, with motion",
+              "fast": "the same palette with every reveal, tick and drain off",
+              "basic": "sixteen ANSI colours and Unicode artwork",
+              "mono": "Unicode artwork, no ANSI styling",
+              "plain": "ASCII artwork, no ANSI styling; letters and typed text stay UTF-8"}
     while True:
-        lines = [f"Current: {DISPLAY_STYLES[world.save.display_style]}.",
-                 "Choose a preset to apply and save it. Back keeps the current preference.",
-                 "[1] Full palette: use the terminal's existing color depth.",
-                 "[2] 16-color: basic ANSI colors and Unicode artwork.",
-                 "[3] Monochrome: Unicode artwork without ANSI styling.",
-                 "[4] Plain: ASCII artwork without ANSI styling. Unicode letters and text input stay UTF-8.",
-                 "Sample: Hull 30/60; Fuel 8/24; Cargo 12/24 used. LOW FUEL / DANGER labels do not need color."]
+        p_ = pal()
+        lines = [f"{p_.slate}Choose a preset to apply and save it. "
+                 f"Back keeps the current preference.{RESET}", section("PRESETS")]
+        # Each preset previews itself: the sample row beside a name is drawn
+        # the way that preset would draw it, so the choice is made by looking
+        # rather than by reading an adjective (issue #493 §5).
+        rows, styles_for = [], []
+        for index, style in enumerate(styles, 1):
+            # A preview is drawn with the terminal's own capability, never above
+            # it: a 16-colour caller previewing the full palette must not be
+            # sent 256-colour escapes their terminal cannot read. What the
+            # sample shows them is the preset's shape; the blurb says the rest.
+            with display_style(style if PRESET_DEPTH[world.save.display_style] >= PRESET_DEPTH[style]
+                               else world.save.display_style):
+                sample = (f"{gauge(30, 60, 8)} {pal().ink}30/60{RESET} "
+                          f"{badge('LOW FUEL', 'danger')} {chip('day', '12')}")
+                if _OUTPUT_STYLE in ("mono", "plain"):
+                    # These previews are of a preset that has no colour, so the
+                    # sample must not pick any up from the table it sits in.
+                    sample = verbatim(ANSI_ESCAPE_RE.sub("", sample))
+                if _OUTPUT_STYLE == "plain":
+                    sample = sample.translate(_ASCII_ART_TRANSLATION)
+            rows.append([key_label(str(index), DISPLAY_STYLES[style]),
+                         badge("CURRENT", "brand") if style == world.save.display_style else "",
+                         sample])
+            styles_for.append(["value", "value", "value"])
+        _, records = table_records(["", "", ""], rows, "lll", styles=styles_for)
+        for record, style in zip(records, styles):
+            # The blurb is never a column: it is the widest thing on the screen
+            # and the first a table would give up, and it is what says what the
+            # preset actually does.
+            lines.append("\n".join(record + [f"  {p_.slate}{blurbs[style]}{RESET}"]))
         if result: lines.insert(0, result)
-        key, page, count = _draw_service_page(p, "Display Options", lines, "[1-4] Set [<] Prev [>] Next [B] Back: ", page)
+        key, page, count = _draw_service_page(p, "Display Options", lines,
+                                              f"[1-{len(styles)}] Set [<] Prev [>] Next [B] Back: ", page)
         if key in ("B", "Q"): return
         if (moved := page_step(key, page, count)) is not None: page = moved
-        elif len(key) == 1 and "1" <= key <= "4":
+        elif len(key) == 1 and "1" <= key <= str(len(styles)):
             style = styles[int(key) - 1]
             changed = select_display_style(world, style)
             if changed: world.commit()
@@ -5189,45 +6100,99 @@ def screen_landmark(p: Palette, world: World) -> None:
 
 
 
-def _market_row(head: str, depth: dict, held: int, tags: list[str]) -> str:
-    """One commodity, one row.
+def price_ladder(commodity: str) -> list[int]:
+    """What this commodity costs at each kind of economy, cheapest first.
 
-    Price and tags are what the row exists for, so they never go. The depth
-    figures give way first -- they are on the depth screen -- and the hold count
-    only as a last resort, because it is what tells the caller whether there is
-    anything here to sell (issue #412 review). Nothing is truncated mid-word: a
-    terminal too narrow for even the shortest form keeps the whole row and wraps.
+    Real, deterministic numbers straight out of the price model, not an
+    invented history: the galaxy has no price archive, and a sparkline drawn
+    from numbers nobody recorded would be decoration pretending to be data.
+    This is the series a trader actually wants -- the spread they are trading
+    against -- and it says at a glance whether the quote in front of them is
+    the cheap end of it.
     """
-    trailer = (" " + " ".join(tags)) if tags else ""
-    optional = [f" Stock {depth['stock']}; demand {depth['demand']}; hold {held}.",
-                f" Hold {held}.",
-                ""]
-    rows = [head + detail + trailer for detail in optional]
-    for row in rows:
-        if _visible_width(row) <= _page_content_width():
-            return row
-    return rows[0]  # too narrow for any form: keep the whole row and let it wrap (#404)
+    base = COMMODITIES[commodity]["base"]
+    prices = []
+    for economy in ECONOMIES:
+        mult = 1.0
+        if commodity in ECONOMY_PRODUCES[economy]:
+            mult *= 0.6
+        if commodity in ECONOMY_DEMANDS[economy]:
+            mult *= 1.6
+        prices.append(max(1, round(base * mult)))
+    return sorted(prices)
+
+
+def price_standing(quote: int, ladder: list[int]) -> tuple[str, str]:
+    """Where a quote sits in the galaxy-wide spread, as (word, tone)."""
+    low, high = ladder[0], ladder[-1]
+    if quote <= low + (high - low) * 0.33:
+        return "cheap", "good"
+    if quote >= low + (high - low) * 0.67:
+        return "dear", "caution"
+    return "typical", "label"
 
 
 def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
+    """The market as a table: one row per commodity, columns that line up.
+
+    It was six prose sentences, each re-stating "buy ...; sell ...; stock ...;
+    demand ...; hold ..." -- readable one at a time and unreadable as a set,
+    which is the whole job of a trading screen (issue #493 §1). Nothing was
+    removed to make the table: every figure that was in the prose is in a
+    column, and the spread the prose never showed is in the last one.
+    """
+    p = pal()
     system = world.here
-    lines = [f"Commodity Market: {system.station_name}",
-             f"Cargo Hold: {sum(world.save.cargo.values())}/{cargo_capacity(world.save.ship)} units used. Prices per unit. "
-             "Only jumps advance days; reopening does not replenish stock."]
+    used, hold = sum(world.save.cargo.values()), cargo_capacity(world.save.ship)
+    head = (f"{p.hull}{BOLD}{system.station_name.upper()}{RESET} {p.slate}{system.economy}{RESET}   "
+            f"{p.slate}hold{RESET} {gauge(used, hold, 8, tone='info')} {p.ink}{used}/{hold}{RESET}")
+    event = world.save.active_event
+    if event and system.id in economy_event_system_ids(world, event):
+        head += "   " + badge("CRASH" if event["direction"] == "crash" else "BOOM",
+                              "danger" if event["direction"] == "crash" else "good")
+    lines = [head]
+    rows, styles = [], []
     for index, commodity in enumerate(goods):
         quote = price_for(world, system.id, commodity)
         depth = market_depth_quote(world, system.id, commodity)
         illegal = not COMMODITIES[commodity]["legal"]
-        buy = "prohibited" if illegal and system.economy != "Haven" else f"{quote}cr"
-        tags = ["Illegal"] if illegal else []
-        event = world.save.active_event
+        prohibited = illegal and system.economy != "Haven"
+        ladder = price_ladder(commodity)
+        word, tone = price_standing(quote, ladder)
+        held = world.save.cargo.get(commodity, 0)
+        # Legality and a running event are separate facts about the same row,
+        # and a contraband commodity in a crash is both.
+        marks = []
+        if prohibited:
+            marks.append(badge("prohibited", "danger"))
+        elif illegal:
+            marks.append(badge("Illegal", "danger"))
         if event and event["commodity"] == commodity and system.id in economy_event_system_ids(world, event):
-            tags.append("[CRASH]" if event["direction"] == "crash" else "[BOOM]")
-        lines.append(_market_row(f"[{MARKET_LETTERS[index]}] {COMMODITIES[commodity]['label']}: "
-                                 f"buy {buy}; sell {round(quote * SELL_SPREAD)}cr.",
-                                 depth, world.save.cargo.get(commodity, 0), tags))
+            marks.append(badge("[CRASH]" if event["direction"] == "crash" else "[BOOM]",
+                               "danger" if event["direction"] == "crash" else "good"))
+        flag = " ".join(marks)
+        rows.append([
+            key_label(MARKET_LETTERS[index], COMMODITIES[commodity]["label"],
+                      tone="danger" if illegal else "value"),
+            glyph("flat") if prohibited else f"{quote}",
+            f"{round(quote * SELL_SPREAD)}",
+            f"{depth['stock']}", f"{depth['demand']}",
+            f"{held}" if held else f"{p.deep}0{RESET}",
+            f"{sparkline(ladder)} {p.tone(tone)}{word}{RESET}",
+            flag,
+        ])
+        styles.append(["value", "value", "value", "label", "label", "value", "value", "value"])
+    lines += table(["COMMODITY", "BUY", "SELL", "STOCK", "DEMAND", "HELD", "SPREAD", ""],
+                   # Drop order, last first: the spread is a nicety, the depth
+                   # figures have a screen of their own, and the price, the
+                   # hold and an ILLEGAL flag never go.
+                   rows, "lrrrrrll", styles=styles, optional=(3, 4, 6))
+    lines.append(f"{p.slate}Prices per unit. Only jumps advance days; reopening does not replenish stock.{RESET}")
     if any(not COMMODITIES[c]["legal"] for c in goods):
-        lines.append(f"Blackwake: +1 standing per new {CONTRABAND_STANDING_STEP}cr net contraband trading gain; purchases count against gains.")
+        lines.append(f"{p.slate}Blackwake standing: {p.ink}+1{p.slate} per new {p.ink}{CONTRABAND_STANDING_STEP}cr"
+                     f"{p.slate} net contraband gain; purchases count against gains.{RESET}")
+    if any(not COMMODITIES[c]["legal"] and system.economy != "Haven" for c in goods):
+        lines.append(f"{p.slate}A {glyph('flat')} buy price is contraband this station will not sell.{RESET}")
     return lines
 
 
@@ -5405,18 +6370,59 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
     its rows, and a selection letter therefore always means what the page it is
     printed on says it means.
     """
+    # A screen may carry more than one table; a heading is only repeated over
+    # the rows that belong to *it*, so `page_heading` records the heading in
+    # force when each page's first table row was placed.
+    any_sticky = any(STICKY_MARK in row for rows in groups for row in rows)
     pages: list[tuple[list[str], dict]] = [([], {})]
+    page_heading: list[str | None] = [None]
+    heading: str | None = None
+
+    def open_page() -> None:
+        # A rule or a table's headings left at the foot of a page name the page
+        # after it, so they travel with it: a heading with nothing under it is a
+        # heading about nothing. They are moved before the new page is filled,
+        # so the rows they take are charged to that page's own room (#493 review).
+        closing = pages[-1][0]
+        stranded = 0
+        while stranded < len(closing) and closing[len(closing) - 1 - stranded][:1] in (SECTION_MARK, STICKY_MARK):
+            stranded += 1
+        carried = closing[len(closing) - stranded:]
+        del closing[len(closing) - stranded:]
+        pages.append((carried, {}))
+        page_heading.append(None)
+        if not closing and len(pages) > 1:
+            # Everything that page had was a heading, and the headings have just
+            # left with their content: at the 40x12 floor a one-row body can hold
+            # a rule and nothing else, and a page of only a rule is a page of
+            # nothing (issue #493 review).
+            del pages[-2]
+            del page_heading[-2]
+
+    def room_on(page_index: int) -> int:
+        # The first page carries its heading in the flow, where the screen put
+        # it; every later page is given one back, and pays a row for it -- but
+        # only if it has not already been handed one by `open_page`, or the row
+        # is charged twice and a two-row record is split down the middle.
+        if page_index == 0 or not any_sticky:
+            return capacity
+        rows = pages[page_index][0]
+        if any(row[:1] == STICKY_MARK for row in rows):
+            return capacity
+        return max(1, capacity - 1)
+
     for index, rows in enumerate(groups):
         key, value = keys[index] if keys is not None else (None, None)
         current, choices = pages[-1]
-        if current and (len(current) + len(rows) > capacity or (key is not None and key in choices)):
-            pages.append(([], {}))
+        if current and (len(current) + len(rows) > room_on(len(pages) - 1)
+                        or (key is not None and key in choices)):
+            open_page()
         remaining = [render(row, index) for row in rows] if render is not None else list(rows)
         while remaining:
             current, choices = pages[-1]
-            room = capacity - len(current)
+            room = room_on(len(pages) - 1) - len(current)
             if room <= 0:
-                pages.append(([], {}))
+                open_page()
                 continue
             chunk, remaining = remaining[:room], remaining[room:]
             if key is not None:
@@ -5425,13 +6431,46 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
                 # page it reaches (issue #411 review).
                 choices[key] = value
                 chunk = keyed_rows(key, chunk)
+            for row in chunk:
+                if STICKY_MARK in row:
+                    heading = row
+                elif MEMBER_MARK in row and page_heading[len(pages) - 1] is None:
+                    page_heading[len(pages) - 1] = heading
             current.extend(chunk)
+    for page_index in range(1, len(pages)):
+        owner = page_heading[page_index]
+        rows, choices = pages[page_index]
+        # No table rows on this page means its headings would be a lie -- and a
+        # heading the page already carries, because it was stranded at the foot
+        # of the page before and travelled here, is not added twice.
+        if owner is None or owner in rows:
+            continue
+        pages[page_index] = ([owner] + rows, choices)
     return pages if keys is not None else [rows for rows, _ in pages]
 
 
 def wrapped_group(line: str) -> list[str]:
-    """One display line as the rows it occupies."""
-    return _wrap_output(_mission_plain(line), _page_content_width()).split("\r\n")
+    """One display line as the styled rows it occupies.
+
+    This function is where Voidrunner's colour used to die. It wrapped every
+    body row of every paged screen through `_mission_plain` -- `ANSI.sub("")` --
+    so a screen could not be coloured even if it wanted to be, and the frame
+    restored in #486 was the only styled thing left on a page because it is
+    added afterwards (issue #493 §2). Now a row that styled itself keeps its
+    styling across the wrap, and a row that did not is coloured by role.
+    """
+    if line.startswith(SECTION_MARK):
+        # A rule is one row whatever its label: `draw_page` draws it across the
+        # frame, and a wrapped rule is not a rule.
+        return [SECTION_MARK + _fit_text(line[1:], max(1, _page_content_width() - 6))]
+    # A stacked table record arrives as its own rows, already measured; it is
+    # still one entry, so it stays one group and moves between pages whole.
+    lead = MEMBER_MARK if line.startswith(MEMBER_MARK) else ""
+    # An alert opens with its severity glyph; a wrapped one keeps that column
+    # clear, so the glyphs still read as a column down the side of the group.
+    hang = 2 if ANSI_ESCAPE_RE.sub("", line)[:1] in alert_glyphs() else 0
+    return [lead + row for part in line.lstrip(MEMBER_MARK).split("\n")
+            for row in wrap_styled(style_body_line(part), _page_content_width(), hang)]
 
 
 def _trade_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
@@ -6011,24 +7050,72 @@ def screen_specialists(p: Palette, world: World) -> str | None:
             if response is not None: result, page = response, 0
 
 
+def price_cell(cost: int, credits: int) -> str:
+    """A price in gold, its affordability in tone. Credits are the only other
+    thing in the game allowed to be gold, and this is a price."""
+    p = pal()
+    return f"{p.gold}{cost:,}cr{RESET}" if cost <= credits else f"{p.alarm}{cost:,}cr{RESET}"
+
+
 def shipyard_lines(world: World) -> list[str]:
-    ship = world.save.ship
-    lines = [world.here.station_name,
-             f"Fuel {ship.fuel}/{fuel_capacity(ship)} at 6cr/unit; hull {ship.hull_hp}/{hull_hp_max(ship)} at {repair_cost_per_hp(ship)}cr/HP"
-             + (f" ({crew_name(world, 'engineer')} discounts repairs)." if ship.has_engineer else ".")]
-    for i, (key, upgrade) in enumerate(UPGRADES.items()):
+    """The yard as two tables: what the ship is now, and what it could be.
+
+    Every upgrade row carries its `now {arrow} next` delta, so the question the
+    caller is actually asking -- what does this buy me -- is answered on the row
+    instead of in the effect blurb (issue #493 §5).
+    """
+    p = pal()
+    ship, credits = world.save.ship, world.save.pilot.credits
+    cells = _gauge_cells()
+    lines = [f"{p.hull}{BOLD}{world.here.station_name.upper()}{RESET}  "
+             + "  ".join([chip("refuel", "6cr/unit"),
+                          chip("repair", f"{repair_cost_per_hp(ship)}cr/HP")])
+             + (f"  {p.mint}{crew_name(world, 'engineer')} discounts repairs{RESET}" if ship.has_engineer else "")]
+    lines.append(section("SHIP"))
+    lines += beside(table(["", "", "", ""], [
+        ["HULL", gauge(ship.hull_hp, hull_hp_max(ship), cells), f"{ship.hull_hp}/{hull_hp_max(ship)}",
+         key_label("P", "repair")],
+        ["FUEL", gauge(ship.fuel, fuel_capacity(ship), cells), f"{ship.fuel}/{fuel_capacity(ship)}",
+         key_label("R", "refuel")],
+    ], "llrl", styles=[["label", "value", "value", "value"]] * 2, optional=(3,),
+        repeat_header=False)[1:], portrait(ship_portrait(ship, "compact"), "info"))
+    lines.append(section("UPGRADES"))
+    rows, styles = [], []
+    for index, (key, upgrade) in enumerate(UPGRADES.items()):
         tier = getattr(ship, f"{key}_tier")
-        status = "MAXED" if tier >= upgrade["max_tier"] else f"Tier {tier} -> {tier + 1}; {upgrade['cost'](tier):,}cr"
-        if _OUTPUT_WIDTH >= 70:
-            lines.append(f"[{YARD_LETTERS[i]}] {upgrade['label']:<20} {status:<24} {upgrade['effect']}")
-        else:
-            lines.append(f"[{YARD_LETTERS[i]}] {upgrade['label']}: {status}. Benefit: {upgrade['effect']}")
-    local = next((WORKSHOPS[key] for key, sid in specialist_stations(world).items() if sid == world.here.id), None)
-    if local: lines.append(f"Local specialist: {local['name']}, {local['owner']}. [S] Specialists for material-supplied installations.")
+        maxed = tier >= upgrade["max_tier"]
+        rows.append([
+            key_label(YARD_LETTERS[index], upgrade["label"], tone="label" if maxed else "value"),
+            badge("MAX", "good") if maxed else f"{p.ink}{tier}{RESET} {p.slate}{glyph('arrow')}{RESET} {p.mint}{tier + 1}{RESET}",
+            upgrade["effect"],
+            glyph("flat") if maxed else price_cell(upgrade["cost"](tier), credits),
+        ])
+        styles.append(["value", "value", "label", "value"])
+    lines += table(["UPGRADE", "TIER", "EFFECT", "COST"], rows, "lllr",
+                   styles=styles, optional=(2,))
     refits = HULL_REFITS[ship.hull_class]
-    for key, (target, cost) in zip(YARD_LETTERS[len(UPGRADES):], refits):
-        lines.append(f"[{key}] {target}-Class Refit: {cost:,}cr; permanent hull change.")
-    if not refits: lines.append(f"Hull: best available class ({ship.hull_class}).")
+    if refits:
+        lines.append(section("HULL REFIT"))
+        refit_rows = []
+        for key, (target, cost) in zip(YARD_LETTERS[len(UPGRADES):], refits):
+            base = HULL_CLASSES[target]
+            refit_rows.append([
+                key_label(key, f"{target}-Class"),
+                f"{p.slate}hull{RESET} {p.ink}{hull_hp_max(ship)}{RESET} {p.slate}{glyph('arrow')}{RESET} "
+                f"{p.mint}{base['hull_base'] + ship.hull_tier * 35}{RESET}",
+                f"{p.slate}hold{RESET} {p.ink}{cargo_capacity(ship)}{RESET} {p.slate}{glyph('arrow')}{RESET} "
+                f"{p.mint}{base['cargo_base'] + ship.cargo_tier * 8}{RESET}",
+                price_cell(cost, credits),
+            ])
+        lines += table(["REFIT", "HULL", "HOLD", "COST"], refit_rows, "lllr",
+                       styles=[["value"] * 4 for _ in refit_rows], optional=(2,))
+        lines.append(f"{p.slate}A refit is a permanent hull change.{RESET}")
+    else:
+        lines.append(f"{p.slate}Hull: best available class ({p.ink}{ship.hull_class}{p.slate}).{RESET}")
+    local = next((WORKSHOPS[key] for key, sid in specialist_stations(world).items() if sid == world.here.id), None)
+    if local:
+        lines.append(alert("note", f"Local specialist: {local['name']}", local["owner"],
+                           key_label("S", "specialists")))
     return lines
 
 
@@ -6117,6 +7204,45 @@ def _page_header(title: str, page: int, count: int) -> str:
     return f"{title} {page + 1}/{count}"
 
 
+# The brand mark that opens every framed page's top border. One accent, carried
+# on every screen, so a Voidrunner screen is recognisable before it is read.
+def _brand() -> str:
+    return f"{glyph('brand')} VOIDRUNNER"
+
+
+def _box_header(p: "Palette", title: str, counter: str) -> str:
+    """`╭─ ◤ VOIDRUNNER · TITLE ────────────── n/m ╮`.
+
+    The brand goes in the border rather than costing a body row, and the page
+    counter sits at the far right where it always is, instead of running along
+    behind the title. Both are dropped, brand first, when the border cannot
+    hold them -- the title is the part that says what the caller is looking at.
+    """
+    inner = _box_inner_width()
+    edge, dim = f"{p.hull}{BOLD}", p.deep
+    # The brand is plasma, which is what plasma is for; the frame around it is
+    # hull, and chrome is never the colour of the thing it frames (#493 review).
+    brand = f"{p.plasma}{BOLD}{_brand()}{RESET}{edge}"
+    tail = f" {p.slate}{counter}{RESET}{edge} " if counter else ""
+    for lead in (f"{brand} {glyph('dot')} {title}", title):
+        head = f"─ {lead} "
+        fill = inner - _visible_width(head) - _visible_width(tail)
+        if fill >= 1:
+            return f"{edge}╭{head}{RESET}{dim}{'─' * fill}{RESET}{tail}{edge}╮{RESET}"
+    head = f"─ {_fit_text(title, max(1, inner - 4))} "
+    return f"{edge}╭{head}{'─' * max(1, inner - _visible_width(head))}╮{RESET}"
+
+
+def _box_section(p: "Palette", label: str) -> str:
+    """`├─ LABEL ───────────────┤`: a named rule across the page frame."""
+    inner = _box_inner_width()
+    # A section header is chrome and wears the frame's own role, not the role
+    # of the hints inside it (issue #493 review).
+    head = f"─ {p.hull}{BOLD}{label}{RESET}{p.hull} "
+    fill = max(1, inner - 3 - _visible_width(label))
+    return f"{p.hull}├{head}{p.deep}{'─' * fill}{p.hull}┤{RESET}"
+
+
 def _header_fits_border(header: str) -> bool:
     """Whether a page's header can be drawn into its top border.
 
@@ -6134,6 +7260,9 @@ def _page_header_rows(header: str) -> int:
     return 1 + len(_wrap_output(header, _page_content_width()).split("\r\n"))
 
 
+_LAST_PAGE_DRAWN: tuple | None = None
+
+
 def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) -> None:
     """Draw one page of a list screen: its frame, its rows, and nothing else.
 
@@ -6141,17 +7270,36 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
     than thirty (issue #486). The action bar is deliberately left to the caller
     and printed outside the box, where the cursor waits.
     """
+    global _LAST_PAGE_DRAWN
     out_line()
     header = _page_header(title, page, count)
     inner = _box_inner_width()
     if _header_fits_border(header):
-        out_line(_box_title(p, header))
+        out_line(_box_header(p, title, f"{page + 1}/{count}"))
     else:
         out_line(_box_top(p))
-        rows = _wrap_output(header, _page_content_width()).split("\r\n") + list(rows)
+        rows = wrap_styled(style_body_line(header), _page_content_width()) + list(rows)
+    # A reveal belongs to arriving somewhere, not to every keypress: a screen
+    # redrawn unchanged (a key that did nothing, a prompt reprinted) must cost
+    # the caller nothing. Paging counts as arriving; pressing `X` twice does not.
+    signature = (title, page, count, len(rows))
+    revealing = signature != _LAST_PAGE_DRAWN and not motion_interrupted()
+    _LAST_PAGE_DRAWN = signature
+    pace = MOTION_REVEAL_BUDGET / max(1, len(rows)) if revealing else 0.0
     for row in rows:
-        out_line(f"{p.accent}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.accent}│{RESET}")
-    out_line(_box_bottom(p))
+        if pace and not motion_pause(pace):
+            pace = 0.0
+        if row.startswith(SECTION_MARK):
+            out_line(_box_section(p, row[1:]))
+            continue
+        # The last place a body row can still be colourless. Screens that build
+        # their own rows -- the contract board, the star map, a screen that
+        # simply hands `draw_page` a list of sentences -- never went through
+        # `wrapped_group`, and a rule that held for most pages and not the rest
+        # is how the colour was lost one slice at a time to begin with.
+        row = style_body_line(row.replace(STICKY_MARK, "").replace(MEMBER_MARK, ""))
+        out_line(f"{p.hull}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.hull}│{RESET}")
+    out_line(_box_bottom(p, border_color=p.hull))
 
 
 def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, page: int, *, pages: list[list[str]] | None = None) -> tuple[str, int, int]:
@@ -6212,32 +7360,61 @@ def screen_shipyard(p: Palette, world: World) -> None:
 
 
 def crew_roster_lines(world: World) -> list[str]:
-    lines = []
+    """One card per specialist: who they are, how far they have come, what they
+    cost. The head rows are measured together so the whole roster lines up, and
+    each card's own detail sits indented under its own head row."""
+    p = pal()
+    heads, styles, meta = [], [], []
     for index, (role, info) in enumerate(CREW_ROLES.items()):
         hired = getattr(world.save.ship, f"has_{role}")
-        status = "HIRED" if hired else "Available"
         level = crew_level(world.save.ship, role)
         name, personality = CREW_CANDIDATES[role][crew_identity(world, role)]
-        price = f"{info['wage']}cr/jump" if hired else f"hire {info['hire_cost']}cr + {info['wage']}cr/jump"
-        lines.append(f"[{CREW_LETTERS[index]}] {info['label']}: {status}; {name}. {price}. Benefit: {crew_effect(role, level)}.")
-        lines.append(f"{name}: {personality}")
+        pips = (f"{p.mint}{glyph('crew_on') * (level + 1)}{RESET}"
+                f"{p.deep}{glyph('crew_off') * (len(CREW_SERVICE_LEVELS) - level - 1)}{RESET}")
+        heads.append([
+            key_label(CREW_LETTERS[index], info["label"], tone="value" if hired else "label"),
+            badge("HIRED", "good") if hired else badge("for hire", "label"),
+            name, pips, CREW_SERVICE_LEVELS[level][1],
+        ])
+        styles.append(["value", "value", "value", "value", "label"])
+        price = (f"{p.gold}{info['wage']}cr/jump{RESET}" if hired
+                 else f"{p.gold}{info['hire_cost']}cr{RESET} {p.slate}+{RESET} {p.gold}{info['wage']}cr/jump{RESET}")
+        meta.append((index, role, hired, level, name, personality, price))
+    # Nothing on a specialist's head row is droppable: who they are, how far
+    # they have come and whether they are aboard are all the row is for. At
+    # forty columns it stacks instead, which keeps every one of them.
+    _, records = table_records(["", "", "", "", ""], heads, "lllll", styles=styles)
+    lines: list[str] = []
+    for record, (index, role, hired, level, name, personality, price) in zip(records, meta):
+        card = list(record)
         paid = world.save.ship.crew_records.get(role, {}).get("paid_jumps", 0)
-        progress = (f"{paid}/{CREW_SERVICE_LEVELS[level + 1][0]} paid jumps to {CREW_SERVICE_LEVELS[level + 1][1]}"
-                    if level + 1 < len(CREW_SERVICE_LEVELS) else "service mastery reached")
-        lines.append(f"{CREW_SERVICE_LEVELS[level][1]}: {progress}.")
+        if level + 1 < len(CREW_SERVICE_LEVELS):
+            target = CREW_SERVICE_LEVELS[level + 1]
+            progress = (f"{gauge(paid, target[0], 8, tone='good')} {p.ink}{paid}/{target[0]}{RESET} "
+                        f"{p.slate}paid jumps to {target[1]}{RESET}")
+        else:
+            progress = badge("service mastery reached", "good")
+        card.append(f"  {price}  {p.deep}{glyph('dot')}{RESET}  {p.slate}{crew_effect(role, level)}{RESET}")
+        card.append(f"  {progress}")
+        # The terms are one entry and the person is another: at the 40x12 floor
+        # a whole card is taller than a page, and what a caller has to be able
+        # to read in one place is the name, the price and what it buys.
+        lines.append("\n".join(card))
+        card = [f"  {p.slate}{_mission_plain(personality)}{RESET}"]
         task = crew_assignment_record(world, role)
         if task is not None:
-            state = task["state"]
+            state, tone = task["state"], "good"
         elif level >= 1:
             state = "available" if hired else "available after rehiring"
+            tone = "good" if hired else "label"
         else:
-            state = "unlocks after hiring and five paid jumps"
-        lines.append(f"[{index + 1}] Task: {CREW_ASSIGNMENTS[role]['title']}; {state}.")
-    lines.extend([
-        "Specialists earn wages on every jump, including detours.",
-        "Promotions follow 5, 15 and 30 paid jumps. Rehiring keeps recorded experience; earlier unrecorded service is unknown.",
-        "Engine promotions affect the following jump's fuel.",
-    ])
+            state, tone = "unlocks after hiring and five paid jumps", "label"
+        card.append(f"  {key_label(str(index + 1), 'Task')} "
+                    f"{p.ink}{CREW_ASSIGNMENTS[role]['title']}{RESET}  {badge(state, tone)}")
+        lines.append("\n".join(card))
+    lines.append(f"{p.slate}Specialists earn wages on every jump, including detours. "
+                 f"Promotions follow {p.ink}5{p.slate}, {p.ink}15{p.slate} and {p.ink}30{p.slate} paid jumps; "
+                 f"rehiring keeps recorded experience. Engine promotions affect the following jump's fuel.{RESET}")
     return lines
 
 
@@ -6593,11 +7770,31 @@ def mission_bearing(world: World, mission: Mission) -> str:
 
 def mission_details(world: World, mission: Mission) -> list[str]:
     """Read-only terms and explicit estimates; never reveal remote market state."""
+    p = pal()
     path = mission_route(world, mission)
     reward = mission_reward_for(world.save, mission.kind, mission.reward)
     target = world.by_id[mission.target_system]
-    lines = [mission.description, f"Destination: {mission_bearing(world, mission)}",
-             f"Target danger: {target.danger}" if target.discovered else "Target danger: uncharted"]
+    kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
+    risk, tone = MISSION_RISK.get(mission.kind, ("CONTRACT", "info"))
+    # The terms first, as terms: what it is, what it pays, and how far away the
+    # job is, on two rows the caller can read without reading a paragraph.
+    lines = [f"{chip(kind, None)} {p.ink}{_mission_plain(target.name)}{RESET}  {badge(risk, tone)}"
+             f"   {p.gold}+{reward:,}cr{RESET}"]
+    terms = [f"{p.slate}route{RESET} " + f" {p.deep}{glyph('arrow')}{RESET} ".join(
+        f"{p.ink}{_mission_plain(world.by_id[sid].name) if world.by_id[sid].discovered else '?'}{RESET}"
+        for sid in ([world.save.current_system] + list(path))[:5])]
+    if mission.deadline_turn is not None:
+        left = mission.deadline_turn - world.save.turn
+        terms.append(f"{p.slate}due{RESET} {p.ink}day {mission.deadline_turn}{RESET} "
+                     + (badge("EXPIRED", "danger") if left < 0 else
+                        f"{gauge(left, max(1, MISSION_BOARD_DAYS * 2), 6, tone='danger' if left <= 1 else 'caution' if left <= 3 else 'good')}"
+                        f" {p.ink}{left}{RESET} {p.slate}left{RESET}"))
+    else:
+        terms.append(f"{p.slate}no deadline{RESET}")
+    lines.append("   ".join(terms))
+    lines.append(section("TERMS"))
+    lines += [mission.description, f"Destination: {mission_bearing(world, mission)}",
+              f"Target danger: {target.danger}" if target.discovered else "Target danger: uncharted"]
     ahead = preceding_bounties(world, mission)
     if ahead:
         lines.append(f"Queued bounties: {ahead} earlier contract(s) at this target resolve first. Budget includes re-entry after each, assuming they remain active and you win.")
@@ -6676,7 +7873,10 @@ def mission_details(world: World, mission: Mission) -> list[str]:
         lines.append("WARNING: a shortest-route jump exceeds tank capacity; upgrade or find another route.")
     if outlay > world.save.pilot.credits:
         lines.append("WARNING: current credits do not cover the estimated remaining outlay.")
-    return [_mission_plain(line) for line in lines]
+    # Sanitize the rows built out of save data; never a completed styled row,
+    # whose own untrusted segments were sanitized before they were styled.
+    return [line if (ANSI_ESCAPE_RE.search(line) or line.startswith(SECTION_MARK))
+            else _mission_plain(line) for line in lines]
 
 
 def _mission_text_pages(lines: list[str], *, overhead: int = 7) -> list[list[str]]:
@@ -7012,16 +8212,48 @@ def screen_mission_details(p: Palette, world: World, mission: Mission, *, active
                 pause(p)
 
 
+MISSION_RISK = {"delivery": ("HAUL", "good"), "scan": ("SURVEY", "info"),
+                "bounty": ("COMBAT", "danger"), "escort": ("CONVOY", "caution")}
+
+
+def mission_card(world: World, mission: Mission, active: bool, width: int) -> list[str]:
+    """One contract as a card: what it pays on the first row, what it costs on
+    the second. A board of these reads as a set of choices; the single
+    `STATE KIND: Target (+reward)` sentence it replaces did not."""
+    p = pal()
+    kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
+    state = ("TRACKED" if active and world.save.tracked_mission_id == mission.id
+             else "ACTIVE" if active else "OFFER")
+    target = world.by_id[mission.target_system]
+    risk, tone = MISSION_RISK.get(mission.kind, ("CONTRACT", "info"))
+    reward = mission_reward_for(world.save, mission.kind, mission.reward)
+    head = (f"{chip(kind, None)} {p.ink}{_mission_plain(target.name)}{RESET}  "
+            f"{badge(state, 'brand' if state == 'TRACKED' else 'info' if active else 'label')}")
+    pay = f"{p.gold}+{reward:,}cr{RESET}"
+    # The payout is pushed to the right edge, but never joined to the title: a
+    # head row too long for the width keeps one space before its own figure.
+    rows = [_pad(head, max(_visible_width(head) + 1, width - _visible_width(pay))) + pay]
+    facts = [f"{p.slate}danger{RESET} {p.ink}{target.danger if target.discovered else '?'}{RESET}",
+             f"{p.ink}{len(mission_route(world, mission))}{RESET} {p.slate}jumps{RESET}"]
+    if mission.deadline_turn is None:
+        facts.append(f"{p.slate}no deadline{RESET}")
+    else:
+        left = mission.deadline_turn - world.save.turn
+        facts.append(f"{p.slate}day{RESET} {p.ink}{mission.deadline_turn}{RESET} "
+                     + (badge("EXPIRED", "danger") if left < 0 else
+                        gauge(left, max(1, MISSION_BOARD_DAYS * 2), 6,
+                              tone="danger" if left <= 1 else "caution" if left <= 3 else "good")))
+    facts.append(badge(risk, tone))
+    rows.append(f" {p.deep}{glyph('dot')}{RESET} ".join(facts))
+    return [row for line in rows for row in wrap_styled(line, width)]
+
+
 def screen_missions(p: Palette, world: World) -> None:
     page = 0
     while True:
         entries = [(m, False) for m in posted_mission_offers(world)] + [(m, True) for m in world.save.active_missions]
-        wrapped = []
-        for mission, active in entries:
-            kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
-            state = "TRACKED" if active and world.save.tracked_mission_id == mission.id else "ACTIVE" if active else "OFFER"
-            label = _mission_plain(f"{state} {kind}: {world.by_id[mission.target_system].name} (+{mission.reward:,}cr)")
-            wrapped.append((mission, active, _wrap_output(label, max(1, _page_content_width() - 4)).split("\r\n")))
+        wrapped = [(mission, active, mission_card(world, mission, active, max(1, _page_content_width() - 4)))
+                   for mission, active in entries]
         summary = [f"Active: {len(world.save.active_missions)}/{MAX_ACTIVE_MISSIONS}"]
         posted = world.save.mission_boards.get(world.save.current_system)
         if posted:
@@ -7049,7 +8281,10 @@ def screen_missions(p: Palette, world: World) -> None:
                     choice = len(choices)
                     choices.append((mission, active))
                     part = 0  # a continuation that opens a new page carries its key again
-                body.append(f"[{choice + 1}] {row}" if part == 0 else " " * len(f"[{choice + 1}] ") + row)
+                # Through `keyed_rows`, so the selection key is a gold hotkey
+                # like every other, and its continuations line up under it.
+                body.append(keyed_rows(str(choice + 1), [row])[0] if part == 0
+                            else " " * _visible_width(f"[{choice + 1}] ") + row)
         page = min(page, len(pages) - 1)
         body = list(pages[page][0])
         if not entries:
@@ -7067,11 +8302,13 @@ def screen_missions(p: Palette, world: World) -> None:
             screen_mission_details(p, world, mission, active=active)
 
 
-def pilot_record_lines(world: World, section: str = "O") -> list[str]:
+def pilot_record_lines(world: World, view: str = "O") -> list[str]:
     """Complete retained records, without display truncation or state changes."""
     pilot, ship = world.save.pilot, world.save.ship
-    lines = ["Views: [O] Pilot [C] Jobs [H] Log [D] Dossiers"]
-    if section == "C":
+    lines = [f"{pal().slate}Views{RESET}  " + "  ".join(
+        key_label(key, label) for key, label in
+        (("O", "Pilot"), ("C", "Jobs"), ("H", "Log"), ("D", "Dossiers")))]
+    if view == "C":
         lines.append(f"Active Contracts & Missions: {len(world.save.active_missions)}. Full terms, tracking and routes: station [B] Mission Board.")
         for mission in world.save.active_missions:
             target = world.by_id[mission.target_system]
@@ -7081,8 +8318,8 @@ def pilot_record_lines(world: World, section: str = "O") -> list[str]:
             lines.append(f"#{mission.id} {kind}: {mission.description}. Target: {target.name} ({target.x},{target.y}); {deadline}; reward {reward}cr.")
         if not world.save.active_missions: lines.append("No active missions.")
         return lines
-    if section == "D": return career_dossier_lines(world.save)
-    if section == "H":
+    if view == "D": return career_dossier_lines(world.save)
+    if view == "H":
         lines.append(f"Career highlights: {len(pilot.highlights)} retained; newest first.")
         lines.extend(f"* {entry}" for entry in reversed(pilot.highlights))
         if not pilot.highlights: lines.append("No career highlights yet.")
@@ -7090,23 +8327,62 @@ def pilot_record_lines(world: World, section: str = "O") -> list[str]:
         lines.extend(f"- {entry}" for entry in reversed(pilot.log))
         if not pilot.log: lines.append("No log entries yet.")
         return lines
-    lines.extend([f"Pilot: {pilot.handle}. Rank: {career_rank(pilot)}. Credits: {pilot.credits:,} cr.",
-                  f"Ship: {ship.hull_class}. Hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}; Cargo {sum(world.save.cargo.values())}/{cargo_capacity(ship)} used."])
-    lines += career_rank_terms(pilot)
+    p = pal()
+    cells = _gauge_cells()
+    lines.append(f"{p.plasma}{BOLD}{_mission_plain(pilot.handle)}{RESET}  "
+                 f"{p.slate}Rank{RESET} {p.plasma}{career_rank(pilot)}{RESET}  "
+                 f"{p.gold}{glyph('credits')} {pilot.credits:,}cr{RESET}")
+    # From the rank the career has kept, not from the balance: rank is permanent
+    # here, so a Void Baron who has spent down to 1,200cr is not working toward
+    # Independent Trader again (issue #493 review).
+    earned = career_rank_index(pilot)
+    following = RANKS[earned + 1] if earned + 1 < len(RANKS) else None
+    if following is not None:
+        previous = RANKS[earned][0]
+        lines.append(f"{p.slate}next rank{RESET} "
+                     f"{gauge(max(0, pilot.credits - previous), max(1, following[0] - previous), cells, tone='brand')} "
+                     f"{p.ink}{max(0, following[0] - pilot.credits):,}cr{RESET} {p.slate}to {following[1]}{RESET}")
+    event = world.save.active_event
+    if event:
+        lines.append(alert("caution", "Economy event",
+                           f"{event['description']} "
+                           f"({event['turns_remaining']} day(s) left)"))
+    lines.append(section("SHIP"))
+    lines += ship_gauge_rows(world)
+    lines.append(section("STANDING"))
+    standing_rows = []
     for faction in FACTIONS:
         rep = pilot.reputation.get(faction, 0)
         label = "Allied" if rep >= 10 else ("Friendly" if rep >= 4 else ("Hostile" if rep <= -5 else "Neutral"))
-        lines.append(f"{FACTION_LABEL[faction]} standing: {rep:+d} ({label}).")
-    crew = [f"{crew_name(world, role)} ({info['label']}, {CREW_SERVICE_LEVELS[crew_level(ship, role)][1]})" for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
-    wages = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}"))
-    lines.append("Crew: " + (", ".join(crew) if crew else "none") + f"; {wages}cr/jump.")
+        tone = "good" if rep >= 4 else ("danger" if rep <= -5 else "label")
+        # -100..100 on the bar: hostile is a short bar, not an absent one.
+        standing_rows.append([FACTION_LABEL[faction], gauge(rep + 100, 200, cells, tone=tone),
+                              f"{rep:+d}", badge(label, tone),
+                              faction_membership_status(world, faction)
+                              if faction in FACTION_MEMBERSHIPS else ""])
+    lines += table(["", "", "", "", ""], standing_rows, "llrll",
+                   styles=[["label", "value", "value", "value", "label"] for _ in standing_rows],
+                   # The word repeats the number and its tone; the membership
+                   # state is the only thing on the row nothing else says.
+                   optional=(4, 3), repeat_header=False)[1:]
+    lines.append(f"{p.slate}Membership perks suspend at {p.ink}-50{p.slate} standing or below.{RESET}")
+    lines.append(section("CAREER"))
     discovered = sum(system.discovered for system in world.galaxy)
-    lines.append(f"Systems charted: {discovered}/{len(world.galaxy)} ({round(discovered / len(world.galaxy) * 100)}%). Combat victories: {pilot.kills}.")
-    lines.append(f"Missions completed: {pilot.missions_completed}; failed or abandoned: {pilot.missions_failed}; expired: {pilot.missions_expired}. Retirements: {pilot.retirements}.")
-    for faction in FACTION_MEMBERSHIPS:
-        lines.append(f"{FACTION_LABEL[faction]}: {faction_membership_status(world, faction)}. Perks suspend at -50 or below.")
-    event = world.save.active_event
-    if event: lines.append(f"Economy event: {event['description']} ({event['turns_remaining']} day(s) left).")
+    crew = [f"{crew_name(world, role)} ({info['label']}, {CREW_SERVICE_LEVELS[crew_level(ship, role)][1]})"
+            for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
+    wages = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}"))
+    lines.append(f"{p.slate}charted{RESET} {gauge(discovered, len(world.galaxy), cells, tone='info')} "
+                 f"{p.ink}{discovered}/{len(world.galaxy)}{RESET} "
+                 f"{p.slate}({round(discovered / len(world.galaxy) * 100)}%){RESET}")
+    lines.append("  ".join([chip("victories", str(pilot.kills)),
+                            chip("completed", str(pilot.missions_completed)),
+                            chip("failed", str(pilot.missions_failed)),
+                            chip("expired", str(pilot.missions_expired)),
+                            chip("retirements", str(pilot.retirements))]))
+    lines.append(f"{p.slate}Crew{RESET} "
+                 + (f"{p.ink}" + ", ".join(crew) + RESET if crew else f"{p.slate}none{RESET}")
+                 + f"  {p.slate}wages{RESET} {p.ink}{wages}cr/jump{RESET}")
+    lines += career_rank_terms(pilot)
     lines.append(f"[C] Jobs: {len(world.save.active_missions)} active. [H] Log: {len(pilot.highlights)} highlights, {len(pilot.log)} log entries.")
     lines.append("[R] Finale shows endings and New Game+ terms. [D] Dossiers shows archived careers.")
     lines += career_path_lines(world.save)
@@ -7142,20 +8418,20 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
 
 
 def screen_status(p: Palette, world: World) -> None:
-    section, page, result = "O", 0, None
+    view, page, result = "O", 0, None
     cache = {}
     while True:
         footer = "[<] Prev [>] Next [O] Pilot [C] Jobs [H] Log [D] Dossiers "
         footer += "[R] Finale [B] Back: "
-        title = "Pilot Record: " + {"O":"Overview", "C":"Contracts", "H":"History", "D":"Dossiers"}[section]
-        if section not in cache:
-            lines = pilot_record_lines(world, section)
+        title = "Pilot Record: " + {"O":"Overview", "C":"Contracts", "H":"History", "D":"Dossiers"}[view]
+        if view not in cache:
+            lines = pilot_record_lines(world, view)
             if result: lines.insert(0, "Result: " + result)
-            cache[section] = _service_pages(lines, title, footer)
-        key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[section])
+            cache[view] = _service_pages(lines, title, footer)
+        key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[view])
         if key in ("B", "Q"): return
         if (moved := page_step(key, page, count)) is not None: page = moved
-        elif key in ("O", "C", "H", "D"): section, page = key, 0
+        elif key in ("O", "C", "H", "D"): view, page = key, 0
         elif key == "R":
             previous = world.save.pilot.retirements
             response = screen_career_finale(p, world)
@@ -7165,15 +8441,50 @@ def screen_status(p: Palette, world: World) -> None:
 
 
 
+MEDALS = ("1st", "2nd", "3rd")
+MEDAL_TONES = ("key", "value", "caution")
+
+
+def standing_cell(position: int) -> str:
+    """The first three places wear a medal; everyone else wears a number."""
+    if position <= len(MEDALS):
+        return badge(MEDALS[position - 1], MEDAL_TONES[position - 1])
+    return f"{pal().slate}#{position}{RESET}"
+
+
 def hall_of_fame_lines(entries: list[dict], user_id: int) -> list[str]:
+    """The board as a ranked table with the caller's own row picked out."""
+    p = pal()
     if not entries:
-        return ["No pilots recorded yet -- be the first."]
-    lines = [f"Top {plural(len(entries), 'pilot')} by best recorded credits. [YOU] marks your pilot when listed."]
+        return [f"{p.slate}No pilots recorded yet -- be the first.{RESET}"]
+    best = max(entry.get("best_credits", 0) for entry in entries) or 1
+    # Deliberately unstyled: it is a sentence, and `style_body_line` colours it
+    # by role on the way to the page like every other sentence in the game.
+    lines = [f"Top {plural(len(entries), 'pilot')} by best recorded credits. "
+             f"[YOU] marks your pilot when listed."]
+    rows, styles = [], []
     for position, entry in enumerate(entries, 1):
-        marker = " [YOU]" if entry.get("user_id") == user_id else ""
-        lines.append(f"#{position}{marker} {entry.get('handle', '?')}: {entry.get('rank', '?')}. "
-                     f"Best credits {entry.get('best_credits', 0):,}cr; latest-career combat victories {entry.get('kills', 0)}; "
-                     f"missions {entry.get('missions_completed', 0)}; retirements {entry.get('retirements', 0)}.")
+        mine = entry.get("user_id") == user_id
+        handle = _mission_plain(str(entry.get("handle", "?")))
+        rows.append([
+            standing_cell(position),
+            f"{p.plasma}{BOLD}{handle}{RESET}" if mine else f"{p.ink}{handle}{RESET}",
+            str(entry.get("rank", "?")),
+            f"{p.gold}{entry.get('best_credits', 0):,}cr{RESET}",
+            gauge(entry.get("best_credits", 0), best, 8, tone="brand" if mine else "info"),
+            str(entry.get("kills", 0)), str(entry.get("missions_completed", 0)),
+            str(entry.get("retirements", 0)),
+            badge("[YOU]", "brand") if mine else "",
+        ])
+        styles.append(["value", "value", "label", "value", "value", "value", "value", "value", "value"])
+    lines += table(["", "PILOT", "RANK", "BEST CR", "", "WINS", "JOBS", "RUNS", ""],
+                   # Only the bar is droppable. A pilot's recorded rank and
+                   # their job and run counts are on no other Hall view, so a
+                   # narrow board stacks and keeps them rather than dropping
+                   # figures a caller could not read anywhere else (#493 review).
+                   rows, "rllrlrrrl", styles=styles, optional=(4,))
+    lines.append(f"{p.slate}Wins are the latest career's combat victories; jobs are missions "
+                 f"completed; runs are retirements.{RESET}")
     return lines
 
 
@@ -7195,7 +8506,10 @@ def achievement_lines(entries: list[dict], category: str, user_id: int) -> list[
         lines.append("No qualifying achievements recorded yet. Older score files gain career details at the pilot's next saved action.")
     for position, record in enumerate(ranked, 1):
         marker = " [YOU]" if record["user_id"] == user_id else ""
-        prefix = f"#{position}{marker} {record['handle']}"
+        # A score record's callsign is another pilot's text, and older score
+        # files were never validated for control characters: sanitize before it
+        # is styled, never after (issue #493 review).
+        prefix = f"#{position}{marker} {_mission_plain(record['handle'])}"
         if category == "careers":
             archived = record.get("achievements", {}).get("careers", [])
             endings = [item for item in archived if item["finale"] is not None]
@@ -7242,35 +8556,91 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
 CHART_CONNECTION_LETTERS = [c for c in LETTERS if c not in CHART_RESERVED_LETTERS]
 
 
+def danger_dots(level: int, *, known: bool = True) -> str:
+    """Danger as five pips in its own tone -- a rating reads faster than a digit.
+
+    An uncharted destination shows a question mark rather than five empty pips:
+    the pips would read as "no danger", and the whole point of an uncharted
+    bearing is that nobody knows.
+    """
+    p = pal()
+    if not known:
+        return f"{p.slate}danger unknown{RESET}"
+    tone = p.mint if level <= 1 else (p.amber if level <= 3 else p.alarm)
+    return f"{tone}{glyph('crew_on') * level}{RESET}{p.deep}{glyph('crew_off') * (5 - level)}{RESET}"
+
+
 def chart_entries(world: World, result: str | None = None) -> list[tuple[int | None, str]]:
+    """The chart as a departures table, one selectable row per connection.
+
+    The rows are built to the width the key prefix leaves over, because
+    `keyed_rows` puts `[K] ` in front of every one of them: the columns line up
+    under the keys rather than in spite of them.
+    """
+    p = pal()
     here = world.here
-    intro = f"{here.name} ({here.x},{here.y}); {sector_for(here)}. Day {world.save.turn}."
-    entries = [(None, intro)]
-    if result: entries.insert(0, (None, "Result: " + result))
+    entries: list[tuple[int | None, str]] = []
+    if result:
+        entries.append((None, "Result: " + _mission_plain(result)))
+    entries.append((None, f"{p.hull}{BOLD}{here.name.upper()}{RESET} {p.slate}({here.x},{here.y}){RESET}  "
+                          f"{p.slate}{sector_for(here)}{RESET}  "
+                          + "  ".join([chip("day", str(world.save.turn)),
+                                       chip("fuel", f"{world.save.ship.fuel}/{fuel_capacity(world.save.ship)}")])))
     mission = tracked_mission(world)
     route = mission_route(world, mission) if mission and not (mission.kind == "scan" and world.by_id[mission.target_system].discovered) else []
-    if mission: entries.append((None, f"Tracked #{mission.id}: {mission_bearing(world, mission)}"))
-    actions = "[G] Route planner [V] Map/list"
-    if world.save.ship.scanner_tier > 0: actions += " [S] Scan"
-    if mission: actions += " [R] Contract route"
-    entries.append((None, actions))
+    if mission:
+        entries.append((None, alert("note", f"Tracked #{mission.id}", _mission_plain(mission_bearing(world, mission)))))
+    actions = [("G", "Route planner"), ("V", "Map/list")]
+    if world.save.ship.scanner_tier > 0:
+        actions.append(("S", "Scan"))
+    if mission:
+        actions.append(("R", "Contract route"))
+    entries.append((None, "  ".join(key_label(key, label) for key, label in actions)))
+    entries.append((None, section("DEPARTURES")))
+    rows, styles, ids = [], [], []
     for sid in sorted(here.connections):
         dest = world.by_id[sid]
         cost = fuel_cost_for_jump(here, dest, world.save.ship)
-        name = dest.name if dest.discovered else "Uncharted Bearing"
-        terms = f"{sector_for(dest)}; {dest.economy}; Danger {dest.danger}" if dest.discovered else "danger unknown"
-        low = " LOW FUEL" if world.save.ship.fuel < cost else ""
-        tracked = " TRACKED NEXT" if route and route[0] == sid else ""
-        entries.append((sid, f"{name} ({dest.x},{dest.y}); {terms}; {cost} fuel{low}{tracked}."))
+        short = world.save.ship.fuel < cost
+        rows.append([
+            dest.name if dest.discovered else "Uncharted Bearing",
+            f"{dest.x},{dest.y}",
+            sector_for(dest) if dest.discovered else "?",
+            dest.economy if dest.discovered else "?",
+            danger_dots(dest.danger, known=dest.discovered),
+            f"{p.alarm}{cost}{RESET}" if short else f"{p.ink}{cost}{RESET}",
+            badge("TRACKED", "brand") if route and route[0] == sid else (badge("LOW FUEL", "danger") if short else ""),
+        ])
+        styles.append(["value", "label", "label", "label", "value", "value", "value"])
+        ids.append(sid)
+    heading, records = table_records(["DESTINATION", "AT", "SECTOR", "ECONOMY", "DANGER", "FUEL", ""],
+                                     rows, "lllllrl", styles=styles, optional=(1, 2, 3),
+                                     width=max(1, _page_content_width() - 4))
+    # The heading sits under the same key prefix its rows will carry, and keeps
+    # its sticky mark so it is repeated on every page of the departures. A
+    # record may be two rows at forty columns; `keyed_rows` indents the second
+    # by the prefix width, which is exactly where the stacked columns want it.
+    entries.append((None, STICKY_MARK + " " * 4 + heading))
+    entries += [(sid, MEMBER_MARK + "\n".join(record)) for sid, record in zip(ids, records)]
     return entries
 
 
 def keyed_rows(key: str, rows: list[str]) -> list[str]:
     """One hotkey per entry: the first row carries `[K] `, continuation rows are
     indented by the same width so a wrapped entry never reads as two entries
-    (issue #411). Selection still maps the key on every page the entry spans."""
-    prefix = f"[{key}] "
-    return [prefix + rows[0]] + [" " * len(prefix) + row for row in rows[1:]] if rows else []
+    (issue #411). Selection still maps the key on every page the entry spans.
+
+    The prefix is styled here, not left plain. A keyed entry's row is usually
+    already styled by the screen that built it, and `style_body_line` leaves a
+    styled row alone -- so a raw prefix would be the one hotkey on the page
+    drawn in the terminal's default colour (issue #493).
+    """
+    if not rows:
+        return []
+    p = pal()
+    prefix = f"{p.gold}{BOLD}[{key}]{RESET} "
+    pad = " " * _visible_width(f"[{key}] ")
+    return [prefix + rows[0]] + [pad + row for row in rows[1:]]
 
 
 def _chart_pages(world: World, title: str, footer: str, result: str | None):
@@ -7281,7 +8651,17 @@ def _chart_pages(world: World, title: str, footer: str, result: str | None):
 def _chart_pages_for(world: World, title: str, footer: str, result: str | None):
     entries = chart_entries(world, result)
     # Budget conservatively with one key prefix per wrapped continuation row.
-    wrapped = [(sid, _wrap_output(_mission_plain(text), max(1, _page_content_width() - 4)).split("\r\n")) for sid, text in entries]
+    # A selectable row is wrapped narrower by the `[K] ` prefix `keyed_rows`
+    # will put in front of it; an unkeyed one -- the heading, the status band --
+    # is not prefixed, so wrapping it that narrow only threw a column away.
+    def rows_for(sid, text):
+        if text.startswith(SECTION_MARK):
+            return [SECTION_MARK + text[1:]]
+        # A stacked departures record arrives as its own rows already measured.
+        width = max(1, _page_content_width() - (4 if sid is not None else 0))
+        return [row for part in text.split("\n") for row in wrap_styled(style_body_line(part), width)]
+
+    wrapped = [(sid, rows_for(sid, text)) for sid, text in entries]
     capacity = page_capacity(["[A] " + row for _, rows in wrapped for row in rows], title, footer)
     letters, groups, index = [], [], 0
     for sid, paragraph in wrapped:
@@ -7479,6 +8859,46 @@ def spatial_map_grid(world: World, path: list[int], *, public_target: int | None
     return [border] + ["|" + "".join(row) + "|" for row in grid] + [border]
 
 
+# What each mark on the star map means, and therefore what colour it is. The
+# grid itself stays plain -- it is a projection, and the exact links live in
+# Info -- so the colour is put on as it is printed.
+MAP_MARK_TONES = {"@": "brand", "!": "danger", "X": "caution", "+": "info",
+                  "*": "brand", "o": "value", "?": "label", ":": "brand"}
+
+
+def style_map_row(p: "Palette", row: str) -> str:
+    """One grid row, each mark in the tone its legend gives it."""
+    pieces, run, tone = [], "", None
+    for character in row:
+        if character in "+-|" and (row[0] in "+" or character == "|"):
+            mark = "frame"
+        else:
+            mark = MAP_MARK_TONES.get(character, "chrome" if character == "." else None)
+        if mark != tone and run:
+            pieces.append(_map_run(p, run, tone))
+            run = ""
+        tone, run = mark, run + character
+    pieces.append(_map_run(p, run, tone))
+    return "".join(pieces)
+
+
+def _map_run(p: "Palette", run: str, tone: str | None) -> str:
+    if not run or tone is None:
+        return run
+    colour = p.hull if tone == "frame" else (p.deep if tone == "chrome" else p.tone(tone))
+    return f"{colour}{run}{RESET}"
+
+
+def map_legend(p: "Palette") -> str:
+    """The legend as chips, in the same tones the grid draws the marks in."""
+    marks = [("@", "here"), ("!", "goal"), ("X", "end"), ("*", "route"),
+             ("o", "known"), ("?", "new"), ("+", "many")]
+    return " ".join(
+        f"{p.deep}{glyph('chip_l')}{RESET}{p.tone(MAP_MARK_TONES[mark])}{mark}{RESET}"
+        f" {p.slate}{label}{RESET}{p.deep}{glyph('chip_r')}{RESET}"
+        for mark, label in marks) + f" {p.deep}.{RESET}{p.slate}link{RESET} {p.plasma}:{RESET}{p.slate}route{RESET}"
+
+
 def map_list_lines(world: World, path: list[int], public_target: int | None) -> list[str]:
     ids = map_system_ids(world, path, public_target)
     hops = bfs_hops(world.by_id, world.here.id)
@@ -7558,12 +8978,13 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
             heading = "Star Map: " + (SECTOR_NAMES[sector] if sector is not None else "Galaxy")
             xmin, xmax, ymin, ymax = map_bounds(sector)
             bounds = f"X {xmin}-{xmax}; Y {ymin}-{ymax}"
-            legend = "@ Here ! Goal X End * Route o Known + Cluster; . link : route"
+            legend = map_legend(p)
             footer = "[N/P] Sector [O] Overview [L] List [I] Info [B] Back: "
             overhead = 2 + sum(len(_wrap_output(text, max(1, _OUTPUT_WIDTH - 1)).split("\r\n")) for text in (heading, bounds, legend, footer))
-            out_line(heading); out_line(bounds)
+            out_line(f"{p.hull}{BOLD}{heading}{RESET}"); out_line(f"{p.slate}{bounds}{RESET}")
             for row in spatial_map_grid(world, path, public_target=public_target, sector=sector,
-                                        columns=_OUTPUT_WIDTH - 1, rows=_OUTPUT_HEIGHT - overhead): out_line(row)
+                                        columns=_OUTPUT_WIDTH - 1, rows=_OUTPUT_HEIGHT - overhead):
+                out_line(style_map_row(p, row))
             out_line(legend)
         out_prompt(footer); key = read_command_at_prompt(); out_line(key)
         if key in ("B", "Q"): return
@@ -8183,32 +9604,47 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     """Read-only combat terms; no random draw or persisted presentation state."""
     ship, pilot = world.save.ship, world.save.pilot
     used = sum(world.save.cargo.values())
+    p = pal()
+    cells = _gauge_cells()
     lines = []
     if result:
-        lines.append("Last exchange:")
+        lines.append(section("LAST EXCHANGE"))
         for message in result:
-            lines.extend(_wrap_output(_mission_plain(message), _page_content_width()).split("\r\n"))
-    if details: lines.append("Tactical Systems:")
-    if warrant is not None: lines += bounty_identification_lines(world, warrant)
-    lines += squadron_terms(world)
-    opponent = f"{pirate.name} (tier {pirate.tier}): HP {_gauge_bar(pirate.hp, pirate.hp_max, 8)} {pirate.hp}/{pirate.hp_max}."
-    own = (f"Your hull {_gauge_bar(ship.hull_hp, hull_hp_max(ship), 8)} {ship.hull_hp}/{hull_hp_max(ship)};"
-           f" Fuel {_gauge_bar(ship.fuel, fuel_capacity(ship), 6)} {ship.fuel}/{fuel_capacity(ship)}.")
-    if max(_visible_width(opponent), _visible_width(own)) > _page_content_width():
-        opponent = f"{pirate.name} (tier {pirate.tier}): HP {pirate.hp}/{pirate.hp_max}."
-        own = f"Your hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}."
-    lines += [
-        opponent,
-        own,
-        f"Cargo {used}/{cargo_capacity(ship)} used; Day {world.save.turn}.",
-    ]
+            lines.extend(wrap_styled(style_body_line(_mission_plain(message)), _page_content_width()))
+    if warrant is not None:
+        lines.append(section("IDENTIFICATION"))
+        lines += bounty_identification_lines(world, warrant)
+    if squadron_terms(world):
+        lines.append(section("SQUADRON"))
+        lines += squadron_terms(world)
+    lines.append(section("CONTACT"))
     intent = tactical_intent(tactics)
-    low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, tactics, cover=squadron_cover(world)) for roll in (4, 9))
-    lines.append(f"{tactics['profile']} intent: {intent.upper()}; incoming {low}-{high} damage if it survives or you fail to disengage.")
+    low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, tactics, cover=squadron_cover(world))
+                 for roll in (4, 9))
+    # The two hulls in the fight, one above the other, on the same scale of
+    # cells: which bar is longer *is* who is winning, and it used to be two
+    # sentences with the numbers buried in the middle of them.
+    contact = [[_mission_plain(pirate.name), gauge(pirate.hp, pirate.hp_max, cells, tone="danger"),
+                f"{pirate.hp}/{pirate.hp_max}", f"tier {pirate.tier}"],
+               ["Your hull", gauge(ship.hull_hp, hull_hp_max(ship), cells),
+                f"{ship.hull_hp}/{hull_hp_max(ship)}", hull_condition(ship)],
+               ["Fuel", gauge(ship.fuel, fuel_capacity(ship), cells, tone="info"),
+                f"{ship.fuel}/{fuel_capacity(ship)}", f"day {world.save.turn}"],
+               ["Hold", gauge(used, cargo_capacity(ship), cells, tone="info"),
+                f"{used}/{cargo_capacity(ship)}",
+                plural(sum(1 for quantity in world.save.cargo.values() if quantity > 0), "lot")]]
+    lines += table(["", "", "", ""], contact, "llrl",
+                   styles=[["label", "value", "value", "label"] for _ in contact],
+                   optional=(3,), repeat_header=False)[1:]
+    lines.append(f"{p.slate}{tactics['profile']} intent{RESET} {badge(intent.upper(), 'danger')}  "
+                 f"{p.slate}incoming{RESET} {p.ink}{low}-{high}{RESET} "
+                 f"{p.slate}if it survives or you fail to disengage{RESET}")
     if tactics["brace_ready"]:
         low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, tactics, braced=True, cover=squadron_cover(world)) for roll in (4, 9))
-        lines.append(f"[G] Guard: reduced shot (55%); incoming {low}-{high}. Fire recharges Guard.")
+        lines.append(f"{key_label('G', 'Guard')} {p.slate}reduced shot (55%); incoming{RESET} "
+                     f"{p.ink}{low}-{high}{RESET}{p.slate}. Fire recharges Guard.{RESET}")
     else: lines.append("Guard recharging: fire once before using G again.")
+    if details: lines.append(section("TACTICAL SYSTEMS"))
     if details:
         lines.append("Pattern: " + " > ".join(TACTICAL_PROFILES[tactics["profile"]]) + ".")
         lines.append("Cover/harry reduce your shot; recovery exposes the enemy. Harry lowers escape chance by 10 percentage points, minimum 5%.")
@@ -8219,6 +9655,7 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     travel = world.save.pending_travel
     escort_at_stake = " Escaping fails the escort contract." if travel is not None and travel.get("phase") == "escorts" else ""
     lines += [
+        section("OPTIONS"),
         "[F] Fire: one shot; a surviving enemy returns fire.",
         f"[E] Evade: about {combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics):.0%} success; failure draws enemy fire.{escort_at_stake}",
     ]
@@ -8254,6 +9691,34 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
 # spend a combat turn -- hence Guard, which the key does spell.
 COMBAT_LABELS = {"F": "Fire", "G": "Guard", "E": "Evade", "D": "Dump", "P": "Pay bribe",
                  "S": "Surrender", "V": "Verify", "R": "Report", "W": "Withdraw", "T": "Target"}
+
+
+COMBAT_DRAIN_STEPS = 8
+
+
+def drain_gauge(label: str, start: int, end: int, maximum: int, *, tone: str | None = None) -> None:
+    """Walk one bar from its old reading to its new one, on its own row.
+
+    Redrawn in place with a carriage return and nothing else -- no cursor
+    addressing, which is the one movement every terminal a BBS meets can do.
+    Any keypress ends it at the final reading, and the row is left showing that
+    reading either way, so a skipped effect and a watched one end identically.
+    """
+    if start == end or motion_interrupted():
+        return
+    p = pal()
+    cells = _gauge_cells()
+    width = max(1, _OUTPUT_WIDTH - 1)
+    for step in range(1, COMBAT_DRAIN_STEPS + 1):
+        value = round(start + (end - start) * step / COMBAT_DRAIN_STEPS)
+        row = (f"  {p.slate}{label}{RESET} {gauge(value, maximum, cells, tone=tone)} "
+               f"{p.ink}{value}/{maximum}{RESET}")
+        out("\r" + _fit_text(row, width))
+        if not motion_pause(0.05):
+            break
+    row = (f"  {p.slate}{label}{RESET} {gauge(end, maximum, cells, tone=tone)} "
+           f"{p.ink}{end}/{maximum}{RESET}")
+    out("\r" + _fit_text(row, width) + "\r\n")
 
 
 def combat_action_bar(actions: str) -> str:
@@ -8333,6 +9798,9 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             continue
         lines = []
         outcome = None
+        # What the two hulls read before the exchange, so the bars can be walked
+        # to their new readings afterwards -- after the commit, never before it.
+        opened_at = (pirate.hp, ship.hull_hp)
         engaging = (action in ("F", "E") or (action == "G" and tactics["brace_ready"])
                     or (action == "D" and not patrol and cargo_aboard) or (action == "P" and not patrol and can_pay))
         if warrant is not None and engaging: warrant["engaged"] = True
@@ -8396,11 +9864,20 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             outcome = "escaped"
         else:
             continue
+        lethal = None
         if ship.hull_hp <= 0 and outcome != "won":
+            # `destroy_ship` tows and patches, so the hull it leaves behind is
+            # higher than the one the shot produced. The bar drains to the hit
+            # that killed the ship; the patched hull is on the page that follows
+            # (issue #493 review).
+            lethal = 0
             lines.append(destroy_ship(world, patrol=patrol, hull_before=hull_before))
             outcome = "destroyed"
         combat.update(pirate=dataclasses.asdict(pirate), outcome=outcome, lines=lines)
         world.commit()
+        drain_gauge(_mission_plain(pirate.name), opened_at[0], max(0, pirate.hp), pirate.hp_max, tone="danger")
+        drain_gauge("Your hull", opened_at[1],
+                    lethal if lethal is not None else max(0, ship.hull_hp), hull_hp_max(ship))
         page = 0
         if outcome is not None:
             report_hop(world, lines)
@@ -8416,15 +9893,25 @@ def customs_quote(world: World) -> tuple[int, int, int]:
 
 
 def customs_display_lines(world: World) -> list[str]:
+    p = pal()
     quantity, cost, fine = customs_quote(world)
     credits = world.save.pilot.credits
     return [
-        f"Concord customs detects {quantity} units of unauthorized contraband.",
-        "[S] Surrender: lose all contraband, pay no fine. Concord standing improves by 1 up to its limit; notoriety stays unchanged.",
-        ("[P] Pay bribe: " if credits >= cost else "Bribe unavailable: ") +
-        f"offer {cost}cr; 60% acceptance. Pay only if accepted, keep all cargo, and leave standing/notoriety unchanged.",
-        f"If refused: all contraband is confiscated. Fine {fine}cr, capped at your credits ({min(credits, fine)}cr now); no debt.",
-        f"Refusal lowers Concord standing by 5 down to its limit and adds {NOTORIETY_PER_CUSTOMS_BUST} notoriety.",
+        alert("danger", "CONCORD CUSTOMS",
+              f"{quantity} units of unauthorised contraband detected"),
+        section("CHOICES"),
+        f"{key_label('S', 'Surrender')}  {p.slate}lose all contraband, pay no fine; "
+        f"Concord standing {RESET}{p.mint}+1{RESET}{p.slate} up to its limit, "
+        f"notoriety unchanged.{RESET}",
+        (f"{key_label('P', 'Pay bribe')}  " if credits >= cost else f"{badge('Bribe unavailable', 'danger')}  ")
+        + f"{p.slate}offer{RESET} {p.gold}{cost}cr{RESET} {p.slate}at{RESET} "
+        f"{gauge(60, 100, 6, tone='caution')} {p.ink}60%{RESET} {p.slate}acceptance. "
+        f"Pay only if accepted, keep all cargo, and leave standing and notoriety unchanged.{RESET}",
+        section("IF THE BRIBE IS REFUSED"),
+        f"{p.slate}If refused: all contraband is confiscated. Fine{RESET} {p.ink}{fine}cr{RESET}{p.slate}, "
+        f"capped at your credits ({RESET}{p.ink}{min(credits, fine)}cr{RESET}{p.slate} now); no debt.{RESET}",
+        f"{p.slate}Concord standing{RESET} {p.alarm}-5{RESET}{p.slate} down to its limit, "
+        f"notoriety{RESET} {p.alarm}+{NOTORIETY_PER_CUSTOMS_BUST}{RESET}{p.slate}.{RESET}",
     ]
 
 
@@ -8597,6 +10084,8 @@ def main() -> int:
     except (TypeError, ValueError):
         reported_height = _OUTPUT_HEIGHT = 24
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
+    set_palette(p)  # what every component in the style layer draws with
+    input_reader()  # opened before the first page, so it can reveal itself
     if _terminal_too_small():
         _refuse_size(p, reported_height)
         return 0
@@ -8681,6 +10170,8 @@ def main() -> int:
                 screen_market(p, world)
             elif choice == "Y":
                 screen_shipyard(p, world)
+            elif choice == "K":
+                screen_crew(p, world)
             elif choice == "B":
                 screen_missions(p, world)
                 continue  # Browsing is read-only; acceptance checkpoints itself.

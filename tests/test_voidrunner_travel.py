@@ -13,7 +13,7 @@ import sys
 
 import pytest
 
-from .support import _Sys, _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_exploration_choice, _world_with_seed, page_text, page_title, vr
+from .support import plain, _Sys, _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_exploration_choice, _world_with_seed, page_text, page_title, vr
 
 
 # leave the bounty active forever, turning its target system into a
@@ -895,7 +895,7 @@ def test_general_route_all_destinations_reachable_in_compact_picker(monkeypatch,
     options = sorted([(s.id, s.name) for s in world.galaxy], key=lambda item: item[1])
     output = io.StringIO(); frames = []
     def choose():
-        frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
+        frame = plain(output.getvalue()); frames.append(frame); output.seek(0); output.truncate(0)
         # Titles can wrap between words at the 40-column floor.
         match = re.search(r"Charted Destination (\d+)/(\d+)", page_text(frame))
         assert match
@@ -932,7 +932,7 @@ def test_destination_picker_keeps_wrapped_names_on_one_page(monkeypatch, termina
     options=[(1,"Alpha"),(2,"Beta"),(3,"Yellowstone Deep Survey Anchorage Station"),(4,"Zeta")]
     output=io.StringIO(); frames=[]
     def choose():
-        frame=output.getvalue();frames.append(frame);output.seek(0);output.truncate(0)
+        frame=plain(output.getvalue());frames.append(frame);output.seek(0);output.truncate(0)
         match=re.search(re.escape(title)+r" (\d+)/(\d+)",page_text(frame))
         assert match
         return "B" if match[1]==match[2] else "N"
@@ -994,7 +994,7 @@ def test_oversized_picker_keeps_choice_identity_when_returning_from_next_option(
     frames = []
     def choose():
         nonlocal returned
-        frame = output.getvalue()
+        frame = plain(output.getvalue())
         output.seek(0); output.truncate(0)
         frames.append(frame)
         assert len(frames) < 200

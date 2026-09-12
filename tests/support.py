@@ -97,6 +97,56 @@ def _add_cargo(world, commodity: str, quantity, *, unit_cost: int | None = None)
 _BORDER = "╭╮╰╯│─═║╔╗╚╝├┤╠╣+-=|"
 
 
+def plain(text: str) -> str:
+    """One screen's raw output with its styling taken off.
+
+    Page bodies are coloured now (issue #493), and colour lands *between*
+    tokens: a row reading `Promoted to Void Baron` carries an escape before
+    `Promoted` and another after it, so the sentence is no longer a substring
+    of what was written. A test that looks for words the caller read reads them
+    through here -- or through `page_text`, which already does this and takes
+    the frame off as well.
+    """
+    stripped = vr._ANSI_RE.sub("", text)
+    # The zero-width marks a screen uses to say what a row *is* -- a rule
+    # across the frame, a table heading, a row of that table -- never reach a
+    # terminal either; `draw_page` takes them off as it prints.
+    for mark in (vr.SECTION_MARK, vr.STICKY_MARK, vr.MEMBER_MARK):
+        stripped = stripped.replace(mark, "")
+    return stripped
+
+
+def page_source(lines) -> str:
+    """A screen's own rows as `page_text` will show them back.
+
+    A screen names its groups with rules drawn across the page frame, and
+    `page_rows` drops border rows -- so a test comparing what a builder returned
+    against what the caller read has to drop them here too.
+    """
+    return " ".join(plain(" ".join(
+        line for line in lines if not line.startswith(vr.SECTION_MARK))).split())
+
+
+_ANSI_BYTES = re.compile(rb"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def plain_bytes(data: bytes) -> bytes:
+    """`plain` for what a door process actually wrote down its pipe."""
+    return _ANSI_BYTES.sub(b"", data)
+
+
+def shows_page(data, title: str) -> bool:
+    """Whether a door drew a page under `title`, its counter and all.
+
+    A framed page puts the title in its top border and the counter in the
+    far corner, with the border's own fill between them (issue #493), so a
+    literal `"Title 1/"` is no longer in the bytes a door wrote.
+    """
+    text = data.decode("utf-8", "replace") if isinstance(data, (bytes, bytearray)) else data
+    pattern = re.compile(re.escape(title) + r"[\s─═+\-]*\d+/\d+")
+    return any(pattern.search(row) for row in plain(text).splitlines())
+
+
 def page_rows(frame: str, *, keep_indent: bool = False) -> list[str]:
     """The body rows of a drawn page, with the HUD frame taken off.
 
@@ -111,7 +161,7 @@ def page_rows(frame: str, *, keep_indent: bool = False) -> list[str]:
         row = row.rstrip() if keep_indent else row.strip()
         if not row.strip():
             continue
-        if row.lstrip()[0] in "╭╰╔╚├╠" or re.match(r"\+[-=]{2,}", row.lstrip()):
+        if row.lstrip()[0] in "╭╰╔╚├╠" or re.match(r"\+[-=]", row.lstrip()):
             continue  # a border row, titled or not
         if all(character in _BORDER or character == " " for character in row):
             continue  # what is left of one after a test cuts the title out
@@ -131,14 +181,27 @@ def page_title(frame: str) -> str:
     A framed screen draws its title into the top border, which `page_rows`
     drops; an unframed one prints it as the first row. Tests that look for the
     page counter, or for the credits a screen puts in its title, read it here.
+
+    The border carries more than the title now (issue #493): the brand opens
+    it, the page counter is pushed to the right-hand corner, and a run of the
+    border's own fill sits between them. That fill is chrome, not text, so it
+    collapses to a single space here and a caller's `Title n/m` still reads as
+    `Title n/m`.
     """
     parts: list[str] = []
     for row in vr._ANSI_RE.sub("", frame).replace("\r\n", "\n").split("\n"):
         row = row.strip()
         if not row or re.fullmatch(r"[A-Za-z0-9<>?]", row):
             continue
-        if row[0] in "╭╔" or re.match(r"\+[-=]{2,}", row):
-            return row.strip("╭╮╔╗+ ").strip("─═- ")
+        if row[0] in "╭╔" or re.match(r"\+[-=]", row):
+            row = row.strip("╭╮╔╗+ ").strip("─═- ")
+            # One box-drawing dash is already fill. An ASCII one is fill when
+            # it stands alone between spaces or runs; a hyphen inside a
+            # word (`Long-Range`) is part of the title.
+            title = " ".join(re.sub(r"[─═]+|(?<=\s)-+(?=\s)|-{2,}", " ", row).split())
+            if title:
+                return title
+            continue  # a plain top border: the header is the page's first row
         if all(character in _BORDER or character == " " for character in row):
             continue
         # Unframed, a long title wraps: it runs to the row the counter lands on,
@@ -179,7 +242,7 @@ class _Sys:
         self.discovered = discovered
 
 
-def _drain_until(stream, output: bytearray, markers, events) -> None:
+def _drain_until(stream, output: bytearray, markers, events, stop=None) -> None:
     """Read a door's stdout in chunks, setting each event as its marker appears.
 
     `read(1)` is the slowest possible drain and the subprocess tests dominate the
@@ -187,6 +250,25 @@ def _drain_until(stream, output: bytearray, markers, events) -> None:
     still seen as soon as the door writes it (issue #422). Markers are matched in
     order, which lets a caller wait for a prompt before it writes, instead of
     racing the door's startup (issue #416 review).
+
+    Markers are matched against the output with its styling taken off: page
+    bodies are coloured now (issue #493), so a phrase the caller reads as one
+    sentence is several runs of bytes with escapes between them, and a marker
+    that had to be contiguous in the raw stream would pin the game's colours in
+    place rather than its behaviour.
+
+    Draining continues past the last marker, to the cap or the end of the
+    stream. Stopping at the marker left the door writing into a pipe nobody was
+    emptying, which was harmless only while a screen was smaller than the pipe
+    buffer: a coloured page is several times the bytes of a plain one, and the
+    door then blocked mid-screen and never reached its next keypress.
+
+    `stop` is what makes "stopped at" mean it. A caller that wants the door
+    frozen where the marker appeared passes its killer here, so the door is
+    stopped *in this thread*, the instant the bytes land -- not whenever the
+    waiting thread is next scheduled. The full pipe used to be an accidental
+    brake on that gap; draining removed it, and a door that ran on could finish
+    the journey the test meant to catch mid-flight.
     """
     if isinstance(markers, bytes):
         markers, events = (markers,), (events,)
@@ -196,10 +278,12 @@ def _drain_until(stream, output: bytearray, markers, events) -> None:
         if not chunk:
             return
         output.extend(chunk)
-        while pending and pending[0][0] in output:
-            pending.pop(0)[1].set()
-        if not pending:
-            return
+        if pending:
+            seen = plain_bytes(bytes(output))
+            while pending and pending[0][0] in seen:
+                pending.pop(0)[1].set()
+            if not pending and stop is not None:
+                stop()
 
 
 @contextlib.contextmanager
@@ -223,7 +307,11 @@ def _door_stopped_at(tmp_path, commands, acknowledgement: bytes, ready: bytes | 
     prompt = threading.Event()
     markers = (ready, acknowledgement) if ready else (acknowledgement,)
     events = (prompt, reached) if ready else (reached,)
-    reader = threading.Thread(target=_drain_until, args=(proc.stdout, output, markers, events))
+    # The door is stopped by the reader, the moment its last marker lands: this
+    # helper exists to photograph a career mid-action, and a door left running
+    # until the waiting thread woke up could finish the action instead.
+    reader = threading.Thread(target=_drain_until,
+                              args=(proc.stdout, output, markers, events, proc.kill))
     reader.start()
     try:
         # `ready` waits for the door's own prompt before writing, so the test does
@@ -265,7 +353,7 @@ def _mission_details_world(kind="delivery"):
 
 
 @contextlib.contextmanager
-def _live_voidrunner(tmp_path, user_id=77, commands=b"", acknowledgement=b"Station Services"):
+def _live_voidrunner(tmp_path, user_id=77, commands=b"", acknowledgement=b"STATION SERVICES"):
     """Own a real door process until the test exits, draining its output."""
     import json
     import os

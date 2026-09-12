@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from .support import vr
+from .support import plain, vr
 
 
 def test_paginate_keeps_groups_whole_splits_oversized_ones_and_never_repeats_a_letter():
@@ -20,9 +20,12 @@ def test_paginate_keeps_groups_whole_splits_oversized_ones_and_never_repeats_a_l
     assert coloured[0][2] == "<b1>"
     keyed = vr.paginate([["A one"], ["A two"], ["B three"]], 10,
                         keys=[("A", 1), ("A", 2), ("B", 3)])
-    assert [rows for rows, _ in keyed] == [["[A] A one"], ["[A] A two", "[B] B three"]]
+    # The selection key is styled by `keyed_rows` (issue #493 review).
+    assert ([[plain(row) for row in rows] for rows, _ in keyed]
+            == [["[A] A one"], ["[A] A two", "[B] B three"]])
     assert [choices for _, choices in keyed] == [{"A": 1}, {"A": 2, "B": 3}]  # a letter never repeats
     # An entry taller than a page carries its letter on every page it reaches (#411 review).
     split = vr.paginate([["one", "two", "three"]], 2, keys=[("A", 7)])
-    assert [rows for rows, _ in split] == [["[A] one", "    two"], ["[A] three"]]
+    assert ([[plain(row) for row in rows] for rows, _ in split]
+            == [["[A] one", "    two"], ["[A] three"]])
     assert [choices for _, choices in split] == [{"A": 7}, {"A": 7}]

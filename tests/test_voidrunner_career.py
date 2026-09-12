@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from .support import _Sys, _VOIDRUNNER_PATH, _add_cargo, _box_rows, _door_stopped_at, _escort_world, _finale_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_text, vr
+from .support import page_source, page_title, plain as plainly, _Sys, _VOIDRUNNER_PATH, _add_cargo, _box_rows, _door_stopped_at, _escort_world, _finale_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_text, vr
 
 
 def test_retire_pilot_increments_retirements_and_grants_cumulative_bonus():
@@ -250,7 +250,7 @@ def test_station_menu_announces_a_promotion(monkeypatch):
     with contextlib.redirect_stdout(buf):
         vr.screen_station_menu(vr.Palette(truecolor=False), world)
 
-    assert "Promoted to" in buf.getvalue()
+    assert "Promoted to" in plainly(buf.getvalue())
 
 
 def test_load_hall_of_fame_returns_empty_list_when_missing(tmp_path):
@@ -1242,9 +1242,9 @@ def test_workshop_detail_pages_keep_terms_and_leave_career_untouched(monkeypatch
         assert all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         plain = vr._ANSI_RE.sub("", frame)
-        match = re.search(r"Workshop\s+[\d,]+cr\s+(\d+)/(\d+)", plain)
+        match = re.search(r"Workshop\s+[\d,]+cr\s+(\d+)/(\d+)", page_title(frame))
         page, count = map(int, match.groups())
-        payload = plain[match.end():]
+        payload = plain
         payload = without_action_bar(payload)
         contents.append(page_text(payload).removeprefix("> ").strip())
         return "B" if page == count else ">"
@@ -1448,7 +1448,7 @@ def test_named_crew_roster_keeps_personality_progress_and_costs_without_writes(m
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
-        page, count = map(int, re.search(r"Crew Roster:.*?(\d+)/(\d+)", frame, re.S).groups())
+        page, count = map(int, re.search(r"Crew Roster:.*?(\d+)/(\d+)", page_title(frame)).groups())
         return "Q" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): vr.screen_crew(vr.Palette(False), world)
@@ -1538,10 +1538,10 @@ def test_crew_first_page_starts_with_available_specialist(monkeypatch, terminal,
     output = io.StringIO()
     with contextlib.redirect_stdout(output): vr.screen_crew(vr.Palette(False), world)
     text = page_text(output.getvalue())
-    assert "Gunner: Available" in text
+    assert "[A] Gunner" in text and "for hire" in text
     if width >= 40:
         assert vr.crew_name(world, "gunner") in text
-        assert "hire 800cr + 15cr/jump" in text and "+3 combat damage per hit" in text
+        assert "800cr + 15cr/jump" in text and "+3 combat damage per hit" in text
     if "Promotions" in text: assert text.index("Gunner: Available") < text.index("Promotions")
 
 
@@ -1712,7 +1712,7 @@ def test_personal_crew_task_pages_keep_complete_terms_and_leave_no_writes(monkey
         assert "[B] Back" in page_text(frame)
         assert len(frame.splitlines()) <= height and all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
-        page, count = map(int, re.search(r"Crew task.*?(\d+)/(\d+)", frame, re.S).groups())
+        page, count = map(int, re.search(r"Crew task.*?(\d+)/(\d+)", page_title(frame)).groups())
         plain = vr._ANSI_RE.sub("", frame)
         body = re.sub(r"^[\s>]*Crew task\s+[\d,]+cr\s+\d+/\d+\s*", "", plain).split("[C] Complete")[0]
         bodies.append(page_text(body))
@@ -1873,7 +1873,8 @@ def test_faction_perks_follow_each_memberships_current_standing(concord, blackwa
     for faction, standing in world.save.pilot.reputation.items():
         status = "ACTIVE" if standing > -50 else "SUSPENDED"
         assert status in vr.faction_membership_status(world, faction)
-        assert any(vr.FACTION_LABEL[faction] in line and status in line for line in vr.pilot_record_lines(world))
+        assert any(vr.FACTION_LABEL[faction] in plainly(line) and status in plainly(line)
+                   for line in vr.pilot_record_lines(world))
 
 
 @pytest.mark.parametrize("faction", vr.FACTIONS)
@@ -1935,7 +1936,7 @@ def test_faction_contact_pages_preserve_all_terms_without_writes(monkeypatch, te
         plain = vr._ANSI_RE.sub("", frame)
         assert "[B] Back" in " ".join(plain.split())
         if state=="eligible":assert "[J] Join" in " ".join(plain.split())
-        match = re.search(r"[\d,]+cr\s+(\d+)/(\d+)", plain); assert match
+        match = re.search(r"[\d,]+cr\s+(\d+)/(\d+)", page_title(frame)); assert match
         page, count = map(int, match.groups())
         body = re.sub(r"^[\s>]*\w+\s+[\d,]+cr\s+\d+/\d+\s*", "", plain)
         bodies.append(page_text(without_action_bar(body)))
@@ -2169,7 +2170,7 @@ def test_faction_case_pages_preserve_full_terms_without_writes(monkeypatch, term
         assert "[B] Back" in page_text(frame)
         assert len(frame.splitlines()) <= height and all(vr._visible_width(row) <= width for row in frame.splitlines())
         plain = vr._ANSI_RE.sub("", frame)
-        page, count = map(int, re.search(r"[\d,]+cr\s+(\d+)/(\d+)", plain).groups())
+        page, count = map(int, re.search(r"[\d,]+cr\s+(\d+)/(\d+)", page_title(frame)).groups())
         body = re.sub(r"^[\s>]*Case\s+[\d,]+cr\s+\d+/\d+\s*", "", plain)
         bodies.append(page_text(without_action_bar(body)))
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
@@ -2335,8 +2336,9 @@ def test_career_rank_views_keep_earned_title_after_spending(index):
     import copy
     world = _world_with_seed(42); world.save.pilot.highest_rank_seen = index; world.save.pilot.credits = 10
     before = copy.deepcopy(world.save.to_dict())
+    # The rank is the status band's own field now, not a sentence (issue #493).
     for lines in (vr.station_deck_lines(world, expanded=True), vr.pilot_record_lines(world, "O")):
-        assert f"Rank: {vr.RANKS[index][1]}." in " ".join(lines)
+        assert f"Rank {vr.RANKS[index][1]}" in plainly(" ".join(lines))
     assert world.save.to_dict() == before
 
 
@@ -2415,7 +2417,7 @@ def test_career_rank_full_terms_fit_record_pages_without_mutation(monkeypatch, t
     def choose():
         frame=output.getvalue(); output.seek(0); output.truncate(0)
         assert len(frame.splitlines())<=height and all(vr._visible_width(line)<=width for line in frame.splitlines())
-        plain=vr._ANSI_RE.sub("",frame); match=re.search(r"Overview\s+(\d+)/(\d+)",plain); assert match
+        plain=vr._ANSI_RE.sub("",frame); match=re.search(r"Overview\s+(\d+)/(\d+)",page_title(frame)); assert match
         page,count=map(int,match.groups())
         body=re.sub(r"^[\s>]*Pilot Record:\s*Overview\s+\d+/\d+\s*","",plain)
         bodies.append(page_text(body.split("[<")[0])); return "B" if page==count else ">"
@@ -2590,12 +2592,12 @@ def test_career_finale_complete_terms_fit_every_page_without_writes(monkeypatch,
     def choose():
         frame=output.getvalue(); output.seek(0); output.truncate(0)
         assert len(frame.splitlines())<=height and all(vr._visible_width(row)<=width for row in frame.splitlines())
-        plain=vr._ANSI_RE.sub("",frame); page,count=map(int,re.search(r"Career Finale\s+(\d+)/(\d+)",plain).groups())
+        plain=vr._ANSI_RE.sub("",frame); page,count=map(int,re.search(r"Career Finale\s+(\d+)/(\d+)",page_title(frame)).groups())
         body=re.sub(r"^[\s>]*Career Finale\s+\d+/\d+\s*","",plain)
         bodies.append(page_text(body.split("[1-4] Choose")[0])); return "B" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):assert vr.screen_career_finale(vr.Palette(False),world) is None
-    assert " ".join(" ".join(bodies).split())==" ".join(" ".join(vr.career_finale_lines(world.save,finale)).split())
+    assert " ".join(" ".join(bodies).split())==page_source(vr.career_finale_lines(world.save,finale))
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
@@ -2612,7 +2614,7 @@ def test_career_dossier_pages_include_all_retained_highlights(monkeypatch, termi
         frame=output.getvalue(); output.seek(0); output.truncate(0)
         assert len(frame.splitlines())<=height and all(vr._visible_width(row)<=width for row in frame.splitlines())
         if first:first=False;return "D"
-        plain=vr._ANSI_RE.sub("",frame); page,count=map(int,re.search(r"Dossiers\s+(\d+)/(\d+)",plain).groups())
+        plain=vr._ANSI_RE.sub("",frame); page,count=map(int,re.search(r"Dossiers\s+(\d+)/(\d+)",page_title(frame)).groups())
         body=re.sub(r"^[\s>D]*Pilot Record:\s*Dossiers\s+\d+/\d+\s*","",plain)
         bodies.append(page_text(body.split("[<")[0])); return "B" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
@@ -2810,7 +2812,7 @@ def test_achievement_category_pages_keep_snapshot_complete_terms_and_all_navigat
     assert loads==[1] and record_path.read_bytes()==before
     for category,parts in bodies.items():
         text=" ".join(" ".join(parts).split())
-        for line in vr.achievement_lines(entries,category,77):assert " ".join(line.split()) in text
+        for line in vr.achievement_lines(entries,category,77):assert " ".join(plainly(line).split()) in text
 
 
 @pytest.mark.parametrize("commands", [b"H2345",b"H2N3NP4N5NBQ"])

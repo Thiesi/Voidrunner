@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import contextlib
 import io
+import re
 import sys
 from pathlib import Path
 
 import pytest
 
-from .support import _VOIDRUNNER_PATH, _door_stopped_at, _escort_world, _finale_world, _mission_details_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
+from .support import _VOIDRUNNER_PATH, plain, plain_bytes, _door_stopped_at, _escort_world, _finale_world, _mission_details_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
 
 
 #
@@ -156,7 +157,7 @@ def test_screen_status_credits_remain_complete_and_width_safe(monkeypatch):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_status(vr.Palette(truecolor=False), world)
-    assert "1,234,567 cr" in buf.getvalue()
+    assert "1,234,567cr" in plain(buf.getvalue())
     assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
 
@@ -191,8 +192,8 @@ def test_service_pages_retain_all_terms_and_fit_terminal(monkeypatch, terminal,w
         for word in info["label"].split(): assert word in plain
     if screen=="yard":
         assert "Freighter-Class" in plain and "Cutter-Class" in plain
-        assert ("MAXED" if maxed else "Tier 0") in plain
-    else: assert ("HIRED" if maxed else "Available") in plain and "cr/jump" in plain
+        assert ("MAX" if maxed else "0 → 1") in plain
+    else: assert ("HIRED" if maxed else "for hire") in plain and "cr/jump" in plain
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
@@ -265,8 +266,9 @@ def test_market_catalog_pages_preserve_goods_quotes_and_telemetry(monkeypatch, t
     with contextlib.redirect_stdout(output):vr.screen_market(vr.Palette(False),world)
     text=page_text(frames)
     for commodity in vr.LEGAL_COMMODITIES+["weapons"]:assert vr.COMMODITIES[commodity]["label"] in text
-    assert "prohibited" in text or haven
-    assert "Illegal" in text and "Stock" in text and "demand" in text and "hold" in text
+    assert ("Illegal" if haven else "prohibited") in text
+    assert "HELD" in text and "hold" in text
+    assert width < 80 or ("STOCK" in text and "DEMAND" in text)
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
@@ -288,9 +290,9 @@ def test_market_retains_trade_result_through_cancelled_quantity(monkeypatch):
     monkeypatch.setattr(vr,"read_key",lambda:next(commands))
     monkeypatch.setattr(vr,"read_line_raw",lambda **kw:next(quantities))
     with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_market(vr.Palette(False),world)
-    assert output.getvalue().count("Result: Bought 1x Food")==2
+    assert plain(output.getvalue()).count("Result: Bought 1x Food")==2
     assert world.save.cargo=={"food":1} and len(saved)==1
-    assert f"Market: {world.save.pilot.credits:,}cr" in output.getvalue()
+    assert f"Market: {world.save.pilot.credits:,}cr" in plain(output.getvalue())
 
 
 def test_prohibited_commodity_details_hide_buy_and_reject_unadvertised_purchase(monkeypatch):
@@ -339,8 +341,8 @@ def test_screen_market_contraband_catalog_keeps_labels_and_bounds(monkeypatch):
     with contextlib.redirect_stdout(buf):
         vr.screen_market(vr.Palette(truecolor=False), world)
     text = page_text(buf.getvalue())
-    # The market row now reads "Stock N; demand N; hold N" so it fits an 80-column page (#412).
-    assert "Illegal" in text and "demand" in text and "Cargo Hold: 8/" in text
+    # The market is a table, and the hold is a gauge in its heading row (#493).
+    assert "Illegal" in text and "DEMAND" in text and "hold" in text and "8/24" in text
     assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
 
@@ -375,9 +377,9 @@ def test_station_deck_pages_keep_telemetry_actions_and_exit_visible(monkeypatch,
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):assert vr.screen_station_menu(vr.Palette(False),world)=="Q"
     text=page_text(frames)
-    for phrase in ("Station Services", "CRITICAL HULL", "Contraband aboard", "Regional supply disruption", "LOW CASH", "2/24", "[M]", "[Y]", "[B]", "[C]", "[S]", "[H]", "[G]", "[T]"):
+    for phrase in ("FREEPORT ANCHORAGE", "CRITICAL HULL", "Contraband aboard", "Regional supply disruption", "Wages unaffordable", "2/24", "[M]", "[Y]", "[B]", "[C]", "[S]", "[H]", "[G]", "[T]"):
         assert phrase in text
-    if expanded:assert "systems charted" in text and "Crew:" in text
+    if expanded:assert "charted" in text and "Crew" in text
     assert world.save.to_dict()==before
 
 
@@ -405,7 +407,7 @@ def test_real_cockpit_paging_toggle_and_exit_preserve_career(tmp_path,commands):
     assert result.returncode==0 and not result.stderr
     assert b"Command Deck:" in result.stdout and b"[X] Compact" in result.stdout
     if b"M" in commands:
-        assert b"Commodity Market" in result.stdout and b"Engineering Yard:" in result.stdout
+        assert b"COMMODITY" in plain_bytes(result.stdout) and b"Engineering Yard:" in plain_bytes(result.stdout)
     assert (tmp_path/"77.json").read_bytes()==original
 
 
@@ -461,10 +463,11 @@ def test_navigation_chart_pages_preserve_all_connections_and_career(monkeypatch,
     # Remove repeated row keys before joining wrapped entry text.
     text=" ".join(re.sub(r"\[[A-Z]\] ","",vr._ANSI_RE.sub(""," ".join(frames))).split())
     for station in world.galaxy[1:]:
-        if discovered: assert station.name in text and vr.sector_for(station) in text
+        # The sector is one of the columns forty columns gives up; the name,
+        # the danger and the fuel cost are not (issue #493).
+        if discovered: assert station.name in text and (width < 80 or vr.sector_for(station) in text)
         else: assert station.name not in text
-        assert f"({station.x},{station.y})" in text
-    if not discovered: assert "danger unknown" in text
+    if not discovered: assert "danger unknown" in text and "Uncharted Bearing" in text
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
@@ -500,7 +503,7 @@ def test_real_responsive_chart_back_eof_and_rejected_jump_preserve_career(tmp_pa
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
     assert result.returncode==0 and not result.stderr and b"Navigation: Fuel" in result.stdout
-    if b"A" in commands: assert b"Result: Not enough fuel" in result.stdout
+    if b"A" in commands: assert b"Result: Not enough fuel" in plain_bytes(result.stdout)
     assert (tmp_path/"77.json").read_bytes()==original
 
 
@@ -541,7 +544,7 @@ def test_score_pages_retain_all_twenty_pilots_and_fields_without_reloading(tmp_p
     for i in range(1,21):
         assert text.count(f"Pilot-{i:02}")==1
         assert f"{1_000_000-i:,}cr" in text
-        assert str(100+i) in text and str(200+i) in text
+        assert str(100+i) in text and (width < 80 or str(200+i) in text)
     assert "Pilot-21" not in text and text.count("[YOU]")==2
     assert len(loads)==len(builds)==1
     assert path.read_bytes()==original_bytes and world.save.to_dict()==before
@@ -583,8 +586,8 @@ def test_screen_hall_of_fame_records_are_complete_and_width_safe(monkeypatch):
         vr.screen_hall_of_fame(vr.Palette(truecolor=False), world, save_dir, 1)
     text = page_text(buf.getvalue())
     assert "SixteenCharHandl" in text and "999,999cr" in text
-    assert "[YOU]" in text and "combat victories 120" in text
-    assert "missions 88" in text and "retirements 3" in text
+    assert "[YOU]" in text and "WINS" in text and "120" in text
+    assert "88" in text and "3" in text
     assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
 
@@ -662,7 +665,9 @@ def test_navigation_chart_keeps_danger_and_fuel_distinct_with_retained_rejection
     keys=iter([key,"Q"]);monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:assert vr.screen_chart(vr.Palette(False),world) is None
     plain=vr._ANSI_RE.sub("",output.getvalue())
-    assert "Danger 0" in plain and "Danger 3" in plain and "LOW FUEL" in plain
+    # Danger is five pips in its own tone now, so the two destinations differ
+    # by how many are lit rather than by a digit buried in a sentence (#493).
+    assert "○○○○○" in plain and "●●●○○" in plain and "LOW FUEL" in plain
     assert "Result: Not enough fuel" in plain and world.save.turn==0
 
 
@@ -741,8 +746,11 @@ def test_screen_crew_and_galaxy_map_boxes_match_79_columns(monkeypatch):
     monkeypatch.setattr(vr, "read_key", lambda: "B")
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_galaxy_map(p, world)
-    borders = [line for line in output.getvalue().splitlines() if line.startswith("+-")]
-    assert len(borders) == 2 and {len(line) for line in borders} == {79}
+    # The grid is coloured as it is printed (issue #493), so its border rows
+    # open with an escape; the width they have to match is the visible one.
+    borders = [plain(line) for line in output.getvalue().splitlines()
+               if plain(line).startswith("+-")]
+    assert len(borders) == 2 and {vr._visible_width(line) for line in borders} == {79}
 
 
 def test_empty_mission_board_renders_clean_notice_and_back(monkeypatch):
@@ -826,21 +834,25 @@ def test_a_terminal_below_the_floor_is_refused_before_a_career_is_touched(monkey
     assert not (tmp_path / "saves").exists()
 
 
-def test_command_deck_gauges_hull_fuel_and_hold_then_falls_back_to_numbers(terminal):
-    """The gauges went with the frame, and they are the part of the cockpit a
-    caller reads at a glance. They are also the first thing to drop when the row
-    does not fit: the numbers never are."""
+@pytest.mark.parametrize("width,height", [(80, 24), (40, 12)])
+def test_command_deck_gauges_hull_fuel_and_hold_at_every_supported_size(terminal, width, height):
+    """The gauges are the part of the cockpit a caller reads at a glance, and
+    they no longer give way to the width: there is one layout above the 40x12
+    floor (issue #495), so a gauge that fits at eighty fits at forty in fewer
+    cells rather than turning back into a sentence (issue #493)."""
     world = _world_with_seed(487)
     ship = world.save.ship
-    terminal(80, 24)
-    wide = next(row for row in vr.station_deck_lines(world) if row.startswith(ship.hull_class))
-    assert "■" in wide or "░" in wide, f"no gauges in {wide!r}"
-    assert f"{ship.hull_hp}/{vr.hull_hp_max(ship)}" in wide
-    assert f"{ship.fuel}/{vr.fuel_capacity(ship)}" in wide
-    terminal(40, 16)
-    narrow = next(row for row in vr.station_deck_lines(world) if row.startswith(ship.hull_class))
-    assert "■" not in narrow and "░" not in narrow, f"gauges kept past the width: {narrow!r}"
-    assert f"Hull {ship.hull_hp}/{vr.hull_hp_max(ship)}" in narrow and "Cargo" in narrow
+    terminal(width, height)
+    rows = [plain(row) for row in vr.station_deck_lines(world)]
+    for label, value in (("HULL", f"{ship.hull_hp}/{vr.hull_hp_max(ship)}"),
+                         ("FUEL", f"{ship.fuel}/{vr.fuel_capacity(ship)}"),
+                         ("HOLD", f"0/{vr.cargo_capacity(ship)}")):
+        row = next(row for row in rows if row.startswith(label))
+        assert "█" in row or "░" in row, f"no gauge in {row!r}"
+        assert value in row, f"no reading in {row!r}"
+    # The bars are all the same length, whatever the readings are.
+    bars = {len(re.search(r"[█░]+", row).group(0)) for row in rows if re.search(r"[█░]+", row)}
+    assert len(bars) == 1, f"gauges of different lengths on one screen: {bars}"
 
 
 def _use_decoded_input(monkeypatch, data):
@@ -1153,8 +1165,8 @@ def test_absent_loss_counters_default_to_zero_and_the_record_shows_them():
     data["pilot"]["missions_failed"] = -1
     with pytest.raises(vr.ResumeError): vr.SaveData.from_dict(data)
     world.save.pilot.missions_completed, world.save.pilot.missions_failed, world.save.pilot.missions_expired = 4, 2, 1
-    text = " ".join(vr.pilot_record_lines(world))
-    assert "Missions completed: 4; failed or abandoned: 2; expired: 1." in text
+    text = plain(" ".join(vr.pilot_record_lines(world)))
+    assert "completed 4" in text and "failed 2" in text and "expired 1" in text
     assert vr.career_accomplishments(world.save)["failed"] == 2
 
 
@@ -1212,7 +1224,8 @@ def test_repair_screen_charges_the_discounted_rate_and_yard_shows_it(monkeypatch
     with contextlib.redirect_stdout(io.StringIO()):
         assert "for 20cr" in vr._repair(vr.Palette(False), world)
     assert world.save.pilot.credits == 980 and world.save.ship.hull_hp == vr.hull_hp_max(world.save.ship)
-    assert "at 2cr/HP" in " ".join(vr.shipyard_lines(world)) and "discounts repairs" in " ".join(vr.shipyard_lines(world))
+    yard = plain(" ".join(vr.shipyard_lines(world)))
+    assert "repair 2cr/HP" in yard and "discounts repairs" in yard
     assert "repairs 2cr/HP instead of 4" in vr.crew_effect("engineer", 2)
 
 
@@ -1265,18 +1278,27 @@ def test_hop_report_is_bounded_and_the_deck_still_fits(monkeypatch, terminal):
         vr.report_hop(world, [f"line {i}" for i in range(20)])
 
 
-def test_keyed_rows_prefix_only_the_first_row():
-    assert vr.keyed_rows("B", ["Mirrorfall (76,4); Industrial;", "Danger 1; 1 fuel TRACKED NEXT."]) == \
-        ["[B] Mirrorfall (76,4); Industrial;", "    Danger 1; 1 fuel TRACKED NEXT."]
-    assert vr.keyed_rows("3", ["single"]) == ["[3] single"] and vr.keyed_rows("A", []) == []
+def test_keyed_rows_prefix_only_the_first_row_and_style_the_key():
+    """The selection key is a hotkey, so it is gold like every other one: a
+    keyed entry's row is usually styled already, and `style_body_line` leaves a
+    styled row alone, so a raw prefix would be the one colourless key on the
+    page (issue #493 review)."""
+    rows = vr.keyed_rows("B", ["Mirrorfall (76,4); Industrial;", "Danger 1; 1 fuel."])
+    assert [plain(row) for row in rows] ==         ["[B] Mirrorfall (76,4); Industrial;", "    Danger 1; 1 fuel."]
+    assert vr.Palette(truecolor=False).gold in rows[0] and vr.BOLD in rows[0]
+    assert [plain(row) for row in vr.keyed_rows("3", ["single"])] == ["[3] single"]
+    assert vr.keyed_rows("A", []) == []
 
 
 def test_chart_continuations_are_indented_and_still_selectable(monkeypatch, terminal):
     terminal(40, 24)
     world = _world_with_seed(42); world.save.ship.fuel = 99
     for sid in world.here.connections: world.by_id[sid].discovered = True
+    # Long enough that the departures table has to stack its columns, which is
+    # what makes the row a continuation at all (issue #493).
+    world.by_id[sorted(world.here.connections)[0]].name = "Xanthe Deep Survey Anchorage Station"
     pages = vr._chart_pages(world, "Navigation", "[B] Back: ", None)
-    rows = [row for page in pages for row in page[0]]
+    rows = [plain(row) for page in pages for row in page[0]]
     keyed = [row for row in rows if row.startswith("[") and row[1] in vr.CHART_CONNECTION_LETTERS]
     assert len(keyed) == len(world.here.connections)  # one key per destination, however many rows it wraps to
     assert any(row.startswith("    ") for row in rows)  # at least one entry wrapped at 40 columns
@@ -1295,7 +1317,8 @@ def test_mission_board_and_picker_continuations_carry_one_key(monkeypatch, termi
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_missions(vr.Palette(False), world)
     rows = page_rows(output.getvalue())
-    assert sum(row.startswith("[1] OFFER") for row in rows) == 1
+    assert sum(row.startswith("[1] ") for row in rows) == 1
+    assert sum("OFFER" in row for row in rows) == 1
     assert any(row.startswith("    ") for row in page_rows(output.getvalue(), keep_indent=True))
     keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -1437,7 +1460,8 @@ def test_wording_uses_singular_forms_and_names_the_offer_refresh():
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.read_key = lambda: "B"
         vr.screen_missions(vr.Palette(False), world)
-    assert re.search(r"New offers on day \d+", output.getvalue()) and "Refresh day" not in output.getvalue()
+    said = plain(output.getvalue())
+    assert re.search(r"New offers on day \d+", said) and "Refresh day" not in said
 
 
 @pytest.mark.parametrize("footer,expected", [

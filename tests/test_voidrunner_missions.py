@@ -13,7 +13,7 @@ import sys
 
 import pytest
 
-from .support import _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _escort_world, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
+from .support import plain, _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _escort_world, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
 
 
 @pytest.mark.parametrize("active", [False, True])
@@ -681,8 +681,13 @@ def test_a_long_active_contract_list_is_paginated_and_selectable(monkeypatch, te
     terminal(40, 24)
     output = io.StringIO()
     selected = []
+    drawn = []
     def key():
-        return "N" if "Contracts 2/" not in output.getvalue() else "1" if not selected else "B"
+        # Count the pages drawn rather than reading the counter out of the
+        # frame: the title and its counter sit at opposite ends of the top
+        # border now, with the border's own fill between them (issue #493).
+        drawn.append(len(drawn))
+        return "N" if len(drawn) == 1 else "1" if not selected else "B"
     monkeypatch.setattr(vr, "read_key", key)
     monkeypatch.setattr(vr, "screen_mission_details", lambda p, w, m, active: selected.append((m.id, active)))
     with contextlib.redirect_stdout(output):
@@ -816,7 +821,8 @@ def test_tracked_chart_hint_identifies_the_actual_destination_key(monkeypatch, d
         dest = vr.screen_chart(vr.Palette(False), world)
     assert dest == first
     assert f"[{key}]" in output.getvalue()
-    assert "TRACKED NEXT" in " ".join(__import__("re").sub(r"\[[A-Z]\] ", "", vr._ANSI_RE.sub("", output.getvalue())).split())
+    # The next hop on a tracked route wears a badge on its departures row.
+    assert "TRACKED" in " ".join(__import__("re").sub(r"\[[A-Z]\] ", "", plain(output.getvalue())).split())
     assert world.by_id[first].discovered is discovered
 
 
@@ -899,7 +905,7 @@ def test_tiny_contract_board_splits_entries_and_keeps_selection(monkeypatch, ter
         assert len(frame.split("\r\n")) <= 12
         assert all(vr._visible_width(row) <= 40 for row in frame.split("\r\n"))
         plain = vr._ANSI_RE.sub("", frame)
-        page, total = map(int, re.search(r"Contracts (\d+)/(\d+)", plain).groups())
+        page, total = map(int, re.search(r"Contracts\s+(\d+)/(\d+)", page_title(frame)).groups())
         return "N" if page < total else "1" if not selected else "B"
     monkeypatch.setattr(vr, "read_key", key)
     monkeypatch.setattr(vr, "screen_mission_details", lambda p, w, m, active: selected.append(m.id))

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from .support import _VOIDRUNNER_PATH, _door_stopped_at, _set_cargo, _world_with_seed, vr
+from .support import plain, plain_bytes, _VOIDRUNNER_PATH, _door_stopped_at, _set_cargo, _world_with_seed, vr
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows byte-range lock initialization")
@@ -211,7 +211,7 @@ def test_a_real_launch_refuses_an_old_career_and_changes_nothing(tmp_path):
 def test_a_real_launch_replaces_a_refused_career_only_after_registration(tmp_path):
     original = _schema_one_career(tmp_path)
     # Page to the offer, take it, accept the default callsign, confirm the launch.
-    with _door_stopped_at(tmp_path, [b">>>>>>>>", b"N", b"\rY"], b"Station Services",
+    with _door_stopped_at(tmp_path, [b">>>>>>>>", b"N", b"\rY"], b"STATION SERVICES",
                           ready=b"Career refused"):
         pass
     archives = list(tmp_path.glob("77.recovery-*.json"))
@@ -610,8 +610,9 @@ def test_real_recovery_back_decline_eof_and_special_keys_write_nothing(tmp_path,
                             env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
     assert result.returncode == (0 if commands.endswith((b"B", b"Q")) else 1)
     assert not result.stderr
-    assert b"Career recovery" in result.stdout and b"Day 7" in result.stdout
-    assert b"Pilot callsign" not in result.stdout
+    said = plain_bytes(result.stdout)
+    assert b"Career recovery" in said and b"Day 7" in said
+    assert b"Pilot callsign" not in said
     assert {p.name: p.read_bytes() for p in tmp_path.glob("*.json")} == before
 
 
@@ -856,7 +857,7 @@ def test_recovery_pages_fit_terminal_and_restore_is_on_last_page(tmp_path, monke
 def test_display_selection_saves_before_applying_and_acknowledging(monkeypatch, fail):
     monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
     world = _world_with_seed(42)
-    keys = iter(["4", "4", "B"])
+    keys = iter(["5", "5", "B"])  # 1 auto, 2 fast, 3 basic, 4 mono, 5 plain
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     output = io.StringIO()
     saves = []
@@ -880,7 +881,8 @@ def test_display_selection_saves_before_applying_and_acknowledging(monkeypatch, 
         assert "Display saved:" in output.getvalue() and "Already using:" in output.getvalue()
 
 
-@pytest.mark.parametrize("style,key", [("auto", b"1"), ("basic", b"2"), ("mono", b"3"), ("plain", b"4")])
+@pytest.mark.parametrize("style,key", [("auto", b"1"), ("fast", b"2"), ("basic", b"3"),
+                                       ("mono", b"4"), ("plain", b"5")])
 def test_real_display_saved_before_ack_and_applied_from_restart_title(tmp_path, style, key):
     import os, subprocess
     world = _world_with_seed(42)
@@ -913,18 +915,19 @@ def test_a_tagged_market_row_still_fits_one_line(monkeypatch):
                                "turns_remaining": 4, "description": "Prices collapse",
                                "system_ids": [haven.id]}
     _set_cargo(world, {contraband: 7})
-    rows = [row for row in vr.market_catalog_lines(world, [contraband]) if row.startswith("[")]
+    rows = [plain(row) for row in vr.market_catalog_lines(world, [contraband])
+            if plain(row).startswith("[")]
     assert rows and all(vr._visible_width(row) <= 79 for row in rows)
     assert "Illegal" in rows[0] and ("[CRASH]" in rows[0] or "[BOOM]" in rows[0])
-    depth = {"stock": 96, "demand": 48}
-    head = "[J] Narcotics: buy 1200cr; sell 1100cr."
-    assert vr._market_row(head, depth, 7, []) == head + " Stock 96; demand 48; hold 7."
-    tagged = vr._market_row(head, depth, 7, ["Illegal", "[CRASH]"])
-    assert tagged == head + " Hold 7. Illegal [CRASH]"  # depth gives way first, the hold last
-    assert vr._visible_width(tagged) <= 79
-    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40)  # the floor: the shortest form still wraps here
-    narrow = [row for row in vr.market_catalog_lines(world, [contraband]) if row.startswith("[")]
-    assert "Stock" in narrow[0] and "hold 7" in narrow[0]
+    # The depth columns give way first at the floor; the price, the hold and
+    # the flags never do (issue #493).
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40)
+    # A record that will not fit one row stacks into two rather than
+    # overflowing, and both of them fit.
+    narrow = [part for row in vr.market_catalog_lines(world, [contraband])
+              if plain(row).startswith("[") for part in plain(row).splitlines()]
+    assert narrow and all(vr._visible_width(part) <= 37 for part in narrow)
+    assert "7" in " ".join(narrow) and "Illegal" in " ".join(narrow)
 
 
 def test_first_flight_names_its_acceptance_action_on_every_page(monkeypatch, terminal):

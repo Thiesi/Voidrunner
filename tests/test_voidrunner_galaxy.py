@@ -12,7 +12,7 @@ import sys
 
 import pytest
 
-from .support import _Sys, _VOIDRUNNER_PATH, _mission_details_world, _world_with_seed, page_text, page_title, vr
+from .support import plain, _Sys, _VOIDRUNNER_PATH, _mission_details_world, _world_with_seed, page_text, page_title, vr
 
 
 def test_generate_galaxy_is_a_pure_function_of_seed():
@@ -471,7 +471,7 @@ def test_a_chart_entry_that_spans_pages_carries_its_letter_on_each(monkeypatch, 
     world.checkpoint()
     pages = vr._chart_pages(world, "Navigation", "[G] Route planner [B] Back: ", None)
     for rows, choices in pages:
-        shown = {match[0] for row in rows for match in re.findall(r"^\[([A-Z])\] ", row)}
+        shown = {match[0] for row in rows for match in re.findall(r"^\[([A-Z])\] ", plain(row))}
         assert set(choices) <= shown, (choices, rows)  # every offered letter is visible here
-    spanning = [page for page in pages if any(row.startswith("    ") for row in page[0])]
+    spanning = [page for page in pages if any(plain(row).startswith("    ") for row in page[0])]
     assert spanning or all(len(page[0]) <= 10 for page in pages)

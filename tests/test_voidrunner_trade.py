@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from .support import _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _drain_until, _live_voidrunner, _set_cargo, _world_at_food_producer, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
+from .support import plain, shows_page, _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _drain_until, _live_voidrunner, _set_cargo, _world_at_food_producer, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
 
 
 def _world_with_market_memory():
@@ -284,7 +284,7 @@ def test_market_memory_and_route_pages_reach_the_end_within_terminal_size(monkey
         output.seek(0)
         output.truncate(0)
         assert len(pages) < 2000
-        match = re.search(re.escape(title) + r" (\d+)/(\d+)", " ".join(value.split()))
+        match = re.search(re.escape(title) + r"\s+(\d+)/(\d+)", page_title(value))
         assert match
         assert world.save.to_dict() == before
         return "B" if match[1] == match[2] else "N"
@@ -349,8 +349,9 @@ def test_trade_route_editing_fields_and_cancelling_is_read_only(monkeypatch):
     monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: "2")
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_trade_route(vr.Palette(False), world)
-    assert "x2" in output.getvalue()
-    assert "existing hold cargo" in output.getvalue() and "buy new cargo here" in output.getvalue()
+    said = plain(output.getvalue())
+    assert "x2" in said
+    assert "existing hold cargo" in said and "buy new cargo here" in said
     assert world.save.to_dict() == before
 
 
@@ -368,11 +369,11 @@ def test_real_market_memory_and_route_back_or_eof_preserve_career(tmp_path, comm
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
                             env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
     assert result.returncode == 0 and not result.stderr
-    assert b"Trade Route 1/" in result.stdout
+    assert shows_page(result.stdout, "Trade Route")
     if b"M" in commands:
-        assert b"Market Memory 1/" in result.stdout
+        assert shows_page(result.stdout, "Market Memory")
     if b"E" in commands:
-        assert b"Route Draft 1/" in result.stdout and b"Quantity 1-" in result.stdout
+        assert shows_page(result.stdout, "Route Draft") and b"Quantity 1-" in result.stdout
     assert (tmp_path / "77.json").read_bytes() == original
 
 
@@ -387,7 +388,7 @@ def test_real_market_memory_is_saved_after_trade_and_arrival_before_acknowledgem
         assert bought.market_memory[0]["food"]["buy"] == vr.price_for(vr.World(bought), 0, "food")
     destination = sorted(world.here.connections)[0]
     jump_key = vr.CHART_CONNECTION_LETTERS[0].encode()
-    marker = ("Station Services: " + world.by_id[destination].station_name).encode()
+    marker = world.by_id[destination].station_name.upper().encode()
     with _door_stopped_at(tmp_path, b"C" + jump_key + b"Y", marker):
         arrived, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert arrived.current_system == destination and arrived.pending_travel is None
@@ -583,7 +584,9 @@ def test_trading_ledger_real_purchases_and_sales_survive_kill_without_duplicate_
         assert sold.cargo_basis == {"food": [[1, cost // 3]]}
         assert sold.market_depth[0]["food"] == {"day": 0, "stock": 47, "demand": 94}
         assert (sold.trading_ledger.sales_cost, sold.trading_ledger.sales_revenue) == (cost * 2 // 3, 2 * unit)
-    with _door_stopped_at(tmp_path, b"T", b"Trading Ledger 1/"):
+    # The title and its counter sit at opposite ends of the border now, so
+    # the marker is the title alone (issue #493).
+    with _door_stopped_at(tmp_path, b"T", b"Trading Ledger"):
         viewed, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert viewed.trading_ledger == sold.trading_ledger
         assert viewed.market_depth == sold.market_depth
@@ -603,7 +606,7 @@ def test_trading_ledger_real_back_and_eof_preserve_career(tmp_path, commands):
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
                             env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
     assert result.returncode == 0 and not result.stderr
-    assert b"Trading Ledger 1/" in result.stdout
+    assert shows_page(result.stdout, "Trading Ledger")
     assert (tmp_path / "77.json").read_bytes() == original
 
 
@@ -683,7 +686,7 @@ def test_trade_route_draft_rejection_keeps_edits_until_apply(monkeypatch):
     monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: "3")
     with contextlib.redirect_stdout(io.StringIO()) as output: result = vr._edit_trade_route(vr.Palette(False), world, initial)
     assert result == {**initial, "quantity": 3} and initial["quantity"] == 1
-    assert "Cannot apply" in output.getvalue() and "Quantity: 3" in output.getvalue()
+    assert "Cannot apply" in plain(output.getvalue()) and "Quantity: 3" in plain(output.getvalue())
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
 
 
@@ -824,7 +827,7 @@ def test_market_depth_exhausted_pool_reports_reason_without_quantity_prompt(monk
     monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: pytest.fail("Exhausted pool prompted for quantity"))
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf): vr._trade_commodity(vr.Palette(False), world, "food")
-    text = " ".join(buf.getvalue().split())
+    text = " ".join(plain(buf.getvalue()).split())
     assert "Stock 0 (+3/day)" in text and "station buys 0 (+6/day)" in text
     assert "station stock" in text if buying else "demand is exhausted" in text
 
@@ -1073,8 +1076,8 @@ def test_real_economy_opportunity_back_eof_and_route_selection_leave_career_unch
     info = tmp_path / "door_info.json"; info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
         env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
-    assert result.returncode == 0 and not result.stderr and b"Opportunities 1/" in result.stdout
-    if b"1" in commands: assert b"Trade Route 1/" in result.stdout
+    assert result.returncode == 0 and not result.stderr and shows_page(result.stdout, "Opportunities")
+    if b"1" in commands: assert shows_page(result.stdout, "Trade Route")
     assert (tmp_path / "77.json").read_bytes() == original
 
 
@@ -1286,9 +1289,9 @@ def test_shipyard_offers_two_refit_choices_from_shuttle_and_one_after_committing
     with contextlib.redirect_stdout(buf):
         vr.screen_shipyard(vr.Palette(truecolor=False), world)
 
-    text = buf.getvalue()
-    assert "[G]" in text and "Freighter-Class Refit" in text
-    assert "[H]" in text and "Cutter-Class Refit" in text
+    text = plain(buf.getvalue())
+    assert "[G]" in text and "Freighter-Class" in text
+    assert "[H]" in text and "Cutter-Class" in text
     assert world.save.ship.hull_class == "Freighter"
 
 
@@ -1688,7 +1691,7 @@ def test_futures_invalid_quantity_retains_draft_without_saving(monkeypatch):
     keys=iter(["U","U","B"]);values=iter(["3","not a number"])
     monkeypatch.setattr(vr,"read_key",lambda:next(keys));monkeypatch.setattr(vr,"read_line_raw",lambda **kw:next(values))
     with contextlib.redirect_stdout(io.StringIO()) as output:vr._screen_buy_futures(vr.Palette(False),world,"food")
-    text=output.getvalue()
+    text=plain(output.getvalue())
     assert "Quantity must fit" in text and text.count("Quantity: 3;")==2
     assert world.save.to_dict()==before
 
@@ -1727,7 +1730,7 @@ def test_picker_footer_only_offers_present_choices(monkeypatch, terminal,count,n
     terminal(80, 24)
     output=io.StringIO();frames=[]
     def choose():
-        frame=output.getvalue();output.seek(0);output.truncate(0);frames.append(frame)
+        frame=plain(output.getvalue());output.seek(0);output.truncate(0);frames.append(frame)
         choices=[line for line in frame.splitlines() if re.match(r"\[\d\] Item",line)]
         if not choices:assert "Select" not in frame
         else:
@@ -2274,7 +2277,7 @@ def test_second_real_launch_cannot_load_or_replace_an_active_pilot(tmp_path, new
 
     if not new_career:
         vr.write_save(tmp_path, 77, _world_with_seed(42).save)
-    ack = b"Pilot callsign" if new_career else b"Station Services"
+    ack = b"Pilot callsign" if new_career else b"STATION SERVICES"
     with _live_voidrunner(tmp_path, acknowledgement=ack) as (_, env):
         before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")}
         result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"Q",
@@ -2468,9 +2471,9 @@ def test_real_opening_guide_back_and_eof_leave_career_unchanged(tmp_path, comman
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
                             env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
     assert result.returncode == 0 and not result.stderr
-    assert b"Pilot Guide 1/" in result.stdout
+    assert shows_page(result.stdout, "Pilot Guide")
     if b"O" in commands:
-        assert b"First Flight 1/" in result.stdout
+        assert shows_page(result.stdout, "First Flight")
     assert (tmp_path / "77.json").read_bytes() == before
 
 
@@ -2544,7 +2547,7 @@ def test_cockpit_settlement_results_stay_inside_height_budget(monkeypatch, termi
     content = []
     for frame in frames:
         plain = vr._ANSI_RE.sub("", frame)
-        assert page_title(frame).startswith("Command Deck:")
+        assert "Command Deck:" in page_title(frame)
         rows = page_rows(frame)  # one-page decks drop Prev/Next (#412)
         title, consumed = page_title(frame), ""
         while rows and consumed != title and title.startswith(f"{consumed} {rows[0]}".strip()):
@@ -2703,7 +2706,7 @@ def test_specialist_directory_paging_keeps_all_named_sites_and_stable_keys(monke
         frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(row) <= width for row in frame.splitlines())
-        page, count = map(int, re.search(r"Workshops\s+(\d+)/(\d+)", frame).groups())
+        page, count = map(int, re.search(r"Workshops\s+(\d+)/(\d+)", page_title(frame)).groups())
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): vr.screen_specialists(vr.Palette(False), world)
