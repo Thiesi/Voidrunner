@@ -7014,11 +7014,18 @@ def screen_economy_opportunities(p: Palette, world: World) -> None:
 
 def screen_trading_ledger(p: Palette, world: World) -> None:
     footer = "[O] Opportunities [R] Route [M] Markets [N] Next [P] Prev [B] Back: "
-    pages = _trade_pages(trading_ledger_lines(world), "Trading Ledger", footer)
+    # Group-aware paging, not row-at-a-time: this screen is tables now (issue
+    # #532), and a stacked record is a label row plus an indented figure row.
+    # `_trade_pages` makes every wrapped row its own group, which split four of
+    # the six spend records at 40x12 -- a page ending `Cargo lost or
+    # surrendered` and the next one opening with an unlabelled `0cr recorded
+    # cost`. `_service_pages` keeps a record whole, which is the promise
+    # `table` makes and the reason the paginator knows what a record is.
+    pages = _service_pages(trading_ledger_lines(world), "Trading Ledger", footer)
     page = 0
     while True:
         draw_page(p, "Trading Ledger", pages[page], page, len(pages))
-        out_prompt(footer)
+        out_prompt(single_page_footer(footer, len(pages)))
         action = read_command_at_prompt()
         out_line(action)
         if action in ("B", "Q"):

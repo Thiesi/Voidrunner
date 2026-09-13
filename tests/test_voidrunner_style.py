@@ -720,6 +720,34 @@ def test_the_hold_says_its_cost_is_the_whole_holdings(monkeypatch):
     assert "1,250cr" in text, text
 
 
+@pytest.mark.parametrize("width,height", SIZES)
+def test_no_ledger_page_opens_with_an_orphaned_figure(monkeypatch, width, height):
+    """A stacked record is a label row plus an indented figure row, and the two
+    are one fact. Paged row-at-a-time, four of the six spend records split at
+    40x12 -- a page ending `Cargo lost or surrendered` and the next opening
+    with an unlabelled `0cr recorded cost` (#532 review).
+
+    Asserted on the rendered pages rather than on the record strings, because
+    pagination re-wraps: what a caller sees is that no page *starts* with a
+    continuation. A table's own headings are indented too and are allowed to
+    open a page -- that is what `sticky` means, and they name the rows under
+    them rather than dangling from the page before.
+    """
+    _at(monkeypatch, width, height)
+    world = _world_with_seed(7)
+    world.save.cargo = {"machinery": 5}
+    world.save.cargo_basis = {"machinery": [[5, 1250]]}
+    footer = "[O] Opportunities [R] Route [M] Markets [N] Next [P] Prev [B] Back: "
+    pages = vr._service_pages(vr.trading_ledger_lines(world), "Trading Ledger", footer)
+    assert len(pages) > 1 or width >= 80, (width, len(pages))
+    for number, page in enumerate(pages[1:], 2):
+        first = next((row for row in page if plain(row).strip()), "")
+        if vr.STICKY_MARK in first:
+            continue
+        assert not plain(first).startswith(" "), (
+            width, number, plain(first), [plain(row) for row in pages[number - 2]])
+
+
 def test_the_hall_of_fame_views_are_a_menu_not_a_sentence(monkeypatch):
     """As prose, `Completed` matched the good-tone severity pattern, so one
     view name in the list came out green for no reason (#532)."""
