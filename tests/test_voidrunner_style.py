@@ -367,7 +367,11 @@ def test_the_colourless_presets_preview_themselves_colourlessly(monkeypatch):
         outside."""
         start = min((row.index(glyph) for glyph in ("█", "░", "#", ".") if glyph in row),
                     default=0)
-        return row[start:row.rindex("12") + 2]
+        # Find the last reading in the *visible* text: a bare `rindex("12")`
+        # matched inside the border's own escape once the frame colour became
+        # `38;2;127;...` (issue #519). Masking the escapes keeps the offsets.
+        masked = vr._ANSI_RE.sub(lambda m: "\x00" * len(m.group(0)), row)
+        return row[start:masked.rindex("12") + 2]
 
     samples = [sample(row) for row in rows]
     # auto, fast and basic show their colours; mono and plain show none.
