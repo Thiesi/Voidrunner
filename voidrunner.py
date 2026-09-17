@@ -201,8 +201,10 @@ class Palette:
             color = {205: 95, 51: 96, 46: 92, 203: 91, 244: 37, 220: 93,
                      # 137 is `slate`, the label role: plain white at sixteen
                      # colours, where there is no tan to move it to and amber
-                     # already holds 33.
-                     81: 96, 24: 34, 255: 97, 137: 37, 84: 92, 215: 33}.get(idx256, 37)
+                     # already holds 33. 110 is `hull` and 237 is `deep`, the
+                     # two chrome roles: dark cyan and bright black are the
+                     # sixteen-colour readings of "recedes behind the content".
+                     110: 36, 237: 90, 255: 97, 137: 37, 84: 92, 215: 33}.get(idx256, 37)
             return f"{ESC}[{color}m"
         if self._truecolor:
             r, g, b = rgb
@@ -212,13 +214,28 @@ class Palette:
     # -- the nine roles ----------------------------------------------------
     @property
     def hull(self) -> str:
-        """Frames, section headers, station names."""
-        return self._sgr((95, 215, 255), 81)
+        """Frames, section headers, station names.
+
+        Steel, not cyan (issue #519, the chrome half). It was `#5fd7ff` / 81,
+        a saturated cyan, and with `deep` it was 49.7% of the command deck's
+        visible characters -- 85% of it box-drawing. Chrome that bright
+        competes with the values drawn on it, so the frame now sits at half
+        the saturation and a step down in brightness: still the cockpit's blue,
+        still distinct from every content role, but behind the content rather
+        than beside it.
+        """
+        return self._sgr((127, 163, 191), 110)
 
     @property
     def deep(self) -> str:
-        """Frame shadow, gauge tracks, separators -- chrome behind chrome."""
-        return self._sgr((29, 59, 87), 24)
+        """Frame shadow, gauge tracks, separators -- chrome behind chrome.
+
+        Neutral (issue #519). It was `#1d3b57` / 24, a dark saturated blue, and
+        99% of its characters were box-drawing. A gauge track or a separator
+        has nothing to say about hue; a near-neutral dark lets the filled half
+        of a gauge be the only coloured thing on its row.
+        """
+        return self._sgr((47, 56, 68), 237)
 
     @property
     def plasma(self) -> str:
