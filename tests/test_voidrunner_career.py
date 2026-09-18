@@ -2394,7 +2394,7 @@ def test_career_rank_retained_top_rank_keeps_real_retirement_available(monkeypat
     world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
     keys=iter("RSY"); monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_status(vr.Palette(False),world)
-    assert "A new career begins" in output.getvalue()
+    assert any("A new career begins" in note for note in world.launch_notes)
     saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
     assert saved.pilot.retirements==1 and saved.pilot.highest_rank_seen==0
 
@@ -2578,7 +2578,7 @@ def test_career_finale_checkpoint_failure_stops_before_new_run_ack(monkeypatch,f
     world=_finale_world(finale); output=io.StringIO(); keys=iter("SY")
     monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     def fail(current):
-        assert len(current.save.retired_careers)==1 and "A new career begins." not in output.getvalue()
+        assert len(current.save.retired_careers)==1 and "A new career begins." not in output.getvalue() and not current.launch_notes
         raise vr.SaveError()
     world._checkpoint=fail
     with contextlib.redirect_stdout(output),pytest.raises(vr.SaveError):vr.screen_career_finale(vr.Palette(False),world)
@@ -2636,7 +2636,7 @@ def test_career_finale_atomic_replace_failure_preserves_old_run_and_no_ack(monke
     monkeypatch.setattr(vr,"_write_bytes_atomic",fail_current)
     keys=iter("SY");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     with contextlib.redirect_stdout(output),pytest.raises(vr.SaveError):vr.screen_career_finale(vr.Palette(False),world)
-    assert "A new career begins." not in output.getvalue() and (tmp_path/"77.json").read_bytes()==before
+    assert "A new career begins." not in output.getvalue() and not world.launch_notes and (tmp_path/"77.json").read_bytes()==before
     saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
     assert saved.pilot.retirements==0 and not saved.retired_careers
 
@@ -3027,7 +3027,7 @@ def test_career_finale_preserves_accepted_legacy_highlight_lists(monkeypatch,tmp
     old,_,_=vr.load_or_create_save(tmp_path,77,"Tester");assert old.pilot.highlights==highlights
     keys=iter("SY");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_career_finale(vr.Palette(False),world)
-    assert "A new career begins." in output.getvalue()
+    assert any("A new career begins." in note for note in world.launch_notes)
     saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
     assert saved.pilot.retirements==1 and saved.retired_careers[0]["highlights"]==highlights
     lines=vr.career_dossier_lines(saved)

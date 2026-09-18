@@ -2060,6 +2060,12 @@ class World:
         # Narration of the current hop, retained for the next deck page (issue #410).
         # Transient: rebuilt from what the hop prints; never persisted.
         self.hop_report: list[str] = []
+        # What the door has to say before its first deck: the First Flight
+        # pointer, a returning pilot's recap, a new career after retirement.
+        # They ride on the deck that follows, because a line written ahead of a
+        # screen is erased by that screen's own clear before anyone can read it
+        # (issue #641). Transient; shown once.
+        self.launch_notes: list[str] = []
         self.galaxy: list[GalaxySystem] = generate_galaxy(save.seed)
         self.by_id: dict[int, GalaxySystem] = {s.id: s for s in self.galaxy}
         for sid in save.discovered:
@@ -5635,11 +5641,13 @@ def screen_station_menu(p: Palette, world: World) -> str:
     world.pending_promotions.clear()
     completed[0:0] = world.hop_report
     world.hop_report = []
+    # Shown on this deck and no later one, like the results below them.
+    notes, world.launch_notes = world.launch_notes, []
     page, expanded = 0, False
     while True:
         lines = station_deck_lines(world, expanded=expanded)
-        if completed:
-            lines[0:0] = ["Result: " + message for message in completed]
+        if notes or completed:
+            lines[0:0] = notes + ["Result: " + message for message in completed]
         footer = "[<] Prev [>] Next [X] Compact [Q] Exit: " if expanded else "[<] Prev [>] Next [X] Expand [Q] Exit: "
         choice, page, count = _draw_service_page(p, f"Command Deck: {world.save.pilot.credits:,}cr", lines, footer, page)
         if (moved := page_step(choice, page, count)) is not None: page = moved
@@ -8111,6 +8119,41 @@ def pilot_recap(world: World) -> list[str]:
     return [_mission_plain(line) for line in lines]
 
 
+FIRST_FLIGHT_POINTER = "Start at [G] Pilot Guide for an optional first delivery and flight instructions."
+
+
+def launch_notes(world: World, *, is_new: bool) -> list[str]:
+    """What the first Command Deck of a session says above its gauges.
+
+    A new pilot gets the one pointer to First Flight; a returning pilot gets a
+    welcome and the recap of what they had committed to. The recap's own first
+    line is left out: it names the station, the day and the credits, which the
+    deck prints directly underneath. A pilot resuming an interrupted journey
+    gets neither here -- that has a screen of its own, and the deck that
+    follows it opens on the journey's results.
+    """
+    if world.save.pending_travel is not None:
+        return []
+    if is_new:
+        return [FIRST_FLIGHT_POINTER]
+    return [_mission_plain(f"Welcome back, {world.save.pilot.handle}.")] + pilot_recap(world)[1:]
+
+
+def journey_resumed_lines(world: World) -> list[str]:
+    travel = world.save.pending_travel
+    system = world.by_id[travel["destination"]] if travel is not None else None
+    # An uncharted bearing stays unnamed until the pilot arrives.
+    destination = system.name if system is not None and system.discovered else "an uncharted system"
+    # Short enough to fit the 40x12 floor with its frame and the pause under it.
+    text = [f"Welcome back, {world.save.pilot.handle}.",
+            f"Resuming your interrupted journey to {destination}, day {world.save.turn}: the same "
+            "encounter, nothing rerolled. Station access follows its resolution."]
+    rows: list[str] = []
+    for line in text:
+        rows.extend(wrap_styled(style_body_line(_mission_plain(line)), _page_content_width()))
+    return rows
+
+
 def pilot_guide_lines(world: World) -> list[str]:
     lines = ["Use [B] Back to return to the station deck before using its market, yard or chart commands.",
              "Your ship is your livelihood. Supply outlying stations, build capital, and choose what kind of pilot to become."]
@@ -8613,10 +8656,14 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
             continue
         if not confirm(f"End this career as {CAREER_FINALES[selected]['label']} and begin New Game+?", p):
             result, page = "Retirement cancelled; current career retained.", 0; continue
+        label = CAREER_FINALES[selected]["label"]
         world.reset(fresh.save)
         world.pending_promotions.extend(fresh.pending_promotions)
         world.commit()
-        out_line(); out_line("A new career begins.")
+        # `reset` cleared the notes with everything else, so this is set after
+        # it. Written to the terminal instead, the line was erased by the new
+        # career's first deck before it could be read (issue #641).
+        world.launch_notes = [f"A new career begins. {label} is archived under [S] Status, [D] Dossiers."]
         return "A new career begins."
 
 
@@ -10358,19 +10405,19 @@ def main() -> int:
                 # The refused career keeps its slot until its replacement is
                 # confirmed; a cancelled registration changes nothing (#421).
                 replace_unsupported_career(save_dir, user_id, save)
-        else:
-            out_line(f"{p.muted}Welcome back, {save.pilot.handle}. Day {save.turn}.{RESET}")
         world = World(save, checkpoint=lambda current: persist(current, save_dir, user_id))
         world.checkpoint()  # the launch tick prepares the station this career opens at
-        if is_new:
-            out_line("Start at [G] Pilot Guide for an optional first delivery and flight instructions.")
-        elif world.save.pending_travel is None:
-            for line in pilot_recap(world):
-                out_line(line)
+        world.launch_notes = launch_notes(world, is_new=is_new)
         if world.save.pending_travel is not None:
-            out_line(f"{p.gold}Resuming your interrupted journey. Station access follows its resolution.{RESET}")
-            screen_travel(p, world, world.save.pending_travel["destination"])
+            # Held on a screen of its own: what follows is the encounter the
+            # caller was cut off in, and its first panel clears the terminal.
+            draw_page(p, "Journey Resumed", journey_resumed_lines(world), 0, 1)
             pause(p)
+            screen_travel(p, world, world.save.pending_travel["destination"])
+            # No pause after it. An ordinary jump has none either: the deck that
+            # follows keeps the journey's outcome as its results. The pause that
+            # stood here held a fight's last lines on screen underneath the
+            # panel they had scrolled off the top (issue #643).
 
         while True:
             choice = screen_station_menu(p, world)
