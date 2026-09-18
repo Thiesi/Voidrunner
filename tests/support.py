@@ -286,6 +286,12 @@ def _drain_until(stream, output: bytearray, markers, events, stop=None) -> None:
                 stop()
 
 
+# The key a caller presses on the Journey Resumed notice, which waits for one
+# before the interrupted encounter is drawn (issue #641). Every test that
+# launches the door onto a saved `pending_travel` types it first.
+RESUME = b" "
+
+
 @contextlib.contextmanager
 def _door_stopped_at(tmp_path, commands, acknowledgement: bytes, ready: bytes | None = None):
     """Run the shipped script, then force-kill while stdin is still open."""

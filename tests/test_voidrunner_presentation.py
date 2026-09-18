@@ -1639,3 +1639,84 @@ def test_select_display_style_rejects_unknown_presets_and_reports_a_change():
     with pytest.raises(ValueError):
         vr.select_display_style(world, "sepia")
     assert world.save.display_style == "mono"
+
+
+# ---------------------------------------------------------------------------
+# What the door says before its first screen (issue #641).
+#
+# Every one of these was written with `out_line` and then erased, in the same
+# burst of output, by the first screen's own clear. The tests that existed
+# asserted the text was *written*, which stayed true the whole time nobody could
+# read it. These ask what is on the screen the caller is left looking at.
+# ---------------------------------------------------------------------------
+
+
+def final_screen(output: bytes) -> str:
+    """What a terminal still shows: everything after the last clear."""
+    return plain_bytes(output.rsplit(b"\x1b[2J", 1)[-1]).decode("utf-8", "replace")
+
+
+def test_a_new_pilot_reads_the_first_flight_pointer_on_the_deck(monkeypatch, terminal):
+    world = _world_with_seed(42)
+    world.launch_notes = vr.launch_notes(world, is_new=True)
+    assert world.launch_notes == [vr.FIRST_FLIGHT_POINTER]
+    page = _deck_page(world, monkeypatch, terminal)
+    assert "Start at [G] Pilot Guide for an optional first delivery" in " ".join(page.split())
+    # Once, like a result: the next deck is the plain deck again.
+    assert world.launch_notes == [] and "Pilot Guide for an optional" not in _deck_page(world, monkeypatch, terminal)
+
+
+def test_a_returning_pilot_reads_the_recap_on_the_deck(monkeypatch, terminal):
+    world = _world_with_seed(42)
+    world.save.pilot.handle = "Tester"
+    world.launch_notes = vr.launch_notes(world, is_new=False)
+    page = " ".join(_deck_page(world, monkeypatch, terminal).split())
+    assert "Welcome back, Tester." in page and "Commitments: 0 contract(s)" in page
+    # The recap's own first line repeats the three things the deck prints under it.
+    assert "Docked:" not in page
+
+
+def test_a_pilot_mid_journey_gets_no_deck_notes_and_a_screen_of_their_own():
+    world, _pirate = _world_with_pending_fight()
+    assert vr.launch_notes(world, is_new=False) == []
+    text = " ".join(plain(row) for row in vr.journey_resumed_lines(world))
+    assert "Resuming your interrupted journey to" in text and "nothing rerolled" in text
+
+
+def test_an_uncharted_destination_stays_unnamed_on_the_resume_screen():
+    world, _pirate = _world_with_pending_fight()
+    destination = world.by_id[world.save.pending_travel["destination"]]
+    destination.discovered = False
+    text = " ".join(plain(row) for row in vr.journey_resumed_lines(world))
+    assert destination.name not in text and "an uncharted system" in text
+
+
+def test_the_real_door_leaves_the_welcome_on_the_screen_it_stops_on(tmp_path):
+    """The shipped script, a saved career, one key. The welcome has to be on the
+    last screen drawn, not merely somewhere in what was written."""
+    import json, os, subprocess
+
+    vr.write_save(tmp_path, 77, _world_with_seed(42).save)
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"", capture_output=True, timeout=20,
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)))
+    assert result.returncode == 0, result.stderr
+    screen = " ".join(final_screen(result.stdout).split())
+    assert "Command Deck" in screen and "Welcome back," in screen and "Commitments:" in screen
+
+
+def test_the_real_door_holds_the_resume_notice_until_a_key(tmp_path):
+    """Cut off mid-fight, a caller is told so on a screen that waits for them;
+    the fight's first panel clears the terminal, so a line ahead of it is lost."""
+    import json, os, subprocess
+
+    world, _pirate = _world_with_pending_fight()
+    vr.persist(world, tmp_path, 77)
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"", capture_output=True, timeout=20,
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)))
+    screen = " ".join(final_screen(result.stdout).split())
+    assert "Journey Resumed" in screen and "Resuming your interrupted journey" in screen
+    assert "Press any key to continue" in screen and "Combat" not in screen
