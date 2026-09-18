@@ -3211,25 +3211,21 @@ def test_an_older_milestone_step_is_rescaled_rather_than_re_awarded():
 def test_every_ending_is_shown_as_an_ending_after_it_is_saved(monkeypatch, tmp_path, finale):
     world = _finale_world(finale)
     world.save.pilot.highlights = ["First kill: destroyed the Ravage.", "Reached Verity."]
-    saves = []
-    world._checkpoint = lambda current: (vr.persist(current, tmp_path, 77), saves.append(current.save.pilot.retirements))
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
     world.checkpoint()
     keys = iter("SY>C")
-    shown_before_save = []
-    def press():
-        key = next(keys)
-        return key
-    monkeypatch.setattr(vr, "read_key", press)
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    retirements_on_disk_when_drawn = []
     real = vr.screen_career_ending
     def ending(p, fresh, ship):
         # By the time the ending is drawn the retirement is on disk.
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
-        shown_before_save.append(saved.pilot.retirements)
+        retirements_on_disk_when_drawn.append(saved.pilot.retirements)
         real(p, fresh, ship)
     monkeypatch.setattr(vr, "screen_career_ending", ending)
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_career_finale(vr.Palette(False), world)
-    assert shown_before_save == [1]
+    assert retirements_on_disk_when_drawn == [1]
     text = " ".join(plain(output.getvalue()).split())
     info = vr.CAREER_FINALES[finale]
     assert "Career Complete" in text and info["label"].upper() in text
@@ -3242,6 +3238,9 @@ def test_every_ending_is_shown_as_an_ending_after_it_is_saved(monkeypatch, tmp_p
 def test_the_ending_is_built_from_the_archived_dossier_and_pages_at_the_floor(monkeypatch, terminal):
     world = _finale_world("combat"); world.save.turn = 77
     fresh = vr.finish_career(world.save, "combat")
+    # The live career is gone once this is read; make the two disagree so the
+    # test can tell which one the screen is built from.
+    assert fresh.turn == 0 and fresh.pilot.kills == 0
     leading, details = vr.career_ending_lines(fresh)
     text = " ".join(plain(row) for row in leading + details)
     assert "FRONTIER WARDEN" in text and "77 days" in text and "50 victories" in text
@@ -3253,16 +3252,22 @@ def test_the_ending_is_built_from_the_archived_dossier_and_pages_at_the_floor(mo
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 vr.draw_page(vr.pal(), "Career Complete", page, index, len(pages)); vr.out_prompt(vr.CAREER_ENDING_FOOTER)
             rows = plain(output.getvalue()).replace("\r\n", "\n").split("\n")
-            assert len([row for row in rows if row]) <= height - vr.HOST_EPILOGUE_ROWS + 3
+            assert len([row for row in rows if row]) <= height
             assert all(vr._visible_width(row) <= width for row in rows)
 
 
-def test_a_paging_key_never_leaves_the_ending_and_any_other_key_does(monkeypatch, terminal):
+@pytest.mark.parametrize("leaving", ["C", "c", "\r", " ", "x", "B", "<esc>"])
+def test_a_paging_key_never_leaves_the_ending_and_the_keys_a_caller_presses_do(monkeypatch, terminal, leaving):
+    """At a bar whose only action is to continue, Enter, Space and Escape are what
+    a caller presses. An ordinary action bar absorbs all three, and the first
+    version of this screen did too, while its docstring said any key left."""
     terminal(40, 12)
     world = _finale_world("legend")
     fresh = vr.finish_career(world.save, "legend")
-    pressed = iter("><<>>>>>>>C")
+    leaving = vr.ESCAPE_KEY if leaving == "<esc>" else leaving
+    # Paging at both ends, and an arrow key the door does not read, all stay.
+    pressed = iter(["<", ">", "<", "<", vr.IGNORED_KEY] + [">"] * 8 + [leaving, "SENTINEL"])
     monkeypatch.setattr(vr, "read_key", lambda: next(pressed))
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_career_ending(vr.Palette(False), fresh, world.save.ship)
-    assert next(pressed, None) is None  # every paging key was consumed; [C] left
+    assert next(pressed) == "SENTINEL", "left early, or did not leave on the key"

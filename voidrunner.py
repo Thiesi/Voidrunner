@@ -8687,18 +8687,27 @@ def screen_career_ending(p: Palette, fresh: SaveData, retired_ship: Ship) -> Non
     Retirement used to go from its yes/no straight to a new Command Deck: four
     endings were written and none was ever presented as one (issue #644). This
     is drawn after the retirement has been saved, so closing the connection here
-    loses nothing, and any key but a paging key leaves it."""
+    loses nothing.
+
+    Any key but a paging key leaves it, Enter, Space and Escape included. An
+    action bar absorbs those three, because on every other screen they would
+    cost a redraw for nothing; at a bar whose only action is to continue they
+    are what a caller presses, so this screen reads its own key."""
     leading, details = career_ending_lines(fresh)
     pages = portrait_pages(p, ship_portrait(retired_ship, "large"), ship_portrait(retired_ship, "compact"),
                            details, "Career Complete", CAREER_ENDING_FOOTER, color=p.gold, leading=leading)
     page = 0
     while True:
-        key, page, count = _draw_service_page(p, "Career Complete", [], CAREER_ENDING_FOOTER, page, pages=pages)
-        if (moved := page_step(key, page, count)) is not None and moved != page:
-            page = moved
-            continue
+        draw_page(p, "Career Complete", pages[page], page, len(pages))
+        out_prompt(single_page_footer(CAREER_ENDING_FOOTER, len(pages)))
+        key = read_key()
+        out_line()
+        if key == IGNORED_KEY:
+            continue  # an arrow or function key the door does not read is not a decision
+        moved = page_step(key, page, len(pages))
         if moved is None:
             return
+        page = moved
 
 
 def screen_career_finale(p: Palette, world: World) -> str | None:
