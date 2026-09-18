@@ -83,6 +83,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+import weakref
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -97,6 +98,8 @@ ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
 ANSI_STYLE_RE = re.compile(r"\x1b\[[0-9;:]*m")
 _OUTPUT_WIDTH = 80
 _OUTPUT_HEIGHT = 24
+# Page lists still in use by a screen, so a resize can cut them again (issue #645).
+_LIVE_PAGES: list = []
 _OUTPUT_STYLE = "auto"
 DISPLAY_STYLES = {"auto": "Full palette", "fast": "Full palette, no motion", "basic": "16-color",
                   "mono": "Monochrome", "plain": "Plain / ASCII artwork"}
@@ -575,6 +578,11 @@ def _active_sgr_after(text: str, active: str) -> str:
 # empty string (which is a substring of every menu's key alphabet).
 IGNORED_KEY = "<key>"
 ESCAPE_KEY = "<esc>"
+# What an action bar returns when the caller's terminal changed size while it
+# waited. No screen has a hotkey by this name, so every screen does with it what
+# it does with any key it does not know: it draws itself again, which is the
+# whole point (issue #645).
+RESIZE_KEY = "<resize>"
 _INPUT_TIMEOUT = 0.15
 
 
@@ -6211,9 +6219,9 @@ def portrait_pages(p: Palette, large: list[str], compact: list[str], details: li
 
     Paged against the bar the caller will see, so a portrait that fits once the
     paging tokens are dropped is one page (issue #412 review)."""
-    return _paginate_against_shown_footer(
+    return _TerminalPages(lambda: _paginate_against_shown_footer(
         lambda bar: _portrait_pages_for(p, large, compact, details, title, bar, color=color, leading=leading),
-        footer)
+        footer))
 
 
 def _portrait_pages_for(p: Palette, large: list[str], compact: list[str], details: list[str], title: str,
@@ -6714,7 +6722,8 @@ def wrapped_group(line: str) -> list[str]:
 
 def _trade_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
     """Row-at-a-time paging: groups may be split anywhere they run over."""
-    return _mission_text_pages(lines, overhead=max(0, _OUTPUT_HEIGHT - page_capacity(lines, title, footer)))
+    # The overhead is measured inside the builder: it depends on the terminal too.
+    return _TerminalPages(lambda: _cut_text_pages(lines, max(0, _OUTPUT_HEIGHT - page_capacity(lines, title, footer))))
 
 
 def remembered_market_lines(world: World) -> list[str]:
@@ -7375,6 +7384,35 @@ def _detail_action_bar(actions: str, labels: dict[str, str]) -> str:
     return "".join(f"[{key}] {labels[key]} " for key in actions.split("/") if key) + "[B] Back [<>] Page: "
 
 
+class _TerminalPages(list):
+    """Pages that cut themselves again when the terminal they were cut for changes.
+
+    A dozen screens paginate once on entry and then loop over the result. After a
+    resize they went on drawing rows wrapped and counted for the old terminal,
+    inside a frame drawn for the new one, until the caller left the screen. Fixing
+    that screen by screen was tried first and got two of them (issue #645 review),
+    so it is fixed where the pages are made instead: every paginator returns one
+    of these, `take_resize` re-cuts the ones still alive, and a page number that
+    no longer exists reads as the last page rather than raising in a loop that
+    had no reason to expect its list to shrink.
+    """
+
+    def __init__(self, build):
+        self._build = build
+        super().__init__(build())
+        # Weak references in a plain list, not a WeakSet: a set would hash and
+        # compare these, and two equal page lists are still two lists.
+        _LIVE_PAGES[:] = [ref for ref in _LIVE_PAGES if ref() is not None] + [weakref.ref(self)]
+
+    def recut(self) -> None:
+        self[:] = self._build()
+
+    def __getitem__(self, index):
+        if isinstance(index, int) and index >= len(self) > 0:
+            index = len(self) - 1
+        return super().__getitem__(index)
+
+
 def _paginate_against_shown_footer(build, footer: str):
     """Paginate against the action bar the caller will actually see.
 
@@ -7394,7 +7432,7 @@ def _paginate_against_shown_footer(build, footer: str):
 
 def _service_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
     """Group-aware paging against the bar the caller will see."""
-    return _paginate_against_shown_footer(lambda bar: _service_pages_for(lines, title, bar), footer)
+    return _TerminalPages(lambda: _paginate_against_shown_footer(lambda bar: _service_pages_for(lines, title, bar), footer))
 
 
 def _service_pages_for(lines: list[str], title: str, footer: str) -> list[list[str]]:
@@ -7562,6 +7600,107 @@ def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, pa
     return action, page, len(pages)
 
 
+# ---------------------------------------------------------------------------
+# Following the caller's terminal (issue #645).
+#
+# NetBBS rewrites the drop file and sends SIGUSR1 when a caller resizes
+# (door guide, "Signal door on terminal resize"). The handler does the one thing
+# a signal handler can do safely: it sets a flag. Nothing is redrawn, read or
+# saved from inside it, and it may run twice for one resize without harm. An
+# action bar waiting for a key notices the flag within a quarter of a second,
+# applies the new size and hands its screen `RESIZE_KEY`; a prompt that is not an
+# action bar (a yes/no, a quantity) finishes first and the screen behind it
+# catches up when it returns.
+#
+# POSIX only, like the host's half: Windows has no SIGUSR1 and is never sent one.
+# ---------------------------------------------------------------------------
+
+_RESIZE_PENDING = False
+_RESIZE_POLL_SECONDS = 0.25
+
+
+def _note_resize(signum=None, frame=None) -> None:
+    global _RESIZE_PENDING
+    _RESIZE_PENDING = True
+
+
+def install_resize_handler() -> bool:
+    import signal
+
+    if not hasattr(signal, "SIGUSR1"):
+        return False
+    signal.signal(signal.SIGUSR1, _note_resize)
+    # A profile that gives the door a PTY is told with SIGWINCH instead, after the
+    # same drop-file rewrite. Its default action is to be ignored, which is what
+    # the door did with it.
+    if hasattr(signal, "SIGWINCH"):
+        signal.signal(signal.SIGWINCH, _note_resize)
+    return True
+
+
+def apply_terminal_size(info: dict) -> int:
+    """Take the geometry the host reports; returns the height as reported, which
+    the launch refusal quotes. Below the floor mid-game there is nobody to
+    refuse, so the door keeps drawing for the floor."""
+    global _OUTPUT_WIDTH, _OUTPUT_HEIGHT
+    try:
+        _OUTPUT_WIDTH = max(1, int(info.get("terminal_width", 80)))
+    except (TypeError, ValueError):
+        _OUTPUT_WIDTH = 80
+    try:
+        reported_height = int(info.get("terminal_height", 24))
+        # The clamp keeps rendering safe; the refusal quotes what was reported.
+        _OUTPUT_HEIGHT = max(10, min(200, reported_height))
+    except (TypeError, ValueError):
+        reported_height = _OUTPUT_HEIGHT = 24
+    return reported_height
+
+
+def take_resize() -> bool:
+    """Apply a pending resize. True when the geometry actually changed."""
+    global _RESIZE_PENDING, _OUTPUT_WIDTH, _OUTPUT_HEIGHT, _LAST_PAGE_DRAWN
+    if not _RESIZE_PENDING:
+        return False
+    _RESIZE_PENDING = False
+    before = (_OUTPUT_WIDTH, _OUTPUT_HEIGHT)
+    apply_terminal_size(_load_door_info())
+    _OUTPUT_WIDTH, _OUTPUT_HEIGHT = max(MINIMUM_WIDTH, _OUTPUT_WIDTH), max(MINIMUM_HEIGHT, _OUTPUT_HEIGHT)
+    _LAST_PAGE_DRAWN = None
+    changed = (_OUTPUT_WIDTH, _OUTPUT_HEIGHT) != before
+    if changed:
+        for ref in list(_LIVE_PAGES):
+            pages = ref()
+            if pages is not None:
+                pages.recut()  # the screens that paginated once on entry
+    return changed
+
+
+def _resized_while_idle() -> bool:
+    """Wait for a key or a resize, whichever comes first; True for a resize.
+
+    A blocking read would sleep through the signal: Python restarts it after the
+    handler returns. So the wait is a short select, and the read that follows a
+    False only happens once a byte is there."""
+    # Only a door with a live terminal waits: a scripted test has no reader open,
+    # and selecting on the test runner's own stdin would never return.
+    live = _INPUT_READER.read_byte if _INPUT_READER is not None else None
+    fd = live.fd if isinstance(live, _StdioBytes) else None
+    if os.name != "posix" or fd is None:
+        return take_resize()
+    if _INPUT_READER.pending is not None:
+        # A byte the decoder has already taken off the pipe (the key typed just
+        # after a lone Escape, say). The kernel has nothing left to report, so
+        # waiting on it would hold that key until the next one arrived.
+        return take_resize()
+    import select
+
+    while True:
+        if take_resize():
+            return True
+        if select.select([fd], [], [], _RESIZE_POLL_SECONDS)[0]:
+            return False
+
+
 def read_command_at_prompt() -> str:
     """A command key at an action bar. Keys that can never be a hotkey (whitespace,
     unsupported terminal keys) are absorbed at the prompt instead of returning to
@@ -7576,6 +7715,9 @@ def read_command_at_prompt() -> str:
     Hall of Fame once left on an unlisted Space, which both cost a redraw for every
     stray keypress and contradicted `B` being Back everywhere (issue #400)."""
     while True:
+        if _resized_while_idle():
+            out_line()  # end the bar's row, as an echoed key would have
+            return RESIZE_KEY
         key = read_command()
         if key == IGNORED_KEY or key.isspace():
             continue
@@ -8137,6 +8279,10 @@ def _mission_text_pages(lines: list[str], *, overhead: int = 7) -> list[list[str
     need splitting, so filling row by row is the degenerate case rather than a
     second implementation (issue #418).
     """
+    return _TerminalPages(lambda: _cut_text_pages(lines, overhead))
+
+
+def _cut_text_pages(lines: list[str], overhead: int) -> list[list[str]]:
     rows = [row for line in lines for row in wrapped_group(line)]
     return paginate([[row] for row in rows], max(1, _OUTPUT_HEIGHT - overhead))
 
@@ -8795,6 +8941,7 @@ def screen_status(p: Palette, world: World) -> None:
             if result: lines.insert(0, "Result: " + result)
             cache[view] = _service_pages(lines, title, footer)
         key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[view])
+        if key == RESIZE_KEY: cache, page = {}, 0  # the cached pages were cut for the old terminal
         if key in ("B", "Q"): return
         if (moved := page_step(key, page, count)) is not None: page = moved
         elif key in ("O", "C", "H", "D"): view, page = key, 0
@@ -8926,6 +9073,7 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
             lines += ["Local accomplishments; starting advantages and game rules may differ. No shared-seed competition."]
             cache[category] = _service_pages(lines, title, footer)
         key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[category])
+        if key == RESIZE_KEY: cache, page = {}, 0  # the cached pages were cut for the old terminal
         if key in ("B", "Q"): return
         if key in ("1", "2", "3", "4", "5"):
             category, page = list(SCORE_CATEGORIES)[int(key) - 1], 0
@@ -10360,6 +10508,7 @@ def screen_customs(p: Palette, world: World) -> None:
         can_pay = world.save.pilot.credits >= customs_quote(world)[1]
         footer = "[S] Surrender [P] Pay bribe [<>] Page: " if can_pay else "[S] Surrender [<>] Page: "
         action, page, count = _draw_service_page(p, f"Customs {world.save.pilot.credits:,}cr", lines, footer, page)
+        if action == RESIZE_KEY: continue  # a resize is not an answer; draw the same terms again
         if (moved := page_step(action, page, count)) is not None: page = moved
         else:
             try:
@@ -10482,17 +10631,11 @@ def main() -> int:
     _OUTPUT_STYLE = "auto"
 
     sys.stdout.reconfigure(encoding="utf-8")
+    # Before anything else: the host may signal at any moment after the spawn,
+    # and SIGUSR1 ends a process that has not said what to do with it.
+    install_resize_handler()
     info = _load_door_info()
-    try:
-        _OUTPUT_WIDTH = max(1, int(info.get("terminal_width", 80)))
-    except (TypeError, ValueError):
-        _OUTPUT_WIDTH = 80
-    try:
-        reported_height = int(info.get("terminal_height", 24))
-        # The clamp keeps rendering safe; the refusal below quotes what was reported.
-        _OUTPUT_HEIGHT = max(10, min(200, reported_height))
-    except (TypeError, ValueError):
-        reported_height = _OUTPUT_HEIGHT = 24
+    reported_height = apply_terminal_size(info)
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
     set_palette(p)  # what every component in the style layer draws with
     input_reader()  # opened before the first page, so it can reveal itself
