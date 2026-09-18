@@ -569,6 +569,11 @@ def _active_sgr_after(text: str, active: str) -> str:
 # empty string (which is a substring of every menu's key alphabet).
 IGNORED_KEY = "<key>"
 ESCAPE_KEY = "<esc>"
+# What an action bar returns when the caller's terminal changed size while it
+# waited. No screen has a hotkey by this name, so every screen does with it what
+# it does with any key it does not know: it draws itself again, which is the
+# whole point (issue #645).
+RESIZE_KEY = "<resize>"
 _INPUT_TIMEOUT = 0.15
 
 
@@ -7507,6 +7512,91 @@ def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, pa
     return action, page, len(pages)
 
 
+# ---------------------------------------------------------------------------
+# Following the caller's terminal (issue #645).
+#
+# NetBBS rewrites the drop file and sends SIGUSR1 when a caller resizes
+# (door guide, "Signal door on terminal resize"). The handler does the one thing
+# a signal handler can do safely: it sets a flag. Nothing is redrawn, read or
+# saved from inside it, and it may run twice for one resize without harm. An
+# action bar waiting for a key notices the flag within a quarter of a second,
+# applies the new size and hands its screen `RESIZE_KEY`; a prompt that is not an
+# action bar (a yes/no, a quantity) finishes first and the screen behind it
+# catches up when it returns.
+#
+# POSIX only, like the host's half: Windows has no SIGUSR1 and is never sent one.
+# ---------------------------------------------------------------------------
+
+_RESIZE_PENDING = False
+_RESIZE_POLL_SECONDS = 0.25
+
+
+def _note_resize(signum=None, frame=None) -> None:
+    global _RESIZE_PENDING
+    _RESIZE_PENDING = True
+
+
+def install_resize_handler() -> bool:
+    import signal
+
+    if not hasattr(signal, "SIGUSR1"):
+        return False
+    signal.signal(signal.SIGUSR1, _note_resize)
+    return True
+
+
+def apply_terminal_size(info: dict) -> int:
+    """Take the geometry the host reports; returns the height as reported, which
+    the launch refusal quotes. Below the floor mid-game there is nobody to
+    refuse, so the door keeps drawing for the floor."""
+    global _OUTPUT_WIDTH, _OUTPUT_HEIGHT
+    try:
+        _OUTPUT_WIDTH = max(1, int(info.get("terminal_width", 80)))
+    except (TypeError, ValueError):
+        _OUTPUT_WIDTH = 80
+    try:
+        reported_height = int(info.get("terminal_height", 24))
+        # The clamp keeps rendering safe; the refusal quotes what was reported.
+        _OUTPUT_HEIGHT = max(10, min(200, reported_height))
+    except (TypeError, ValueError):
+        reported_height = _OUTPUT_HEIGHT = 24
+    return reported_height
+
+
+def take_resize() -> bool:
+    """Apply a pending resize. True when the geometry actually changed."""
+    global _RESIZE_PENDING, _OUTPUT_WIDTH, _OUTPUT_HEIGHT, _LAST_PAGE_DRAWN
+    if not _RESIZE_PENDING:
+        return False
+    _RESIZE_PENDING = False
+    before = (_OUTPUT_WIDTH, _OUTPUT_HEIGHT)
+    apply_terminal_size(_load_door_info())
+    _OUTPUT_WIDTH, _OUTPUT_HEIGHT = max(MINIMUM_WIDTH, _OUTPUT_WIDTH), max(MINIMUM_HEIGHT, _OUTPUT_HEIGHT)
+    _LAST_PAGE_DRAWN = None
+    return (_OUTPUT_WIDTH, _OUTPUT_HEIGHT) != before
+
+
+def _resized_while_idle() -> bool:
+    """Wait for a key or a resize, whichever comes first; True for a resize.
+
+    A blocking read would sleep through the signal: Python restarts it after the
+    handler returns. So the wait is a short select, and the read that follows a
+    False only happens once a byte is there."""
+    # Only a door with a live terminal waits: a scripted test has no reader open,
+    # and selecting on the test runner's own stdin would never return.
+    live = _INPUT_READER.read_byte if _INPUT_READER is not None else None
+    fd = live.fd if isinstance(live, _StdioBytes) else None
+    if os.name != "posix" or fd is None:
+        return take_resize()
+    import select
+
+    while True:
+        if take_resize():
+            return True
+        if select.select([fd], [], [], _RESIZE_POLL_SECONDS)[0]:
+            return False
+
+
 def read_command_at_prompt() -> str:
     """A command key at an action bar. Keys that can never be a hotkey (whitespace,
     unsupported terminal keys) are absorbed at the prompt instead of returning to
@@ -7521,6 +7611,9 @@ def read_command_at_prompt() -> str:
     Hall of Fame once left on an unlisted Space, which both cost a redraw for every
     stray keypress and contradicted `B` being Back everywhere (issue #400)."""
     while True:
+        if _resized_while_idle():
+            out_line()  # end the bar's row, as an echoed key would have
+            return RESIZE_KEY
         key = read_command()
         if key == IGNORED_KEY or key.isspace():
             continue
@@ -8632,6 +8725,7 @@ def screen_status(p: Palette, world: World) -> None:
             if result: lines.insert(0, "Result: " + result)
             cache[view] = _service_pages(lines, title, footer)
         key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[view])
+        if key == RESIZE_KEY: cache, page = {}, 0  # the cached pages were cut for the old terminal
         if key in ("B", "Q"): return
         if (moved := page_step(key, page, count)) is not None: page = moved
         elif key in ("O", "C", "H", "D"): view, page = key, 0
@@ -10289,17 +10383,11 @@ def main() -> int:
     _OUTPUT_STYLE = "auto"
 
     sys.stdout.reconfigure(encoding="utf-8")
+    # Before anything else: the host may signal at any moment after the spawn,
+    # and SIGUSR1 ends a process that has not said what to do with it.
+    install_resize_handler()
     info = _load_door_info()
-    try:
-        _OUTPUT_WIDTH = max(1, int(info.get("terminal_width", 80)))
-    except (TypeError, ValueError):
-        _OUTPUT_WIDTH = 80
-    try:
-        reported_height = int(info.get("terminal_height", 24))
-        # The clamp keeps rendering safe; the refusal below quotes what was reported.
-        _OUTPUT_HEIGHT = max(10, min(200, reported_height))
-    except (TypeError, ValueError):
-        reported_height = _OUTPUT_HEIGHT = 24
+    reported_height = apply_terminal_size(info)
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
     set_palette(p)  # what every component in the style layer draws with
     input_reader()  # opened before the first page, so it can reveal itself
