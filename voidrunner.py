@@ -7561,6 +7561,11 @@ def install_resize_handler() -> bool:
     if not hasattr(signal, "SIGUSR1"):
         return False
     signal.signal(signal.SIGUSR1, _note_resize)
+    # A profile that gives the door a PTY is told with SIGWINCH instead, after the
+    # same drop-file rewrite. Its default action is to be ignored, which is what
+    # the door did with it.
+    if hasattr(signal, "SIGWINCH"):
+        signal.signal(signal.SIGWINCH, _note_resize)
     return True
 
 
@@ -7606,6 +7611,11 @@ def _resized_while_idle() -> bool:
     live = _INPUT_READER.read_byte if _INPUT_READER is not None else None
     fd = live.fd if isinstance(live, _StdioBytes) else None
     if os.name != "posix" or fd is None:
+        return take_resize()
+    if _INPUT_READER.pending is not None:
+        # A byte the decoder has already taken off the pipe (the key typed just
+        # after a lone Escape, say). The kernel has nothing left to report, so
+        # waiting on it would hold that key until the next one arrived.
         return take_resize()
     import select
 
@@ -8919,6 +8929,7 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
             lines += ["Local accomplishments; starting advantages and game rules may differ. No shared-seed competition."]
             cache[category] = _service_pages(lines, title, footer)
         key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[category])
+        if key == RESIZE_KEY: cache, page = {}, 0  # the cached pages were cut for the old terminal
         if key in ("B", "Q"): return
         if key in ("1", "2", "3", "4", "5"):
             category, page = list(SCORE_CATEGORIES)[int(key) - 1], 0
@@ -10329,6 +10340,7 @@ def screen_customs(p: Palette, world: World) -> None:
         can_pay = world.save.pilot.credits >= customs_quote(world)[1]
         footer = "[S] Surrender [P] Pay bribe [<>] Page: " if can_pay else "[S] Surrender [<>] Page: "
         action, page, count = _draw_service_page(p, f"Customs {world.save.pilot.credits:,}cr", lines, footer, page)
+        if action == RESIZE_KEY: continue  # a resize is not an answer; draw the same terms again
         if (moved := page_step(action, page, count)) is not None: page = moved
         else:
             try:
