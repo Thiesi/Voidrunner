@@ -475,3 +475,60 @@ def test_a_chart_entry_that_spans_pages_carries_its_letter_on_each(monkeypatch, 
         assert set(choices) <= shown, (choices, rows)  # every offered letter is visible here
     spanning = [page for page in pages if any(plain(row).startswith("    ") for row in page[0])]
     assert spanning or all(len(page[0]) <= 10 for page in pages)
+
+
+# ---------------------------------------------------------------------------
+# Screens that were drawn under the screen before them (issue #643).
+#
+# Both opened with a blank line where every other screen clears, so they were
+# printed beneath whatever was there and every key left another copy in the
+# scroll. Each frame a caller is handed has to begin at the top of the terminal.
+# ---------------------------------------------------------------------------
+
+CLEAR = "\x1b[2J\x1b[H"
+
+
+def _frames_of(monkeypatch, keys: str, draw) -> list[str]:
+    """What the door wrote between one keypress and the next."""
+    output, frames, supply = io.StringIO(), [], iter(keys)
+    def press():
+        frames.append(output.getvalue()); output.seek(0); output.truncate(0)
+        return next(supply)
+    monkeypatch.setattr(vr, "read_key", press)
+    with contextlib.redirect_stdout(output):
+        draw()
+    return frames
+
+
+def _assert_one_fresh_screen(frame: str, height: int) -> None:
+    """One clear, nothing before it but the echo of the key that asked for the
+    screen, and what follows it fits the terminal."""
+    echoed, cleared, shown = frame.partition(CLEAR)
+    assert cleared, f"never cleared: {frame[:40]!r}"
+    assert len(echoed.strip()) <= 1, f"drawn before the clear: {echoed!r}"
+    assert CLEAR not in shown
+    # The clear took the place of a blank row, so the screen still fits.
+    assert len(shown.splitlines()) <= height
+
+
+@pytest.mark.parametrize("width,height", [(80, 24), (40, 12)])
+def test_every_view_of_the_star_map_replaces_the_one_before(monkeypatch, terminal, width, height):
+    terminal(width, height)
+    world = _world_with_seed(42)
+    for station in world.galaxy: station.discovered = True
+    world.sync_discovered()
+    # Sector forward, sector back, overview, then leave: four drawings of the map.
+    frames = _frames_of(monkeypatch, "NPOB", lambda: vr.screen_galaxy_map(vr.Palette(False), world))
+    assert len(frames) == 4 and all("Star Map:" in frame for frame in frames)
+    for frame in frames:
+        _assert_one_fresh_screen(frame, height)
+
+
+@pytest.mark.parametrize("width,height", [(80, 24), (40, 12)])
+def test_every_page_of_a_list_picker_replaces_the_one_before(monkeypatch, terminal, width, height):
+    terminal(width, height)
+    options = [(index, f"Station number {index}") for index in range(30)]
+    frames = _frames_of(monkeypatch, "NNPB", lambda: vr._pick_trade_field("Charted Destination", options))
+    assert len(frames) == 4 and all("Charted Destination" in plain(frame) for frame in frames)
+    for frame in frames:
+        _assert_one_fresh_screen(frame, height)

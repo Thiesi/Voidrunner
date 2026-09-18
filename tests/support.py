@@ -100,7 +100,7 @@ _BORDER = "╭╮╰╯│─═║╔╗╚╝├┤╠╣+-=|"
 def plain(text: str) -> str:
     """One screen's raw output with its styling taken off.
 
-    Page bodies are coloured now (issue #493), and colour lands *between*
+    Page bodies are colored now (issue #493), and color lands *between*
     tokens: a row reading `Promoted to Void Baron` carries an escape before
     `Promoted` and another after it, so the sentence is no longer a substring
     of what was written. A test that looks for words the caller read reads them
@@ -252,15 +252,15 @@ def _drain_until(stream, output: bytearray, markers, events, stop=None) -> None:
     racing the door's startup (issue #416 review).
 
     Markers are matched against the output with its styling taken off: page
-    bodies are coloured now (issue #493), so a phrase the caller reads as one
+    bodies are colored now (issue #493), so a phrase the caller reads as one
     sentence is several runs of bytes with escapes between them, and a marker
-    that had to be contiguous in the raw stream would pin the game's colours in
+    that had to be contiguous in the raw stream would pin the game's colors in
     place rather than its behaviour.
 
     Draining continues past the last marker, to the cap or the end of the
     stream. Stopping at the marker left the door writing into a pipe nobody was
     emptying, which was harmless only while a screen was smaller than the pipe
-    buffer: a coloured page is several times the bytes of a plain one, and the
+    buffer: a colored page is several times the bytes of a plain one, and the
     door then blocked mid-screen and never reached its next keypress.
 
     `stop` is what makes "stopped at" mean it. A caller that wants the door
@@ -284,6 +284,12 @@ def _drain_until(stream, output: bytearray, markers, events, stop=None) -> None:
                 pending.pop(0)[1].set()
             if not pending and stop is not None:
                 stop()
+
+
+# The key a caller presses on the Journey Resumed notice, which waits for one
+# before the interrupted encounter is drawn (issue #641). Every test that
+# launches the door onto a saved `pending_travel` types it first.
+RESUME = b" "
 
 
 @contextlib.contextmanager

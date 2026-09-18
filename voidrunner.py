@@ -92,6 +92,9 @@ ESC = "\x1b"
 RESET = f"{ESC}[0m"
 BOLD = f"{ESC}[1m"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
+# Styling only: colour, weight and reset. The unstyled presets strip these and
+# nothing else, so a screen still clears and homes (issue #642).
+ANSI_STYLE_RE = re.compile(r"\x1b\[[0-9;:]*m")
 _OUTPUT_WIDTH = 80
 _OUTPUT_HEIGHT = 24
 _OUTPUT_STYLE = "auto"
@@ -175,11 +178,11 @@ def _load_door_info() -> dict:
 class Palette:
     """Voidrunner's presentation palette (issue #493 §4).
 
-    Nine named roles, not nine colours a screen may pick from: *what a token
-    is* decides its colour, so the same fact is the same colour on every
-    screen, and chrome is never the colour of content. Truecolour is the
-    design target; the 256-colour index beside each RGB is the first
-    degradation, `basic` the second (a 16-colour terminal), and `mono`/`plain`
+    Nine named roles, not nine colors a screen may pick from: *what a token
+    is* decides its color, so the same fact is the same color on every
+    screen, and chrome is never the color of content. Truecolor is the
+    design target; the 256-color index beside each RGB is the first
+    degradation, `basic` the second (a 16-color terminal), and `mono`/`plain`
     drop styling entirely by returning an empty sequence from `_sgr` -- which
     is why every component can be written once and still render in all four
     presets.
@@ -187,7 +190,7 @@ class Palette:
     The four legacy names (`title`, `accent`, `correct`, `wrong`, `muted`)
     remain as aliases of the roles they always meant: hundreds of call sites
     outside the rebuilt screens still use them, and renaming them would say
-    nothing about the colour anyone sees. A real nearest-256 algorithm is
+    nothing about the color anyone sees. A real nearest-256 algorithm is
     overkill here for the same reason as in `retro_trivia.py`.
     """
 
@@ -200,10 +203,10 @@ class Palette:
         if _OUTPUT_STYLE == "basic":
             color = {205: 95, 51: 96, 46: 92, 203: 91, 244: 37, 220: 93,
                      # 137 is `slate`, the label role: plain white at sixteen
-                     # colours, where there is no tan to move it to and amber
+                     # colors, where there is no tan to move it to and amber
                      # already holds 33. 110 is `hull` and 237 is `deep`, the
                      # two chrome roles: dark cyan and bright black are the
-                     # sixteen-colour readings of "recedes behind the content".
+                     # sixteen-color readings of "recedes behind the content".
                      110: 36, 237: 90, 255: 97, 137: 37, 84: 92, 215: 33}.get(idx256, 37)
             return f"{ESC}[{color}m"
         if self._truecolor:
@@ -233,7 +236,7 @@ class Palette:
         Neutral (issue #519). It was `#1d3b57` / 24, a dark saturated blue, and
         99% of its characters were box-drawing. A gauge track or a separator
         has nothing to say about hue; a near-neutral dark lets the filled half
-        of a gauge be the only coloured thing on its row.
+        of a gauge be the only colored thing on its row.
         """
         return self._sgr((47, 56, 68), 237)
 
@@ -258,7 +261,7 @@ class Palette:
 
         Warm, and deliberately the one role drawn from outside the cockpit's own
         hue (issue #519). It was `#7f8fae` / 103, a desaturated *blue* on a blue
-        screen, so a label read as the same colour one shade down rather than as
+        screen, so a label read as the same color one shade down rather than as
         a different kind of thing: measured on the command deck, `deep`, `hull`,
         `ink` and this were 78.7% of visible characters in one band. Warm rather
         than neutral because it has to separate, not merely differ -- and
@@ -302,12 +305,12 @@ class Palette:
 
     def gradient(self, text: str, start: tuple[int, int, int], end: tuple[int, int, int],
                  fallback: str | None = None) -> str:
-        """Ramp one colour into another across `text`, where the terminal can.
+        """Ramp one color into another across `text`, where the terminal can.
 
-        Truecolour is the design target and this is the one place it buys
-        something a 256-colour palette cannot fake, so it degrades rather than
-        approximating: a 256-colour terminal gets the whole run in one role
-        colour, `basic` gets its nearest, and mono/plain get the characters.
+        Truecolor is the design target and this is the one place it buys
+        something a 256-color palette cannot fake, so it degrades rather than
+        approximating: a 256-color terminal gets the whole run in one role
+        color, `basic` gets its nearest, and mono/plain get the characters.
         """
         if _OUTPUT_STYLE in ("mono", "plain") or not text:
             return text
@@ -326,7 +329,7 @@ class Palette:
                 "info": self.hull, "brand": self.plasma, "key": self.gold,
                 "value": self.ink, "label": self.slate,
                 # A column heading is a section header, which `hull` already
-                # means. It was `label`, so a table's headings were the colour
+                # means. It was `label`, so a table's headings were the color
                 # of the sentence above them and the footnote below them and
                 # the table never announced itself as one (issue #532).
                 "heading": self.hull}.get(name, self.ink)
@@ -337,7 +340,7 @@ class Palette:
 # and thirty more -- and threading a palette through every one of them would
 # say nothing except "this file has a palette". It is a module-level setting in
 # exactly the way `_OUTPUT_WIDTH` and `_OUTPUT_STYLE` already are, set once by
-# `main()` from the drop file's colour depth.
+# `main()` from the drop file's color depth.
 _PALETTE = Palette(truecolor=False)
 
 
@@ -376,7 +379,10 @@ def display_style(style: str):
 
 def out(text: str = "") -> None:
     if _OUTPUT_STYLE in ("mono", "plain"):
-        text = ANSI_ESCAPE_RE.sub("", text)
+        # "No ANSI styling" means no colour, not no terminal. Stripping every
+        # escape took `clear_screen`'s with it, so these two presets went back
+        # to printing each screen under the last one (issues #516, #642).
+        text = ANSI_STYLE_RE.sub("", text)
     if _OUTPUT_STYLE == "plain":
         text = text.translate(_ASCII_ART_TRANSLATION)
     sys.stdout.write(text)
@@ -524,13 +530,13 @@ def _visible_width(text: str) -> int:
 
 
 def wrap_styled(text: str, width: int, hang: int = 0) -> list[str]:
-    """Wrap a styled row and keep its colour across the break.
+    """Wrap a styled row and keep its color across the break.
 
     `_wrap_output` is ANSI-aware about *width*, but a row it breaks in the
-    middle of a coloured span continues in the terminal's default foreground:
+    middle of a colored span continues in the terminal's default foreground:
     the escape that opened the span is on the previous row. Every styled body
     row goes through here instead, so the second half of a wrapped sentence is
-    the colour the first half was, and each row is closed with a reset so the
+    the color the first half was, and each row is closed with a reset so the
     frame drawn after it is never tinted by the content.
     """
     # A row that indents itself is a detail under something; its continuations
@@ -2060,6 +2066,12 @@ class World:
         # Narration of the current hop, retained for the next deck page (issue #410).
         # Transient: rebuilt from what the hop prints; never persisted.
         self.hop_report: list[str] = []
+        # What the door has to say before its first deck: the First Flight
+        # pointer, a returning pilot's recap, a new career after retirement.
+        # They ride on the deck that follows, because a line written ahead of a
+        # screen is erased by that screen's own clear before anyone can read it
+        # (issue #641). Transient; shown once.
+        self.launch_notes: list[str] = []
         self.galaxy: list[GalaxySystem] = generate_galaxy(save.seed)
         self.by_id: dict[int, GalaxySystem] = {s.id: s for s in self.galaxy}
         for sid in save.discovered:
@@ -4852,14 +4864,14 @@ def _gauge_bar(val: int, max_val: int, width: int = 10, p: Palette | None = None
 #
 # Every component returns *styled* text. Page bodies used to be flattened to
 # plain before printing (`wrapped_group`), which is the single mechanism that
-# deleted the game's colour; they are not any more, so a component's output
+# deleted the game's color; they are not any more, so a component's output
 # survives all the way to the terminal.
 # ---------------------------------------------------------------------------
 
 
 def gauge(value: int, maximum: int, cells: int = 10, *, ramp: bool = True,
           tone: str | None = None) -> str:
-    """A filled bar. `ramp` colours it by how full it is; `tone` overrides.
+    """A filled bar. `ramp` colors it by how full it is; `tone` overrides.
 
     The track is `deep` rather than absent so the bar's full length reads as a
     scale even when it is nearly empty -- an eighth of a bar with nothing
@@ -4869,12 +4881,12 @@ def gauge(value: int, maximum: int, cells: int = 10, *, ramp: bool = True,
     fraction = 0.0 if maximum <= 0 else max(0.0, min(1.0, value / maximum))
     filled = round(fraction * cells)
     if tone is not None:
-        colour = p.tone(tone)
+        color = p.tone(tone)
     elif ramp:
-        colour = p.mint if fraction > 0.5 else (p.amber if fraction > 0.2 else p.alarm)
+        color = p.mint if fraction > 0.5 else (p.amber if fraction > 0.2 else p.alarm)
     else:
-        colour = p.hull
-    return (f"{colour}{glyph('fill') * filled}{RESET}"
+        color = p.hull
+    return (f"{color}{glyph('fill') * filled}{RESET}"
             f"{p.deep}{glyph('track') * (cells - filled)}{RESET}")
 
 
@@ -4952,11 +4964,11 @@ def alert(tone: str, title: str, detail: str = "", action: str = "") -> str:
 
 
 def verbatim(text: str) -> str:
-    """Mark a cell as already composed, so `table` does not colour it.
+    """Mark a cell as already composed, so `table` does not color it.
 
-    A `table` colours any cell that carries no styling of its own, which is
+    A `table` colors any cell that carries no styling of its own, which is
     right for the figures screens hand it and wrong for a sample that is meant
-    to have no colour -- the Display Options preview of `mono` and `plain`.
+    to have no color -- the Display Options preview of `mono` and `plain`.
     The reset says "this is finished" in the one alphabet the rule reads.
     """
     return text if ANSI_ESCAPE_RE.search(text) else f"{RESET}{text}"
@@ -5122,7 +5134,7 @@ def _menu_entry(key: str, label: str) -> str:
     """One `[K] Label` cell, with a preview count picked out as the value it is.
 
     `Board: 4 offers` is a label and a value, not one phrase: the count is what
-    a caller scans the menu for, and colouring the whole entry alike buried it
+    a caller scans the menu for, and coloring the whole entry alike buried it
     (issue #518). Entries with no count -- `Status`, `Hall of Fame` -- are the
     thing itself and stay a value throughout.
     """
@@ -5157,8 +5169,8 @@ def menu_grid(entries: list[tuple[str, str]], width: int | None = None) -> list[
 
 def portrait(art: list[str], tint: str = "info") -> list[str]:
     """Authored ANSI-free art in one tone. Whole composition or none."""
-    colour = pal().tone(tint)
-    return [f"{colour}{row}{RESET}" for row in art]
+    color = pal().tone(tint)
+    return [f"{color}{row}{RESET}" for row in art]
 
 
 # A body row that is really a rule across the frame, naming the group under it.
@@ -5249,7 +5261,7 @@ _VALUE_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?(?:\s?cr|%|/\d[\d,]*)?")
 # Gold is hotkeys and credits and nothing else, so a credit figure is claimed
 # before the generic value pass that would paint it as an ordinary number.
 _CREDIT_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?\s?cr\b")
-# Every escape this game writes is an SGR colour. Anything else on a body row
+# Every escape this game writes is an SGR color. Anything else on a body row
 # -- a cursor jump, a clear-screen -- arrived inside data: a score file's
 # callsign, a name out of a save. It is removed before the row is styled, so a
 # row cannot be taken for "already styled" because a caller put an escape in
@@ -5265,7 +5277,7 @@ _GAUGE_RE = re.compile(r"[▀-▐░-▓■]{2,}")
 
 
 def style_action_bar(text: str) -> str:
-    """An action bar, coloured the way the service menu above it is coloured.
+    """An action bar, colored the way the service menu above it is colored.
 
     `[K]` gold, the label after it a value, the rest of the row prose --
     which is exactly what `key_label` and `_menu_entry` do inside the box, so
@@ -5275,11 +5287,11 @@ def style_action_bar(text: str) -> str:
 
 
 def style_body_line(text: str, *, key_labels: bool = False) -> str:
-    """Colour an unstyled body row by the role of each token.
+    """Color an unstyled body row by the role of each token.
 
     Rebuilt screens compose their rows out of components and arrive here
     already styled; this is what every *other* row in the game gets, and it is
-    why no page prints a body row with no colour on it. The rule is the same
+    why no page prints a body row with no color on it. The rule is the same
     one the components follow: a hotkey is gold, a value is ink, a severity
     word takes its tone, and the prose around them is slate.
 
@@ -5312,7 +5324,7 @@ def style_body_line(text: str, *, key_labels: bool = False) -> str:
         claim(match.start(), match.end(),
               badge(match.group(0), tone) if tone else f"{p.gold}{BOLD}{match.group(0)}{RESET}")
     if key_labels:
-        # Claimed before the shape-based passes below, so a label is one colour
+        # Claimed before the shape-based passes below, so a label is one color
         # from end to end: `[R] Refuel` must not come out with `Refuel` in two
         # roles because a word inside it happened to match a severity pattern.
         for position, match in enumerate(keys):
@@ -5425,7 +5437,7 @@ def screen_title(p: Palette, info: dict) -> None:
     out_line(top_border)
     for kind, text, align in title_rows(info, inner_w):
         if kind == "rule":
-            # The one place truecolour buys something a palette cannot fake.
+            # The one place truecolor buys something a palette cannot fake.
             out_line(f"{edge}╠{RESET}{p.gradient('═' * inner_w, (95, 215, 255), (255, 90, 190), p.title)}{edge}╣{RESET}")
             continue
         if kind == "logo":
@@ -5456,11 +5468,11 @@ def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str 
     out_line(_box_title(p, _fit_text(title, max(1, inner_w - 5))))
     handle = info["handle"]
     welcome = welcome or f"Welcome to the void, pilot. No career dossier found for {p.gold}{handle}{p.muted}."
-    # One colour for the whole greeting, with the callsign the one thing picked
-    # out of it. A wrapped row used to carry no colour of its own, so a sentence
-    # that spilled onto a second row arrived in two colours -- the continuation
+    # One color for the whole greeting, with the callsign the one thing picked
+    # out of it. A wrapped row used to carry no color of its own, so a sentence
+    # that spilled onto a second row arrived in two colors -- the continuation
     # in the terminal's default foreground, which on a caller's client can be
-    # the colour this box's own border is drawn in.
+    # the color this box's own border is drawn in.
     active = p.muted
     for index, row in enumerate(_wrap_output(f"{p.muted}{welcome}", max(1, inner_w - 2)).split("\r\n")):
         styled = row if index == 0 else active + row
@@ -5511,7 +5523,7 @@ def ship_gauge_rows(world: World) -> list[str]:
                      f"{round(chance * 100)}%", "patrol interest"])
     # Column 3 is the hull's condition, the ship's class, the lot count, the
     # crew roster -- every one of them a value a caller reads off the row. It
-    # was declared `label`, so it came out the colour of `HULL` and `FUEL` in
+    # was declared `label`, so it came out the color of `HULL` and `FUEL` in
     # column 0, which really are labels (issue #532).
     drawn = table(["", "", "", ""], rows, "llrl",
                   styles=[["label", "value", "value", "value"] for _ in rows],
@@ -5533,7 +5545,7 @@ def deck_alert_rows(world: World) -> list[str]:
 
     These used to be ordinary sentences mixed in among the status lines, which
     is how a critical hull read exactly like a crew wage. Severity is now the
-    row's colour and its glyph, and the key that answers it is on the same row.
+    row's color and its glyph, and the key that answers it is on the same row.
     """
     ship, pilot, here = world.save.ship, world.save.pilot, world.here
     rows: list[str] = []
@@ -5668,11 +5680,13 @@ def screen_station_menu(p: Palette, world: World) -> str:
     world.pending_promotions.clear()
     completed[0:0] = world.hop_report
     world.hop_report = []
+    # Shown on this deck and no later one, like the results below them.
+    notes, world.launch_notes = world.launch_notes, []
     page, expanded = 0, False
     while True:
         lines = station_deck_lines(world, expanded=expanded)
-        if completed:
-            lines[0:0] = ["Result: " + message for message in completed]
+        if notes or completed:
+            lines[0:0] = notes + ["Result: " + message for message in completed]
         footer = "[<] Prev [>] Next [X] Compact [Q] Exit: " if expanded else "[<] Prev [>] Next [X] Expand [Q] Exit: "
         choice, page, count = _draw_service_page(p, f"Command Deck: {world.save.pilot.credits:,}cr", lines, footer, page)
         if (moved := page_step(choice, page, count)) is not None: page = moved
@@ -5755,9 +5769,9 @@ def screen_faction_story(p: Palette, world: World, faction: str) -> str | None:
 def screen_display_options(p: Palette, world: World) -> None:
     page, result = 0, None
     styles = list(DISPLAY_STYLES)
-    blurbs = {"auto": "the terminal's own colour depth, with motion",
+    blurbs = {"auto": "the terminal's own color depth, with motion",
               "fast": "the same palette with every reveal, tick and drain off",
-              "basic": "sixteen ANSI colours and Unicode artwork",
+              "basic": "sixteen ANSI colors and Unicode artwork",
               "mono": "Unicode artwork, no ANSI styling",
               "plain": "ASCII artwork, no ANSI styling; letters and typed text stay UTF-8"}
     while True:
@@ -5770,15 +5784,15 @@ def screen_display_options(p: Palette, world: World) -> None:
         rows, styles_for = [], []
         for index, style in enumerate(styles, 1):
             # A preview is drawn with the terminal's own capability, never above
-            # it: a 16-colour caller previewing the full palette must not be
-            # sent 256-colour escapes their terminal cannot read. What the
+            # it: a 16-color caller previewing the full palette must not be
+            # sent 256-color escapes their terminal cannot read. What the
             # sample shows them is the preset's shape; the blurb says the rest.
             with display_style(style if PRESET_DEPTH[world.save.display_style] >= PRESET_DEPTH[style]
                                else world.save.display_style):
                 sample = (f"{gauge(30, 60, 8)} {pal().ink}30/60{RESET} "
                           f"{badge('LOW FUEL', 'danger')} {chip('day', '12')}")
                 if _OUTPUT_STYLE in ("mono", "plain"):
-                    # These previews are of a preset that has no colour, so the
+                    # These previews are of a preset that has no color, so the
                     # sample must not pick any up from the table it sits in.
                     sample = verbatim(ANSI_ESCAPE_RE.sub("", sample))
                 if _OUTPUT_STYLE == "plain":
@@ -6585,7 +6599,7 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
     unit -- a wrapped line, an authored silhouette, a keyed list entry -- and is
     only split when it is larger than a whole page, in which case it continues on
     the next one rather than being dropped. `render(row, index)` decorates a row
-    with its group's index, which is how a portrait screen colours its art.
+    with its group's index, which is how a portrait screen colors its art.
 
     With `keys`, each group carries an optional `(letter, value)`: a page breaks
     rather than repeat a letter, every page returns its own letter map alongside
@@ -6674,12 +6688,12 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
 def wrapped_group(line: str) -> list[str]:
     """One display line as the styled rows it occupies.
 
-    This function is where Voidrunner's colour used to die. It wrapped every
+    This function is where Voidrunner's color used to die. It wrapped every
     body row of every paged screen through `_mission_plain` -- `ANSI.sub("")` --
-    so a screen could not be coloured even if it wanted to be, and the frame
+    so a screen could not be colored even if it wanted to be, and the frame
     restored in #486 was the only styled thing left on a page because it is
     added afterwards (issue #493 §2). Now a row that styled itself keeps its
-    styling across the wrap, and a row that did not is coloured by role.
+    styling across the wrap, and a row that did not is colored by role.
     """
     if line.startswith(SECTION_MARK):
         # A rule is one row whatever its label: `draw_page` draws it across the
@@ -6821,7 +6835,12 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choi
     while True:
         current = pages[page]
         if page_state is not None: page_state["page"] = page
-        out_line(); out_line(f"{current['title']} {page + 1}/{len(pages)}")
+        # A screen of its own, so it starts at the top of the terminal. It used to
+        # open with a blank line instead, which put it under the prompt that
+        # called it and left every page turned in the scroll (issue #643). The
+        # clear takes the blank line's row, so the height budget is unchanged.
+        clear_screen()
+        out_line(f"{current['title']} {page + 1}/{len(pages)}")
         for row in current["rows"]: out_line(row)
         seen.add(page)
         controls = current["footer"] if current["choices"] or current["required"] else "[N] Next [P] Prev [B] Back: "
@@ -7450,7 +7469,7 @@ def _box_header(p: "Palette", title: str, counter: str) -> str:
     inner = _box_inner_width()
     edge, dim = f"{p.hull}{BOLD}", p.deep
     # The brand is plasma, which is what plasma is for; the frame around it is
-    # hull, and chrome is never the colour of the thing it frames (#493 review).
+    # hull, and chrome is never the color of the thing it frames (#493 review).
     brand = f"{p.plasma}{BOLD}{_brand()}{RESET}{edge}"
     tail = f" {p.slate}{counter}{RESET}{edge} " if counter else ""
     for lead in (f"{brand} {glyph('dot')} {title}", title):
@@ -7521,11 +7540,11 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
         if row.startswith(SECTION_MARK):
             out_line(_box_section(p, row[1:]))
             continue
-        # The last place a body row can still be colourless. Screens that build
+        # The last place a body row can still be colorless. Screens that build
         # their own rows -- the contract board, the star map, a screen that
         # simply hands `draw_page` a list of sentences -- never went through
         # `wrapped_group`, and a rule that held for most pages and not the rest
-        # is how the colour was lost one slice at a time to begin with.
+        # is how the color was lost one slice at a time to begin with.
         row = style_body_line(row.replace(STICKY_MARK, "").replace(MEMBER_MARK, ""))
         out_line(f"{p.hull}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.hull}│{RESET}")
     out_line(_box_bottom(p, border_color=p.hull))
@@ -8144,6 +8163,45 @@ def pilot_recap(world: World) -> list[str]:
     return [_mission_plain(line) for line in lines]
 
 
+FIRST_FLIGHT_POINTER = "Start at [G] Pilot Guide for an optional first delivery and flight instructions."
+
+
+def launch_notes(world: World, *, is_new: bool) -> list[str]:
+    """What the first Command Deck of a session says above its gauges.
+
+    A new pilot gets the one pointer to First Flight; a returning pilot gets a
+    welcome and the recap of what they had committed to. The recap's own first
+    line is left out: it names the station, the day and the credits, which the
+    deck prints directly underneath. A pilot resuming an interrupted journey
+    gets neither here -- that has a screen of its own, and the deck that
+    follows it opens on the journey's results.
+    """
+    if world.save.pending_travel is not None:
+        return []
+    if is_new:
+        return [FIRST_FLIGHT_POINTER]
+    # Also left out: the recap's advice for a pilot tracking nothing. It is
+    # guidance, the guide keeps it, and at forty columns it is three more rows
+    # on a page the deck's own header and gauges are waiting behind.
+    recap = [line for line in pilot_recap(world)[1:] if not line.startswith("No contract tracked.")]
+    return [_mission_plain(f"Welcome back, {world.save.pilot.handle}.")] + recap
+
+
+def journey_resumed_lines(world: World) -> list[str]:
+    travel = world.save.pending_travel
+    system = world.by_id[travel["destination"]] if travel is not None else None
+    # An uncharted bearing stays unnamed until the pilot arrives.
+    destination = system.name if system is not None and system.discovered else "an uncharted system"
+    # Short enough to fit the 40x12 floor with its frame and the pause under it.
+    text = [f"Welcome back, {world.save.pilot.handle}.",
+            f"Resuming your interrupted journey to {destination}, day {world.save.turn}: the same "
+            "encounter, nothing rerolled. Station access follows its resolution."]
+    rows: list[str] = []
+    for line in text:
+        rows.extend(wrap_styled(style_body_line(_mission_plain(line)), _page_content_width()))
+    return rows
+
+
 def pilot_guide_lines(world: World) -> list[str]:
     lines = ["Use [B] Back to return to the station deck before using its market, yard or chart commands.",
              "Your ship is your livelihood. Supply outlying stations, build capital, and choose what kind of pilot to become."]
@@ -8647,10 +8705,14 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
             continue
         if not confirm(f"End this career as {CAREER_FINALES[selected]['label']} and begin New Game+?", p):
             result, page = "Retirement cancelled; current career retained.", 0; continue
+        label = CAREER_FINALES[selected]["label"]
         world.reset(fresh.save)
         world.pending_promotions.extend(fresh.pending_promotions)
         world.commit()
-        out_line(); out_line("A new career begins.")
+        # `reset` cleared the notes with everything else, so this is set after
+        # it. Written to the terminal instead, the line was erased by the new
+        # career's first deck before it could be read (issue #641).
+        world.launch_notes = [f"A new career begins. {label} is archived under [S] Status, [D] Dossiers."]
         return "A new career begins."
 
 
@@ -8695,7 +8757,7 @@ def hall_of_fame_lines(entries: list[dict], user_id: int) -> list[str]:
     if not entries:
         return [f"{p.slate}No pilots recorded yet -- be the first.{RESET}"]
     best = max(entry.get("best_credits", 0) for entry in entries) or 1
-    # Deliberately unstyled: it is a sentence, and `style_body_line` colours it
+    # Deliberately unstyled: it is a sentence, and `style_body_line` colors it
     # by role on the way to the page like every other sentence in the game.
     lines = [f"Top {plural(len(entries), 'pilot')} by best recorded credits. "
              f"[YOU] marks your pilot when listed."]
@@ -8768,7 +8830,7 @@ def hall_view_rows() -> list[str]:
     """The Hall's own view switcher, as the menu it is.
 
     It used to be a sentence -- `Views: [1] Wealth, ... [5] Completed careers.`
-    -- left to `style_body_line` to colour by pattern, and `Completed` matched
+    -- left to `style_body_line` to color by pattern, and `Completed` matched
     the good-tone severity pattern, so one view name in the list came out green
     for no reason (issue #532). A menu is built with the menu component: a
     component's decision beats a pattern's guess, which is the same rule that
@@ -8884,7 +8946,7 @@ def keyed_rows(key: str, rows: list[str]) -> list[str]:
     The prefix is styled here, not left plain. A keyed entry's row is usually
     already styled by the screen that built it, and `style_body_line` leaves a
     styled row alone -- so a raw prefix would be the one hotkey on the page
-    drawn in the terminal's default colour (issue #493).
+    drawn in the terminal's default color (issue #493).
     """
     if not rows:
         return []
@@ -9115,9 +9177,9 @@ def spatial_map_grid(world: World, path: list[int], *, public_target: int | None
     return [border] + ["|" + "".join(row) + "|" for row in grid] + [border]
 
 
-# What each mark on the star map means, and therefore what colour it is. The
+# What each mark on the star map means, and therefore what color it is. The
 # grid itself stays plain -- it is a projection, and the exact links live in
-# Info -- so the colour is put on as it is printed.
+# Info -- so the color is put on as it is printed.
 MAP_MARK_TONES = {"@": "brand", "!": "danger", "X": "caution", "+": "info",
                   "*": "brand", "o": "value", "?": "label", ":": "brand"}
 
@@ -9141,8 +9203,8 @@ def style_map_row(p: "Palette", row: str) -> str:
 def _map_run(p: "Palette", run: str, tone: str | None) -> str:
     if not run or tone is None:
         return run
-    colour = p.hull if tone == "frame" else (p.deep if tone == "chrome" else p.tone(tone))
-    return f"{colour}{run}{RESET}"
+    color = p.hull if tone == "frame" else (p.deep if tone == "chrome" else p.tone(tone))
+    return f"{color}{run}{RESET}"
 
 
 def map_legend(p: "Palette") -> str:
@@ -9230,7 +9292,12 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
             draw_page(p, title, pages[page], page, len(pages))
             footer = list_footer
         else:
-            out_line()
+            # Full-bleed and unframed on purpose, and sized to fill the terminal --
+            # so it has to start at the top of one. It opened with a blank line
+            # instead, which drew it under the chart and added another whole copy
+            # beneath the last at every sector change (issue #643). The clear
+            # takes the blank line's row.
+            clear_screen()
             heading = "Star Map: " + (SECTOR_NAMES[sector] if sector is not None else "Galaxy")
             xmin, xmax, ymin, ymax = map_bounds(sector)
             bounds = f"X {xmin}-{xmax}; Y {ymin}-{ymax}"
@@ -10331,7 +10398,8 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
                     except EOFError:
                         pass
                     return RecoveryResult(None, 1)
-                out_line("Previous checkpoint restored. Resuming this career.")
+                # Said by `main`, on the deck the restored career opens at: a line
+                # written here is erased by that deck's clear (issue #641).
                 return RecoveryResult(restored, 0)
 
 
@@ -10390,11 +10458,9 @@ def main() -> int:
             save = recovery.save
             if save is None:
                 return recovery.exit_code
-            is_new, notice = False, None
+            is_new, notice = False, "Previous checkpoint restored. Resuming this career."
         apply_display_style(save.display_style)
         screen_title(p, info)
-        if notice:
-            out_line(f"{p.wrong}{notice}{RESET}")
         if is_new:
             # After a refusal there *is* a dossier; it is simply not one this
             # build opens, and saying otherwise would read as a bug (#421).
@@ -10409,19 +10475,22 @@ def main() -> int:
                 # The refused career keeps its slot until its replacement is
                 # confirmed; a cancelled registration changes nothing (#421).
                 replace_unsupported_career(save_dir, user_id, save)
-        else:
-            out_line(f"{p.muted}Welcome back, {save.pilot.handle}. Day {save.turn}.{RESET}")
         world = World(save, checkpoint=lambda current: persist(current, save_dir, user_id))
         world.checkpoint()  # the launch tick prepares the station this career opens at
-        if is_new:
-            out_line("Start at [G] Pilot Guide for an optional first delivery and flight instructions.")
-        elif world.save.pending_travel is None:
-            for line in pilot_recap(world):
-                out_line(line)
+        # `notice` is what loading had to say (a career rolled back to its previous
+        # checkpoint). It waits for the first deck with the rest, even when a
+        # resumed journey comes first.
+        world.launch_notes = ([notice] if notice else []) + launch_notes(world, is_new=is_new)
         if world.save.pending_travel is not None:
-            out_line(f"{p.gold}Resuming your interrupted journey. Station access follows its resolution.{RESET}")
-            screen_travel(p, world, world.save.pending_travel["destination"])
+            # Held on a screen of its own: what follows is the encounter the
+            # caller was cut off in, and its first panel clears the terminal.
+            draw_page(p, "Journey Resumed", journey_resumed_lines(world), 0, 1)
             pause(p)
+            screen_travel(p, world, world.save.pending_travel["destination"])
+            # No pause after it. An ordinary jump has none either: the deck that
+            # follows keeps the journey's outcome as its results. The pause that
+            # stood here held a fight's last lines on screen underneath the
+            # panel they had scrolled off the top (issue #643).
 
         while True:
             choice = screen_station_menu(p, world)

@@ -333,7 +333,7 @@ def test_trade_route_destination_picker_pages_keep_selection_and_back_available(
     for page in pages:
         assert len(page.splitlines()) <= height, page
         assert all(vr._visible_width(row) <= width for row in page.splitlines())
-        # A narrow bar wraps (#400), and its keys are coloured (#532), so this
+        # A narrow bar wraps (#400), and its keys are colored (#532), so this
         # reads what a caller reads rather than the bytes that carried it.
         assert "[B] Back" in " ".join(plain(page).split())
 
@@ -2793,7 +2793,7 @@ def test_every_portrait_has_distinct_complete_bounded_composition(monkeypatch, t
         text=" ".join(" ".join(row.split()) for page in plain_pages for row in page)
         for detail in details:assert detail in text
         output="".join(rendered)
-        if style in ("mono","plain"):assert "\x1b" not in output
+        if style in ("mono","plain"):assert "\x1b" not in output.replace("\x1b[2J\x1b[H", "")  # the clear stays (#642)
         elif style=="basic":assert "\x1b[" in output and "38;" not in output
         else:assert "38;2;" in output
         if style=="plain":assert output.isascii()

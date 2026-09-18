@@ -13,7 +13,7 @@ import sys
 
 import pytest
 
-from .support import plain, plain_bytes, _Sys, _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_exploration_choice, _world_with_seed, page_text, page_title, vr
+from .support import RESUME, plain, plain_bytes, _Sys, _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_exploration_choice, _world_with_seed, page_text, page_title, vr
 
 
 # leave the bounty active forever, turning its target system into a
@@ -1467,7 +1467,7 @@ def test_real_customs_browsing_and_rejected_bribe_preserve_pending_save(tmp_path
     before = (tmp_path / "77.json").read_bytes()
     info = tmp_path / "door_info.json"
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 40, "terminal_height": 12}), encoding="utf-8")
-    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands,
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=RESUME + commands,
         capture_output=True, timeout=10, env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)))
     assert result.returncode == 0 and not result.stderr
     assert b"Resuming your interrupted journey" in result.stdout and b"Customs" in result.stdout
@@ -1485,7 +1485,7 @@ def test_customs_result_checkpoint_and_replay_do_not_repeat_effects(tmp_path, de
     vr.persist(world, tmp_path, 77)
     marker = b"You surrender" if decision == "surrender" else b"changes hands quietly" if decision == "accepted" else b"Bribe refused"
     command = b">S" if decision == "surrender" else b">P"
-    with _door_stopped_at(tmp_path, command, marker):
+    with _door_stopped_at(tmp_path, RESUME + command, marker):
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert saved.pending_travel["encounter"]["done"]
         assert saved.cargo["food"] == 1
@@ -1527,7 +1527,7 @@ def test_distress_cost_preview_matches_each_possible_draw(monkeypatch, fuel):
 def test_real_exploration_browsing_and_disconnect_preserve_pending_save(tmp_path, kind):
     world = _world_with_exploration_choice(kind); vr.persist(world, tmp_path, 77)
     path = tmp_path / "77.json"; before = path.read_bytes()
-    with _door_stopped_at(tmp_path, b">?<", b": <") as output:
+    with _door_stopped_at(tmp_path, RESUME + b">?<", b": <") as output:
         # This echo exists only after both navigation keys and invalid input were read.
         # The prompt itself is matched by its trailing colon, because a one-page screen
         # drops its paging tokens and no longer ends in "Page: " (#412). Read through
@@ -1542,7 +1542,7 @@ def test_real_exploration_browsing_and_disconnect_preserve_pending_save(tmp_path
 def test_real_exploration_decision_is_durable_before_result(tmp_path, kind, key, marker):
     world = _world_with_exploration_choice(kind); vr.persist(world, tmp_path, 77)
     fuel, credits = world.save.ship.fuel, world.save.pilot.credits
-    with _door_stopped_at(tmp_path, key, marker):
+    with _door_stopped_at(tmp_path, RESUME + key, marker):
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         if kind == "distress":
             assert fuel - 4 <= saved.ship.fuel <= fuel - 2
