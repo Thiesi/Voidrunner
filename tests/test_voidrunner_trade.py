@@ -333,7 +333,7 @@ def test_trade_route_destination_picker_pages_keep_selection_and_back_available(
     for page in pages:
         assert len(page.splitlines()) <= height, page
         assert all(vr._visible_width(row) <= width for row in page.splitlines())
-        # A narrow bar wraps (#400), and its keys are coloured (#532), so this
+        # A narrow bar wraps (#400), and its keys are colored (#532), so this
         # reads what a caller reads rather than the bytes that carried it.
         assert "[B] Back" in " ".join(plain(page).split())
 
