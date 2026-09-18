@@ -3369,9 +3369,12 @@ def tactical_round(world: World, pirate: Pirate, tactics: dict, action: str) -> 
     return damage, received, lines
 
 
-def combat_evade_chance(world: World, pirate: Pirate, *, dumped_cargo: bool, tactics: dict, cargo_units: int | None = None) -> float:
+def combat_evade_chance(world: World, pirate: Pirate, *, dumped_cargo: bool, tactics: dict, cargo_units: int | None = None,
+                        patrol: bool = False) -> float:
     chance = evade_chance(world, pirate, dumped_cargo=dumped_cargo, cargo_units=cargo_units)
-    if outclassed(world, pirate, tactics):
+    # Raiders only. A Concord patrol is not after the cargo, takes no Dump, and
+    # has Surrender as its way out; its odds are what they were (#647 review).
+    if not patrol and outclassed(world, pirate, tactics):
         chance = max(chance, OUTCLASSED_DUMP_CHANCE if dumped_cargo else OUTCLASSED_EVADE_FLOOR)
     if tactical_intent(tactics) == "harry": chance = max(0.05, chance - 0.10)
     return chance
@@ -8227,7 +8230,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         f"5. First upgrade: [Y] Yard, [{YARD_LETTERS[list(UPGRADES).index('cargo')]}] Cargo Bay Expansion adds 8 cargo spaces. [{YARD_LETTERS[list(UPGRADES).index('hull')]}] Hull Reinforcement adds 35 maximum hull. Keep travel money before investing.",
         f"Your next cargo tier costs {UPGRADES['cargo']['cost'](world.save.ship.cargo_tier):,} cr." if world.save.ship.cargo_tier < UPGRADES['cargo']['max_tier'] else "Your cargo upgrades are complete.",
         "Danger is a risk rating, not a guarantee you can win a fight. Evasion can fail; bribes cost credits and can be refused. Read the encounter choices before acting.",
-        "A raider marked OUTCLASSED can break your hull in two volleys and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
+        "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
         "The Mission Board ([B] on the station deck) shows full contract terms, tracking and abandonment. [G] Guide keeps this recap available. On every other screen [B] is Back; [Q] on the station deck saves and leaves the game.",
     ]
     return lines
@@ -9967,10 +9970,10 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         lines.append(f"{key_label('G', 'Guard')} {p.slate}reduced shot (55%); incoming{RESET} "
                      f"{p.ink}{low}-{high}{RESET}{p.slate}. Fire recharges Guard.{RESET}")
     else: lines.append("Guard recharging: fire once before using G again.")
-    if outclassed(world, pirate, tactics):
+    if not patrol and outclassed(world, pirate, tactics):
         # One row, said where the decision is made: the numbers above already
         # show it, but only to a pilot who knows what their hull is worth.
-        lines.append(alert("danger", "OUTCLASSED", "two volleys break this hull; it wants your cargo"))
+        lines.append(alert("danger", "OUTCLASSED", "two hits can break this hull; it wants your cargo"))
     if details: lines.append(section("TACTICAL SYSTEMS"))
     if details:
         lines.append("Pattern: " + " > ".join(TACTICAL_PROFILES[tactics["profile"]]) + ".")
@@ -9984,7 +9987,7 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     lines += [
         section("OPTIONS"),
         "[F] Fire: one shot; a surviving enemy returns fire.",
-        f"[E] Evade: about {combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics):.0%} success; failure draws enemy fire.{escort_at_stake}",
+        f"[E] Evade: about {combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics, patrol=patrol):.0%} success; failure draws enemy fire.{escort_at_stake}",
     ]
     if patrol:
         cost = notoriety_fine_cost(pilot.notoriety)
@@ -10172,7 +10175,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
                 dumped = True
                 lines.append(f"You dump {units} units of cargo across their bow." if bought_off
                              else "You dump cargo to lighten the ship.")
-            if world.event_rng.random() < combat_evade_chance(world, pirate, dumped_cargo=dumped, tactics=tactics):
+            if world.event_rng.random() < combat_evade_chance(world, pirate, dumped_cargo=dumped, tactics=tactics, patrol=patrol):
                 lines.append("You break contact and escape.")
                 outcome = "escaped"
             else:

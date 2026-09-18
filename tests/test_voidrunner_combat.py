@@ -1346,3 +1346,18 @@ def test_the_departure_prompt_warns_a_hull_that_can_be_outclassed_and_only_that_
     # An uncharted bearing has no rating to warn about.
     world.save.ship.hull_tier = 0; dest.discovered = False
     assert "can outclass" not in vr.departure_terms(world, dest.id)
+
+
+def test_a_concord_patrol_is_not_bought_off_and_keeps_its_old_odds():
+    """The escape rules are for raiders. A patrol takes no Dump and offers
+    Surrender, so telling a pilot "it wants your cargo" there was wrong, and the
+    Evade floor had quietly changed patrol balance too (#647 review)."""
+    world, pirate, tactics = _shuttle_against(4)
+    assert vr.outclassed(world, pirate, tactics)
+    raider = vr.combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics)
+    patrol = vr.combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics, patrol=True)
+    assert raider == vr.OUTCLASSED_EVADE_FLOOR and patrol < 0.15
+    rows = [plain(row) for row in vr.combat_display_lines(world, pirate, [], patrol=True, tactics=tactics)]
+    assert not any("OUTCLASSED" in row for row in rows) and not any(row.startswith("[D]") for row in rows)
+    evade = next(row for row in rows if row.startswith("[E]"))
+    assert f"{patrol:.0%}" in evade
