@@ -6788,7 +6788,12 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choi
     while True:
         current = pages[page]
         if page_state is not None: page_state["page"] = page
-        out_line(); out_line(f"{current['title']} {page + 1}/{len(pages)}")
+        # A screen of its own, so it starts at the top of the terminal. It used to
+        # open with a blank line instead, which put it under the prompt that
+        # called it and left every page turned in the scroll (issue #643). The
+        # clear takes the blank line's row, so the height budget is unchanged.
+        clear_screen()
+        out_line(f"{current['title']} {page + 1}/{len(pages)}")
         for row in current["rows"]: out_line(row)
         seen.add(page)
         controls = current["footer"] if current["choices"] or current["required"] else "[N] Next [P] Prev [B] Back: "
@@ -9191,7 +9196,12 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
             draw_page(p, title, pages[page], page, len(pages))
             footer = list_footer
         else:
-            out_line()
+            # Full-bleed and unframed on purpose, and sized to fill the terminal --
+            # so it has to start at the top of one. It opened with a blank line
+            # instead, which drew it under the chart and added another whole copy
+            # beneath the last at every sector change (issue #643). The clear
+            # takes the blank line's row.
+            clear_screen()
             heading = "Star Map: " + (SECTOR_NAMES[sector] if sector is not None else "Galaxy")
             xmin, xmax, ymin, ymax = map_bounds(sector)
             bounds = f"X {xmin}-{xmax}; Y {ymin}-{ymax}"
