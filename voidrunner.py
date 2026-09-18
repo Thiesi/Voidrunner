@@ -92,6 +92,9 @@ ESC = "\x1b"
 RESET = f"{ESC}[0m"
 BOLD = f"{ESC}[1m"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
+# Styling only: colour, weight and reset. The unstyled presets strip these and
+# nothing else, so a screen still clears and homes (issue #642).
+ANSI_STYLE_RE = re.compile(r"\x1b\[[0-9;:]*m")
 _OUTPUT_WIDTH = 80
 _OUTPUT_HEIGHT = 24
 _OUTPUT_STYLE = "auto"
@@ -376,7 +379,10 @@ def display_style(style: str):
 
 def out(text: str = "") -> None:
     if _OUTPUT_STYLE in ("mono", "plain"):
-        text = ANSI_ESCAPE_RE.sub("", text)
+        # "No ANSI styling" means no colour, not no terminal. Stripping every
+        # escape took `clear_screen`'s with it, so these two presets went back
+        # to printing each screen under the last one (issues #516, #642).
+        text = ANSI_STYLE_RE.sub("", text)
     if _OUTPUT_STYLE == "plain":
         text = text.translate(_ASCII_ART_TRANSLATION)
     sys.stdout.write(text)
