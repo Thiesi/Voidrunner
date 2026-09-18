@@ -83,6 +83,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+import weakref
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -97,6 +98,8 @@ ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
 ANSI_STYLE_RE = re.compile(r"\x1b\[[0-9;:]*m")
 _OUTPUT_WIDTH = 80
 _OUTPUT_HEIGHT = 24
+# Page lists still in use by a screen, so a resize can cut them again (issue #645).
+_LIVE_PAGES: list = []
 _OUTPUT_STYLE = "auto"
 DISPLAY_STYLES = {"auto": "Full palette", "fast": "Full palette, no motion", "basic": "16-color",
                   "mono": "Monochrome", "plain": "Plain / ASCII artwork"}
@@ -6180,9 +6183,9 @@ def portrait_pages(p: Palette, large: list[str], compact: list[str], details: li
 
     Paged against the bar the caller will see, so a portrait that fits once the
     paging tokens are dropped is one page (issue #412 review)."""
-    return _paginate_against_shown_footer(
+    return _TerminalPages(lambda: _paginate_against_shown_footer(
         lambda bar: _portrait_pages_for(p, large, compact, details, title, bar, color=color, leading=leading),
-        footer)
+        footer))
 
 
 def _portrait_pages_for(p: Palette, large: list[str], compact: list[str], details: list[str], title: str,
@@ -6683,7 +6686,8 @@ def wrapped_group(line: str) -> list[str]:
 
 def _trade_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
     """Row-at-a-time paging: groups may be split anywhere they run over."""
-    return _mission_text_pages(lines, overhead=max(0, _OUTPUT_HEIGHT - page_capacity(lines, title, footer)))
+    # The overhead is measured inside the builder: it depends on the terminal too.
+    return _TerminalPages(lambda: _cut_text_pages(lines, max(0, _OUTPUT_HEIGHT - page_capacity(lines, title, footer))))
 
 
 def remembered_market_lines(world: World) -> list[str]:
@@ -7344,6 +7348,35 @@ def _detail_action_bar(actions: str, labels: dict[str, str]) -> str:
     return "".join(f"[{key}] {labels[key]} " for key in actions.split("/") if key) + "[B] Back [<>] Page: "
 
 
+class _TerminalPages(list):
+    """Pages that cut themselves again when the terminal they were cut for changes.
+
+    A dozen screens paginate once on entry and then loop over the result. After a
+    resize they went on drawing rows wrapped and counted for the old terminal,
+    inside a frame drawn for the new one, until the caller left the screen. Fixing
+    that screen by screen was tried first and got two of them (issue #645 review),
+    so it is fixed where the pages are made instead: every paginator returns one
+    of these, `take_resize` re-cuts the ones still alive, and a page number that
+    no longer exists reads as the last page rather than raising in a loop that
+    had no reason to expect its list to shrink.
+    """
+
+    def __init__(self, build):
+        self._build = build
+        super().__init__(build())
+        # Weak references in a plain list, not a WeakSet: a set would hash and
+        # compare these, and two equal page lists are still two lists.
+        _LIVE_PAGES[:] = [ref for ref in _LIVE_PAGES if ref() is not None] + [weakref.ref(self)]
+
+    def recut(self) -> None:
+        self[:] = self._build()
+
+    def __getitem__(self, index):
+        if isinstance(index, int) and index >= len(self) > 0:
+            index = len(self) - 1
+        return super().__getitem__(index)
+
+
 def _paginate_against_shown_footer(build, footer: str):
     """Paginate against the action bar the caller will actually see.
 
@@ -7363,7 +7396,7 @@ def _paginate_against_shown_footer(build, footer: str):
 
 def _service_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
     """Group-aware paging against the bar the caller will see."""
-    return _paginate_against_shown_footer(lambda bar: _service_pages_for(lines, title, bar), footer)
+    return _TerminalPages(lambda: _paginate_against_shown_footer(lambda bar: _service_pages_for(lines, title, bar), footer))
 
 
 def _service_pages_for(lines: list[str], title: str, footer: str) -> list[list[str]]:
@@ -7597,7 +7630,13 @@ def take_resize() -> bool:
     apply_terminal_size(_load_door_info())
     _OUTPUT_WIDTH, _OUTPUT_HEIGHT = max(MINIMUM_WIDTH, _OUTPUT_WIDTH), max(MINIMUM_HEIGHT, _OUTPUT_HEIGHT)
     _LAST_PAGE_DRAWN = None
-    return (_OUTPUT_WIDTH, _OUTPUT_HEIGHT) != before
+    changed = (_OUTPUT_WIDTH, _OUTPUT_HEIGHT) != before
+    if changed:
+        for ref in list(_LIVE_PAGES):
+            pages = ref()
+            if pages is not None:
+                pages.recut()  # the screens that paginated once on entry
+    return changed
 
 
 def _resized_while_idle() -> bool:
@@ -8204,6 +8243,10 @@ def _mission_text_pages(lines: list[str], *, overhead: int = 7) -> list[list[str
     need splitting, so filling row by row is the degenerate case rather than a
     second implementation (issue #418).
     """
+    return _TerminalPages(lambda: _cut_text_pages(lines, overhead))
+
+
+def _cut_text_pages(lines: list[str], overhead: int) -> list[list[str]]:
     rows = [row for line in lines for row in wrapped_group(line)]
     return paginate([[row] for row in rows], max(1, _OUTPUT_HEIGHT - overhead))
 
