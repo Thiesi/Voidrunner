@@ -3244,6 +3244,11 @@ def test_the_ending_is_built_from_the_archived_dossier_and_pages_at_the_floor(mo
     leading, details = vr.career_ending_lines(fresh)
     text = " ".join(plain(row) for row in leading + details)
     assert "FRONTIER WARDEN" in text and "77 days" in text and "50 victories" in text
+    # Counts in prose read as prose: the gallery's one-day career said "1 days".
+    single = vr.finish_career(_finale_world("legend").save, "legend")
+    single.retired_careers[-1].update(days=1, kills=1, missions=1)
+    said = " ".join(plain(row) for row in vr.career_ending_lines(single)[1])
+    assert "1 day," in said and "1 victory;" in said and "1 contract completed" in said
     for width, height in ((80, 24), (40, 12)):
         terminal(width, height)
         pages = vr.portrait_pages(vr.pal(), vr.ship_portrait(world.save.ship, "large"), vr.ship_portrait(world.save.ship, "compact"),

@@ -8665,11 +8665,12 @@ def career_ending_lines(fresh: SaveData) -> tuple[list[str], list[str]]:
                f"{p.slate}of{RESET} {p.plasma}{BOLD}{_mission_plain(fresh.pilot.handle)}{RESET}",
                info["closing"]]
     details = [section("THE CAREER"),
-               f"{dossier['days']} days, {dossier['started'] or 'an unrecorded start'} to {dossier['ended']}; "
+               f"{plural(dossier['days'], 'day')}, {dossier['started'] or 'an unrecorded start'} to {dossier['ended']}; "
                f"retired a {RANKS[dossier['rank']][1]} in a {dossier['ship']}.",
                f"Final credits {dossier['credits']:,}cr; market margin {dossier['market_margin']:+,}cr.",
-               f"{dossier['charted']}/{GALAXY_SYSTEM_COUNT} systems charted; {dossier['kills']} victories; "
-               f"{dossier['missions']} contracts completed, {dossier['failed']} failed, {dossier['expired']} expired."]
+               f"{dossier['charted']}/{GALAXY_SYSTEM_COUNT} systems charted; "
+               f"{dossier['kills']} {'victory' if dossier['kills'] == 1 else 'victories'}; "
+               f"{plural(dossier['missions'], 'contract')} completed, {dossier['failed']} failed, {dossier['expired']} expired."]
     # The last few things the career was remembered for; the dossier keeps them all.
     details += ["* " + _mission_plain(entry) for entry in dossier["highlights"][-3:]]
     start = f"A fresh galaxy, a Shuttle and {fresh.pilot.credits:,}cr"
