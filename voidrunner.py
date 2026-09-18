@@ -9984,8 +9984,19 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                      + (f" with hull patched to {salvage_hull(ship, paid, hull_before)}/{hull_hp_max(ship)} (the fee is {salvage_fee(ship)}cr)." if paid < salvage_fee(ship) else "."))
     travel = world.save.pending_travel
     escort_at_stake = " Escaping fails the escort contract." if travel is not None and travel.get("phase") == "escorts" else ""
-    lines += [
-        section("OPTIONS"),
+    dump_row = None
+    if not patrol and used:
+        units = dump_units(world, pirate, tactics)
+        chance = combat_evade_chance(world, pirate, dumped_cargo=True, tactics=tactics, cargo_units=max(0, used - units))
+        what = (f"jettison half the hold ({units} of {used} units, chosen at random) for the raider to take"
+                if outclassed(world, pirate, tactics) else "jettison one unit of a random held commodity to try to break contact")
+        dump_row = f"[D] Dump: {what}; about {chance:.0%} success; failure draws fire." + escort_at_stake
+    # Against a raider that outclasses the hull, Dump is the answer the alert row
+    # points at, so it leads the options: listed fourth, it fell onto the second
+    # page at 80x24 while the row that names it stayed on the first (the gallery's
+    # "Combat, outclassed" panel is where that was seen).
+    dump_leads = dump_row is not None and outclassed(world, pirate, tactics)
+    lines += [section("OPTIONS")] + ([dump_row] if dump_leads else []) + [
         "[F] Fire: one shot; a surviving enemy returns fire.",
         f"[E] Evade: about {combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics, patrol=patrol):.0%} success; failure draws enemy fire.{escort_at_stake}",
     ]
@@ -9994,12 +10005,8 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         lines.append((f"[S] Surrender: pay {cost}cr, clear notoriety, Concord +2 and escape. " if pilot.credits >= cost else f"Surrender requires {cost}cr. ") +
                      ("Available." if pilot.credits >= cost else "UNAFFORDABLE; surrender unavailable."))
     else:
-        if used:
-            units = dump_units(world, pirate, tactics)
-            chance = combat_evade_chance(world, pirate, dumped_cargo=True, tactics=tactics, cargo_units=max(0, used - units))
-            what = (f"jettison half the hold ({units} of {used} units, chosen at random) for the raider to take"
-                    if outclassed(world, pirate, tactics) else "jettison one unit of a random held commodity to try to break contact")
-            lines.append(f"[D] Dump: {what}; about {chance:.0%} success; failure draws fire." + escort_at_stake)
+        if dump_row is not None and not dump_leads:
+            lines.append(dump_row)
         cost = bribe_cost(pirate)
         lines.append((f"[P] Pay bribe: " if pilot.credits >= cost else "Pay bribe unavailable: ") +
                      f"{cost}cr only if accepted (about {bribe_chance(world, pirate):.0%}); "

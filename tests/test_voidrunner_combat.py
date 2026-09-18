@@ -1306,9 +1306,19 @@ def test_the_panel_says_outclassed_and_prices_the_dump_it_will_actually_make():
     assert any("OUTCLASSED" in row and "cargo" in row for row in rows)
     dump = next(row for row in rows if row.startswith("[D]"))
     assert "half the hold (12 of 23 units" in dump and "75%" in dump
-    world, pirate, tactics = _shuttle_against(2)
+    # The alert names the cargo, so the option that spends it leads the list: as
+    # the fourth option it fell onto page two at 80x24, away from the alert.
+    options = [row[:3] for row in rows[rows.index(next(row for row in rows if "OPTIONS" in row)) + 1:] if row.startswith("[")]
+    assert options[:3] == ["[D]", "[F]", "[E]"]
+    vr._OUTPUT_WIDTH, vr._OUTPUT_HEIGHT = 80, 24
+    bar = vr.combat_action_bar("F/G/E/D/P")
+    first = [plain(row) for row in vr._service_pages(vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics), "Combat 1,000cr", bar)[0]]
+    assert any("OUTCLASSED" in row for row in first) and any(row.lstrip().startswith("[D] Dump") for row in first)
+    world, pirate, tactics = _shuttle_against(2, cargo=23)
     rows = [plain(row) for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics)]
     assert not any("OUTCLASSED" in row for row in rows)
+    options = [row[:3] for row in rows[rows.index(next(row for row in rows if "OPTIONS" in row)) + 1:] if row.startswith("[")]
+    assert options[:3] == ["[F]", "[E]", "[D]"]  # a fair fight keeps the order it had
 
 
 def test_a_cautious_starter_shuttle_usually_survives_the_raider_that_used_to_kill_it():
