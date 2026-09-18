@@ -4,8 +4,8 @@ Issue #493's acceptance criteria, one test apiece. They exist because the suite
 that watched Voidrunner's entire visual design disappear could only ever assert
 that a screen *fits* -- row counts, border widths, "every term survives the page
 break" -- all of which stayed true of a wall of unstyled text. These assert what
-a caller sees instead: that colour reaches the body at all, that a hotkey is not
-the colour of a label, that a column starts where the column above it started,
+a caller sees instead: that color reaches the body at all, that a hotkey is not
+the color of a label, that a column starts where the column above it started,
 that every preset renders deliberately, and that motion is optional and skippable.
 """
 
@@ -35,7 +35,7 @@ FOREGROUND = re.compile(r"\x1b\[(?:1m\x1b\[)?(?:38;[25];|3[0-7]m|9[0-7]m)")
 def body_rows(frame: str) -> list[str]:
     """The rows a page drew inside its frame, styling intact.
 
-    `page_rows` takes the colour off, which is exactly what these tests are
+    `page_rows` takes the color off, which is exactly what these tests are
     looking for, so they read the frame for themselves.
     """
     rows = []
@@ -141,25 +141,25 @@ def render(screen: str, monkeypatch, width: int, height: int, style: str = "auto
 
 
 # ---------------------------------------------------------------------------
-# 1. Colour reaches the body.
+# 1. Color reaches the body.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("width,height", [(80, 24), (40, 12)])
 @pytest.mark.parametrize("screen", sorted(SCREENS))
-def test_every_body_row_carries_colour(monkeypatch, screen, width, height):
+def test_every_body_row_carries_color(monkeypatch, screen, width, height):
     """*This is the test that would have caught the whole regression.*
 
     `wrapped_group` wrapped every body row of every paged screen through
     `_mission_plain` -- `ANSI.sub("")` -- so the frame was the only styled thing
-    on a page and no screen could be coloured even if it tried. Nothing in the
+    on a page and no screen could be colored even if it tried. Nothing in the
     old suite could fail because of that, which is why it survived two releases.
     """
     frame = render(screen, monkeypatch, width, height)
     rows = body_rows(frame)
     assert rows, f"{screen}: nothing drawn at {width}x{height}"
-    colourless = [vr._ANSI_RE.sub("", row) for row in rows if not FOREGROUND.search(row)]
-    assert not colourless, f"{screen} at {width}x{height}: uncoloured body rows {colourless}"
+    colorless = [vr._ANSI_RE.sub("", row) for row in rows if not FOREGROUND.search(row)]
+    assert not colorless, f"{screen} at {width}x{height}: uncolored body rows {colorless}"
 
 
 # ---------------------------------------------------------------------------
@@ -167,15 +167,15 @@ def test_every_body_row_carries_colour(monkeypatch, screen, width, height):
 # ---------------------------------------------------------------------------
 
 
-def test_the_palette_roles_are_four_different_colours():
+def test_the_palette_roles_are_four_different_colors():
     palette = vr.Palette(truecolor=True)
     roles = {"hotkey": palette.gold, "label": palette.slate, "value": palette.ink, "frame": palette.hull}
-    assert len(set(roles.values())) == len(roles), f"roles share a colour: {roles}"
+    assert len(set(roles.values())) == len(roles), f"roles share a color: {roles}"
 
 
 @pytest.mark.parametrize("screen", ["deck", "market", "yard", "chart"])
 def test_a_screen_uses_the_hotkey_label_and_value_roles_at_once(monkeypatch, screen):
-    """Chrome is never the colour of content, and a hotkey is never the colour
+    """Chrome is never the color of content, and a hotkey is never the color
     of the label beside it. Asserted on the drawn screen, not eyeballed."""
     frame = render(screen, monkeypatch, 80, 24)
     palette = vr.Palette(truecolor=True)
@@ -342,7 +342,9 @@ def test_every_screen_renders_legibly_in_every_preset(monkeypatch, screen, width
         if line.strip()[:1] in ("│", "|"):
             assert len(line) == max(borders), f"{screen}/{style}: ragged row {line!r}"
     if style in ("mono", "plain"):
-        assert not vr._ANSI_RE.search(frame), f"{screen}/{style} is styled"
+        # Unstyled means no colour; the screen still clears (issue #642).
+        assert not vr.ANSI_STYLE_RE.search(frame), f"{screen}/{style} is styled"
+        assert not vr._ANSI_RE.search(frame.replace("\x1b[2J\x1b[H", "")), f"{screen}/{style}: an escape besides the clear"
     if style == "plain":
         left = sorted(set(frame) & set(UNICODE_GLYPHS))
         assert not left, f"{screen}/plain kept Unicode artwork: {left}"
@@ -354,27 +356,27 @@ def test_every_screen_renders_legibly_in_every_preset(monkeypatch, screen, width
 # ---------------------------------------------------------------------------
 
 
-def test_the_colourless_presets_preview_themselves_colourlessly(monkeypatch):
+def test_the_colorless_presets_preview_themselves_colorlessly(monkeypatch):
     """Each preset previews itself, so the `mono` and `plain` samples have to
-    arrive with no colour -- and a table colours any cell that has none of its
+    arrive with no color -- and a table colors any cell that has none of its
     own, which would have made those two previews a lie (issue #493 review)."""
     frame = render("display", monkeypatch, 80, 24, "auto")
     rows = [row for row in body_rows(frame) if "30/60" in vr._ANSI_RE.sub("", row)]
     assert len(rows) == len(PRESETS), rows
     def sample(row: str) -> str:
         """The preview itself: from its gauge to its last reading, with the
-        frame's own right-hand border -- which is always hull-coloured -- left
+        frame's own right-hand border -- which is always hull-colored -- left
         outside."""
         start = min((row.index(glyph) for glyph in ("█", "░", "#", ".") if glyph in row),
                     default=0)
         # Find the last reading in the *visible* text: a bare `rindex("12")`
-        # matched inside the border's own escape once the frame colour became
+        # matched inside the border's own escape once the frame color became
         # `38;2;127;...` (issue #519). Masking the escapes keeps the offsets.
         masked = vr._ANSI_RE.sub(lambda m: "\x00" * len(m.group(0)), row)
         return row[start:masked.rindex("12") + 2]
 
     samples = [sample(row) for row in rows]
-    # auto, fast and basic show their colours; mono and plain show none.
+    # auto, fast and basic show their colors; mono and plain show none.
     assert [bool(FOREGROUND.search(text)) for text in samples] == \
         [True, True, True, False, False], [vr._ANSI_RE.sub("", text) for text in samples]
 
@@ -422,11 +424,11 @@ def test_an_escape_inside_data_never_reaches_the_terminal(monkeypatch, intruder)
     monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
     monkeypatch.setattr(vr, "_PALETTE", vr.Palette(truecolor=True))
     def leftovers(row: str) -> str:
-        """What is on the row once the game's own colour is taken off."""
+        """What is on the row once the game's own color is taken off."""
         return vr.ANSI_ESCAPE_RE.sub("", row)
 
     styled = vr.style_body_line(f"Pilot {intruder}Nine: 12 victories")
-    # Every escape left is one of ours, and every one of ours is a colour.
+    # Every escape left is one of ours, and every one of ours is a color.
     assert all(sequence.endswith("m") for sequence in vr.ANSI_ESCAPE_RE.findall(styled))
     assert "\x1b" not in leftovers(styled) and "\x07" not in leftovers(styled)
     assert "Pilot Nine" in leftovers(styled)
@@ -498,13 +500,30 @@ def test_every_paged_screen_goes_through_the_one_clearing_path():
     assert source.count("[2J") == 1, "the clear belongs in clear_screen() alone"
 
 
+@pytest.mark.parametrize("style", ["mono", "plain"])
+def test_an_unstyled_preset_loses_its_colour_and_keeps_its_clear(monkeypatch, capsys, style):
+    """Monochrome and Plain drop styling, not the terminal (issue #642).
+
+    `out()` used to strip every escape in these two presets, which removed
+    `clear_screen`'s own `ESC[2J ESC[H` on the way out, so both printed each
+    screen under the last one -- the scroll #516 had ended. The test above could
+    not see it: it replaces `out`, and `out` is where the clear was lost. This
+    one reads what reaches stdout.
+    """
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    vr.draw_page(vr.pal(), "TEST", ["a row"], 0, 1)
+    written = capsys.readouterr().out
+    assert written.startswith("\x1b[2J\x1b[H"), repr(written[:24])
+    assert "\x1b" not in written[len("\x1b[2J\x1b[H"):], "styling must not reach an unstyled preset"
+
+
 @pytest.mark.parametrize("label,count,noun", [
     ("Market: 7 goods", "7", " goods"),
     ("Board: 4 offers", "4", " offers"),
     ("Chart: 1 link", "1", " link"),
 ])
 def test_a_preview_count_is_styled_as_the_value_it_is(label, count, noun):
-    """`Board: 4 offers` is a label and a value, not one phrase: colouring the
+    """`Board: 4 offers` is a label and a value, not one phrase: coloring the
     whole entry alike buried the number a caller scans the menu for (#518)."""
     p = vr.pal()
     drawn = vr._menu_entry("B", label)
@@ -535,7 +554,7 @@ def test_a_service_label_reads_as_a_label_not_a_sentence():
 
 def test_labels_are_off_the_cockpits_own_hue():
     """Labels were `#7f8fae`, a desaturated blue on a blue cockpit (#519), so a
-    label read as the same colour one shade down rather than a different kind
+    label read as the same color one shade down rather than a different kind
     of thing."""
     p = vr.Palette(truecolor=True)
     rgb = re.search(r"38;2;(\d+);(\d+);(\d+)", p.slate)
@@ -546,8 +565,8 @@ def test_labels_are_off_the_cockpits_own_hue():
 def test_every_palette_role_stays_distinct_in_both_depths():
     p = vr.Palette(truecolor=True)
     roles = ["hull", "deep", "plasma", "gold", "ink", "slate", "mint", "amber", "alarm"]
-    truecolour = [getattr(p, role) for role in roles]
-    assert len(set(truecolour)) == len(roles)
+    truecolor = [getattr(p, role) for role in roles]
+    assert len(set(truecolor)) == len(roles)
     indexed = [getattr(vr.Palette(truecolor=False), role) for role in roles]
     assert len(set(indexed)) == len(roles)
 
@@ -558,25 +577,25 @@ def test_every_palette_role_stays_distinct_in_both_depths():
 
 
 def _role_runs(drawn: str) -> dict[str, str]:
-    """Each visible run of text in a styled row, mapped to the colour in force.
+    """Each visible run of text in a styled row, mapped to the color in force.
 
-    The colour, not merely the last escape before the text: every component
+    The color, not merely the last escape before the text: every component
     writes its role and then `BOLD`, so "the sequence immediately preceding" is
     the bold one on exactly the tokens these tests care most about.
     """
-    runs, colour, cursor = {}, "", 0
+    runs, color, cursor = {}, "", 0
     for match in re.finditer(r"\x1b\[[0-9;]*m", drawn):
         text = drawn[cursor:match.start()]
         if text:
-            runs[text] = colour
+            runs[text] = color
         body = match.group(0)[2:-1]
         if body in ("", "0"):
-            colour = ""
+            color = ""
         elif body.startswith("38;"):
-            colour = match.group(0)
+            color = match.group(0)
         cursor = match.end()
     if drawn[cursor:]:
-        runs[drawn[cursor:]] = colour
+        runs[drawn[cursor:]] = color
     return runs
 
 
@@ -634,9 +653,9 @@ def test_a_body_row_is_still_read_as_prose(monkeypatch):
     assert runs.get(" to go back.") == p.slate, runs
 
 
-def test_a_tables_headings_are_not_the_colour_of_its_labels(monkeypatch):
+def test_a_tables_headings_are_not_the_color_of_its_labels(monkeypatch):
     """`PILOT RANK BEST CR` was styled `label`, so a table's headings were the
-    colour of the sentence above them and the footnote below them, and the
+    color of the sentence above them and the footnote below them, and the
     table never announced itself as one (#532)."""
     p = _at(monkeypatch)
     heading = vr.table(["PILOT", "RANK"], [["Thiesi", "Rookie"]], "ll",
@@ -647,7 +666,7 @@ def test_a_tables_headings_are_not_the_colour_of_its_labels(monkeypatch):
 
 def test_no_cockpit_row_shows_its_label_and_its_value_in_one_role(monkeypatch):
     """`HULL ... 60/60 Intact` declared its fourth column `label`, so the row's
-    own value came out the colour of the row's label (#532)."""
+    own value came out the color of the row's label (#532)."""
     p = _at(monkeypatch)
     drawn = "".join(vr.ship_gauge_rows(_world_with_seed(7)))
     for value in ("Intact", "Shuttle"):
@@ -671,7 +690,7 @@ def test_a_neutral_standing_is_a_value_and_its_bar_is_not(monkeypatch):
 
 
 def test_an_empty_crew_is_still_a_value(monkeypatch):
-    """`Crew none` had the label and the value in one colour: the populated
+    """`Crew none` had the label and the value in one color: the populated
     branch was `ink` and the empty one had drifted to the label role, so the
     row said nothing about which half was which (#532)."""
     p = _at(monkeypatch)

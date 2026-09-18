@@ -47,21 +47,21 @@ def _assert_box_rows_match_border(text: str, label: str) -> None:
             )
 
 
-def _sgr_colour_runs(line: str) -> list[tuple[str, str]]:
-    """One rendered row as (colour, text) runs: the last SGR wins, a reset clears it.
+def _sgr_color_runs(line: str) -> list[tuple[str, str]]:
+    """One rendered row as (color, text) runs: the last SGR wins, a reset clears it.
 
-    Accurate for rows that carry colour and no other attribute, which is every
+    Accurate for rows that carry color and no other attribute, which is every
     content row of a box.
     """
-    runs, colour, position = [], "", 0
+    runs, color, position = [], "", 0
     for match in vr._ANSI_RE.finditer(line):
         chunk = line[position : match.start()]
         if chunk:
-            runs.append((colour, chunk))
-        colour = "" if match.group(0) == vr.RESET else match.group(0)
+            runs.append((color, chunk))
+        color = "" if match.group(0) == vr.RESET else match.group(0)
         position = match.end()
     if line[position:]:
-        runs.append((colour, line[position:]))
+        runs.append((color, line[position:]))
     return runs
 
 
@@ -705,13 +705,13 @@ def test_create_career_box_rows_fit_79_column_border(monkeypatch):
     assert {len(line) for line in border_lines} == {79}
 
 
-def test_create_career_greeting_holds_one_colour_and_highlights_the_callsign(monkeypatch, terminal):
-    """The greeting is one sentence and has to arrive in one colour.
+def test_create_career_greeting_holds_one_color_and_highlights_the_callsign(monkeypatch, terminal):
+    """The greeting is one sentence and has to arrive in one color.
 
-    Only its first clause used to be coloured, so the rest of the sentence --
+    Only its first clause used to be colored, so the rest of the sentence --
     including the whole of a wrapped second row -- arrived in the terminal's
     default foreground, which on a caller's client is not necessarily
-    distinguishable from the colour this very box's border is drawn in
+    distinguishable from the color this very box's border is drawn in
     (playtest, 2026-09-11). The callsign is the one part allowed to differ.
     """
     terminal(64, 24, "auto")
@@ -723,16 +723,16 @@ def test_create_career_greeting_holds_one_colour_and_highlights_the_callsign(mon
         assert vr.create_career(p, {"handle": handle}) == handle
     rows = [row for row in buf.getvalue().split("\r\n") if vr._ANSI_RE.sub("", row).startswith("│")]
     assert len(rows) > 1, "the greeting has to wrap here or this test proves nothing"
-    coloured: dict[str, list[str]] = {}
+    colored: dict[str, list[str]] = {}
     for row in rows:
-        for colour, text in _sgr_colour_runs(row):
+        for color, text in _sgr_color_runs(row):
             body = text.strip("│ ")
             if body:
-                coloured.setdefault(colour, []).append(body)
-    assert "" not in coloured, f"greeting text left in the terminal's own colour: {coloured.get('')}"
-    assert p.accent not in coloured, f"greeting text drawn in the border's colour: {coloured.get(p.accent)}"
-    assert coloured.pop(p.gold) == [handle], "the callsign is the one highlight in the greeting"
-    assert set(coloured) == {p.muted}, f"the greeting is split across colours: {set(coloured)}"
+                colored.setdefault(color, []).append(body)
+    assert "" not in colored, f"greeting text left in the terminal's own color: {colored.get('')}"
+    assert p.accent not in colored, f"greeting text drawn in the border's color: {colored.get(p.accent)}"
+    assert colored.pop(p.gold) == [handle], "the callsign is the one highlight in the greeting"
+    assert set(colored) == {p.muted}, f"the greeting is split across colors: {set(colored)}"
 
 
 def test_screen_crew_and_galaxy_map_boxes_match_79_columns(monkeypatch):
@@ -748,7 +748,7 @@ def test_screen_crew_and_galaxy_map_boxes_match_79_columns(monkeypatch):
     monkeypatch.setattr(vr, "read_key", lambda: "B")
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_galaxy_map(p, world)
-    # The grid is coloured as it is printed (issue #493), so its border rows
+    # The grid is colored as it is printed (issue #493), so its border rows
     # open with an escape; the width they have to match is the visible one.
     borders = [plain(line) for line in output.getvalue().splitlines()
                if plain(line).startswith("+-")]
@@ -1283,7 +1283,7 @@ def test_hop_report_is_bounded_and_the_deck_still_fits(monkeypatch, terminal):
 def test_keyed_rows_prefix_only_the_first_row_and_style_the_key():
     """The selection key is a hotkey, so it is gold like every other one: a
     keyed entry's row is usually styled already, and `style_body_line` leaves a
-    styled row alone, so a raw prefix would be the one colourless key on the
+    styled row alone, so a raw prefix would be the one colorless key on the
     page (issue #493 review)."""
     rows = vr.keyed_rows("B", ["Mirrorfall (76,4); Industrial;", "Danger 1; 1 fuel."])
     assert [plain(row) for row in rows] ==         ["[B] Mirrorfall (76,4); Industrial;", "    Danger 1; 1 fuel."]
@@ -1607,10 +1607,10 @@ def test_screen_naming_says_what_a_caller_can_navigate_to():
     assert not any(name in outer for name in helpers)
 
 
-@pytest.mark.parametrize("style,keeps_colour,keeps_unicode", [
+@pytest.mark.parametrize("style,keeps_color,keeps_unicode", [
     ("auto", True, True), ("basic", True, True), ("mono", False, True), ("plain", False, False),
 ])
-def test_apply_display_style_selects_what_reaches_the_terminal(monkeypatch, terminal, style, keeps_colour, keeps_unicode):
+def test_apply_display_style_selects_what_reaches_the_terminal(monkeypatch, terminal, style, keeps_color, keeps_unicode):
     """The presets were covered only indirectly, through one output test (#423)."""
     monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
     vr.apply_display_style(style)
@@ -1619,7 +1619,7 @@ def test_apply_display_style_selects_what_reaches_the_terminal(monkeypatch, term
     with contextlib.redirect_stdout(written):
         vr.out("\x1b[38;5;220mHull \u2588\u2591\u2588\x1b[0m")
     shown = written.getvalue()
-    assert ("\x1b[" in shown) == keeps_colour
+    assert ("\x1b[" in shown) == keeps_color
     assert any(ord(ch) > 127 for ch in shown) == keeps_unicode
     assert "Hull" in shown  # the text itself survives every preset
 

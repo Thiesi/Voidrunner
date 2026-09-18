@@ -904,7 +904,8 @@ def test_real_display_saved_before_ack_and_applied_from_restart_title(tmp_path, 
         assert result.returncode == 0 and not result.stderr
         assert b"Display Options" in result.stdout
         assert (tmp_path / "77.json").read_bytes() == before
-        if style in ("mono", "plain"): assert b"\x1b" not in result.stdout
+        # The clear is the one escape an unstyled preset keeps (issue #642).
+        if style in ("mono", "plain"): assert b"\x1b" not in result.stdout.replace(b"\x1b[2J\x1b[H", b"")
         if style == "basic": assert b"38;" not in result.stdout
         if style == "plain": assert result.stdout.isascii()
 

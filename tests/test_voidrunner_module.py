@@ -16,8 +16,8 @@ def test_paginate_keeps_groups_whole_splits_oversized_ones_and_never_repeats_a_l
     groups = [["a1", "a2"], ["b1"], ["c1", "c2", "c3", "c4", "c5"]]
     assert vr.paginate(groups, 3) == [["a1", "a2", "b1"], ["c1", "c2", "c3"], ["c4", "c5"]]
     assert vr.paginate(groups, 10) == [["a1", "a2", "b1", "c1", "c2", "c3", "c4", "c5"]]
-    coloured = vr.paginate(groups, 10, render=lambda row, index: f"<{row}>" if index == 1 else row)
-    assert coloured[0][2] == "<b1>"
+    colored = vr.paginate(groups, 10, render=lambda row, index: f"<{row}>" if index == 1 else row)
+    assert colored[0][2] == "<b1>"
     keyed = vr.paginate([["A one"], ["A two"], ["B three"]], 10,
                         keys=[("A", 1), ("A", 2), ("B", 3)])
     # The selection key is styled by `keyed_rows` (issue #493 review).
