@@ -3129,10 +3129,13 @@ def test_legend_threshold_is_twice_void_baron_and_promotion_never_demotes():
     assert vr.career_rank(world.save.pilot) == "Legend of the Frontier" and vr.check_rank_up(world) is None
 
 
-def test_new_fights_use_ruleset_two_and_cached_fights_keep_their_curve():
+def test_new_fights_use_the_current_ruleset_and_cached_fights_keep_their_curve():
     world = _world_with_seed(42); pirate = vr.Pirate("Probe", 3, 65, 65)
     tactics = vr.new_tactics(pirate)
-    assert tactics["version"] == 2 and vr.tactical_threat_bonus(tactics) == (0, 3, 6, 8, 34)
+    # Version 3 (issue #647) is version 2's damage with a way out of a fight the
+    # ship cannot win; the curve #406 settled is unchanged.
+    assert tactics["version"] == 3 and vr.tactical_threat_bonus(tactics) == (0, 3, 6, 8, 34)
+    assert vr.tactical_threat_bonus({"version": 2}) == vr.tactical_threat_bonus({"version": 3})
     assert vr.tactical_threat_bonus({"version": 1}) == (0, 3, 6, 20, 55)
     ship = world.save.ship
     v1 = vr._tactical_incoming_damage(ship, 3, "volley", 9, {"version": 1})
@@ -3140,12 +3143,13 @@ def test_new_fights_use_ruleset_two_and_cached_fights_keep_their_curve():
     assert v1 == 47 and v2 == 28 and v2 < v1
 
 
-def test_both_tactical_versions_load_and_others_are_unsupported():
+def test_every_tactical_version_loads_and_others_are_unsupported():
     world, pirate = _world_with_pending_fight(tactics={"version": 1, "profile": "Raider", "step": 0, "brace_ready": True})
     vr.SaveData.from_dict(world.save.to_dict())
-    world.save.pending_travel["encounter"]["combat"]["tactics"]["version"] = 2
-    vr.SaveData.from_dict(world.save.to_dict())
-    world.save.pending_travel["encounter"]["combat"]["tactics"]["version"] = 3
+    for version in (2, 3):
+        world.save.pending_travel["encounter"]["combat"]["tactics"]["version"] = version
+        vr.SaveData.from_dict(world.save.to_dict())
+    world.save.pending_travel["encounter"]["combat"]["tactics"]["version"] = 4
     with pytest.raises(vr.UnsupportedSave): vr.SaveData.from_dict(world.save.to_dict())
 
 

@@ -912,10 +912,15 @@ def test_review_combat_dump_terms_disclose_actual_escape_probability(tier, cargo
         assert line is None  # an empty hold has nothing to dump, so the action is not offered (#414)
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         return
-    vr._dispose_cargo(after, "food", 1)
+    # A raider the ship cannot fight is bought off with half the hold (#647);
+    # any other Dump is the one-unit feint it always was.
+    units = vr.dump_units(world, pirate, tactics)
+    bought_off = vr.outclassed(world, pirate, tactics)
+    assert units == ((cargo + 1) // 2 if bought_off else 1) and bought_off == (tier == 4)
+    vr._dispose_cargo(after, "food", units)
     assert f"{vr.combat_evade_chance(after, pirate, dumped_cargo=True, tactics=tactics):.0%}" in line
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
-    assert "one unit" in line
+    assert (f"half the hold ({units} of {cargo} units" if bought_off else "one unit") in line
 
 
 @pytest.mark.parametrize("hull", [20, 60])
@@ -1247,3 +1252,122 @@ def test_escape_answers_no_at_a_confirmation_and_ignores_unsupported_keys(monkey
     keys = iter(["y"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()):
         assert vr.confirm("Sure?", vr.Palette(False)) is True
+
+
+# ---------------------------------------------------------------------------
+# A way out of a fight the ship cannot win (issue #647, tactical ruleset 3).
+#
+# Playing a new career on a live node: the first profitable market sat in a
+# danger-4 system one jump from the tutorial's destination. Three tier-4 raiders
+# in nine jumps destroyed a starter Shuttle three times, with Evade showing 5-14%
+# and Dump 24-34% against a volley worth two thirds of the hull. The damage is a
+# decision (#406) and stays. What was missing was anything between fine and dead.
+# ---------------------------------------------------------------------------
+
+
+def _shuttle_against(tier, cargo=24, version=None):
+    world = _world_with_seed(42); _set_cargo(world, {"food": cargo} if cargo else {})
+    pirate = vr.Pirate("Probe", tier, 20 + tier * 15, 20 + tier * 15)
+    tactics = vr.new_tactics(pirate) if version is None else vr.new_tactics(pirate, version)
+    return world, pirate, tactics
+
+
+def test_only_a_raider_two_volleys_from_the_full_hull_outclasses_it():
+    world, _, _ = _shuttle_against(4)
+    ship = world.save.ship
+    assert [vr.raider_outclasses(ship, tier) for tier in range(5)] == [False, False, False, False, True]
+    # The hull decides it, not the ship's name: reinforcement is a real answer.
+    ship.hull_tier = 3
+    assert vr.hull_hp_max(ship) > 2 * vr._tactical_incoming_damage(ship, 4, "volley", 9, {"version": 3})
+    assert not vr.raider_outclasses(ship, 4)
+
+
+def test_an_outclassed_ship_can_buy_its_way_out_and_an_older_fight_keeps_its_odds():
+    world, pirate, tactics = _shuttle_against(4)
+    assert vr.outclassed(world, pirate, tactics)
+    assert vr.combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics) == vr.OUTCLASSED_EVADE_FLOOR
+    assert vr.combat_evade_chance(world, pirate, dumped_cargo=True, tactics=tactics, cargo_units=12) == vr.OUTCLASSED_DUMP_CHANCE
+    # Harry still costs ten points; the floor is not a guarantee.
+    harried = dict(tactics, profile="Skirmisher", step=0)
+    assert vr.tactical_intent(harried) == "harry"
+    assert vr.combat_evade_chance(world, pirate, dumped_cargo=True, tactics=harried, cargo_units=12) == pytest.approx(0.65)
+    # A fight saved under ruleset 2 resumes with the odds it was started under.
+    world, pirate, old = _shuttle_against(4, version=2)
+    assert not vr.outclassed(world, pirate, old) and vr.dump_units(world, pirate, old) == 1
+    assert vr.combat_evade_chance(world, pirate, dumped_cargo=False, tactics=old) < 0.10
+    # And a raider the ship can fight is not bought off by anybody.
+    world, pirate, fair = _shuttle_against(2)
+    assert not vr.outclassed(world, pirate, fair) and vr.dump_units(world, pirate, fair) == 1
+
+
+def test_the_panel_says_outclassed_and_prices_the_dump_it_will_actually_make():
+    world, pirate, tactics = _shuttle_against(4, cargo=23)
+    rows = [plain(row) for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics)]
+    assert any("OUTCLASSED" in row and "cargo" in row for row in rows)
+    dump = next(row for row in rows if row.startswith("[D]"))
+    assert "half the hold (12 of 23 units" in dump and "75%" in dump
+    # The alert names the cargo, so the option that spends it leads the list: as
+    # the fourth option it fell onto page two at 80x24, away from the alert.
+    options = [row[:3] for row in rows[rows.index(next(row for row in rows if "OPTIONS" in row)) + 1:] if row.startswith("[")]
+    assert options[:3] == ["[D]", "[F]", "[E]"]
+    vr._OUTPUT_WIDTH, vr._OUTPUT_HEIGHT = 80, 24
+    bar = vr.combat_action_bar("F/G/E/D/P")
+    first = [plain(row) for row in vr._service_pages(vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics), "Combat 1,000cr", bar)[0]]
+    assert any("OUTCLASSED" in row for row in first) and any(row.lstrip().startswith("[D] Dump") for row in first)
+    world, pirate, tactics = _shuttle_against(2, cargo=23)
+    rows = [plain(row) for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics)]
+    assert not any("OUTCLASSED" in row for row in rows)
+    options = [row[:3] for row in rows[rows.index(next(row for row in rows if "OPTIONS" in row)) + 1:] if row.startswith("[")]
+    assert options[:3] == ["[F]", "[E]", "[D]"]  # a fair fight keeps the order it had
+
+
+def test_a_cautious_starter_shuttle_usually_survives_the_raider_that_used_to_kill_it():
+    """Dump while there is cargo, Evade once there is none. Under ruleset 2 the
+    same policy lost nearly every time; this is the number the change is for."""
+    def survivals(version):
+        alive = 0
+        for seed in range(300):
+            world, pirate, tactics = _shuttle_against(4, cargo=24, version=version)
+            world.event_rng.seed(seed)
+            ship = world.save.ship
+            while ship.hull_hp > 0:
+                held = sum(world.save.cargo.values())
+                if held:
+                    for _ in range(vr.dump_units(world, pirate, tactics)):
+                        vr._dispose_cargo(world, "food", 1)
+                if world.event_rng.random() < vr.combat_evade_chance(world, pirate, dumped_cargo=bool(held), tactics=tactics):
+                    alive += 1
+                    break
+                vr.tactical_retaliation(world, pirate, tactics)
+        return alive / 300
+    old, new = survivals(2), survivals(3)
+    assert old < 0.55 < 0.85 < new, (old, new)
+
+
+def test_the_departure_prompt_warns_a_hull_that_can_be_outclassed_and_only_that_hull():
+    world = _world_with_seed(42)
+    dest = world.by_id[sorted(world.here.connections)[0]]
+    dest.discovered = True
+    for danger, warned in ((1, False), (2, False), (3, True), (4, True)):
+        dest.danger = danger
+        assert ("can outclass this hull" in vr.departure_terms(world, dest.id)) == warned, danger
+    world.save.ship.hull_tier = 3
+    assert "can outclass" not in vr.departure_terms(world, dest.id)
+    # An uncharted bearing has no rating to warn about.
+    world.save.ship.hull_tier = 0; dest.discovered = False
+    assert "can outclass" not in vr.departure_terms(world, dest.id)
+
+
+def test_a_concord_patrol_is_not_bought_off_and_keeps_its_old_odds():
+    """The escape rules are for raiders. A patrol takes no Dump and offers
+    Surrender, so telling a pilot "it wants your cargo" there was wrong, and the
+    Evade floor had quietly changed patrol balance too (#647 review)."""
+    world, pirate, tactics = _shuttle_against(4)
+    assert vr.outclassed(world, pirate, tactics)
+    raider = vr.combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics)
+    patrol = vr.combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics, patrol=True)
+    assert raider == vr.OUTCLASSED_EVADE_FLOOR and patrol < 0.15
+    rows = [plain(row) for row in vr.combat_display_lines(world, pirate, [], patrol=True, tactics=tactics)]
+    assert not any("OUTCLASSED" in row for row in rows) and not any(row.startswith("[D]") for row in rows)
+    evade = next(row for row in rows if row.startswith("[E]"))
+    assert f"{patrol:.0%}" in evade
