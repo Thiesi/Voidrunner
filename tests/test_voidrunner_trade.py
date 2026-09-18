@@ -2793,7 +2793,7 @@ def test_every_portrait_has_distinct_complete_bounded_composition(monkeypatch, t
         text=" ".join(" ".join(row.split()) for page in plain_pages for row in page)
         for detail in details:assert detail in text
         output="".join(rendered)
-        if style in ("mono","plain"):assert "\x1b" not in output
+        if style in ("mono","plain"):assert "\x1b" not in output.replace("\x1b[2J\x1b[H", "")  # the clear stays (#642)
         elif style=="basic":assert "\x1b[" in output and "38;" not in output
         else:assert "38;2;" in output
         if style=="plain":assert output.isascii()

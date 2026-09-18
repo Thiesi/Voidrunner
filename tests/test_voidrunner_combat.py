@@ -12,7 +12,7 @@ import random
 
 import pytest
 
-from .support import plain, plain as plainly, _add_cargo, _box_rows, _door_stopped_at, _mission_details_world, _set_cargo, _world_at_food_producer, _world_with_exploration_choice, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
+from .support import RESUME, plain, plain as plainly, _add_cargo, _box_rows, _door_stopped_at, _mission_details_world, _set_cargo, _world_at_food_producer, _world_with_exploration_choice, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
 
 
 def test_fire_damages_both_sides_and_is_driven_by_world_event_rng():
@@ -170,7 +170,7 @@ def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkey
     assert saved["ship"]["fuel"] < initial["ship"]["fuel"]
 
     # A fresh executable must resume the opponent, not reveal a station menu.
-    with _door_stopped_at(tmp_path, b"I", b"TACTICAL SYSTEMS") as output:
+    with _door_stopped_at(tmp_path, RESUME + b"I", b"TACTICAL SYSTEMS") as output:
         assert b"Resuming your interrupted journey" in output
         assert b"Freeport Anchorage" not in output
         assert json.loads((tmp_path / "77.json").read_text(encoding="utf-8")) == saved
@@ -463,7 +463,7 @@ def test_tactical_brace_checkpoint_survives_real_kill_and_invalid_repeat(tmp_pat
         assert combat["tactics"]["version"] == vr.TACTICAL_RULESET_VERSION and not combat["tactics"]["brace_ready"]
         assert combat["tactics"]["step"] == 1 and 0 < combat["pirate"]["hp"] < combat["pirate"]["hp_max"]
     before = (tmp_path / "77.json").read_bytes()
-    with _door_stopped_at(tmp_path, b"GI", b"TACTICAL SYSTEMS"):
+    with _door_stopped_at(tmp_path, RESUME + b"GI", b"TACTICAL SYSTEMS"):
         assert (tmp_path / "77.json").read_bytes() == before
 
 
@@ -664,17 +664,17 @@ def test_bounty_verification_and_report_survive_real_kills_without_duplicate_eff
     world, _, warrant = _world_with_bounty_warrant(matches=False)
     vr.persist(world, tmp_path, 77)
     initial_fuel, credits = world.save.ship.fuel, world.save.pilot.credits
-    with _door_stopped_at(tmp_path, b"V", b"Identity mismatch confirmed"):
+    with _door_stopped_at(tmp_path, RESUME + b"V", b"Identity mismatch confirmed"):
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert saved.pending_travel["encounter"]["warrant"]["checked"]
         assert saved.ship.fuel == initial_fuel - 1
-    with _door_stopped_at(tmp_path, b"R", b"Incorrect identity reported"):
+    with _door_stopped_at(tmp_path, RESUME + b"R", b"Incorrect identity reported"):
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert saved.pilot.credits == credits and saved.ship.fuel == initial_fuel - 1
     # The parent may consume the checkpointed report before the reader kills it.
     if saved.active_missions:
         assert saved.pending_travel["encounter"]["combat"]["outcome"] == "reported"
-        with _door_stopped_at(tmp_path, b"", b"Incorrect warrant closed"):
+        with _door_stopped_at(tmp_path, RESUME, b"Incorrect warrant closed"):
             saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert not saved.active_missions
     assert saved.pilot.credits == credits and saved.ship.fuel == initial_fuel - 1
@@ -855,7 +855,7 @@ def test_target_selection_closes_after_engagement_without_effects(monkeypatch):
 def test_target_switch_survives_real_disconnect_before_acknowledgement(tmp_path):
     world, pirates = _world_with_coordinated_squadron(); vr.persist(world, tmp_path, 77)
     rng = world.event_rng.getstate()
-    with _door_stopped_at(tmp_path, b"T", b"Target selected"):
+    with _door_stopped_at(tmp_path, RESUME + b"T", b"Target selected"):
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         state = saved.pending_travel["encounter"]
         assert state["pirates"][0]["name"] == pirates[1].name

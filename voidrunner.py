@@ -92,6 +92,9 @@ ESC = "\x1b"
 RESET = f"{ESC}[0m"
 BOLD = f"{ESC}[1m"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
+# Styling only: colour, weight and reset. The unstyled presets strip these and
+# nothing else, so a screen still clears and homes (issue #642).
+ANSI_STYLE_RE = re.compile(r"\x1b\[[0-9;:]*m")
 _OUTPUT_WIDTH = 80
 _OUTPUT_HEIGHT = 24
 _OUTPUT_STYLE = "auto"
@@ -376,7 +379,10 @@ def display_style(style: str):
 
 def out(text: str = "") -> None:
     if _OUTPUT_STYLE in ("mono", "plain"):
-        text = ANSI_ESCAPE_RE.sub("", text)
+        # "No ANSI styling" means no colour, not no terminal. Stripping every
+        # escape took `clear_screen`'s with it, so these two presets went back
+        # to printing each screen under the last one (issues #516, #642).
+        text = ANSI_STYLE_RE.sub("", text)
     if _OUTPUT_STYLE == "plain":
         text = text.translate(_ASCII_ART_TRANSLATION)
     sys.stdout.write(text)
@@ -2065,6 +2071,12 @@ class World:
         # Narration of the current hop, retained for the next deck page (issue #410).
         # Transient: rebuilt from what the hop prints; never persisted.
         self.hop_report: list[str] = []
+        # What the door has to say before its first deck: the First Flight
+        # pointer, a returning pilot's recap, a new career after retirement.
+        # They ride on the deck that follows, because a line written ahead of a
+        # screen is erased by that screen's own clear before anyone can read it
+        # (issue #641). Transient; shown once.
+        self.launch_notes: list[str] = []
         self.galaxy: list[GalaxySystem] = generate_galaxy(save.seed)
         self.by_id: dict[int, GalaxySystem] = {s.id: s for s in self.galaxy}
         for sid in save.discovered:
@@ -5640,11 +5652,13 @@ def screen_station_menu(p: Palette, world: World) -> str:
     world.pending_promotions.clear()
     completed[0:0] = world.hop_report
     world.hop_report = []
+    # Shown on this deck and no later one, like the results below them.
+    notes, world.launch_notes = world.launch_notes, []
     page, expanded = 0, False
     while True:
         lines = station_deck_lines(world, expanded=expanded)
-        if completed:
-            lines[0:0] = ["Result: " + message for message in completed]
+        if notes or completed:
+            lines[0:0] = notes + ["Result: " + message for message in completed]
         footer = "[<] Prev [>] Next [X] Compact [Q] Exit: " if expanded else "[<] Prev [>] Next [X] Expand [Q] Exit: "
         choice, page, count = _draw_service_page(p, f"Command Deck: {world.save.pilot.credits:,}cr", lines, footer, page)
         if (moved := page_step(choice, page, count)) is not None: page = moved
@@ -6793,7 +6807,12 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choi
     while True:
         current = pages[page]
         if page_state is not None: page_state["page"] = page
-        out_line(); out_line(f"{current['title']} {page + 1}/{len(pages)}")
+        # A screen of its own, so it starts at the top of the terminal. It used to
+        # open with a blank line instead, which put it under the prompt that
+        # called it and left every page turned in the scroll (issue #643). The
+        # clear takes the blank line's row, so the height budget is unchanged.
+        clear_screen()
+        out_line(f"{current['title']} {page + 1}/{len(pages)}")
         for row in current["rows"]: out_line(row)
         seen.add(page)
         controls = current["footer"] if current["choices"] or current["required"] else "[N] Next [P] Prev [B] Back: "
@@ -8204,6 +8223,45 @@ def pilot_recap(world: World) -> list[str]:
     return [_mission_plain(line) for line in lines]
 
 
+FIRST_FLIGHT_POINTER = "Start at [G] Pilot Guide for an optional first delivery and flight instructions."
+
+
+def launch_notes(world: World, *, is_new: bool) -> list[str]:
+    """What the first Command Deck of a session says above its gauges.
+
+    A new pilot gets the one pointer to First Flight; a returning pilot gets a
+    welcome and the recap of what they had committed to. The recap's own first
+    line is left out: it names the station, the day and the credits, which the
+    deck prints directly underneath. A pilot resuming an interrupted journey
+    gets neither here -- that has a screen of its own, and the deck that
+    follows it opens on the journey's results.
+    """
+    if world.save.pending_travel is not None:
+        return []
+    if is_new:
+        return [FIRST_FLIGHT_POINTER]
+    # Also left out: the recap's advice for a pilot tracking nothing. It is
+    # guidance, the guide keeps it, and at forty columns it is three more rows
+    # on a page the deck's own header and gauges are waiting behind.
+    recap = [line for line in pilot_recap(world)[1:] if not line.startswith("No contract tracked.")]
+    return [_mission_plain(f"Welcome back, {world.save.pilot.handle}.")] + recap
+
+
+def journey_resumed_lines(world: World) -> list[str]:
+    travel = world.save.pending_travel
+    system = world.by_id[travel["destination"]] if travel is not None else None
+    # An uncharted bearing stays unnamed until the pilot arrives.
+    destination = system.name if system is not None and system.discovered else "an uncharted system"
+    # Short enough to fit the 40x12 floor with its frame and the pause under it.
+    text = [f"Welcome back, {world.save.pilot.handle}.",
+            f"Resuming your interrupted journey to {destination}, day {world.save.turn}: the same "
+            "encounter, nothing rerolled. Station access follows its resolution."]
+    rows: list[str] = []
+    for line in text:
+        rows.extend(wrap_styled(style_body_line(_mission_plain(line)), _page_content_width()))
+    return rows
+
+
 def pilot_guide_lines(world: World) -> list[str]:
     lines = ["Use [B] Back to return to the station deck before using its market, yard or chart commands.",
              "Your ship is your livelihood. Supply outlying stations, build capital, and choose what kind of pilot to become."]
@@ -8706,10 +8764,14 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
             continue
         if not confirm(f"End this career as {CAREER_FINALES[selected]['label']} and begin New Game+?", p):
             result, page = "Retirement cancelled; current career retained.", 0; continue
+        label = CAREER_FINALES[selected]["label"]
         world.reset(fresh.save)
         world.pending_promotions.extend(fresh.pending_promotions)
         world.commit()
-        out_line(); out_line("A new career begins.")
+        # `reset` cleared the notes with everything else, so this is set after
+        # it. Written to the terminal instead, the line was erased by the new
+        # career's first deck before it could be read (issue #641).
+        world.launch_notes = [f"A new career begins. {label} is archived under [S] Status, [D] Dossiers."]
         return "A new career begins."
 
 
@@ -9285,7 +9347,12 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
             draw_page(p, title, pages[page], page, len(pages))
             footer = list_footer
         else:
-            out_line()
+            # Full-bleed and unframed on purpose, and sized to fill the terminal --
+            # so it has to start at the top of one. It opened with a blank line
+            # instead, which drew it under the chart and added another whole copy
+            # beneath the last at every sector change (issue #643). The clear
+            # takes the blank line's row.
+            clear_screen()
             heading = "Star Map: " + (SECTOR_NAMES[sector] if sector is not None else "Galaxy")
             xmin, xmax, ymin, ymax = map_bounds(sector)
             bounds = f"X {xmin}-{xmax}; Y {ymin}-{ymax}"
@@ -10374,7 +10441,8 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
                     except EOFError:
                         pass
                     return RecoveryResult(None, 1)
-                out_line("Previous checkpoint restored. Resuming this career.")
+                # Said by `main`, on the deck the restored career opens at: a line
+                # written here is erased by that deck's clear (issue #641).
                 return RecoveryResult(restored, 0)
 
 
@@ -10427,11 +10495,9 @@ def main() -> int:
             save = recovery.save
             if save is None:
                 return recovery.exit_code
-            is_new, notice = False, None
+            is_new, notice = False, "Previous checkpoint restored. Resuming this career."
         apply_display_style(save.display_style)
         screen_title(p, info)
-        if notice:
-            out_line(f"{p.wrong}{notice}{RESET}")
         if is_new:
             # After a refusal there *is* a dossier; it is simply not one this
             # build opens, and saying otherwise would read as a bug (#421).
@@ -10446,19 +10512,22 @@ def main() -> int:
                 # The refused career keeps its slot until its replacement is
                 # confirmed; a cancelled registration changes nothing (#421).
                 replace_unsupported_career(save_dir, user_id, save)
-        else:
-            out_line(f"{p.muted}Welcome back, {save.pilot.handle}. Day {save.turn}.{RESET}")
         world = World(save, checkpoint=lambda current: persist(current, save_dir, user_id))
         world.checkpoint()  # the launch tick prepares the station this career opens at
-        if is_new:
-            out_line("Start at [G] Pilot Guide for an optional first delivery and flight instructions.")
-        elif world.save.pending_travel is None:
-            for line in pilot_recap(world):
-                out_line(line)
+        # `notice` is what loading had to say (a career rolled back to its previous
+        # checkpoint). It waits for the first deck with the rest, even when a
+        # resumed journey comes first.
+        world.launch_notes = ([notice] if notice else []) + launch_notes(world, is_new=is_new)
         if world.save.pending_travel is not None:
-            out_line(f"{p.gold}Resuming your interrupted journey. Station access follows its resolution.{RESET}")
-            screen_travel(p, world, world.save.pending_travel["destination"])
+            # Held on a screen of its own: what follows is the encounter the
+            # caller was cut off in, and its first panel clears the terminal.
+            draw_page(p, "Journey Resumed", journey_resumed_lines(world), 0, 1)
             pause(p)
+            screen_travel(p, world, world.save.pending_travel["destination"])
+            # No pause after it. An ordinary jump has none either: the deck that
+            # follows keeps the journey's outcome as its results. The pause that
+            # stood here held a fight's last lines on screen underneath the
+            # panel they had scrolled off the top (issue #643).
 
         while True:
             choice = screen_station_menu(p, world)
