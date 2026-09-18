@@ -342,7 +342,9 @@ def test_every_screen_renders_legibly_in_every_preset(monkeypatch, screen, width
         if line.strip()[:1] in ("│", "|"):
             assert len(line) == max(borders), f"{screen}/{style}: ragged row {line!r}"
     if style in ("mono", "plain"):
-        assert not vr._ANSI_RE.search(frame), f"{screen}/{style} is styled"
+        # Unstyled means no colour; the screen still clears (issue #642).
+        assert not vr.ANSI_STYLE_RE.search(frame), f"{screen}/{style} is styled"
+        assert not vr._ANSI_RE.search(frame.replace("\x1b[2J\x1b[H", "")), f"{screen}/{style}: an escape besides the clear"
     if style == "plain":
         left = sorted(set(frame) & set(UNICODE_GLYPHS))
         assert not left, f"{screen}/plain kept Unicode artwork: {left}"
@@ -496,6 +498,23 @@ def test_every_paged_screen_goes_through_the_one_clearing_path():
     games lost their presentation to slices that each looked fine."""
     source = vr.__file__ and open(vr.__file__, encoding="utf-8").read()
     assert source.count("[2J") == 1, "the clear belongs in clear_screen() alone"
+
+
+@pytest.mark.parametrize("style", ["mono", "plain"])
+def test_an_unstyled_preset_loses_its_colour_and_keeps_its_clear(monkeypatch, capsys, style):
+    """Monochrome and Plain drop styling, not the terminal (issue #642).
+
+    `out()` used to strip every escape in these two presets, which removed
+    `clear_screen`'s own `ESC[2J ESC[H` on the way out, so both printed each
+    screen under the last one -- the scroll #516 had ended. The test above could
+    not see it: it replaces `out`, and `out` is where the clear was lost. This
+    one reads what reaches stdout.
+    """
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    vr.draw_page(vr.pal(), "TEST", ["a row"], 0, 1)
+    written = capsys.readouterr().out
+    assert written.startswith("\x1b[2J\x1b[H"), repr(written[:24])
+    assert "\x1b" not in written[len("\x1b[2J\x1b[H"):], "styling must not reach an unstyled preset"
 
 
 @pytest.mark.parametrize("label,count,noun", [
