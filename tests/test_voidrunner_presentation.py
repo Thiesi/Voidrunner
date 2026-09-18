@@ -126,7 +126,7 @@ def test_pilot_record_retirement_acknowledges_a_saved_new_career(tmp_path):
     world.save.pilot.credits=vr.RANKS[-1][0]
     world.save.pilot.highest_rank_seen=len(vr.RANKS)-1
     world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
-    with _door_stopped_at(tmp_path,b"SHRSY",b"A new career begins."):
+    with _door_stopped_at(tmp_path,b"SHRSY",b"Career Complete"):  # the first acknowledgement is the ending screen (#644)
         saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
         assert saved.pilot.retirements==1 and saved.seed!=world.save.seed
         assert saved.pilot.credits==1200+vr.RETIREMENT_STARTING_CREDITS_BONUS

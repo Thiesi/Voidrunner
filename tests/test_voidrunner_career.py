@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from .support import plain_bytes, page_source, page_title, plain as plainly, _Sys, _VOIDRUNNER_PATH, _add_cargo, _box_rows, _door_stopped_at, _escort_world, _finale_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_text, vr
+from .support import plain, plain_bytes, page_source, page_title, plain as plainly, _Sys, _VOIDRUNNER_PATH, _add_cargo, _box_rows, _door_stopped_at, _escort_world, _finale_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_text, vr
 
 
 def test_retire_pilot_increments_retirements_and_grants_cumulative_bonus():
@@ -83,7 +83,7 @@ def test_screen_status_retires_on_confirmation_at_top_rank(monkeypatch):
     world.save.pilot.credits = vr.RANKS[-1][0]
     old_seed = world.save.seed
 
-    keys = iter(["R", "S", "Y"])
+    keys = iter(["R", "S", "Y", "C"])  # the ending screen waits for a key (#644)
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -2392,7 +2392,7 @@ def test_career_rank_retirement_resets_rank_despite_lifetime_score():
 def test_career_rank_retained_top_rank_keeps_real_retirement_available(monkeypatch,tmp_path):
     world=_world_with_seed(42); world.save.pilot.highest_rank_seen=4; world.save.pilot.credits=100
     world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
-    keys=iter("RSY"); monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    keys=iter("RSYC"); monkeypatch.setattr(vr,"read_key",lambda:next(keys))  # [C] leaves the ending screen (#644)
     with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_status(vr.Palette(False),world)
     assert any("A new career begins" in note for note in world.launch_notes)
     saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
@@ -2551,7 +2551,7 @@ def test_career_finale_full_archive_loads_but_never_evicts_to_retire(tmp_path):
 def test_career_finale_real_kill_ack_keeps_dossier_and_new_equipment(tmp_path,finale,index):
     world=_finale_world(finale); world.save.pilot.highlight("Preserved through disconnect")
     world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
-    with _door_stopped_at(tmp_path,f"SR{index}SY".encode(),b"A new career begins."):
+    with _door_stopped_at(tmp_path,f"SR{index}SY".encode(),b"Career Complete"):
         saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
         assert saved.pilot.retirements==1 and saved.retired_careers[0]["finale"]==finale
         assert "Preserved through disconnect" in saved.retired_careers[0]["highlights"]
@@ -3025,7 +3025,7 @@ def test_career_finale_preserves_accepted_legacy_highlight_lists(monkeypatch,tmp
     world=_finale_world();highlights=[f"Legacy achievement {i}" for i in range(count)]
     world.save.pilot.highlights=list(highlights);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
     old,_,_=vr.load_or_create_save(tmp_path,77,"Tester");assert old.pilot.highlights==highlights
-    keys=iter("SY");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    keys=iter("SYC");monkeypatch.setattr(vr,"read_key",lambda:next(keys))  # [C] leaves the ending screen (#644)
     with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_career_finale(vr.Palette(False),world)
     assert any("A new career begins." in note for note in world.launch_notes)
     saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
@@ -3037,7 +3037,7 @@ def test_career_finale_preserves_accepted_legacy_highlight_lists(monkeypatch,tmp
 def test_career_finale_legacy_highlights_survive_real_retirement_disconnect(tmp_path):
     world=_finale_world();highlights=[f"Legacy event {i}" for i in range(41)]
     world.save.pilot.highlights=list(highlights);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
-    with _door_stopped_at(tmp_path,b"SRSY",b"A new career begins."):
+    with _door_stopped_at(tmp_path,b"SRSY",b"Career Complete"):
         saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
         assert saved.pilot.retirements==1 and saved.retired_careers[0]["highlights"]==highlights
 
@@ -3199,3 +3199,70 @@ def test_an_older_milestone_step_is_rescaled_rather_than_re_awarded():
     assert vr.SaveData.from_dict(reloaded.save.to_dict()).contraband_trade_milestones == 5  # and reloads unchanged
     data["contraband_standing_step"] = 0
     with pytest.raises(vr.ResumeError): vr.SaveData.from_dict(data)
+
+
+# ---------------------------------------------------------------------------
+# The ending (issue #644). Retirement went from its yes/no straight to a fresh
+# Command Deck; four endings were written and none was presented as one.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("finale", list(vr.CAREER_FINALES))
+def test_every_ending_is_shown_as_an_ending_after_it_is_saved(monkeypatch, tmp_path, finale):
+    world = _finale_world(finale)
+    world.save.pilot.highlights = ["First kill: destroyed the Ravage.", "Reached Verity."]
+    saves = []
+    world._checkpoint = lambda current: (vr.persist(current, tmp_path, 77), saves.append(current.save.pilot.retirements))
+    world.checkpoint()
+    keys = iter("SY>C")
+    shown_before_save = []
+    def press():
+        key = next(keys)
+        return key
+    monkeypatch.setattr(vr, "read_key", press)
+    real = vr.screen_career_ending
+    def ending(p, fresh, ship):
+        # By the time the ending is drawn the retirement is on disk.
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        shown_before_save.append(saved.pilot.retirements)
+        real(p, fresh, ship)
+    monkeypatch.setattr(vr, "screen_career_ending", ending)
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_career_finale(vr.Palette(False), world)
+    assert shown_before_save == [1]
+    text = " ".join(plain(output.getvalue()).split())
+    info = vr.CAREER_FINALES[finale]
+    assert "Career Complete" in text and info["label"].upper() in text
+    assert " ".join(info["closing"].split()[:6]) in text
+    assert "THE CAREER" in text and "WHAT COMES NEXT" in text and "First kill: destroyed the Ravage." in text
+    if info["tier"] is not None:
+        assert vr.UPGRADES[info["tier"]]["label"] + " tier 1" in text
+
+
+def test_the_ending_is_built_from_the_archived_dossier_and_pages_at_the_floor(monkeypatch, terminal):
+    world = _finale_world("combat"); world.save.turn = 77
+    fresh = vr.finish_career(world.save, "combat")
+    leading, details = vr.career_ending_lines(fresh)
+    text = " ".join(plain(row) for row in leading + details)
+    assert "FRONTIER WARDEN" in text and "77 days" in text and "50 victories" in text
+    for width, height in ((80, 24), (40, 12)):
+        terminal(width, height)
+        pages = vr.portrait_pages(vr.pal(), vr.ship_portrait(world.save.ship, "large"), vr.ship_portrait(world.save.ship, "compact"),
+                                  details, "Career Complete", vr.CAREER_ENDING_FOOTER, leading=leading)
+        for index, page in enumerate(pages):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                vr.draw_page(vr.pal(), "Career Complete", page, index, len(pages)); vr.out_prompt(vr.CAREER_ENDING_FOOTER)
+            rows = plain(output.getvalue()).replace("\r\n", "\n").split("\n")
+            assert len([row for row in rows if row]) <= height - vr.HOST_EPILOGUE_ROWS + 3
+            assert all(vr._visible_width(row) <= width for row in rows)
+
+
+def test_a_paging_key_never_leaves_the_ending_and_any_other_key_does(monkeypatch, terminal):
+    terminal(40, 12)
+    world = _finale_world("legend")
+    fresh = vr.finish_career(world.save, "legend")
+    pressed = iter("><<>>>>>>>C")
+    monkeypatch.setattr(vr, "read_key", lambda: next(pressed))
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_career_ending(vr.Palette(False), fresh, world.save.ship)
+    assert next(pressed, None) is None  # every paging key was consumed; [C] left

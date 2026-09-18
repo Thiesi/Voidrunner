@@ -8639,6 +8639,57 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
     return lines
 
 
+CAREER_ENDING_FOOTER = "[<>] Page [C] Continue: "
+
+
+def career_ending_lines(fresh: SaveData) -> tuple[list[str], list[str]]:
+    """The ending a pilot earned, and the career it closes, from the dossier
+    that retirement has just archived -- never from the live career, which is
+    gone by the time this is read. Returns what stands above the portrait and
+    what stands below it."""
+    p = pal()
+    dossier = fresh.retired_careers[-1]
+    info = CAREER_FINALES[dossier["finale"]]
+    leading = [f"{badge(info['label'].upper(), 'brand')}  {p.slate}career{RESET} {p.ink}#{dossier['number']}{RESET} "
+               f"{p.slate}of{RESET} {p.plasma}{BOLD}{_mission_plain(fresh.pilot.handle)}{RESET}",
+               info["closing"]]
+    details = [section("THE CAREER"),
+               f"{dossier['days']} days, {dossier['started'] or 'an unrecorded start'} to {dossier['ended']}; "
+               f"retired a {RANKS[dossier['rank']][1]} in a {dossier['ship']}.",
+               f"Final credits {dossier['credits']:,}cr; market margin {dossier['market_margin']:+,}cr.",
+               f"{dossier['charted']}/{GALAXY_SYSTEM_COUNT} systems charted; {dossier['kills']} victories; "
+               f"{dossier['missions']} contracts completed, {dossier['failed']} failed, {dossier['expired']} expired."]
+    # The last few things the career was remembered for; the dossier keeps them all.
+    details += ["* " + _mission_plain(entry) for entry in dossier["highlights"][-3:]]
+    start = f"A fresh galaxy, a Shuttle and {fresh.pilot.credits:,}cr"
+    if info["tier"] is not None:
+        start += f", with {UPGRADES[info['tier']]['label']} tier 1 from this ending"
+    details += [section("WHAT COMES NEXT"),
+                start + ".",
+                "Kept: your display style, lifetime score, retirement count and this dossier, under [S] Status, [D] Dossiers."]
+    return leading, details
+
+
+def screen_career_ending(p: Palette, fresh: SaveData, retired_ship: Ship) -> None:
+    """The one moment of a career that happens once, held until the pilot moves on.
+
+    Retirement used to go from its yes/no straight to a new Command Deck: four
+    endings were written and none was ever presented as one (issue #644). This
+    is drawn after the retirement has been saved, so closing the connection here
+    loses nothing, and any key but a paging key leaves it."""
+    leading, details = career_ending_lines(fresh)
+    pages = portrait_pages(p, ship_portrait(retired_ship, "large"), ship_portrait(retired_ship, "compact"),
+                           details, "Career Complete", CAREER_ENDING_FOOTER, color=p.gold, leading=leading)
+    page = 0
+    while True:
+        key, page, count = _draw_service_page(p, "Career Complete", [], CAREER_ENDING_FOOTER, page, pages=pages)
+        if (moved := page_step(key, page, count)) is not None and moved != page:
+            page = moved
+            continue
+        if moved is None:
+            return
+
+
 def screen_career_finale(p: Palette, world: World) -> str | None:
     selected = next((key for key in CAREER_FINALES if career_finale_blocker(world.save, key) is None), "legend")
     page, result = 0, None
@@ -8661,9 +8712,12 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
         if not confirm(f"End this career as {CAREER_FINALES[selected]['label']} and begin New Game+?", p):
             result, page = "Retirement cancelled; current career retained.", 0; continue
         label = CAREER_FINALES[selected]["label"]
+        retired_ship = dataclasses.replace(world.save.ship)  # the ship that flew this career, for its portrait
         world.reset(fresh.save)
         world.pending_promotions.extend(fresh.pending_promotions)
         world.commit()
+        # Saved first, shown second: the ending is narration of something durable.
+        screen_career_ending(p, world.save, retired_ship)
         # `reset` cleared the notes with everything else, so this is set after
         # it. Written to the terminal instead, the line was erased by the new
         # career's first deck before it could be read (issue #641).
