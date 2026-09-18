@@ -8136,7 +8136,11 @@ def launch_notes(world: World, *, is_new: bool) -> list[str]:
         return []
     if is_new:
         return [FIRST_FLIGHT_POINTER]
-    return [_mission_plain(f"Welcome back, {world.save.pilot.handle}.")] + pilot_recap(world)[1:]
+    # Also left out: the recap's advice for a pilot tracking nothing. It is
+    # guidance, the guide keeps it, and at forty columns it is three more rows
+    # on a page the deck's own header and gauges are waiting behind.
+    recap = [line for line in pilot_recap(world)[1:] if not line.startswith("No contract tracked.")]
+    return [_mission_plain(f"Welcome back, {world.save.pilot.handle}.")] + recap
 
 
 def journey_resumed_lines(world: World) -> list[str]:
@@ -10327,7 +10331,8 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
                     except EOFError:
                         pass
                     return RecoveryResult(None, 1)
-                out_line("Previous checkpoint restored. Resuming this career.")
+                # Said by `main`, on the deck the restored career opens at: a line
+                # written here is erased by that deck's clear (issue #641).
                 return RecoveryResult(restored, 0)
 
 
@@ -10386,11 +10391,9 @@ def main() -> int:
             save = recovery.save
             if save is None:
                 return recovery.exit_code
-            is_new, notice = False, None
+            is_new, notice = False, "Previous checkpoint restored. Resuming this career."
         apply_display_style(save.display_style)
         screen_title(p, info)
-        if notice:
-            out_line(f"{p.wrong}{notice}{RESET}")
         if is_new:
             # After a refusal there *is* a dossier; it is simply not one this
             # build opens, and saying otherwise would read as a bug (#421).
@@ -10407,7 +10410,10 @@ def main() -> int:
                 replace_unsupported_career(save_dir, user_id, save)
         world = World(save, checkpoint=lambda current: persist(current, save_dir, user_id))
         world.checkpoint()  # the launch tick prepares the station this career opens at
-        world.launch_notes = launch_notes(world, is_new=is_new)
+        # `notice` is what loading had to say (a career rolled back to its previous
+        # checkpoint). It waits for the first deck with the rest, even when a
+        # resumed journey comes first.
+        world.launch_notes = ([notice] if notice else []) + launch_notes(world, is_new=is_new)
         if world.save.pending_travel is not None:
             # Held on a screen of its own: what follows is the encounter the
             # caller was cut off in, and its first panel clears the terminal.

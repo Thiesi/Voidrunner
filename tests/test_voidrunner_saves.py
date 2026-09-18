@@ -618,7 +618,11 @@ def test_real_recovery_back_decline_eof_and_special_keys_write_nothing(tmp_path,
 
 def test_real_confirmed_recovery_preserves_original_before_success_and_resumes(tmp_path):
     expected = _broken_career_with_previous(tmp_path)
-    with _door_stopped_at(tmp_path, b"RY", b"Previous checkpoint restored"):
+    with _door_stopped_at(tmp_path, b"RY", b"Previous checkpoint restored") as output:
+        # On the deck the restored career opens at, not ahead of it: a line
+        # written before that deck is erased by its clear (issue #641).
+        shown = output.rsplit(b"\x1b[2J", 1)[-1]
+        assert b"Command Deck" in shown and b"Previous checkpoint restored" in shown
         restored, is_new, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert not is_new and restored.turn == 7
         archives = list(tmp_path.glob("77.recovery-*.json"))
