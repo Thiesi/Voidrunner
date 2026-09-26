@@ -21,6 +21,7 @@ import random
 import re
 import subprocess
 import sys
+from tests.door_python import DOOR_PYTHON
 import threading
 import time
 from pathlib import Path
@@ -304,7 +305,7 @@ def _door_stopped_at(tmp_path, commands, acknowledgement: bytes, ready: bytes | 
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
     env = dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info))
     proc = subprocess.Popen(
-        [sys.executable, str(_VOIDRUNNER_PATH)], stdin=subprocess.PIPE,
+        [DOOR_PYTHON, str(_VOIDRUNNER_PATH)], stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
     )
     reached = threading.Event()
@@ -370,7 +371,7 @@ def _live_voidrunner(tmp_path, user_id=77, commands=b"", acknowledgement=b"STATI
     info = tmp_path / f"info-{user_id}.json"
     info.write_text(json.dumps({"user_id": user_id, "handle": "Tester"}), encoding="utf-8")
     env = dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info))
-    proc = subprocess.Popen([sys.executable, str(_VOIDRUNNER_PATH)], stdin=subprocess.PIPE,
+    proc = subprocess.Popen([DOOR_PYTHON, str(_VOIDRUNNER_PATH)], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     output = bytearray()
     reached = threading.Event()
