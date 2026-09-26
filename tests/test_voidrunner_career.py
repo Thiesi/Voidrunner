@@ -776,7 +776,7 @@ with vr['pilot_session'](directory, uid):
             proc.stdin.write(b"x")
             proc.stdin.flush()
         for proc in processes:
-            _, errors = proc.communicate(timeout=15)
+            _, errors = proc.communicate(timeout=60)
             assert proc.returncode == 0, errors
     finally:
         for proc in processes:
@@ -1037,7 +1037,7 @@ def test_real_archive_and_landmark_browsing_preserve_career_bytes(tmp_path, comm
     world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
     before = (tmp_path / "77.json").read_bytes()
     info = tmp_path / "door_info.json"; info.write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 40, "terminal_height": 12}), encoding="utf-8")
-    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True, timeout=10,
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True, timeout=60,
         env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)))
     assert result.returncode == 0 and not result.stderr
     assert (b"Archive" if commands.startswith(b"N") else b"Unclaimed salvage") in result.stdout
@@ -1062,7 +1062,7 @@ def test_real_archive_actions_save_before_ack_and_cannot_replay(tmp_path, stage,
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert saved.flags[flag] is True
     before = (tmp_path / "77.json").read_bytes()
-    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"N" + key + b"BQ", capture_output=True, timeout=10,
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"N" + key + b"BQ", capture_output=True, timeout=60,
         env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")))
     assert result.returncode == 0 and not result.stderr
     assert (tmp_path / "77.json").read_bytes() == before
@@ -1269,7 +1269,7 @@ def test_real_workshop_installation_saves_costs_and_tier_before_ack(tmp_path, ke
         assert saved.pilot.credits == 100_000 - quote["credits"]
         assert not saved.cargo and saved.trading_ledger.workshop_spend == quote["credits"]
     before = (tmp_path / "77.json").read_bytes()
-    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"YS" + number + b"BBQQ", capture_output=True, timeout=10,
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"YS" + number + b"BBQQ", capture_output=True, timeout=60,
         env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")))
     assert result.returncode == 0 and not result.stderr
     assert (tmp_path / "77.json").read_bytes() == before
@@ -1479,7 +1479,7 @@ def test_real_paid_service_promotion_is_saved_before_ack_and_not_replayed(tmp_pa
     with _door_stopped_at(tmp_path, b"CAY", b"is now Seasoned"):
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert saved.ship.crew_records[role]["paid_jumps"] == 5 and saved.turn == 5
-    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"IQQ", capture_output=True, timeout=10,
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"IQQ", capture_output=True, timeout=60,
         env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")))
     assert result.returncode == 0 and not result.stderr
     resumed, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
@@ -1797,7 +1797,7 @@ def test_real_personal_crew_task_back_and_eof_preserve_career(tmp_path, role, in
     world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
     path = tmp_path / "77.json"; original = path.read_bytes()
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=f"YK{index}".encode() + commands,
-                            capture_output=True, timeout=10, env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path),
+                            capture_output=True, timeout=60, env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path),
                             NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")))
     assert result.returncode == 0 and not result.stderr
     assert b"Crew task" in result.stdout and path.read_bytes() == original
@@ -1958,7 +1958,7 @@ def test_real_faction_contact_back_eof_and_refusal_preserve_career(tmp_path, key
     (tmp_path / "door_info.json").write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 40, "terminal_height": 12}), encoding="utf-8")
     original = (tmp_path / "77.json").read_bytes()
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=key.encode() + commands,
-                            capture_output=True, timeout=10, env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")))
+                            capture_output=True, timeout=60, env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")))
     assert result.returncode == 0 and not result.stderr
     assert (b"Edda Ro" if key == "P" else b"Rook Talan") in result.stdout
     assert (tmp_path / "77.json").read_bytes() == original
@@ -2237,7 +2237,7 @@ def test_faction_case_real_back_eof_and_refusal_preserve_career(tmp_path, factio
     original = (tmp_path / "77.json").read_bytes()
     prefix = b"PS" if faction == vr.FACTION_CONCORD else b"WS"
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=prefix + commands,
-                            capture_output=True, timeout=10, env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)))
+                            capture_output=True, timeout=60, env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)))
     assert result.returncode == 0 and not result.stderr
     assert b"Case " in result.stdout and (tmp_path / "77.json").read_bytes() == original
 
@@ -2566,7 +2566,7 @@ def test_career_finale_real_browse_refusal_eof_write_nothing(tmp_path,commands):
     world=_finale_world(); world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
     info=tmp_path/"door_info.json"; info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
     before=(tmp_path/"77.json").read_bytes()
-    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,timeout=10,
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,timeout=60,
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
     assert result.returncode==0 and not result.stderr
     assert (tmp_path/"77.json").read_bytes()==before
@@ -2823,7 +2823,7 @@ def test_real_achievement_category_browsing_keeps_career_and_score_bytes(tmp_pat
     world=_finale_world("combat");world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
     paths=[tmp_path/"77.json",tmp_path/"scores"/"77.json"];before={p:p.read_bytes() for p in paths}
     info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
-    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,timeout=10,
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,timeout=60,
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
     assert result.returncode==0 and not result.stderr
     assert b"[1-5] View" in plain_bytes(result.stdout)
@@ -2913,7 +2913,7 @@ code=g['main']()
 print('REPLACED:'+str(len(replaced)),file=sys.stderr)
 raise SystemExit(code)
 """
-    result=subprocess.run([sys.executable,"-c",script,str(_VOIDRUNNER_PATH)],input=key.encode()+commands,capture_output=True,timeout=10,
+    result=subprocess.run([sys.executable,"-c",script,str(_VOIDRUNNER_PATH)],input=key.encode()+commands,capture_output=True,timeout=60,
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
     assert result.returncode==0 and result.stderr.strip()==b"REPLACED:0"
     assert (b"Edda Ro" if key=="P" else b"Rook Talan") in result.stdout

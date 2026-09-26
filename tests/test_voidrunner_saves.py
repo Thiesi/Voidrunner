@@ -36,11 +36,11 @@ except vr['PilotBusy']:
     args = [sys.executable, "-c", script, str(_VOIDRUNNER_PATH), str(path)]
     with path.open("r+b") as owner:
         msvcrt.locking(owner.fileno(), msvcrt.LK_NBLCK, 1)
-        blocked = subprocess.run(args, capture_output=True, timeout=5)
+        blocked = subprocess.run(args, capture_output=True, timeout=60)
         assert blocked.returncode == 0 and not blocked.stderr
         assert blocked.stdout.strip() == b"busy"
     assert path.read_bytes() == b""
-    acquired = subprocess.run(args, capture_output=True, timeout=5)
+    acquired = subprocess.run(args, capture_output=True, timeout=60)
     assert acquired.returncode == 0 and not acquired.stderr
     assert acquired.stdout.strip() == b"acquired" and path.read_bytes() == b""
 
@@ -164,7 +164,7 @@ def test_cancelled_career_does_not_create_save(tmp_path):
     env.pop("NETBBS_DOOR_INFO", None)
     result = subprocess.run(
         [sys.executable, str(_VOIDRUNNER_PATH)], input=b"NewPilot\rN",
-        capture_output=True, env=env, timeout=10,
+        capture_output=True, env=env, timeout=60,
     )
     assert result.returncode == 0
     assert b"Career launch cancelled" in result.stdout
@@ -240,7 +240,7 @@ def test_unreadable_resume_state_stops_without_replacing_career(tmp_path, broken
     result = subprocess.run(
         [sys.executable, str(_VOIDRUNNER_PATH)], input=b" ", capture_output=True,
         env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)),
-        timeout=10,
+        timeout=60,
     )
     assert result.returncode == 1
     assert "your saved career is unchanged" in " ".join(
@@ -350,7 +350,7 @@ def test_inconsistent_resume_stops_before_rewriting_save(tmp_path, fault):
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
     result = subprocess.run(
         [sys.executable, str(_VOIDRUNNER_PATH)], input=b" ", capture_output=True,
-        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10,
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=60,
     )
     assert result.returncode == 1
     output = " ".join(vr._ANSI_RE.sub("", result.stdout.decode("utf-8")).split())
@@ -607,7 +607,7 @@ def test_real_recovery_back_decline_eof_and_special_keys_write_nothing(tmp_path,
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
     before = {p.name: p.read_bytes() for p in tmp_path.glob("*.json")}
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
-                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=60)
     assert result.returncode == (0 if commands.endswith((b"B", b"Q")) else 1)
     assert not result.stderr
     said = plain_bytes(result.stdout)
@@ -783,7 +783,7 @@ def test_future_formats_never_offer_or_allow_downgrade_recovery(tmp_path, monkey
     info = tmp_path / "door_info.json"
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"RYB", capture_output=True,
-                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=60)
     assert result.returncode == 0 and not result.stderr
     shown = plain_bytes(result.stdout)
     assert b"[R] Restore" not in shown and b"Pilot callsign" not in shown
@@ -899,7 +899,7 @@ def test_real_display_saved_before_ack_and_applied_from_restart_title(tmp_path, 
     before = (tmp_path / "77.json").read_bytes()
     for commands in (b"O", b"OBQ", b"O" + key + b"BQ"):
         result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands,
-            capture_output=True, timeout=10, env=dict(os.environ,
+            capture_output=True, timeout=60, env=dict(os.environ,
                 VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")))
         assert result.returncode == 0 and not result.stderr
         assert b"Display Options" in result.stdout

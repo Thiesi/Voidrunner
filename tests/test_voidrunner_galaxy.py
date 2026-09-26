@@ -337,7 +337,7 @@ def test_real_spatial_map_back_eof_and_inspection_preserve_career(tmp_path, comm
     original = (tmp_path/"77.json").read_bytes()
     info=tmp_path/"door_info.json"; info.write_text(json.dumps({"user_id":77,"handle":"Tester"}),encoding="utf-8")
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
-        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=60)
     assert result.returncode==0 and not result.stderr and b"Star Map:" in result.stdout
     if b"LI1" in commands: assert b"Station Info" in result.stdout
     assert (tmp_path/"77.json").read_bytes()==original

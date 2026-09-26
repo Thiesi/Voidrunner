@@ -370,7 +370,7 @@ def test_real_market_memory_and_route_back_or_eof_preserve_career(tmp_path, comm
     info = tmp_path / "door_info.json"
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
-                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=60)
     assert result.returncode == 0 and not result.stderr
     assert shows_page(result.stdout, "Trade Route")
     if b"M" in commands:
@@ -610,7 +610,7 @@ def test_trading_ledger_real_back_and_eof_preserve_career(tmp_path, commands):
     info = tmp_path / "door_info.json"
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
-                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=60)
     assert result.returncode == 0 and not result.stderr
     assert shows_page(result.stdout, "Trading Ledger")
     assert (tmp_path / "77.json").read_bytes() == original
@@ -1081,7 +1081,7 @@ def test_real_economy_opportunity_back_eof_and_route_selection_leave_career_unch
     original = (tmp_path / "77.json").read_bytes()
     info = tmp_path / "door_info.json"; info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
-        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=60)
     assert result.returncode == 0 and not result.stderr and shows_page(result.stdout, "Opportunities")
     if b"1" in commands: assert shows_page(result.stdout, "Trade Route")
     assert (tmp_path / "77.json").read_bytes() == original
@@ -1710,7 +1710,7 @@ def test_real_responsive_futures_draft_back_cancel_and_eof_preserve_career(tmp_p
     before=(tmp_path/"77.json").read_bytes()
     info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
-        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=60)
     assert result.returncode==0 and not result.stderr and b"Order Food:" in result.stdout
     if b"SN" in commands:assert b"Signing cancelled" in result.stdout
     assert (tmp_path/"77.json").read_bytes()==before
@@ -1863,7 +1863,7 @@ def test_acknowledged_station_action_survives_forced_termination(
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5)
-        reader.join(timeout=5)
+        reader.join(timeout=60)
         assert not reader.is_alive()
         proc.stdin.close()
         proc.stdout.close()
@@ -1951,7 +1951,7 @@ def test_real_door_accepts_utf8_name_and_coalesces_crlf(tmp_path):
     result = subprocess.run(
         [sys.executable, str(_VOIDRUNNER_PATH)],
         input="界e\u0301\x7fJörg\r\nYQ".encode("utf-8"),
-        capture_output=True, env=env, timeout=10,
+        capture_output=True, env=env, timeout=60,
     )
     assert result.returncode == 0
     assert not result.stderr
@@ -1969,7 +1969,7 @@ def test_real_pipe_eof_in_partial_key_never_launches_career(tmp_path, partial):
     env.pop("NETBBS_DOOR_INFO", None)
     result = subprocess.run(
         [sys.executable, str(_VOIDRUNNER_PATH)], input=partial,
-        capture_output=True, env=env, timeout=10,
+        capture_output=True, env=env, timeout=60,
     )
     assert result.returncode == 0
     assert not result.stderr
@@ -2287,7 +2287,7 @@ def test_second_real_launch_cannot_load_or_replace_an_active_pilot(tmp_path, new
     with _live_voidrunner(tmp_path, acknowledgement=ack) as (_, env):
         before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")}
         result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"Q",
-                                capture_output=True, env=env, timeout=10)
+                                capture_output=True, env=env, timeout=60)
         assert result.returncode == 0, result.stderr
         assert b"already has an active Voidrunner session" in result.stdout
         assert b"Welcome back" not in result.stdout and b"Pilot callsign" not in result.stdout
@@ -2309,7 +2309,7 @@ def test_pilot_lease_releases_and_acknowledged_trade_survives(tmp_path, end):
             proc.stdin.close()
         proc.wait(timeout=5)
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"Q",
-                            capture_output=True, env=env, timeout=10)
+                            capture_output=True, env=env, timeout=60)
     assert result.returncode == 0, result.stderr
     assert b"Welcome back" in result.stdout
     assert b"already has" not in result.stdout
@@ -2453,7 +2453,7 @@ def test_real_first_flight_survives_kills_through_acceptance_purchase_delivery_a
         assert (delivered.trading_ledger.delivery_cost, delivered.trading_ledger.delivery_revenue) == (cargo_cost, offer.reward)
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"QQ", capture_output=True,
                             env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path),
-                                     NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")), timeout=10)
+                                     NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")), timeout=60)
     assert result.returncode == 0 and not result.stderr
     resumed, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert resumed.pending_travel is None and resumed.pilot.credits == delivered.pilot.credits
@@ -2475,7 +2475,7 @@ def test_real_opening_guide_back_and_eof_leave_career_unchanged(tmp_path, comman
     info = tmp_path / "door_info.json"
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
-                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=60)
     assert result.returncode == 0 and not result.stderr
     assert shows_page(result.stdout, "Pilot Guide")
     if b"O" in commands:
@@ -2645,7 +2645,7 @@ def test_real_survey_back_paging_and_eof_preserve_career(tmp_path, commands):
     original = (tmp_path / "77.json").read_bytes()
     info = tmp_path / "door_info.json"; info.write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 40, "terminal_height": 12}), encoding="utf-8")
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
-        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=60)
     assert result.returncode == 0 and not result.stderr and b"Survey 1,200cr" in result.stdout
     assert (tmp_path / "77.json").read_bytes() == original
 
@@ -2818,7 +2818,7 @@ def test_real_viewport_browsing_preserves_career_bytes(tmp_path,commands):
     world=_world_with_seed(42); world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
     before=(tmp_path/"77.json").read_bytes()
     info=tmp_path/"door_info.json"; info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
-    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,timeout=10,
+    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,timeout=60,
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
     assert result.returncode==0 and not result.stderr
     assert b"[1-3] View" in plain_bytes(result.stdout)

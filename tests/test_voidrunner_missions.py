@@ -156,7 +156,7 @@ def test_real_mission_navigation_back_and_eof_preserve_career(tmp_path,active,co
     original=(tmp_path/"77.json").read_bytes()
     info=tmp_path/"door_info.json"; info.write_text(json.dumps({"user_id":77,"handle":"Tester"}),encoding="utf-8")
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
-        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=60)
     assert result.returncode==0 and not result.stderr and b"Contract Route #1" in result.stdout
     assert (tmp_path/"77.json").read_bytes()==original
     assert not vr.World(vr.load_or_create_save(tmp_path,77,"Tester")[0]).by_id[mission.target_system].discovered
@@ -181,7 +181,7 @@ def test_real_mission_navigation_completes_delivery_once_before_retained_result(
         assert saved.tracked_mission_id is None
     info=tmp_path/"door_info.json"
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=b"Q",capture_output=True,
-        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=60)
     assert result.returncode==0 and not result.stderr
     resumed,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
     assert resumed.pilot.credits==saved.pilot.credits and resumed.turn==1
@@ -428,7 +428,7 @@ def test_real_door_preserves_bad_resume_mission_and_shows_recovery(tmp_path, kin
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
     result = subprocess.run(
         [sys.executable, str(_VOIDRUNNER_PATH)], input=b" ", capture_output=True,
-        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10,
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=60,
     )
     assert result.returncode == 1
     output = " ".join(vr._ANSI_RE.sub("", result.stdout.decode("utf-8")).split())

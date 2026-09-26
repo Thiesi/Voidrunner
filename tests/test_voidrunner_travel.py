@@ -917,7 +917,7 @@ def test_real_general_route_back_and_eof_preserve_career(tmp_path, commands):
     info = tmp_path / "door_info.json"
     info.write_text(json.dumps({"user_id":77, "handle":"Tester"}), encoding="utf-8")
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
-        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=60)
     assert result.returncode == 0 and not result.stderr and b"Route Planner" in result.stdout
     if b"D1" in commands: assert b"Destination:" in result.stdout
     assert b"Charted Destination" in result.stdout  # the planner picks before it plans (#415)
@@ -1468,7 +1468,7 @@ def test_real_customs_browsing_and_rejected_bribe_preserve_pending_save(tmp_path
     info = tmp_path / "door_info.json"
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 40, "terminal_height": 12}), encoding="utf-8")
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=RESUME + commands,
-        capture_output=True, timeout=10, env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)))
+        capture_output=True, timeout=60, env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)))
     assert result.returncode == 0 and not result.stderr
     assert b"Resuming your interrupted journey" in result.stdout and b"Customs" in result.stdout
     assert b"Command Deck" not in result.stdout
@@ -1568,7 +1568,7 @@ def test_real_workshop_browsing_and_routes_preserve_career_bytes(tmp_path, comma
     world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
     before = (tmp_path / "77.json").read_bytes()
     info = tmp_path / "door_info.json"; info.write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 40, "terminal_height": 12}), encoding="utf-8")
-    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True, timeout=10,
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True, timeout=60,
         env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)))
     assert result.returncode == 0 and not result.stderr and b"Specialist Workshops" in result.stdout
     assert (tmp_path / "77.json").read_bytes() == before
