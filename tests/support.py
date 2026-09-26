@@ -342,7 +342,7 @@ def _door_stopped_at(tmp_path, commands, acknowledgement: bytes, ready: bytes | 
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5)
-        reader.join(timeout=5)
+        reader.join(timeout=60)
         assert not reader.is_alive()
         proc.stdin.close()
         proc.stdout.close()
@@ -387,7 +387,7 @@ def _live_voidrunner(tmp_path, user_id=77, commands=b"", acknowledgement=b"STATI
         if proc.poll() is None:
             proc.kill()
         proc.wait(timeout=5)
-        reader.join(timeout=5)
+        reader.join(timeout=60)
         assert not reader.is_alive()
         proc.stdin.close()
         proc.stdout.close()

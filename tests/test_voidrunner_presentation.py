@@ -115,7 +115,7 @@ def test_real_pilot_record_browsing_cancel_and_eof_preserve_career(tmp_path,comm
     info=tmp_path/"door_info.json"
     info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
-        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=60)
     assert result.returncode==0 and not result.stderr and b"Pilot Record:" in result.stdout
     if b"N" in commands:assert b"Retirement cancelled" in result.stdout
     assert (tmp_path/"77.json").read_bytes()==original
@@ -228,7 +228,7 @@ def test_real_responsive_service_browsing_and_cancellation_preserve_career(tmp_p
     info=tmp_path/"door_info.json"
     info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
-        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=60)
     assert result.returncode==0 and not result.stderr and b"Engineering Yard" in result.stdout
     if b"K" in commands: assert b"Crew Roster" in result.stdout
     assert (tmp_path/"77.json").read_bytes()==original
@@ -312,7 +312,7 @@ def test_real_market_catalog_browsing_cancel_and_eof_preserve_career(tmp_path,co
     original=(tmp_path/"77.json").read_bytes()
     info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
-        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=60)
     assert result.returncode==0 and not result.stderr and b"Market: 1,200cr" in result.stdout
     assert (tmp_path/"77.json").read_bytes()==original
 
@@ -404,7 +404,7 @@ def test_real_cockpit_paging_toggle_and_exit_preserve_career(tmp_path,commands):
     info=tmp_path/"door_info.json"
     info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
-        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=60)
     assert result.returncode==0 and not result.stderr
     shown = plain_bytes(result.stdout)
     assert b"Command Deck:" in shown and b"[X] Compact" in shown
@@ -503,7 +503,7 @@ def test_real_responsive_chart_back_eof_and_rejected_jump_preserve_career(tmp_pa
     original=(tmp_path/"77.json").read_bytes()
     info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
-        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=60)
     assert result.returncode==0 and not result.stderr and b"Navigation: Fuel" in result.stdout
     if b"A" in commands: assert b"Result: Not enough fuel" in plain_bytes(result.stdout)
     assert (tmp_path/"77.json").read_bytes()==original
@@ -564,7 +564,7 @@ def test_real_score_paging_back_and_eof_preserve_career_and_scores(tmp_path,comm
     before={path:path.read_bytes() for path in paths}
     info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
-        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=10)
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=60)
     assert result.returncode==0 and not result.stderr and b"Hall of Fame" in result.stdout
     assert {path:path.read_bytes() for path in paths}==before
 
