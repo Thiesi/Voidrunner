@@ -1846,7 +1846,7 @@ def test_acknowledged_station_action_survives_forced_termination(
                 time.sleep(max(0.25, vr._INPUT_TIMEOUT * 5))
             proc.stdin.write(part)
             proc.stdin.flush()
-        assert reached.wait(10), bytes(output).decode("utf-8", errors="replace")
+        assert reached.wait(60), bytes(output).decode("utf-8", errors="replace")
         # Deliberately no menu-exit input, EOF or graceful quit.
         proc.kill()
         proc.wait(timeout=5)

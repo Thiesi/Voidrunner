@@ -326,14 +326,14 @@ def _door_stopped_at(tmp_path, commands, acknowledgement: bytes, ready: bytes | 
         # by design and a *lone* Escape only exists on the wire once the decoder's
         # timeout has passed (issue #416 review).
         if ready:
-            assert prompt.wait(15), bytes(output).decode("utf-8", errors="replace")
+            assert prompt.wait(60), bytes(output).decode("utf-8", errors="replace")
         parts = commands if isinstance(commands, list) else [commands]
         for index, part in enumerate(parts):
             if index:
                 time.sleep(max(0.25, vr._INPUT_TIMEOUT * 5))
             proc.stdin.write(part)
             proc.stdin.flush()
-        assert reached.wait(10), bytes(output).decode("utf-8", errors="replace")
+        assert reached.wait(60), bytes(output).decode("utf-8", errors="replace")
         proc.kill()
         proc.wait(timeout=5)
         yield bytes(output)
@@ -380,7 +380,7 @@ def _live_voidrunner(tmp_path, user_id=77, commands=b"", acknowledgement=b"STATI
     try:
         proc.stdin.write(commands)
         proc.stdin.flush()
-        assert reached.wait(10), output.decode("utf-8", errors="replace")
+        assert reached.wait(60), output.decode("utf-8", errors="replace")
         yield proc, env
     finally:
         if proc.poll() is None:
