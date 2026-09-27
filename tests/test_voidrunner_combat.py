@@ -1226,7 +1226,7 @@ def test_contract_notes_appear_only_when_they_apply():
     far = next(s.id for s in world.galaxy if not s.discovered and s.id != dest)
     scan = vr.Mission(2, "scan", "Survey", 250, 0, far)
     text = " ".join(vr.mission_details(world, scan))
-    assert "Survey scanning may avoid travel." in text and "Remote danger remains unknown until charted." in text
+    assert "Survey scanning may avoid travel, at half pay (125cr)." in text and "Remote danger remains unknown until charted." in text
 
 
 def test_offer_page_one_points_to_accept_without_offering_it(monkeypatch, terminal):

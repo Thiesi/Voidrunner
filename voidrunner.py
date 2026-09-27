@@ -3139,7 +3139,14 @@ def expire_missions(world: World) -> list[str]:
     return messages
 
 
-def check_mission_completions(world: World, *, just_discovered: int | None = None) -> list[str]:
+def remote_survey_payout(reward: int) -> int:
+    return reward * REMOTE_SURVEY_PAYOUT_PERCENT // 100
+
+
+def check_mission_completions(world: World, *, just_discovered: int | None = None,
+                              remote: bool = False) -> list[str]:
+    """`remote` is a scanner discovery: a survey it completes pays
+    `REMOTE_SURVEY_PAYOUT_PERCENT` of the reward rather than all of it."""
     msgs = expire_missions(world)
     still_active: list[Mission] = []
     for m in world.save.active_missions:
@@ -3152,14 +3159,17 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
         elif m.kind == "scan" and just_discovered == m.target_system:
             done = True
         if done:
-            world.save.pilot.credits += m.reward
+            paid = remote_survey_payout(m.reward) if remote and m.kind == "scan" else m.reward
+            world.save.pilot.credits += paid
             adjust_reputation(world, FACTION_CONCORD, CONCORD_STANDING_PER_CONTRACT)
             if m.opening_assignment:
                 world.save.flags["opening_assignment_completed"] = True
             if world.save.pilot.missions_completed == 0:
                 world.save.pilot.highlight(f"First mission complete: {m.description}.")
             world.save.pilot.missions_completed += 1
-            msg = f"Mission complete: {m.description} (+{m.reward}cr, +{CONCORD_STANDING_PER_CONTRACT} Concord standing)"
+            msg = (f"Mission complete: {m.description} (+{paid}cr"
+                   + (", scanner survey at half pay" if paid != m.reward else "")
+                   + f", +{CONCORD_STANDING_PER_CONTRACT} Concord standing)")
             world.save.pilot.note(msg)
             msgs.append(msg)
         else:
@@ -3407,6 +3417,10 @@ def bribe_chance(world: World, pirate: Pirate) -> float:
 
 
 CONCORD_STANDING_PER_CONTRACT = 1  # Legal contract work earns Concord standing (issue #407).
+# A survey contract completed by the long-range scanner, without the jump the
+# contract asks for, pays this share of its reward. At full pay a 900cr scanner
+# made surveys close to free income: 2 fuel, no travel, no day (issue #648).
+REMOTE_SURVEY_PAYOUT_PERCENT = 50
 # A bounty pays its Concord standing through the kill itself, not the contract.
 CONCORD_STANDING_CONTRACTS = ("delivery", "scan", "escort")
 
@@ -8264,7 +8278,7 @@ def mission_details(world: World, mission: Mission) -> list[str]:
     if wage:
         lines.append("Budget keeps current crew wages and assumes refuelling stops.")
     if mission.kind == "scan" and not target.discovered:
-        lines.append("Survey scanning may avoid travel.")
+        lines.append(f"Survey scanning may avoid travel, at half pay ({remote_survey_payout(reward):,}cr).")
     if any(not world.by_id[sid].discovered for sid in path):
         lines.append("Remote danger remains unknown until charted.")
     if max_leg > fuel_capacity(world.save.ship):
@@ -9286,7 +9300,9 @@ def survey_terms(world: World) -> list[str]:
               "Chart all contacts in range, including station, economy and danger. No day or wages pass.",
               f"Navigator bonus: +{navigator_bonus(world.save.ship)} connection hops. Surveying creates no remote price quotes."]
     contracts = [m for m in world.save.active_missions if m.kind == "scan" and m.target_system in candidates and not mission_expired(world, m)]
-    if contracts: lines.append(f"Active surveys in range: {len(contracts)}; gross payout {sum(m.reward for m in contracts):,}cr.")
+    if contracts: lines.append(f"Active surveys in range: {len(contracts)}; scanner payout "
+                               f"{sum(remote_survey_payout(m.reward) for m in contracts):,}cr, half of "
+                               f"{sum(m.reward for m in contracts):,}cr on arrival.")
     if world.save.ship.scanner_tier == 0: lines.insert(0, "Scanner required; surveying unavailable.")
     elif fuel < 2: lines.insert(0, "Insufficient fuel: surveying unavailable.")
     elif not candidates: lines.insert(0, "Area already charted: no new contacts; no charge.")
@@ -9306,7 +9322,7 @@ def perform_survey(world: World) -> tuple[str, list[str]]:
         system = world.by_id[sid]
         system.discovered = True
         report.append(f"{system.name}: {system.station_name}; {system.economy}; danger {system.danger}/5.")
-        completed += check_mission_completions(world, just_discovered=sid)
+        completed += check_mission_completions(world, just_discovered=sid, remote=True)
     # The charted list reads whole; what it completed follows it (#648).
     report += completed
     world.sync_discovered()

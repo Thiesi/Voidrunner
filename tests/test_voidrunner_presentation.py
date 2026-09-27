@@ -1784,3 +1784,20 @@ def test_survey_completions_follow_the_charted_list():
     completed = [number for number, row in enumerate(report) if row.startswith("Mission complete")]
     charted = [number for number, row in enumerate(report) if "; danger " in row]
     assert completed and len(charted) == len(targets) and max(charted) < min(completed)
+
+
+def test_a_scanner_survey_pays_half_and_arrival_pays_in_full():
+    """A dock survey used to pay a contract in full for 2 fuel and no jump
+    (issue #648). The scan says what it will pay before the pilot presses S."""
+    world = _world_with_seed(42); world.save.ship.scanner_tier = 1
+    target = vr.survey_candidates(world)[0]
+    world.save.active_missions = [vr.Mission(1, "scan", "Survey one", 441, 0, target)]
+    assert "scanner payout 220cr, half of 441cr on arrival" in " ".join(vr.survey_terms(world))
+    _, report = vr.perform_survey(world)
+    assert world.save.pilot.credits == 1200 + 220
+    assert any("+220cr, scanner survey at half pay" in row for row in report)
+    arrived = _world_with_seed(42)
+    arrived.save.active_missions = [vr.Mission(1, "scan", "Survey one", 441, 0, target)]
+    arrived.save.current_system = target
+    assert any("+441cr, +1 Concord" in row for row in vr.check_mission_completions(arrived, just_discovered=target))
+    assert arrived.save.pilot.credits == 1200 + 441
