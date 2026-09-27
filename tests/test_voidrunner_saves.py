@@ -964,12 +964,12 @@ def test_a_blocked_survey_does_not_advertise_scanning(monkeypatch):
     world.save.active_missions = [mission]
     target.discovered = False
     open_text = " ".join(vr.mission_details(world, mission))
-    assert "Survey scanning may avoid travel." in open_text and "BLOCKED SURVEY" not in open_text
+    assert "Survey scanning may avoid travel" in open_text and "BLOCKED SURVEY" not in open_text
     target.discovered = True
     world.sync_discovered()
     blocked = " ".join(vr.mission_details(world, mission))
     assert "BLOCKED SURVEY" in blocked
-    assert "Survey scanning may avoid travel." not in blocked
+    assert "Survey scanning may avoid travel" not in blocked
     assert "Area surveys require a scanner" not in blocked
 
 

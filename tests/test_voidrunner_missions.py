@@ -377,7 +377,7 @@ def test_scan_checkpoint_contains_discovery_and_mission_reward(tmp_path, monkeyp
         vr._do_scan(vr.Palette(False), world)
     saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert target in saved.discovered
-    assert saved.pilot.credits == 1700
+    assert saved.pilot.credits == 1450  # a scanner survey pays half (#648)
     assert saved.active_missions == []
 
 
@@ -1083,7 +1083,7 @@ def test_area_survey_completes_all_matching_contracts_with_inclusive_deadlines(d
                                   for i, sid in enumerate(targets, 1)]
     _, report = vr.perform_survey(world)
     assert world.save.active_missions == []
-    assert world.save.pilot.credits == (1200 if deadline < 0 else 1400)
+    assert world.save.pilot.credits == (1200 if deadline < 0 else 1300)  # half pay from range (#648)
     assert world.save.pilot.missions_completed == (0 if deadline < 0 else 2)
     assert sum("Mission complete" in row for row in report) == (0 if deadline < 0 else 2)
 
