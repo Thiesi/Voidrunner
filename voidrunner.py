@@ -10824,7 +10824,7 @@ def main() -> int:
         # Status 0, because nonzero is reported as a crash (issue #771).
         out_line(f"{p.gold}" + ("Your pilot is already flying in another session. Leave that one first."
                                 if isinstance(exc, PilotInUse) else
-                                "Voidrunner's saves are being backed up or restored. Try again shortly.")
+                                "Voidrunner's saves are busy with maintenance. Try again shortly.")
                  + RESET)
         return 0
     except ResumeError as exc:

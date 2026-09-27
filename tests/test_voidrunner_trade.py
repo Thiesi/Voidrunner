@@ -2292,7 +2292,7 @@ def test_second_real_launch_cannot_load_or_replace_an_active_pilot(tmp_path, new
         # One line that says which lock it met, and no pause of the door's own:
         # the host's prompt is the only one (issue #771).
         assert b"Your pilot is already flying in another session. Leave that one first." in result.stdout
-        assert b"Press any key" not in result.stdout and b"backed up" not in result.stdout
+        assert b"Press any key" not in result.stdout and b"maintenance" not in result.stdout
         assert b"Welcome back" not in result.stdout and b"Pilot callsign" not in result.stdout
         assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")} == before
 
@@ -2991,7 +2991,7 @@ def test_a_live_pilot_session_refuses_maintenance_and_maintenance_refuses_a_laun
             [sys.executable, str(_VOIDRUNNER_PATH)], input=b"", capture_output=True, timeout=20,
             env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(saves), NETBBS_DOOR_INFO=str(info)))
     assert launched.returncode == 0 and not launched.stderr
-    assert b"Voidrunner's saves are being backed up or restored. Try again shortly." in launched.stdout
+    assert b"Voidrunner's saves are busy with maintenance. Try again shortly." in launched.stdout
     assert b"Press any key" not in launched.stdout and b"another session" not in launched.stdout
     assert not (saves / "99.json").exists()  # a refused launch creates no career
 
