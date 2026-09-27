@@ -2289,7 +2289,10 @@ def test_second_real_launch_cannot_load_or_replace_an_active_pilot(tmp_path, new
         result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"Q",
                                 capture_output=True, env=env, timeout=60)
         assert result.returncode == 0, result.stderr
-        assert b"already has an active Voidrunner session" in result.stdout
+        # One line that says which lock it met, and no pause of the door's own:
+        # the host's prompt is the only one (issue #771).
+        assert b"Your pilot is already flying in another session. Leave that one first." in result.stdout
+        assert b"Press any key" not in result.stdout and b"backed up" not in result.stdout
         assert b"Welcome back" not in result.stdout and b"Pilot callsign" not in result.stdout
         assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")} == before
 
@@ -2988,8 +2991,24 @@ def test_a_live_pilot_session_refuses_maintenance_and_maintenance_refuses_a_laun
             [sys.executable, str(_VOIDRUNNER_PATH)], input=b"", capture_output=True, timeout=20,
             env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(saves), NETBBS_DOOR_INFO=str(info)))
     assert launched.returncode == 0 and not launched.stderr
-    assert b"already has an active Voidrunner session" in launched.stdout  # the message wraps
+    assert b"Voidrunner's saves are being backed up or restored. Try again shortly." in launched.stdout
+    assert b"Press any key" not in launched.stdout and b"another session" not in launched.stdout
     assert not (saves / "99.json").exists()  # a refused launch creates no career
+
+
+def test_a_refused_pilot_session_says_which_lock_refused_it(tmp_path):
+    """Both stay `PilotBusy` for callers that only need "not now" (#771)."""
+    with vr.pilot_session(tmp_path, 77):
+        with pytest.raises(vr.PilotInUse):
+            with vr.pilot_session(tmp_path, 77):
+                pytest.fail("one session per pilot")
+        with vr.pilot_session(tmp_path, 78):
+            pass  # another pilot flies freely
+    with vr.maintenance_session(tmp_path):
+        with pytest.raises(vr.SavesInMaintenance):
+            with vr.pilot_session(tmp_path, 77):
+                pytest.fail("maintenance holds the directory")
+    assert issubclass(vr.PilotInUse, vr.PilotBusy) and issubclass(vr.SavesInMaintenance, vr.PilotBusy)
 
 
 def test_hull_condition_names_each_band_at_its_own_threshold():
