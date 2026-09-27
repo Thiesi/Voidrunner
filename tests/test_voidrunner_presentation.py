@@ -466,10 +466,11 @@ def test_navigation_chart_pages_preserve_all_connections_and_career(monkeypatch,
     text=" ".join(re.sub(r"\[[A-Z]\] ","",vr._ANSI_RE.sub(""," ".join(frames))).split())
     for station in world.galaxy[1:]:
         # The sector is one of the columns forty columns gives up; the name,
-        # the danger and the fuel cost are not (issue #493).
-        if discovered: assert station.name in text and (width < 80 or vr.sector_for(station) in text)
+        # the danger and the fuel cost are not (issue #493), and nor is the
+        # economy a trader picks a jump by (issue #648).
+        if discovered: assert station.name in text and station.economy in text and (width < 80 or vr.sector_for(station) in text)
         else: assert station.name not in text
-    if not discovered: assert "danger unknown" in text and "Uncharted Bearing" in text
+    if not discovered: assert "Uncharted Bearing" in text and "danger unknown" not in text
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
@@ -1243,11 +1244,14 @@ def test_arrival_narration_is_retained_as_deck_results_then_cleared(monkeypatch,
     world = _world_with_seed(42); world.save.ship.fuel = 99
     dest = sorted(world.here.connections)[0]; world.by_id[dest].discovered = False; world.sync_discovered()
     monkeypatch.setattr(world.event_rng, "random", lambda: 0.99)  # no encounter, no inspection
-    with contextlib.redirect_stdout(io.StringIO()):
+    shown = io.StringIO()
+    with contextlib.redirect_stdout(shown):
         vr.screen_travel(vr.Palette(False), world, dest)
     assert f"New system charted: {world.by_id[dest].name}." in world.hop_report
     page = _deck_page(world, monkeypatch, terminal)
-    assert f"Result: Jumping to the unknown..." in page and f"Result: New system charted: {world.by_id[dest].name}." in page
+    assert "Result: Departure: " in page and f"Result: New system charted: {world.by_id[dest].name}." in page
+    # The jump is a transition: shown while it happens, not kept as a result (#648).
+    assert "Jumping to the unknown..." in shown.getvalue() and "Jumping to" not in page
     assert world.hop_report == [] and "Result:" not in _deck_page(world, monkeypatch, terminal)
 
 
@@ -1720,3 +1724,63 @@ def test_the_real_door_holds_the_resume_notice_until_a_key(tmp_path):
     screen = " ".join(final_screen(result.stdout).split())
     assert "Journey Resumed" in screen and "Resuming your interrupted journey" in screen
     assert "Press any key to continue" in screen and "Combat" not in screen
+
+
+
+# ---------------------------------------------------------------------------
+# Issue #648: small things from the 2026-09-18 playtest.
+
+
+def test_a_range_with_equal_ends_is_one_number():
+    assert vr.span(2, 2) == "2" and vr.span(2, 5) == "2-5"
+
+
+def test_combat_rows_name_whose_pattern_it_is_and_say_guard_plainly():
+    world = _world_with_seed(42)
+    pirate = vr.Pirate("Ravage", 2, 200, 200)
+    tactics = {"version": 1, "profile": "Bulwark", "step": 0, "brace_ready": True}
+    rows = [plain(line) for line in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics, details=True)]
+    assert any(row.startswith("Ravage flies Bulwark; intent COVER") for row in rows)
+    assert any(row.startswith("[G] Guard: your shot at 55%, incoming ") for row in rows)
+    assert "Bulwark pattern: cover > volley > recover." in rows
+    assert not any(re.search(r"\b(\d+)-\1\b", row) for row in rows)
+
+
+def test_the_commodity_exchange_writes_credits_like_every_header_and_offers_no_paging_on_one_page(monkeypatch):
+    world = _world_with_seed(42); world.save.pilot.credits = 12345
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._trade_commodity(vr.Palette(False), world, "food")
+    shown = plain(output.getvalue())
+    assert "Credits: 12,345cr." in shown and " 1/1" in shown and "[<>] Page" not in shown
+
+
+def test_every_paged_action_bar_drops_its_paging_keys_on_a_one_page_screen():
+    """A ratchet over the source: a prompt that pages goes through
+    `single_page_footer`, so `[<>] Page` is never offered on a 1/1 panel. The
+    star map's `[N/P] Sector` moves between sectors, not pages, and stays."""
+    source = Path(vr.__file__).read_text(encoding="utf-8").splitlines()
+    unguarded = [number for number, line in enumerate(source, 1)
+                 if "out_prompt(" in line and re.search(r"footer|controls|actions|Next|Prev|Page", line)
+                 and "single_page_footer" not in line and not any("[N/P] Sector" in row for row in source[number - 10:number])]
+    assert unguarded == []
+
+
+def test_the_contract_board_prompts_end_in_a_colon_like_every_other(monkeypatch):
+    world = _world_with_seed(42)
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_missions(vr.Palette(False), world)
+    shown = plain(output.getvalue())
+    assert "[B] Back: " in shown and "Back >" not in shown
+
+
+def test_survey_completions_follow_the_charted_list():
+    world = _world_with_seed(42); world.save.ship.scanner_tier = 3
+    targets = vr.survey_candidates(world)
+    assert len(targets) >= 3
+    world.save.active_missions = [vr.Mission(1, "scan", "Survey one", 100, 0, targets[0], deadline_turn=9)]
+    _, report = vr.perform_survey(world)
+    completed = [number for number, row in enumerate(report) if row.startswith("Mission complete")]
+    charted = [number for number, row in enumerate(report) if "; danger " in row]
+    assert completed and len(charted) == len(targets) and max(charted) < min(completed)

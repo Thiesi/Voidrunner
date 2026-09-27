@@ -426,7 +426,8 @@ def test_tactical_intent_displayed_damage_range_matches_resolution(monkeypatch, 
     lines = vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics, details=True)
     label = next(plainly(line) for line in lines
                  if (plainly(line).startswith("[G]") if action == "G" else " intent " in plainly(line)))
-    low, high = map(int, re.search(r"incoming (\d+)-(\d+)", label).groups())
+    found = re.search(r"incoming (\d+)(?:-(\d+))?", label)
+    low, high = int(found[1]), int(found[2] or found[1])  # "2", not "2-2" (#648)
     monkeypatch.setattr(world.event_rng, "randint", lambda lo, hi: hi)
     _, received, _ = vr.tactical_round(world, pirate, tactics, action)
     assert received == high and low <= high
