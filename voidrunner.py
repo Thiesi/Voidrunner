@@ -7194,7 +7194,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
             return result
         out_prompt(f"{p.muted}Quantity (max {max_qty}; Enter or Esc cancels): {RESET}")
         raw = read_line_raw(max_len=5)
-        qty = int(raw) if raw.isdigit() else 0
+        qty = int(raw) if raw.isascii() and raw.isdigit() else 0
         qty = min(qty, max_qty)
         if qty <= 0:
             return
@@ -7216,7 +7216,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
             return result
         out_prompt(f"{p.muted}Quantity (have {have}, station buys {max_qty}; Enter or Esc cancels): {RESET}")
         raw = read_line_raw(max_len=5)
-        qty = int(raw) if raw.isdigit() else 0
+        qty = int(raw) if raw.isascii() and raw.isdigit() else 0
         qty = min(qty, max_qty)
         if qty <= 0:
             return
@@ -8054,7 +8054,7 @@ def _refuel(p: Palette, world: World) -> str | None:
         return "Not enough credits to buy fuel (6cr/unit)."
     out_prompt(f"{p.muted}Fuel to buy (max {max_qty}, 6cr/unit; Enter or Esc cancels): {RESET}")
     raw = read_line_raw(max_len=4)
-    qty = int(raw) if raw.isdigit() else 0
+    qty = int(raw) if raw.isascii() and raw.isdigit() else 0
     qty = min(qty, max_qty)
     if qty <= 0:
         return
