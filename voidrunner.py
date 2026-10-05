@@ -85,7 +85,7 @@ import time
 import unicodedata
 import weakref
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -5505,6 +5505,531 @@ def screen_title(p: Palette, info: dict) -> None:
     out_line()
 
 
+# ---------------------------------------------------------------------------
+# Launch splash. A full-screen title card that plays once as the door opens: a
+# parallax starfield, a ringed gas giant in half-block pixels, a ship streaking
+# across on a plasma trail, and the wordmark resolving in underneath. It is
+# motion, so it follows motion's rules (issue #493 §3): absent from the presets
+# that ask for less, absent with nobody watching, and over the moment a key
+# arrives. It draws by changed cell only, so a frame costs what moved.
+# ---------------------------------------------------------------------------
+
+# The largest scene the splash composes; a bigger terminal shows it centred.
+SPLASH_MAX_WIDTH, SPLASH_MAX_HEIGHT = 132, 50
+SPLASH_FRAMES = 32
+SPLASH_FRAME_SECONDS = 0.08  # 32 frames, about 2.6 s; a frame is never more than 0.1 s apart
+# A paste is drained, not read forever: past this many keys the rest belongs to
+# whatever screen comes next, and the splash is long gone by then.
+SPLASH_DRAIN_LIMIT = 256
+
+# Pixel fonts, drawn two pixels to a cell with half blocks. The large face is
+# 6x7 with two-pixel stems; the compact one is 3x5 and makes the word in 39
+# columns, so it fits the door's 40-column floor.
+_SPLASH_FONT_LARGE = {
+    "V": ("##..##", "##..##", "##..##", "##..##", "##..##", ".####.", "..##.."),
+    "O": (".####.", "##..##", "##..##", "##..##", "##..##", "##..##", ".####."),
+    "I": ("######", "..##..", "..##..", "..##..", "..##..", "..##..", "######"),
+    "D": ("#####.", "##..##", "##..##", "##..##", "##..##", "##..##", "#####."),
+    "R": ("#####.", "##..##", "##..##", "#####.", "##.##.", "##..##", "##..##"),
+    "U": ("##..##", "##..##", "##..##", "##..##", "##..##", "##..##", ".####."),
+    "N": ("##..##", "###.##", "######", "##.###", "##..##", "##..##", "##..##"),
+    "E": ("######", "##....", "##....", "#####.", "##....", "##....", "######"),
+}
+_SPLASH_FONT_SMALL = {
+    "V": ("#.#", "#.#", "#.#", "#.#", ".#."),
+    "O": ("###", "#.#", "#.#", "#.#", "###"),
+    "I": ("###", ".#.", ".#.", ".#.", "###"),
+    "D": ("##.", "#.#", "#.#", "#.#", "##."),
+    "R": ("##.", "#.#", "##.", "#.#", "#.#"),
+    "U": ("#.#", "#.#", "#.#", "#.#", "###"),
+    "N": ("##.", "#.#", "#.#", "#.#", "#.#"),
+    "E": ("###", "#..", "###", "#..", "###"),
+}
+_SPLASH_WORD = "VOIDRUNNER"
+# The ship, nose to the right: hull, fins and a cockpit.
+_SPLASH_SHIP = ("....ff.....",
+                "..lllll....",
+                ".lllllccl..",
+                "hhhhhhhhhhn",
+                ".dddddddd..",
+                "..ddddd....",
+                "....ff.....")
+# The same ship at half the size, for a sky only a few rows tall.
+_SPLASH_SHIP_SMALL = ("..ll..",
+                      "hhhhhn",
+                      "..dd..")
+_SPLASH_SHIP_COLORS = {"l": (226, 236, 250), "h": (176, 192, 216), "d": (104, 120, 150),
+                       "f": (190, 70, 150), "c": (95, 215, 255), "n": (255, 255, 255)}
+# Bands of the gas giant, pole to pole, blended smoothly.
+_SPLASH_BANDS = ((104, 64, 188), (190, 86, 170), (238, 136, 128), (150, 70, 190), (86, 58, 156),
+                 (214, 104, 168), (122, 74, 196))
+_SPLASH_GOLD, _SPLASH_PLASMA = (255, 200, 60), (255, 90, 190)
+# The sixteen colors a `basic` terminal is assumed to show, in SGR order.
+_SPLASH_16 = ((0, 0, 0), (205, 0, 0), (0, 205, 0), (205, 205, 0), (0, 0, 238), (205, 0, 205),
+              (0, 205, 205), (229, 229, 229), (127, 127, 127), (255, 0, 0), (0, 255, 0),
+              (255, 255, 0), (92, 92, 255), (255, 0, 255), (0, 255, 255), (255, 255, 255))
+_CUBE_LEVELS = (0, 95, 135, 175, 215, 255)
+
+
+def _splash_plain(text: str) -> str:
+    """Caller-derived text as plain characters: no escapes, no control codes."""
+    text = ANSI_ESCAPE_RE.sub("", str(text))
+    return " ".join("".join(" " if unicodedata.category(ch).startswith("C") else ch for ch in text).split())
+
+
+def _splash_256(rgb: tuple[int, int, int]) -> int:
+    """The nearest xterm-256 index: the 6x6x6 cube or the grey ramp, whichever is closer."""
+    def nearest(value: int) -> int:
+        return min(range(6), key=lambda index: abs(_CUBE_LEVELS[index] - value))
+
+    r, g, b = (nearest(component) for component in rgb)
+    cube = tuple(_CUBE_LEVELS[index] for index in (r, g, b))
+    grey_index = max(0, min(23, round((sum(rgb) / 3 - 8) / 10)))
+    grey = (8 + grey_index * 10,) * 3
+
+    def distance(other: tuple[int, ...]) -> int:
+        return sum((x - y) ** 2 for x, y in zip(rgb, other))
+
+    # The grey ramp only for a color that is grey: a dark violet is nearer a grey
+    # by distance, and the planet's whole night side went to ash that way.
+    unsaturated = max(rgb) - min(rgb) < 24
+    return 232 + grey_index if unsaturated and distance(grey) < distance(cube) else 16 + 36 * r + 6 * g + b
+
+
+# The text roles keep the sixteen-color readings `Palette._sgr` gives them.
+_SPLASH_16_ROLES = {(127, 163, 191): 6, (179, 155, 125): 7, (232, 240, 255): 15,
+                    (47, 56, 68): 8, (70, 82, 98): 8}
+
+
+def _splash_16(rgb: tuple[int, int, int]) -> int:
+    """A color's sixteen-color reading by hue family, not by nearest distance.
+
+    Nearest distance turns every violet of the planet into grey: the sixteen
+    colors are saturated corners, and a muted violet is closer to the middle.
+    Picking the family by hue and the bright half by value keeps a violet
+    planet magenta and a gold wordmark yellow."""
+    if rgb in _SPLASH_16_ROLES:
+        return _SPLASH_16_ROLES[rgb]
+    r, g, b = (component / 255 for component in rgb)
+    high, low = max(r, g, b), min(r, g, b)
+    if high < 0.16:
+        return 0
+    saturation = (high - low) / high
+    if saturation < 0.15:
+        return 15 if high > 0.85 else (7 if high > 0.6 else 8)
+    if high == r:
+        hue = (60 * (g - b) / (high - low)) % 360
+    elif high == g:
+        hue = 60 * (b - r) / (high - low) + 120
+    else:
+        hue = 60 * (r - g) / (high - low) + 240
+    # No red: the splash has nothing alarming in it, and a salmon or a peach is
+    # read as the warm end of magenta or of gold instead.
+    family = (5 if hue < 8 or hue >= 300 else 3 if hue < 75 else 2 if hue < 160
+              else 6 if hue < 205 else 4 if hue < 255 else 5)
+    return family + (8 if high > 0.62 else 0)
+
+
+def _splash_sgr(fg: tuple[int, int, int] | None, bg: tuple[int, int, int] | None,
+                reset: bool = True) -> str:
+    """One cell's colors as a single SGR, at the depth this preset draws.
+
+    Without `reset` it only sets: right after a cell whose colors this one
+    replaces completely, which is most of them, and it is the commonest SGR."""
+    parts = ["0"] if reset else []
+    truecolor = _PALETTE._truecolor and _OUTPUT_STYLE == "auto"
+    for rgb, base in ((fg, 38), (bg, 48)):
+        if rgb is None:
+            continue
+        if _OUTPUT_STYLE == "basic":
+            index = _splash_16(rgb)
+            offset = 30 if base == 38 else 40
+            parts.append(str(offset + index if index < 8 else offset + 60 + index - 8))
+        elif truecolor:
+            parts.append(f"{base};2;{rgb[0]};{rgb[1]};{rgb[2]}")
+        else:
+            parts.append(f"{base};5;{_splash_256(rgb)}")
+    return f"{ESC}[{';'.join(parts)}m"
+
+
+def _mix(a: tuple[int, int, int], b: tuple[int, int, int], amount: float) -> tuple[int, int, int]:
+    amount = max(0.0, min(1.0, amount))
+    return tuple(round(x + (y - x) * amount) for x, y in zip(a, b))
+
+
+def _scale(rgb: tuple[int, int, int], factor: float) -> tuple[int, int, int]:
+    return tuple(max(0, min(255, round(component * factor))) for component in rgb)
+
+
+class _SplashLayout:
+    """Where everything goes on a `width` x `height` terminal.
+
+    A complete composition at every size the door accepts: the large face and a
+    planet that fills the sky from 72x20 up, the compact face below that. Rows
+    are counted from the top; the last row is left empty so nothing is ever
+    written to the bottom-right cell, where a terminal may scroll.
+    """
+
+    def __init__(self, width: int, height: int, node: str, handle: str):
+        self.width, self.height = width, height
+        self.large = width >= 72 and height >= 20
+        self.font = _SPLASH_FONT_LARGE if self.large else _SPLASH_FONT_SMALL
+        glyph_w = len(self.font["V"][0])
+        self.logo_w = len(_SPLASH_WORD) * (glyph_w + 1) - 1
+        self.logo_px_h = len(self.font["V"])
+        self.logo_rows = (self.logo_px_h + 2) // 2  # one pixel more, for the shadow
+        roomy = height >= 16
+        subtitle = "TACTICAL DEEP-SPACE TRADING & EXPLORATION"
+        if _visible_width(subtitle) > width - 2:
+            subtitle = "DEEP-SPACE TRADING & EXPLORATION"
+        if _visible_width(subtitle) > width - 2:
+            subtitle = "DEEP-SPACE TRADING"
+        self.subtitle = subtitle
+        self.chips = self._chips(node, handle, width)
+        below = self.logo_rows + (1 if roomy else 0) + 1 + (1 if roomy else 0) + len(self.chips) + 1
+        self.scene_rows = max(3, height - below)
+        self.logo_top = self.scene_rows
+        self.logo_left = max(0, (width - self.logo_w) // 2)
+        self.subtitle_row = self.logo_top + self.logo_rows + (1 if roomy else 0)
+        self.chip_row = self.subtitle_row + 1 + (1 if roomy else 0)
+        self.text_rows = {self.subtitle_row, *range(self.chip_row, self.chip_row + len(self.chips))}
+        # The planet: as large as the sky allows, its rings kept on the screen.
+        sky_px = self.scene_rows * 2
+        self.radius = max(2.0, min(sky_px * 0.40, width * 0.17))
+        self.planet_x = width * (0.70 if width >= 60 else 0.74)
+        self.planet_y = sky_px * 0.50
+        self.ship = _SPLASH_SHIP if sky_px >= 14 else _SPLASH_SHIP_SMALL
+        # The ship's centre row, in pixels: low across the sky, clear of its foot.
+        self.ship_y = int(sky_px * 0.70) if sky_px >= 14 else max(1, sky_px - 3)
+        self.rings = self.radius >= 6
+        self.stars = self._stars(f"{node}/{handle}")
+
+    @staticmethod
+    def _chips(node: str, handle: str, room: int) -> list[list[tuple[str, str]]]:
+        """Chips as rows of (label, value): all three on one row where they fit,
+        then node and pilot, then one per row. A value is cut by display width
+        only when it cannot fit on a row of its own."""
+        fields = [("NODE", node), ("PILOT", handle), ("GALAXY", f"{GALAXY_SYSTEM_COUNT} Star Systems")]
+
+        def width_of(row: list[tuple[str, str]]) -> int:
+            return sum(len(label) + 3 + _visible_width(value) for label, value in row) + 3 * (len(row) - 1)
+
+        # Rows that share the line keep a column of margin each side; a chip on
+        # a row of its own may use all of it, which is what lets a sixteen-glyph
+        # wide callsign stand whole at the forty-column floor.
+        for row in (fields, fields[:2]):
+            if width_of(row) <= room - 2:
+                return [row]
+        return [[(label, _fit_text(value, max(1, room - len(label) - 3)))] for label, value in fields[:2]]
+
+    def _stars(self, seed_text: str) -> list[tuple[float, int, int]]:
+        """(x, row, layer) for each star, the same sky every time for the same pilot.
+
+        Its own generator, never `random`: the galaxy's generator must keep its
+        exact call sequence (see the module docstring)."""
+        digest = zlib.crc32(seed_text.encode("utf-8")) or 1
+        stars = []
+        count = max(8, self.width * self.height // 70)
+        for index in range(count):
+            digest = (digest * 1103515245 + 12345) & 0x7FFFFFFF
+            x = digest % self.width
+            digest = (digest * 1103515245 + 12345) & 0x7FFFFFFF
+            row = digest % max(1, self.height - 1)
+            layer = 1 if index % 5 == 0 else 0
+            stars.append((float(x), row, layer))
+        return stars
+
+
+def _planet_pixel(layout: _SplashLayout, x: float, y: float) -> tuple[tuple[int, int, int] | None, bool]:
+    """The planet and its rings at one pixel: (color, is the ring in front)."""
+    r = layout.radius
+    dx, dy = (x + 0.5 - layout.planet_x) / r, (y + 0.5 - layout.planet_y) / r
+    # The rings, tilted: rotate into the ring plane, then flatten.
+    tilt = -0.21
+    u = dx * math.cos(tilt) - dy * math.sin(tilt)
+    v = dx * math.sin(tilt) + dy * math.cos(tilt)
+    rho = math.hypot(u, v / 0.24)
+    ring = None
+    if layout.rings and 1.30 <= rho <= 2.05 and not 1.62 <= rho <= 1.70:
+        stripe = 0.90 + 0.10 * math.sin(rho * 9.0)
+        fade = 1.0 - max(0.0, rho - 1.8) * 2.2
+        base = _mix((214, 186, 140), (150, 120, 196), (rho - 1.3) / 0.75)
+        ring = _scale(base, stripe * max(0.35, fade) * (1.0 if u < 0.35 else 0.78))
+    disc = dx * dx + dy * dy
+    if disc <= 1.0:
+        if ring is not None and v > 0:
+            return ring, True
+        z = math.sqrt(1.0 - disc)
+        light = max(0.0, -0.58 * dx - 0.48 * dy + 0.66 * z)
+        band = (dy * 3.4 + 0.18 * math.sin(dx * 4.0 + dy * 2.0)) % len(_SPLASH_BANDS)
+        low = int(band)
+        color = _mix(_SPLASH_BANDS[low], _SPLASH_BANDS[(low + 1) % len(_SPLASH_BANDS)], band - low)
+        shaded = _mix((14, 8, 30), color, 0.10 + 1.05 * light)
+        if z < 0.32 and light > 0.18:  # a thin atmosphere on the lit limb
+            shaded = _mix(shaded, (120, 210, 255), (0.32 - z) * 1.6)
+        return shaded, False
+    return ring, ring is not None
+
+
+def _logo_ink(layout: _SplashLayout, px: int, py: int) -> bool:
+    glyph_w = len(layout.font["V"][0])
+    if px < 0 or py < 0 or py >= layout.logo_px_h:
+        return False
+    letter, column = divmod(px, glyph_w + 1)
+    return letter < len(_SPLASH_WORD) and column < glyph_w and layout.font[_SPLASH_WORD[letter]][py][column] == "#"
+
+
+def _logo_pixel(layout: _SplashLayout, px: int, py: int) -> tuple[int, int, int] | None:
+    """The wordmark at one pixel of its own box, in its gradient."""
+    if not _logo_ink(layout, px, py):
+        # A drop shadow, down and to the right, so the word sits off the sky.
+        return (66, 22, 84) if _logo_ink(layout, px - 1, py - 1) else None
+    across = _mix(_SPLASH_GOLD, _SPLASH_PLASMA, px / max(1, layout.logo_w - 1))
+    # Lit from above: the top of each stroke brighter, the foot a shade deeper.
+    down = py / max(1, layout.logo_px_h - 1)
+    return _mix(_mix(across, (255, 246, 214), 0.35), _scale(across, 0.72), down)
+
+
+def splash_frame(layout: _SplashLayout, frame: int) -> list[list[tuple[str, tuple | None, tuple | None]]]:
+    """Every cell of one frame as (character, foreground, background).
+
+    A pure function of the layout and the frame number, so a frame can be
+    composed, measured and tested without a terminal."""
+    w, h = layout.width, layout.height
+    t = frame / max(1, SPLASH_FRAMES - 1)
+    sky_px = layout.scene_rows * 2
+    pixels: list[list[tuple | None]] = [[None] * w for _ in range(sky_px)]
+
+    # The planet wipes in from its lit edge, upper left to lower right.
+    planet_reveal = max(0.0, min(1.0, (t - 0.04) / 0.26))
+    if planet_reveal > 0:
+        span = layout.radius * 2.2
+        for y in range(sky_px):
+            for x in range(w):
+                color, _front = _planet_pixel(layout, x, y)
+                if color is None:
+                    continue
+                # Measured from the cell, not the pixel, so a cell is drawn once.
+                along = ((x - layout.planet_x) + (y // 2 * 2 + 1 - layout.planet_y)) / (span * 2) + 0.5
+                if along <= planet_reveal * 1.15:
+                    pixels[y][x] = color
+
+    # The ship crosses once, fast, its trail cooling behind it in steps.
+    trail_len = max(10, int(w * 0.5))
+    travel = w + 10 + trail_len
+    ship_t = (t - 0.18) / 0.40
+    if 0.0 <= ship_t <= 1.0 + trail_len / travel:
+        nose = int(-10 + ship_t * travel)
+        ship = layout.ship
+        mid = len(ship) // 2
+        length = len(ship[0])
+        sy = layout.ship_y - mid
+        for d in range(1, trail_len + 1):
+            x = nose - length - d + 1
+            if not 0 <= x < w:
+                continue
+            heat = 1.0 - d / trail_len
+            level = math.ceil(heat * 3) / 3  # three steps: a cell changes three times, not every frame
+            if level <= 0:
+                continue
+            color = _mix((70, 30, 110), (255, 140, 225), level)
+            for row, strength in ((sy + mid, 1.0), (sy + mid - 1, 0.45), (sy + mid + 1, 0.45)):
+                if 0 <= row < sky_px and (strength == 1.0 or d < trail_len * 0.35):
+                    tint = color if strength == 1.0 else _scale(color, 0.55)
+                    if pixels[row][x] is None or strength == 1.0:
+                        pixels[row][x] = tint
+        for row_index, row in enumerate(ship):
+            for column, cell in enumerate(row):
+                x, y = nose - length + 1 + column, sy + row_index
+                if cell != "." and 0 <= x < w and 0 <= y < sky_px:
+                    pixels[y][x] = _SPLASH_SHIP_COLORS[cell]
+        glow_x = nose - length
+        if 0 <= glow_x < w and 0 <= sy + mid < sky_px:
+            pixels[sy + mid][glow_x] = (255, 236, 250)
+
+    cells: list[list[tuple[str, tuple | None, tuple | None]]] = [[(" ", None, None)] * w for _ in range(h)]
+
+    # Stars first, so everything else is drawn over them. Near stars move a
+    # column a frame, far ones a column every fourth: parallax.
+    for x0, row, layer in layout.stars:
+        shift = frame if layer else frame // 4
+        x = int(x0 - shift) % w
+        if (row == h - 1 and x == w - 1) or row in layout.text_rows:
+            continue
+        if layer:
+            cells[row][x] = ("+" if (x + row) % 3 else "*", (200, 214, 255), None)
+        else:
+            cells[row][x] = ("·" if (x * 7 + row) % 4 else ".", (82, 94, 128) if (x + row) % 2 else (120, 132, 170), None)
+
+    for row in range(layout.scene_rows):
+        top, bottom = pixels[row * 2], pixels[row * 2 + 1]
+        for x in range(w):
+            a, b = top[x], bottom[x]
+            if a is None and b is None:
+                continue
+            if a is not None and b is not None:
+                cells[row][x] = (" ", None, a) if a == b else ("▀", a, b)
+            elif a is not None:
+                cells[row][x] = ("▀", a, None)
+            else:
+                cells[row][x] = ("▄", b, None)
+
+    # The wordmark resolves left to right behind a hot edge.
+    logo_reveal = (t - 0.50) / 0.26
+    if logo_reveal > 0:
+        edge = int(logo_reveal * (layout.logo_w + 4))
+        for row in range(layout.logo_rows):
+            for column in range(layout.logo_w + 1):
+                if column > edge:
+                    break
+                a = _logo_pixel(layout, column, row * 2)
+                b = _logo_pixel(layout, column, row * 2 + 1)
+                if a is None and b is None:
+                    continue
+                if column >= edge - 1 and logo_reveal < 1.0:
+                    a = (255, 255, 255) if _logo_ink(layout, column, row * 2) else a
+                    b = (255, 255, 255) if _logo_ink(layout, column, row * 2 + 1) else b
+                x, y = layout.logo_left + column, layout.logo_top + row
+                if not (0 <= x < w and 0 <= y < h):
+                    continue
+                if a is not None and b is not None:
+                    cells[y][x] = (" ", None, a) if a == b else ("▀", a, b)
+                elif a is not None:
+                    cells[y][x] = ("▀", a, None)
+                else:
+                    cells[y][x] = ("▄", b, None)
+
+    def text(row: int, pieces: list[tuple[str, tuple]], shown: int | None = None) -> None:
+        if not 0 <= row < h - (0 if row < h - 1 else 1):
+            return
+        total = sum(_visible_width(piece) for piece, _ in pieces)
+        x = max(0, (w - total) // 2)
+        typed = 0
+        for piece, color in pieces:
+            for ch in piece:
+                if shown is not None and typed >= shown:
+                    return
+                width = _char_width(ch)
+                if x + width > w or (row == h - 1 and x + width >= w):
+                    return
+                cells[row][x] = (ch, color, None)
+                for extra in range(1, width):
+                    cells[row][x + extra] = ("", color, None)
+                x += width
+                typed += 1
+
+    sub_t = (t - 0.74) / 0.12
+    if sub_t > 0:
+        shown = len(layout.subtitle) if sub_t >= 1 else int(sub_t * len(layout.subtitle))
+        text(layout.subtitle_row, [(layout.subtitle, (127, 163, 191))], shown)
+    if t >= 0.86:
+        for offset, row in enumerate(layout.chips):
+            pieces: list[tuple[str, tuple]] = []
+            for index, (label, value) in enumerate(row):
+                if index:
+                    pieces.append(("   ", (47, 56, 68)))
+                pieces += [(glyph("chip_l"), (70, 82, 98)), (label, (179, 155, 125)),
+                           (glyph("chip_r"), (70, 82, 98)), (" ", (47, 56, 68)), (value, (232, 240, 255))]
+            text(layout.chip_row + offset, pieces)
+    return cells
+
+
+def _splash_delta(previous, current, top: int = 0, left: int = 0) -> str:
+    """The escapes that turn `previous` into `current`: changed cells only,
+    with the composition's top-left corner at screen cell (`top`, `left`)."""
+    out_parts: list[str] = []
+    cursor: tuple[int, int] | None = None
+    style = None
+    for row, (old_row, new_row) in enumerate(zip(previous, current)):
+        for column, (old, new) in enumerate(zip(old_row, new_row)):
+            if old == new or new[0] == "":
+                continue
+            if cursor != (row, column):
+                out_parts.append(f"{ESC}[{top + row + 1};{left + column + 1}H")
+            wanted = (new[1], new[2]) if new[0] != " " or new[2] is not None else (None, None)
+            if wanted != style:
+                if wanted == (None, None):
+                    out_parts.append(f"{ESC}[0m")
+                else:
+                    # A color only needs a reset when it takes one away.
+                    takes_away = style is None or (style[0] is not None and wanted[0] is None)                         or (style[1] is not None and wanted[1] is None)
+                    out_parts.append(_splash_sgr(wanted[0], wanted[1], reset=takes_away))
+                style = wanted
+            out_parts.append(new[0])
+            cursor = (row, column + max(1, _char_width(new[0])))
+    return "".join(out_parts)
+
+
+def splash_frames(width: int, height: int, info: dict) -> Iterator[str]:
+    """The animation as the bytes each frame writes, first frame first.
+
+    Composed one frame at a time, as it is played, and never larger than
+    `SPLASH_MAX_WIDTH` x `SPLASH_MAX_HEIGHT`: the host accepts terminals up to
+    500x200, where composing every frame of a full-size sky up front took
+    seconds of silence before the first one and over half a megabyte on the
+    wire. A larger terminal gets the capped scene centred on a dark screen.
+    """
+    cols, rows = min(width, SPLASH_MAX_WIDTH), min(height, SPLASH_MAX_HEIGHT)
+    top, left = (height - rows) // 2, (width - cols) // 2
+    layout = _SplashLayout(cols, rows, _splash_plain(info.get("node_name", "NetBBS")) or "NetBBS",
+                           _splash_plain(info.get("handle", "Pilot")) or "Pilot")
+    previous = [[(" ", None, None)] * cols for _ in range(rows)]
+    for frame in range(SPLASH_FRAMES):
+        current = splash_frame(layout, frame)
+        yield _splash_delta(previous, current, top, left)
+        previous = current
+
+
+def _splash_drain() -> None:
+    """Take every key already waiting, so the one that skipped acts on nothing."""
+    reader = _INPUT_READER
+    for _ in range(SPLASH_DRAIN_LIMIT):
+        if reader is None or not reader.read_byte.waiting():
+            return
+        try:
+            reader.read_key()
+        except (EOFError, OSError, ValueError):
+            return
+
+
+def splash_switched_off() -> bool:
+    """`DOOR_SPLASH=0` (or `off`, `no`, `false`) turns the launch splash off.
+
+    A SysOp sets it in the door's environment to open straight on the game; the
+    door gallery sets it so its panels photograph the screens behind the splash,
+    and turns it back on only for the walk that photographs the splash itself.
+    """
+    return os.environ.get("DOOR_SPLASH", "").strip().lower() in ("0", "off", "no", "false")
+
+
+def play_splash(info: dict) -> bool:
+    """Play the launch splash, if anyone is watching it. Returns whether it drew.
+
+    Skipped without drawing anything when motion is off for this caller's
+    preset, when there is no live terminal (`motion_interrupted` says so for
+    both), and when keys are already waiting -- typed ahead for the game, not to
+    skip a title card. Otherwise any key ends it and is consumed with the rest
+    of its input unit, so it cannot act on the screen that follows.
+    """
+    if splash_switched_off() or motion_interrupted():
+        return False
+    frames = splash_frames(_OUTPUT_WIDTH, _OUTPUT_HEIGHT, info)
+    out(f"{ESC}[?25l{ESC}[0m")
+    clear_screen()
+    try:
+        for frame in frames:
+            out(frame)
+            if not motion_pause(SPLASH_FRAME_SECONDS) or _RESIZE_PENDING:
+                if not _RESIZE_PENDING:
+                    _splash_drain()
+                break
+    finally:
+        out(f"{ESC}[0m")
+        clear_screen()
+        out(f"{ESC}[?25h")
+    return True
+
+
 def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str | None:
     out_line()
     inner_w = _box_inner_width()
@@ -10716,14 +11241,19 @@ def main() -> int:
         except OSError as exc:
             raise SaveError from exc
         outdated = False
+        # A launch that has already shown a refusal or a recovery screen has
+        # opened; a title card after it would be a second opening.
+        splashable = True
         try:
             save, is_new, notice = load_or_create_save(save_dir, user_id, info["handle"])
         except OutdatedSave as exc:
+            splashable = False
             screen_title(p, info)
             if not screen_outdated_career(p, exc):
                 return 0
             save, is_new, notice, outdated = _new_career(info["handle"]), True, None, True
         except ResumeError as exc:
+            splashable = False
             screen_title(p, info)
             recovery = screen_save_recovery(p, save_dir, user_id, exc)
             save = recovery.save
@@ -10731,6 +11261,10 @@ def main() -> int:
                 return recovery.exit_code
             is_new, notice = False, "Previous checkpoint restored. Resuming this career."
         apply_display_style(save.display_style)
+        if splashable:
+            # After the caller's own preset is known, so a caller who asked for
+            # no motion is never shown any; before the first screen it opens on.
+            play_splash(info)
         screen_title(p, info)
         if is_new:
             # After a refusal there *is* a dossier; it is simply not one this
