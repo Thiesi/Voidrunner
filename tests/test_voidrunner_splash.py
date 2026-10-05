@@ -185,3 +185,25 @@ def test_a_resize_ends_the_splash_and_is_left_for_the_next_screen(live_terminal,
     assert vr.play_splash(INFO) is True
     assert len(frames_seen) == 2
     assert vr._RESIZE_PENDING is True
+
+
+@pytest.mark.parametrize("value", ["0", "off", "No", " false "])
+def test_the_environment_can_switch_the_splash_off(live_terminal, monkeypatch, value):
+    # A live terminal and a motion preset: everything the splash needs, but the
+    # SysOp (or the door gallery) has set DOOR_SPLASH off.
+    written = []
+    monkeypatch.setattr(vr, "out", written.append)
+    monkeypatch.setenv("DOOR_SPLASH", value)
+    assert vr.play_splash(INFO) is False
+    assert written == []
+
+
+def test_a_large_terminal_gets_the_capped_scene_centred_and_promptly():
+    frames = vr.splash_frames(500, 200, INFO)
+    first = next(frames)
+    rows = [int(row) for row in re.findall(r"\x1b\[(\d+);\d+H", first + "".join(frames))]
+    cols = [int(col) for col in re.findall(r"\x1b\[\d+;(\d+)H", first)]
+    top = (200 - vr.SPLASH_MAX_HEIGHT) // 2
+    left = (500 - vr.SPLASH_MAX_WIDTH) // 2
+    assert top < min(rows) and max(rows) <= top + vr.SPLASH_MAX_HEIGHT
+    assert left < min(cols) and max(cols) <= left + vr.SPLASH_MAX_WIDTH

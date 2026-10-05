@@ -85,7 +85,7 @@ import time
 import unicodedata
 import weakref
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -5514,6 +5514,8 @@ def screen_title(p: Palette, info: dict) -> None:
 # arrives. It draws by changed cell only, so a frame costs what moved.
 # ---------------------------------------------------------------------------
 
+# The largest scene the splash composes; a bigger terminal shows it centred.
+SPLASH_MAX_WIDTH, SPLASH_MAX_HEIGHT = 132, 50
 SPLASH_FRAMES = 32
 SPLASH_FRAME_SECONDS = 0.08  # 32 frames, about 2.6 s; a frame is never more than 0.1 s apart
 # A paste is drained, not read forever: past this many keys the rest belongs to
@@ -5932,8 +5934,9 @@ def splash_frame(layout: _SplashLayout, frame: int) -> list[list[tuple[str, tupl
     return cells
 
 
-def _splash_delta(previous, current) -> str:
-    """The escapes that turn `previous` into `current`: changed cells only."""
+def _splash_delta(previous, current, top: int = 0, left: int = 0) -> str:
+    """The escapes that turn `previous` into `current`: changed cells only,
+    with the composition's top-left corner at screen cell (`top`, `left`)."""
     out_parts: list[str] = []
     cursor: tuple[int, int] | None = None
     style = None
@@ -5942,7 +5945,7 @@ def _splash_delta(previous, current) -> str:
             if old == new or new[0] == "":
                 continue
             if cursor != (row, column):
-                out_parts.append(f"{ESC}[{row + 1};{column + 1}H")
+                out_parts.append(f"{ESC}[{top + row + 1};{left + column + 1}H")
             wanted = (new[1], new[2]) if new[0] != " " or new[2] is not None else (None, None)
             if wanted != style:
                 if wanted == (None, None):
@@ -5957,17 +5960,24 @@ def _splash_delta(previous, current) -> str:
     return "".join(out_parts)
 
 
-def splash_frames(width: int, height: int, info: dict) -> list[str]:
-    """The whole animation as the bytes each frame writes, first frame first."""
-    layout = _SplashLayout(width, height, _splash_plain(info.get("node_name", "NetBBS")) or "NetBBS",
+def splash_frames(width: int, height: int, info: dict) -> Iterator[str]:
+    """The animation as the bytes each frame writes, first frame first.
+
+    Composed one frame at a time, as it is played, and never larger than
+    `SPLASH_MAX_WIDTH` x `SPLASH_MAX_HEIGHT`: the host accepts terminals up to
+    500x200, where composing every frame of a full-size sky up front took
+    seconds of silence before the first one and over half a megabyte on the
+    wire. A larger terminal gets the capped scene centred on a dark screen.
+    """
+    cols, rows = min(width, SPLASH_MAX_WIDTH), min(height, SPLASH_MAX_HEIGHT)
+    top, left = (height - rows) // 2, (width - cols) // 2
+    layout = _SplashLayout(cols, rows, _splash_plain(info.get("node_name", "NetBBS")) or "NetBBS",
                            _splash_plain(info.get("handle", "Pilot")) or "Pilot")
-    blank = [[(" ", None, None)] * width for _ in range(height)]
-    frames, previous = [], blank
+    previous = [[(" ", None, None)] * cols for _ in range(rows)]
     for frame in range(SPLASH_FRAMES):
         current = splash_frame(layout, frame)
-        frames.append(_splash_delta(previous, current))
+        yield _splash_delta(previous, current, top, left)
         previous = current
-    return frames
 
 
 def _splash_drain() -> None:
@@ -5982,6 +5992,16 @@ def _splash_drain() -> None:
             return
 
 
+def splash_switched_off() -> bool:
+    """`DOOR_SPLASH=0` (or `off`, `no`, `false`) turns the launch splash off.
+
+    A SysOp sets it in the door's environment to open straight on the game; the
+    door gallery sets it so its panels photograph the screens behind the splash,
+    and turns it back on only for the walk that photographs the splash itself.
+    """
+    return os.environ.get("DOOR_SPLASH", "").strip().lower() in ("0", "off", "no", "false")
+
+
 def play_splash(info: dict) -> bool:
     """Play the launch splash, if anyone is watching it. Returns whether it drew.
 
@@ -5991,7 +6011,7 @@ def play_splash(info: dict) -> bool:
     skip a title card. Otherwise any key ends it and is consumed with the rest
     of its input unit, so it cannot act on the screen that follows.
     """
-    if motion_interrupted():
+    if splash_switched_off() or motion_interrupted():
         return False
     frames = splash_frames(_OUTPUT_WIDTH, _OUTPUT_HEIGHT, info)
     out(f"{ESC}[?25l{ESC}[0m")
