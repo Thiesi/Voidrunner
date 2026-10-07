@@ -5960,6 +5960,25 @@ def _splash_delta(previous, current, top: int = 0, left: int = 0) -> str:
     return "".join(out_parts)
 
 
+def _splash_box(width: int, height: int) -> tuple[int, int, int, int]:
+    """(columns, rows, top, left) of the composition on a `width` x `height` terminal."""
+    cols, rows = min(width, SPLASH_MAX_WIDTH), min(height, SPLASH_MAX_HEIGHT)
+    return cols, rows, (height - rows) // 2, (width - cols) // 2
+
+
+SPLASH_HOLD_PROMPT = "press any key to launch"
+
+
+def splash_hold_prompt(width: int, height: int) -> str:
+    """The prompt a finished splash waits under: right-aligned on the
+    composition's bottom row, which the scene always leaves empty, and clear of
+    the last column so the bottom-right cell is never written."""
+    cols, rows, top, left = _splash_box(width, height)
+    col = max(0, cols - len(SPLASH_HOLD_PROMPT) - 2)
+    return (f"{ESC}[{top + rows};{left + col + 1}H{_splash_sgr((255, 200, 60), None)}"
+            f"{SPLASH_HOLD_PROMPT[:cols - 1]}{ESC}[0m")
+
+
 def splash_frames(width: int, height: int, info: dict) -> Iterator[str]:
     """The animation as the bytes each frame writes, first frame first.
 
@@ -5969,8 +5988,7 @@ def splash_frames(width: int, height: int, info: dict) -> Iterator[str]:
     seconds of silence before the first one and over half a megabyte on the
     wire. A larger terminal gets the capped scene centred on a dark screen.
     """
-    cols, rows = min(width, SPLASH_MAX_WIDTH), min(height, SPLASH_MAX_HEIGHT)
-    top, left = (height - rows) // 2, (width - cols) // 2
+    cols, rows, top, left = _splash_box(width, height)
     layout = _SplashLayout(cols, rows, _splash_plain(info.get("node_name", "NetBBS")) or "NetBBS",
                            _splash_plain(info.get("handle", "Pilot")) or "Pilot")
     previous = [[(" ", None, None)] * cols for _ in range(rows)]
@@ -6002,6 +6020,25 @@ def splash_switched_off() -> bool:
     return os.environ.get("DOOR_SPLASH", "").strip().lower() in ("0", "off", "no", "false")
 
 
+def _splash_hold() -> None:
+    """Keep the finished splash on the screen until the caller presses a key.
+
+    The key is spent, with any others already behind it, so it acts on nothing.
+    End of input ends the wait, and so does a resize: the screen that follows
+    has to be drawn at the new size.
+    """
+    reader = _INPUT_READER
+    while reader is not None and not _RESIZE_PENDING:
+        if reader.read_byte.waiting():
+            try:
+                reader.read_key()
+            except (EOFError, OSError, ValueError):
+                return
+            _splash_drain()
+            return
+        time.sleep(0.02)
+
+
 def play_splash(info: dict) -> bool:
     """Play the launch splash, if anyone is watching it. Returns whether it drew.
 
@@ -6009,7 +6046,8 @@ def play_splash(info: dict) -> bool:
     preset, when there is no live terminal (`motion_interrupted` says so for
     both), and when keys are already waiting -- typed ahead for the game, not to
     skip a title card. Otherwise any key ends it and is consumed with the rest
-    of its input unit, so it cannot act on the screen that follows.
+    of its input unit, so it cannot act on the screen that follows. Left to run
+    to the end, it holds its last frame under a prompt until a key is pressed.
     """
     if splash_switched_off() or motion_interrupted():
         return False
@@ -6023,6 +6061,9 @@ def play_splash(info: dict) -> bool:
                 if not _RESIZE_PENDING:
                     _splash_drain()
                 break
+        else:
+            out(splash_hold_prompt(_OUTPUT_WIDTH, _OUTPUT_HEIGHT))
+            _splash_hold()
     finally:
         out(f"{ESC}[0m")
         clear_screen()
