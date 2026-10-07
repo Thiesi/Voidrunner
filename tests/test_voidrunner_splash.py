@@ -10,12 +10,20 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+import time
 
 import pytest
 
 from .support import vr
 
 INFO = {"node_name": "Harbor Lights", "handle": "Carrier"}
+
+
+@pytest.fixture(autouse=True)
+def _splash_switched_on(monkeypatch):
+    """The suite turns door splashes off (conftest); these tests are about it."""
+    monkeypatch.delenv("DOOR_SPLASH", raising=False)
 CUP = re.compile(r"\x1b\[(\d+);(\d+)H")
 
 
@@ -207,3 +215,44 @@ def test_a_large_terminal_gets_the_capped_scene_centred_and_promptly():
     left = (500 - vr.SPLASH_MAX_WIDTH) // 2
     assert top < min(rows) and max(rows) <= top + vr.SPLASH_MAX_HEIGHT
     assert left < min(cols) and max(cols) <= left + vr.SPLASH_MAX_WIDTH
+
+
+def test_left_to_run_it_holds_the_last_frame_until_a_key(live_terminal, monkeypatch):
+    reader, write_fd = live_terminal
+    written = []
+    monkeypatch.setattr(vr, "motion_pause", lambda seconds: True)
+    monkeypatch.setattr(vr, "out", written.append)
+
+    def press_later():
+        time.sleep(0.15)
+        os.write(write_fd, b"\x1b[Bq")  # an arrow key and a letter, both spent
+    threading.Thread(target=press_later, daemon=True).start()
+    started = time.monotonic()
+    assert vr.play_splash(INFO) is True
+    assert time.monotonic() - started >= 0.15, "the finished splash did not wait"
+    assert any(vr.SPLASH_HOLD_PROMPT in text for text in written)
+    assert not reader.read_byte.waiting()
+    assert "".join(written).endswith("\x1b[0m\x1b[2J\x1b[H\x1b[?25h")
+
+
+def test_end_of_input_ends_the_hold(monkeypatch):
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)  # the caller has gone: the pipe is at end of input
+    with os.fdopen(read_fd, "rb", buffering=0) as stream:
+        monkeypatch.setattr(vr, "_INPUT_READER", vr._DoorInput(vr._StdioBytes(stream)))
+        monkeypatch.setattr(vr, "_RESIZE_PENDING", False)
+        vr._splash_hold()  # returns at end of input rather than waiting forever
+
+
+@pytest.mark.parametrize("width, height", [(40, 12), (80, 24), (132, 50), (500, 200)])
+def test_the_hold_prompt_sits_on_the_empty_bottom_row(width, height):
+    prompt = vr.splash_hold_prompt(width, height)
+    row, col = (int(n) for n in re.match(r"\x1b\[(\d+);(\d+)H", prompt).groups())
+    cols, rows, top, left = vr._splash_box(width, height)
+    assert row == top + rows <= height
+    assert col + len(vr.SPLASH_HOLD_PROMPT) - 1 < width
+    # The scene leaves that row empty, so the prompt covers nothing.
+    layout = vr._SplashLayout(cols, rows, "Node", "Pilot")
+    last = vr.splash_frame(layout, vr.SPLASH_FRAMES - 1)[rows - 1]
+    span = last[col - left - 1:col - left - 1 + len(vr.SPLASH_HOLD_PROMPT)]
+    assert all(cell[0] == " " for cell in span)
