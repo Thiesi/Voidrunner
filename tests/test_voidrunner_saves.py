@@ -141,7 +141,7 @@ def test_save_failure_stops_main_without_success_or_more_actions(tmp_path, monke
     with monkeypatch.context() as patch:
         patch.setattr(vr.sys, "stdout", output)
         patch.setattr(vr, "_load_door_info", lambda: {"handle": "Tester", "user_id": 77})
-        patch.setattr(vr, "_default_save_dir", lambda: tmp_path)
+        patch.setenv("VOIDRUNNER_SAVE_DIR", str(tmp_path))
         patch.setattr(vr, "load_or_create_save", lambda *args: (world.save, False, None))
         patch.setattr(vr, "persist", fail_second_save)
         patch.setattr(vr, "read_key", lambda: next(keys))
