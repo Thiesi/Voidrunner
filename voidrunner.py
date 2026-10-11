@@ -8384,6 +8384,7 @@ def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, pa
 
 _RESIZE_PENDING = False
 _RESIZE_POLL_SECONDS = 0.25
+_CLASSIC_DROP_FILE: str | None = None
 
 
 def _note_resize(signum=None, frame=None) -> None:
@@ -8430,7 +8431,8 @@ def take_resize() -> bool:
         return False
     _RESIZE_PENDING = False
     before = (_OUTPUT_WIDTH, _OUTPUT_HEIGHT)
-    apply_terminal_size(_load_door_info())
+    info = _load_door_info(_CLASSIC_DROP_FILE) if _CLASSIC_DROP_FILE is not None else _load_door_info()
+    apply_terminal_size(info)
     _OUTPUT_WIDTH, _OUTPUT_HEIGHT = max(MINIMUM_WIDTH, _OUTPUT_WIDTH), max(MINIMUM_HEIGHT, _OUTPUT_HEIGHT)
     _LAST_PAGE_DRAWN = None
     changed = (_OUTPUT_WIDTH, _OUTPUT_HEIGHT) != before
@@ -11414,8 +11416,10 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
 
 
 def main(drop_file: str | None = None) -> int:
-    global _OUTPUT_WIDTH, _OUTPUT_HEIGHT, _OUTPUT_STYLE, _DEFAULT_ENCODING
+    global _OUTPUT_WIDTH, _OUTPUT_HEIGHT, _OUTPUT_STYLE, _DEFAULT_ENCODING, _CLASSIC_DROP_FILE
     _OUTPUT_STYLE = "auto"
+    # Resize notifications must reload the same metadata source as this launch.
+    _CLASSIC_DROP_FILE = drop_file
 
     _DEFAULT_ENCODING = "utf-8"
     apply_display_encoding("auto")
@@ -11432,6 +11436,7 @@ def main(drop_file: str | None = None) -> int:
     input_reader()  # opened before the first page, so it can reveal itself
     if _terminal_too_small():
         _refuse_size(p, reported_height)
+        _CLASSIC_DROP_FILE = None
         return 0
     save_dir = _default_save_dir()
     # Valid host drop files carry a positive user_id. The Guest fallback for a
@@ -11602,6 +11607,7 @@ def main(drop_file: str | None = None) -> int:
         lease.close()
         out(RESET)
         _OUTPUT_STYLE = "auto"
+        _CLASSIC_DROP_FILE = None
         _DEFAULT_ENCODING = "utf-8"
         apply_display_encoding("auto")
 
