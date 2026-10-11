@@ -157,7 +157,8 @@ Escape answers No at every yes/no confirmation and cancels a quantity field,
 erasing what was typed (issue #413); prompts say so. Unsupported keys still do
 nothing at either prompt.
 
-Voidrunner uses one UTF-8 and terminal-key decoder for menus and text fields.
+Voidrunner uses one terminal-key decoder for menus and text fields, with UTF-8
+or CP437 text decoding according to the active display encoding.
 Unsupported special keys, terminal control strings, and bracketed paste cannot
 become menu commands or confirmations. Partial sequences survive transport gaps;
 a lone Escape is harmless and does not block indefinitely. CRLF submits a field
@@ -1070,10 +1071,17 @@ instead of grey.
 
 Voidrunner offers saved display presets from station Display Options: full palette
 using the existing terminal color depth, the same palette with motion off
-(`fast`), basic 16-color, monochrome Unicode, and plain text with ASCII artwork.
+(`fast`), basic 16-color, monochrome artwork, and plain text with ASCII artwork.
 Monochrome/plain suppress ANSI styling; plain maps the whole glyph vocabulary to
-equal-width ASCII while retaining Unicode pilot text and input. This is an
-artwork fallback, not a change to the UTF-8 door transport. Each preset previews
+equal-width ASCII while retaining Unicode pilot text in the career. Encoding is
+an independent saved preference: Automatic uses CP437 for classic drop files
+and UTF-8 for standalone launches; UTF-8 and CP437 can be selected explicitly.
+NetBBS always receives UTF-8 because the host converts output for its caller.
+CP437 output preserves encodable characters and uses explicit, equal-width
+substitutes for unsupported artwork. Other user text is transliterated for
+display without changing the stored name. The encoding preference defaults to
+Automatic in older saves, survives retirement, and checkpoints before applying
+or acknowledging a change. Each preset previews
 itself on the Display Options screen: the sample beside a preset's name is drawn
 the way that preset would draw it, so the choice is made by looking rather than
 by reading an adjective. A chosen preset checkpoints before acknowledgement;

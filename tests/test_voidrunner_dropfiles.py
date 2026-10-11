@@ -39,7 +39,7 @@ def test_door32_golden_file(tmp_path, newline, filename):
     assert info == {
         "handle": "Starfox", "user_id": 77, "node_name": "Test BBS",
         "terminal_width": 80, "terminal_height": 24, "color_depth": "16",
-        "display_style": "basic", "drop_file_type": "DOOR32.SYS",
+        "display_style": "basic", "display_encoding": "cp437", "drop_file_type": "DOOR32.SYS",
         "minutes_left": 25, "comm_type": 2, "comm_handle": 1234, "emulation": 1,
     }
 
@@ -53,7 +53,7 @@ def test_door_sys_golden_file(tmp_path, newline, count, handle, filename):
     assert info == {
         "handle": handle, "user_id": 77, "node_name": "Local",
         "terminal_width": 80, "terminal_height": 30, "color_depth": "16",
-        "display_style": "basic", "drop_file_type": "DOOR.SYS",
+        "display_style": "basic", "display_encoding": "cp437", "drop_file_type": "DOOR.SYS",
         "minutes_left": 25, "comm_port": "COM1:", "emulation": "GR",
     }
 

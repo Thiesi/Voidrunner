@@ -103,6 +103,20 @@ _OUTPUT_HEIGHT = 24
 # Page lists still in use by a screen, so a resize can cut them again (issue #645).
 _LIVE_PAGES: list = []
 _OUTPUT_STYLE = "auto"
+_OUTPUT_ENCODING = "utf-8"
+_DEFAULT_ENCODING = "utf-8"
+DISPLAY_ENCODINGS = {"auto": "Automatic", "utf-8": "UTF-8", "cp437": "CP437"}
+# One-column substitutes for artwork absent from the CP437 repertoire. Keep
+# terminal escapes untouched; using the low CP437 control bytes for arrows or
+# symbols would make some terminals interpret artwork as commands.
+_CP437_TRANSLATION = str.maketrans({
+    "╭": "┌", "╮": "┐", "╯": "┘", "╰": "└",
+    "▁": "_", "▂": "▄", "▃": "▄", "▅": "█", "▆": "█", "▇": "█",
+    "→": ">", "▲": "^", "▼": "v", "◆": "*", "◈": "*",
+    "○": "o", "●": "o", "◤": ">", "⟦": "[", "⟧": "]",
+    "★": "*", "•": "·", "–": "-", "—": "-", "…": ".",
+    "‘": "'", "’": "'", "“": '"', "”": '"',
+})
 DISPLAY_STYLES = {"auto": "Full palette", "fast": "Full palette, no motion", "basic": "16-color",
                   "mono": "Monochrome", "plain": "Plain / ASCII artwork"}
 # How much of a terminal each preset asks for, so a preview is never drawn above
@@ -227,7 +241,7 @@ def _classic_door_info(path: Path) -> dict:
         }
         graphics = emulation == "GR"
     info.update(terminal_width=80, color_depth="16" if graphics else "none",
-                display_style="basic" if graphics else "plain")
+                display_style="basic" if graphics else "plain", display_encoding="cp437")
     return info
 
 
@@ -251,7 +265,7 @@ def _load_door_info(drop_file: str | None = None) -> dict:
             pass
     elif drop_file is not None:
         # Even a malformed foreign file must not select the 256-color palette.
-        default.update(color_depth="16", display_style="basic")
+        default.update(color_depth="16", display_style="basic", display_encoding="cp437")
         try:
             default.update(_classic_door_info(Path(drop_file)))
         except (OSError, ValueError) as exc:
@@ -463,6 +477,45 @@ def display_style(style: str):
         _OUTPUT_STYLE = previous
 
 
+def apply_display_encoding(encoding: str) -> None:
+    """Choose the wire charset; NetBBS always owns its caller-side conversion."""
+    global _OUTPUT_ENCODING
+    if type(encoding) is not str or encoding not in DISPLAY_ENCODINGS:
+        raise ValueError("Unknown display encoding.")
+    effective = _DEFAULT_ENCODING if encoding == "auto" else encoding
+    if os.environ.get("NETBBS_DOOR_INFO"):
+        effective = "utf-8"
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding=effective, errors="strict")
+    _OUTPUT_ENCODING = effective
+    if _INPUT_READER is not None:
+        _INPUT_READER.encoding = effective
+        _INPUT_READER.utf8.clear()
+
+
+def _cp437_text(text: str) -> str:
+    """Map artwork, then transliterate user text while preserving its columns.
+
+    Careers remain Unicode. An unrepresentable wide name character is shown as
+    two underscores; combining marks use no columns. No replacement '?' bytes.
+    """
+    text = text.translate(_CP437_TRANSLATION)
+    try:
+        text.encode("cp437")
+        return text
+    except UnicodeEncodeError:
+        result = []
+        for char in text:
+            try:
+                char.encode("cp437")
+                result.append(char)
+            except UnicodeEncodeError:
+                width = _char_width(char)
+                folded = unicodedata.normalize("NFKD", char).encode("ascii", "ignore").decode("ascii")
+                result.append(folded[:width].ljust(width, "_") if width else "")
+        return "".join(result)
+
+
 def out(text: str = "") -> None:
     if _OUTPUT_STYLE in ("mono", "plain"):
         # "No ANSI styling" means no colour, not no terminal. Stripping every
@@ -471,6 +524,8 @@ def out(text: str = "") -> None:
         text = ANSI_STYLE_RE.sub("", text)
     if _OUTPUT_STYLE == "plain":
         text = text.translate(_ASCII_ART_TRANSLATION)
+    if _OUTPUT_ENCODING == "cp437":
+        text = _cp437_text(text)
     sys.stdout.write(text)
     sys.stdout.flush()
 
@@ -769,15 +824,16 @@ class _StdioBytes:
 
 
 class _DoorInput:
-    """A bounded UTF-8/terminal-key decoder shared by every input screen.
+    """A bounded UTF-8 or CP437/terminal-key decoder shared by every input screen.
 
     Partial sequences survive timeouts, so a delayed arrow suffix cannot become
     a menu command. Control strings and bracketed paste are discarded through
     their terminator, retaining only enough bytes to recognize that terminator.
     """
 
-    def __init__(self, read_byte):
+    def __init__(self, read_byte, encoding: str = "utf-8"):
         self.read_byte = read_byte
+        self.encoding = encoding
         self.mode = "text"
         self.sequence = bytearray()
         self.utf8 = bytearray()
@@ -899,6 +955,10 @@ class _DoorInput:
             elif n == 27:
                 self.mode = "escape"
                 continue
+            elif n >= 0x80 and self.encoding == "cp437":
+                # CP437's high bytes are printable letters/artwork, including
+                # bytes used as C1 controls by the UTF-8 terminal protocol.
+                char = byte.decode("cp437")
             elif n in (0x9b, 0x8f):
                 self.mode = "csi" if n == 0x9b else "ss3"
                 self.sequence.clear()
@@ -945,7 +1005,7 @@ def input_reader() -> "_DoorInput":
     stream = sys.stdin.buffer
     if _INPUT_STREAM is not stream:
         _INPUT_STREAM = stream
-        _INPUT_READER = _DoorInput(_StdioBytes(stream))
+        _INPUT_READER = _DoorInput(_StdioBytes(stream), _OUTPUT_ENCODING)
     return _INPUT_READER
 
 
@@ -1670,6 +1730,7 @@ class SaveData:
     best_credits: int = 0
     galaxy_version: int = 1
     display_style: str = "auto"
+    display_encoding: str = "auto"
     # Each known FIFO lot is [remaining quantity, remaining total paid cost].
     # Any hold quantity without a lot is older cargo of unknown acquisition cost.
     cargo_basis: dict[str, list[list[int]]] = field(default_factory=dict)
@@ -1684,6 +1745,7 @@ class SaveData:
             "schema_version": self.schema_version,
             "galaxy_version": self.galaxy_version,
             "display_style": self.display_style,
+            "display_encoding": self.display_encoding,
             "seed": self.seed,
             "pilot": self.pilot.to_dict(),
             "ship": self.ship.to_dict(),
@@ -1724,6 +1786,7 @@ class SaveData:
             schema_version=d["schema_version"],
             galaxy_version=d.get("galaxy_version", 1),
             display_style=d.get("display_style", "auto"),
+            display_encoding=d.get("display_encoding", "auto"),
             seed=d["seed"],
             pilot=Pilot.from_dict(d["pilot"]),
             ship=Ship.from_dict(d["ship"]),
@@ -1809,6 +1872,8 @@ def _validate_save_document(data: dict) -> None:
     record(data, SaveData, "career")
     style = data.get("display_style", "auto")
     require(type(style) is str and style in DISPLAY_STYLES, "display style")
+    encoding = data.get("display_encoding", "auto")
+    require(type(encoding) is str and encoding in DISPLAY_ENCODINGS, "display encoding")
     integer(data["seed"], "galaxy seed", minimum=-(2**63))
     system(data["current_system"], "current system")
     integer(data["turn"], "day")
@@ -4243,6 +4308,7 @@ def retire_pilot(old_save: SaveData) -> SaveData:
     retirements = old_save.pilot.retirements + 1
     new_save = _new_career(old_save.pilot.handle)
     new_save.display_style = old_save.display_style
+    new_save.display_encoding = old_save.display_encoding
     new_save.retired_careers = [dict(item, highlights=list(item["highlights"])) for item in old_save.retired_careers]
     new_save.best_credits = max(old_save.best_credits, old_save.pilot.credits)
     new_save.pilot.retirements = retirements
@@ -6471,13 +6537,18 @@ def screen_display_options(p: Palette, world: World) -> None:
     styles = list(DISPLAY_STYLES)
     blurbs = {"auto": "the terminal's own color depth, with motion",
               "fast": "the same palette with every reveal, tick and drain off",
-              "basic": "sixteen ANSI colors and Unicode artwork",
-              "mono": "Unicode artwork, no ANSI styling",
-              "plain": "ASCII artwork, no ANSI styling; letters and typed text stay UTF-8"}
+              "basic": "sixteen ANSI colors and terminal artwork",
+              "mono": "terminal artwork, no ANSI styling",
+              "plain": "ASCII artwork, no ANSI styling; text uses the chosen encoding"}
     while True:
         p_ = pal()
         lines = [f"{p_.slate}Choose a preset to apply and save it. "
                  f"Back keeps the current preference.{RESET}", section("PRESETS")]
+        managed = bool(os.environ.get("NETBBS_DOOR_INFO"))
+        encoding_label = ("UTF-8 (managed by NetBBS)" if managed else
+                          f"{DISPLAY_ENCODINGS[world.save.display_encoding]} ({_OUTPUT_ENCODING.upper()})")
+        lines.insert(1, f"Encoding: {encoding_label}." + ("" if managed else
+                         " [E] cycles Automatic / UTF-8 / CP437."))
         # Each preset previews itself: the sample row beside a name is drawn
         # the way that preset would draw it, so the choice is made by looking
         # rather than by reading an adjective (issue #493 §5).
@@ -6508,10 +6579,17 @@ def screen_display_options(p: Palette, world: World) -> None:
             # preset actually does.
             lines.append("\n".join(record + [f"  {p_.slate}{blurbs[style]}{RESET}"]))
         if result: lines.insert(0, result)
+        encoding_key = "" if managed else "[E] Encoding "
         key, page, count = _draw_service_page(p, "Display Options", lines,
-                                              f"[1-{len(styles)}] Set [<] Prev [>] Next [B] Back: ", page)
+                                              f"[1-{len(styles)}] Set {encoding_key}[<] Prev [>] Next [B] Back: ", page)
         if key in ("B", "Q"): return
-        if (moved := page_step(key, page, count)) is not None: page = moved
+        if key == "E" and not managed:
+            encodings = list(DISPLAY_ENCODINGS)
+            world.save.display_encoding = encodings[(encodings.index(world.save.display_encoding) + 1) % len(encodings)]
+            world.commit()
+            apply_display_encoding(world.save.display_encoding)
+            result, page = f"Encoding saved: {DISPLAY_ENCODINGS[world.save.display_encoding]}.", 0
+        elif (moved := page_step(key, page, count)) is not None: page = moved
         elif len(key) == 1 and "1" <= key <= str(len(styles)):
             style = styles[int(key) - 1]
             changed = select_display_style(world, style)
@@ -11336,14 +11414,17 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
 
 
 def main(drop_file: str | None = None) -> int:
-    global _OUTPUT_WIDTH, _OUTPUT_HEIGHT, _OUTPUT_STYLE
+    global _OUTPUT_WIDTH, _OUTPUT_HEIGHT, _OUTPUT_STYLE, _DEFAULT_ENCODING
     _OUTPUT_STYLE = "auto"
 
-    sys.stdout.reconfigure(encoding="utf-8")
+    _DEFAULT_ENCODING = "utf-8"
+    apply_display_encoding("auto")
     # Before anything else: the host may signal at any moment after the spawn,
     # and SIGUSR1 ends a process that has not said what to do with it.
     install_resize_handler()
     info = _load_door_info(drop_file) if drop_file is not None else _load_door_info()
+    _DEFAULT_ENCODING = info.get("display_encoding", "utf-8")
+    apply_display_encoding("auto")
     apply_display_style(info.get("display_style", "auto"))
     reported_height = apply_terminal_size(info)
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
@@ -11393,6 +11474,7 @@ def main(drop_file: str | None = None) -> int:
         if is_new:
             save.display_style = info.get("display_style", "auto")
         apply_display_style(save.display_style)
+        apply_display_encoding(save.display_encoding)
         if splashable:
             # After the caller's own preset is known, so a caller who asked for
             # no motion is never shown any; before the first screen it opens on.
@@ -11520,6 +11602,8 @@ def main(drop_file: str | None = None) -> int:
         lease.close()
         out(RESET)
         _OUTPUT_STYLE = "auto"
+        _DEFAULT_ENCODING = "utf-8"
+        apply_display_encoding("auto")
 
 
 if __name__ == "__main__":
