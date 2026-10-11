@@ -202,7 +202,8 @@ def test_command_line_creates_and_resumes_by_record_number(tmp_path, kind):
     # The host alias changes; the career and its chosen preset still belong to 77.
     saved["display_style"] = "mono"
     (saves / "77.json").write_text(json.dumps(saved))
-    drop_file(tmp_path, kind, changes={7 if kind == "DOOR32.SYS" else 36: "Renamed"})
+    drop_file(tmp_path, kind, changes={1: "0", 2: "0", 7: "Renamed"}
+              if kind == "DOOR32.SYS" else {36: "Renamed"})
     result = subprocess.run(args, input=b"Q", capture_output=True, env=env, timeout=60)
     assert result.returncode == 0, result.stderr
     saved = json.loads((saves / "77.json").read_text())

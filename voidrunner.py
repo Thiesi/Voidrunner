@@ -8,7 +8,8 @@ drop-file NetBBS hands it via `NETBBS_DOOR_INFO` for handle/user_id/color
 depth, then owns raw stdin/stdout for the whole session (single keystroke
 reads; this module decodes UTF-8 and whole terminal keys, with a line editor for
 numeric quantities and the callsign prompt, since NetBBS gives a door no
-line-editing help). Runnable completely standalone outside NetBBS too.
+line-editing help). Classic DOOR32 socket launches use the inherited connection
+with telnet filtering instead of stdio. Runnable completely standalone too.
 Zero external dependencies -- stdlib only.
 
 **Persistence**: The native door API provides no mediated database access
@@ -55,7 +56,7 @@ by itself make Voidrunner multiplayer, and nothing here assumes it ever
 will be; it just avoids closing that door (see the design discussion in
 issue #172 -- doors are locked as single-player/session-scoped in v1,
 and this stays strictly inside that: one save, one player, no shared
-galaxy state, no networking). Independent score records provide a shared ranking.
+galaxy state, no multiplayer networking). Independent score records provide a shared ranking.
 
 **Load-bearing invariant**: `generate_galaxy()` is a pure function of
 the save's `seed` -- only the seed is persisted, not the galaxy itself,
@@ -81,6 +82,7 @@ import math
 import os
 import random
 import re
+import socket
 import sys
 import tempfile
 import time
@@ -105,6 +107,7 @@ _LIVE_PAGES: list = []
 _OUTPUT_STYLE = "auto"
 _OUTPUT_ENCODING = "utf-8"
 _DEFAULT_ENCODING = "utf-8"
+_SOCKET_TRANSPORT: _SocketTransport | None = None
 DISPLAY_ENCODINGS = {"auto": "Automatic", "utf-8": "UTF-8", "cp437": "CP437"}
 # One-column substitutes for artwork absent from the CP437 repertoire. Keep
 # terminal escapes untouched; using the low CP437 control bytes for arrows or
@@ -485,7 +488,7 @@ def apply_display_encoding(encoding: str) -> None:
     effective = _DEFAULT_ENCODING if encoding == "auto" else encoding
     if os.environ.get("NETBBS_DOOR_INFO"):
         effective = "utf-8"
-    if hasattr(sys.stdout, "reconfigure"):
+    if _SOCKET_TRANSPORT is None and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding=effective, errors="strict")
     _OUTPUT_ENCODING = effective
     if _INPUT_READER is not None:
@@ -526,8 +529,11 @@ def out(text: str = "") -> None:
         text = text.translate(_ASCII_ART_TRANSLATION)
     if _OUTPUT_ENCODING == "cp437":
         text = _cp437_text(text)
-    sys.stdout.write(text)
-    sys.stdout.flush()
+    if _SOCKET_TRANSPORT is not None:
+        _SOCKET_TRANSPORT.write(text.encode(_OUTPUT_ENCODING, "strict"))
+    else:
+        sys.stdout.write(text)
+        sys.stdout.flush()
 
 
 def out_line(text: str = "") -> None:
@@ -823,6 +829,102 @@ class _StdioBytes:
         return os.read(self.fd, 1)
 
 
+class _CarrierLost(EOFError):
+    """The caller's socket closed; use the normal EOF checkpoint path."""
+
+
+class _SocketTransport:
+    """Borrow the host's connection through this process's inherited handle.
+
+    Close only our handle on return, never shutdown the shared connection or
+    change its blocking mode. Telnet negotiation remains the host's job.
+    Filtering keeps constant space even for an unfinished subnegotiation.
+    """
+
+    def __init__(self, handle: int):
+        self.socket = socket.socket(fileno=handle)
+        self.mode = "text"
+        self.lost = False
+
+    def waiting(self, timeout: float | None = 0) -> bool:
+        if self.lost:
+            return True
+        import select
+
+        try:
+            return bool(select.select([self.socket], [], [], timeout)[0])
+        except OSError:
+            self.lost = True
+            return True
+
+    def __call__(self, timeout: float | None) -> bytes | None:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        for _ in range(4096):
+            if self.lost:
+                return b""
+            remaining = None if deadline is None else max(0, deadline - time.monotonic())
+            if not self.waiting(remaining):
+                return None
+            if self.lost:
+                return b""
+            try:
+                byte = self.socket.recv(1)
+            except BlockingIOError:
+                continue  # the host may have handed us a nonblocking socket
+            except OSError:
+                self.lost = True
+                return b""
+            if not byte:
+                self.lost = True
+                return b""
+            n = byte[0]
+            if self.mode == "option":
+                self.mode = "text"  # WILL/WONT/DO/DONT's option byte
+            elif self.mode == "sub":
+                if n == 255:
+                    self.mode = "sub_iac"
+            elif self.mode == "sub_iac":
+                self.mode = "text" if n == 240 else "sub"
+            elif self.mode == "iac":
+                self.mode = "text"
+                if n == 255:
+                    return byte  # IAC IAC is a literal data byte
+                if n in (251, 252, 253, 254):
+                    self.mode = "option"
+                elif n == 250:
+                    self.mode = "sub"
+            elif n == 255:
+                self.mode = "iac"
+            else:
+                return byte
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
+        return None  # yield after a bounded run of telnet control traffic
+
+    def write(self, data: bytes) -> None:
+        if self.lost:
+            raise _CarrierLost("socket closed")
+        import select
+
+        pending = memoryview(data.replace(b"\xff", b"\xff\xff"))
+        try:
+            while pending:
+                select.select([], [self.socket], [])
+                try:
+                    sent = self.socket.send(pending)
+                except BlockingIOError:
+                    continue
+                if not sent:
+                    raise _CarrierLost("socket closed")
+                pending = pending[sent:]
+        except (OSError, _CarrierLost) as exc:
+            self.lost = True
+            raise _CarrierLost("socket closed") from exc
+
+    def close(self) -> None:
+        self.socket.close()
+
+
 class _DoorInput:
     """A bounded UTF-8 or CP437/terminal-key decoder shared by every input screen.
 
@@ -831,9 +933,10 @@ class _DoorInput:
     their terminator, retaining only enough bytes to recognize that terminator.
     """
 
-    def __init__(self, read_byte, encoding: str = "utf-8"):
+    def __init__(self, read_byte, encoding: str = "utf-8", *, telnet: bool = False):
         self.read_byte = read_byte
         self.encoding = encoding
+        self.telnet = telnet
         self.mode = "text"
         self.sequence = bytearray()
         self.utf8 = bytearray()
@@ -981,7 +1084,7 @@ class _DoorInput:
                 return IGNORED_KEY
             if self.skip_lf:
                 self.skip_lf = False
-                if char == "\n":
+                if char == "\n" or (self.telnet and char == "\0"):
                     continue
             self.skip_lf = char == "\r"
             if char in ("\r", "\n", "\x7f", "\x08") or char.isprintable():
@@ -1002,10 +1105,11 @@ def input_reader() -> "_DoorInput":
     could not reveal, because nothing had read a key yet.
     """
     global _INPUT_READER, _INPUT_STREAM
-    stream = sys.stdin.buffer
+    stream = _SOCKET_TRANSPORT if _SOCKET_TRANSPORT is not None else sys.stdin.buffer
     if _INPUT_STREAM is not stream:
         _INPUT_STREAM = stream
-        _INPUT_READER = _DoorInput(_StdioBytes(stream), _OUTPUT_ENCODING)
+        _INPUT_READER = _DoorInput(stream if _SOCKET_TRANSPORT is not None else _StdioBytes(stream),
+                                   _OUTPUT_ENCODING, telnet=_SOCKET_TRANSPORT is not None)
     return _INPUT_READER
 
 
@@ -1042,7 +1146,7 @@ def motion_interrupted() -> bool:
     if not motion_enabled():
         return True
     reader = _INPUT_READER
-    if reader is None or not isinstance(reader.read_byte, _StdioBytes):
+    if reader is None or not isinstance(reader.read_byte, (_StdioBytes, _SocketTransport)):
         return True
     return reader.read_byte.waiting()
 
@@ -8455,8 +8559,8 @@ def _resized_while_idle() -> bool:
     # Only a door with a live terminal waits: a scripted test has no reader open,
     # and selecting on the test runner's own stdin would never return.
     live = _INPUT_READER.read_byte if _INPUT_READER is not None else None
-    fd = live.fd if isinstance(live, _StdioBytes) else None
-    if os.name != "posix" or fd is None:
+    fd = live.socket if isinstance(live, _SocketTransport) else live.fd if isinstance(live, _StdioBytes) else None
+    if fd is None or (os.name != "posix" and not isinstance(live, _SocketTransport)):
         return take_resize()
     if _INPUT_READER.pending is not None:
         # A byte the decoder has already taken off the pipe (the key typed just
@@ -8468,7 +8572,11 @@ def _resized_while_idle() -> bool:
     while True:
         if take_resize():
             return True
-        if select.select([fd], [], [], _RESIZE_POLL_SECONDS)[0]:
+        if isinstance(live, _SocketTransport):
+            ready = live.waiting(_RESIZE_POLL_SECONDS)
+        else:
+            ready = bool(select.select([fd], [], [], _RESIZE_POLL_SECONDS)[0])
+        if ready:
             return False
 
 
@@ -11418,17 +11526,50 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
 
 
 def main(drop_file: str | None = None) -> int:
-    global _OUTPUT_WIDTH, _OUTPUT_HEIGHT, _OUTPUT_STYLE, _DEFAULT_ENCODING, _CLASSIC_DROP_FILE
+    global _OUTPUT_STYLE, _DEFAULT_ENCODING, _CLASSIC_DROP_FILE, _SOCKET_TRANSPORT
+    global _INPUT_READER, _INPUT_STREAM
     _OUTPUT_STYLE = "auto"
     # Resize notifications must reload the same metadata source as this launch.
     _CLASSIC_DROP_FILE = drop_file
 
     _DEFAULT_ENCODING = "utf-8"
-    apply_display_encoding("auto")
     # Before anything else: the host may signal at any moment after the spawn,
     # and SIGUSR1 ends a process that has not said what to do with it.
     install_resize_handler()
     info = _load_door_info(drop_file) if drop_file is not None else _load_door_info()
+    started = False
+    try:
+        if info.get("drop_file_type") == "DOOR32.SYS" and info.get("comm_type") == 2:
+            try:
+                _SOCKET_TRANSPORT = _SocketTransport(info["comm_handle"])
+            except (OSError, ValueError, OverflowError):
+                print("Voidrunner: cannot open inherited DOOR32 socket.", file=sys.stderr)
+                return 1
+        started = True
+        return _run_game(info)
+    except _CarrierLost:
+        # Pre-career output, or a busy/refused launch: nothing to checkpoint.
+        # Once a World exists, _run_game handles EOF and checkpoints it.
+        return 0
+    finally:
+        try:
+            if started:
+                with contextlib.suppress(_CarrierLost):
+                    out(RESET)
+        finally:
+            _OUTPUT_STYLE = "auto"
+            _CLASSIC_DROP_FILE = None
+            _DEFAULT_ENCODING = "utf-8"
+            apply_display_encoding("auto")
+            _INPUT_READER = _INPUT_STREAM = None
+            if _SOCKET_TRANSPORT is not None:
+                with contextlib.suppress(OSError):
+                    _SOCKET_TRANSPORT.close()
+                _SOCKET_TRANSPORT = None
+
+
+def _run_game(info: dict) -> int:
+    global _DEFAULT_ENCODING
     _DEFAULT_ENCODING = info.get("display_encoding", "utf-8")
     apply_display_encoding("auto")
     apply_display_style(info.get("display_style", "auto"))
@@ -11438,7 +11579,6 @@ def main(drop_file: str | None = None) -> int:
     input_reader()  # opened before the first page, so it can reveal itself
     if _terminal_too_small():
         _refuse_size(p, reported_height)
-        _CLASSIC_DROP_FILE = None
         return 0
     save_dir = _default_save_dir(standalone=True)
     # Valid host drop files carry a positive user_id. The Guest fallback for a
@@ -11583,17 +11723,17 @@ def main(drop_file: str | None = None) -> int:
                  + RESET)
         return 0
     except ResumeError as exc:
-        out_line(f"{p.wrong}{exc} Play has stopped; your saved career is unchanged. "
-                 f"Please contact your SysOp.{RESET}")
         try:
+            out_line(f"{p.wrong}{exc} Play has stopped; your saved career is unchanged. "
+                     f"Please contact your SysOp.{RESET}")
             pause(p)
         except EOFError:
             pass
         return 1
     except SaveError:
-        out_line(f"{p.wrong}Save failed. Play has stopped to protect your last saved career. "
-                 f"Please contact your SysOp before playing again.{RESET}")
         try:
+            out_line(f"{p.wrong}Save failed. Play has stopped to protect your last saved career. "
+                     f"Please contact your SysOp before playing again.{RESET}")
             pause(p)
         except EOFError:
             pass
@@ -11607,11 +11747,6 @@ def main(drop_file: str | None = None) -> int:
         return 0
     finally:
         lease.close()
-        out(RESET)
-        _OUTPUT_STYLE = "auto"
-        _CLASSIC_DROP_FILE = None
-        _DEFAULT_ENCODING = "utf-8"
-        apply_display_encoding("auto")
 
 
 if __name__ == "__main__":
