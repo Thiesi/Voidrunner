@@ -128,18 +128,23 @@ def test_netbbs_always_takes_precedence(tmp_path, monkeypatch, capsys, data):
 def test_default_save_directory_migration_and_explicit_override(tmp_path, monkeypatch):
     monkeypatch.setattr(vr.Path, "home", lambda: tmp_path)
     current, old = tmp_path / ".voidrunner", tmp_path / ".netbbs" / "voidrunner_saves"
-    assert vr._default_save_dir() == current
-    old.mkdir(parents=True)
+    assert vr._default_save_dir(standalone=True) == current
     assert vr._default_save_dir() == old
+    old.mkdir(parents=True)
+    assert vr._default_save_dir(standalone=True) == old
     current.mkdir()
-    assert vr._default_save_dir() == current
+    assert vr._default_save_dir(standalone=True) == current
+    assert vr._default_save_dir() == old
     monkeypatch.setenv("NETBBS_DOOR_INFO", "host.json")
+    assert vr._default_save_dir(standalone=True) == old
     assert vr._default_save_dir() == old
     monkeypatch.setenv("VOIDRUNNER_SAVE_DIR", str(tmp_path / "explicit"))
+    assert vr._default_save_dir(standalone=True) == tmp_path / "explicit"
     assert vr._default_save_dir() == tmp_path / "explicit"
 
 
-def test_backup_imports_find_legacy_careers_without_a_door_environment(tmp_path, monkeypatch):
+@pytest.mark.parametrize("standalone_exists", [False, True])
+def test_backup_imports_find_legacy_careers_without_a_door_environment(tmp_path, monkeypatch, standalone_exists):
     # netbbs.backup runs in the host, with neither door environment variable set.
     from voidrunner import _default_save_dir, PilotBusy, maintenance_session
 
@@ -148,11 +153,39 @@ def test_backup_imports_find_legacy_careers_without_a_door_environment(tmp_path,
     legacy.mkdir(parents=True)
     career = legacy / "77.json"
     career.write_text('{"backup_fixture": true}')
+    if standalone_exists:
+        standalone = tmp_path / ".voidrunner"
+        standalone.mkdir()
+        (standalone / "77.json").write_text('{"standalone_fixture": true}')
     directory = _default_save_dir()
     assert directory == legacy
     assert issubclass(PilotBusy, Exception)
     with maintenance_session(directory):
         assert json.loads((directory / "77.json").read_text()) == {"backup_fixture": True}
+
+
+@pytest.mark.parametrize("current_exists,legacy_exists", [(False, False), (False, True), (True, True)])
+def test_game_launch_uses_standalone_directory_policy(tmp_path, current_exists, legacy_exists):
+    current, legacy = tmp_path / ".voidrunner", tmp_path / ".netbbs" / "voidrunner_saves"
+    if current_exists:
+        current.mkdir()
+    if legacy_exists:
+        legacy.mkdir(parents=True)
+    path = drop_file(tmp_path, changes={1: "0", 2: "0"})
+    script = r'''
+import runpy, sys
+from pathlib import Path
+Path.home = classmethod(lambda cls: Path(sys.argv[3]))
+main = runpy.run_path(sys.argv[1])["main"]
+sys.exit(main(sys.argv[2]))
+'''
+    result = subprocess.run([sys.executable, "-c", script, str(_VOIDRUNNER_PATH), path, str(tmp_path)],
+                            input=b"Ace\rYQ", capture_output=True, env=dict(os.environ), timeout=60)
+    assert result.returncode == 0, result.stderr
+    expected = legacy if legacy_exists and not current_exists else current
+    assert json.loads((expected / "77.json").read_text())["pilot"]["handle"] == "Ace"
+    other = current if expected == legacy else legacy
+    assert not (other / "77.json").exists()
 
 
 @pytest.mark.parametrize("kind", ["DOOR32.SYS", "DOOR.SYS"])

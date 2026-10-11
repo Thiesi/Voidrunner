@@ -26,7 +26,8 @@ Careers live in the directory named by `VOIDRUNNER_SAVE_DIR`. NetBBS always
 sets it, to `<db path>.doors/voidrunner/` unless the SysOp chose another
 place. Outside NetBBS, the default is `~/.voidrunner/`. If that directory does
 not exist and `~/.netbbs/voidrunner_saves/` does, the legacy directory is used
-in place, without moving files. NetBBS's fallback remains the legacy directory.
+in place, without moving files. NetBBS's fallback remains the legacy directory,
+including backup imports without a door environment when both directories exist.
 Each pilot is one JSON file, keyed by the caller's numeric user id. The directory also holds
 the session locks and the Hall of Fame records, so back it up as a whole and
 don't delete lock files while a BBS is running.

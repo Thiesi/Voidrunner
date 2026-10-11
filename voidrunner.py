@@ -4246,9 +4246,11 @@ class SaveError(OSError):
     """A gameplay checkpoint failed; no further actions may be accepted."""
 
 
-def _default_save_dir() -> Path:
+def _default_save_dir(*, standalone: bool = False) -> Path:
     # NetBBS backup imports this function, PilotBusy and maintenance_session.
-    # Keep this shared resolver and its legacy-directory fallback (NetBBS #1221).
+    # Its environment-free, no-argument call must keep the legacy host default,
+    # even when the same OS account also has standalone careers (NetBBS #1221).
+    # Only a game launch explicitly opts into the standalone migration policy.
     override = os.environ.get("VOIDRUNNER_SAVE_DIR")
     if override:
         return Path(override).expanduser().resolve()
@@ -4268,7 +4270,7 @@ def _default_save_dir() -> Path:
         home = Path(tempfile.gettempdir())
     legacy = home / ".netbbs" / "voidrunner_saves"
     current = home / ".voidrunner"
-    if os.environ.get("NETBBS_DOOR_INFO") or (not current.exists() and legacy.is_dir()):
+    if not standalone or os.environ.get("NETBBS_DOOR_INFO") or (not current.exists() and legacy.is_dir()):
         return legacy
     return current
 
@@ -11438,7 +11440,7 @@ def main(drop_file: str | None = None) -> int:
         _refuse_size(p, reported_height)
         _CLASSIC_DROP_FILE = None
         return 0
-    save_dir = _default_save_dir()
+    save_dir = _default_save_dir(standalone=True)
     # Valid host drop files carry a positive user_id. The Guest fallback for a
     # standalone launch or unreadable drop file must be
     # deterministic per handle -- Python's built-in hash() is randomized
