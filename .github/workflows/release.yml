@@ -1,0 +1,33 @@
+name: Release
+
+# Push a tag such as v1.0.0 to publish that commit's voidrunner.py, unchanged,
+# as a GitHub release. NetBBS vendors exactly this file (Thiesi/NetBBS#1216),
+# so the asset must be byte-identical to what git stores at the tag.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Tests
+        run: |
+          python -m pip install "pytest>=7.0" "pytest-xdist>=3.0"
+          python -m pytest -q -n auto
+      - name: Check the asset is the stored file
+        run: test "$(git hash-object voidrunner.py)" = "$(git rev-parse "$GITHUB_REF_NAME:voidrunner.py")"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum voidrunner.py > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" voidrunner.py SHA256SUMS \
+            --title "Voidrunner $GITHUB_REF_NAME" --generate-notes --verify-tag
