@@ -108,6 +108,7 @@ _OUTPUT_STYLE = "auto"
 _OUTPUT_ENCODING = "utf-8"
 _DEFAULT_ENCODING = "utf-8"
 _SOCKET_TRANSPORT: _SocketTransport | None = None
+_SESSION_CLOCK: _SessionClock | None = None
 DISPLAY_ENCODINGS = {"auto": "Automatic", "utf-8": "UTF-8", "cp437": "CP437"}
 # One-column substitutes for artwork absent from the CP437 repertoire. Keep
 # terminal escapes untouched; using the low CP437 control bytes for arrows or
@@ -730,6 +731,71 @@ RESIZE_KEY = "<resize>"
 _INPUT_TIMEOUT = 0.15
 
 
+class _SessionExpired(EOFError):
+    """The host's allowance ended at a safe input/motion boundary."""
+
+
+class _SessionClock:
+    def __init__(self, seconds: float, started: float):
+        self.deadline = started + seconds
+        # Keep short allowances useful too; never reserve more than a tenth.
+        self.exit_at = self.deadline - min(1.0, seconds / 10)
+        self.warned = False
+
+    def label(self) -> str:
+        seconds = max(0, math.ceil(self.deadline - time.monotonic()))
+        return f"{'LOW TIME' if seconds <= 180 else 'Time'} {seconds // 60}:{seconds % 60:02d}"
+
+    def check(self, *, warn: bool = False) -> None:
+        if time.monotonic() >= self.exit_at:
+            raise _SessionExpired
+        if warn and not self.warned and self.deadline - time.monotonic() <= 180:
+            self.warned = True
+            # A one-line alert over the top border, without scrolling the page
+            # or moving the line editor's cursor. Both unstyled presets retain
+            # cursor controls, just as they retain clear_screen's controls.
+            message = "Time low: returning to the BBS soon."
+            out(f"{ESC}7{ESC}[1;1H{RESET}{pal().gold}{_fit_text(message, _OUTPUT_WIDTH - 1)}{RESET}{ESC}[K{ESC}8")
+
+
+def _session_clock(info: dict, started: float) -> _SessionClock | None:
+    value = info.get("session_limit_seconds")
+    scale = 1
+    if "session_limit_seconds" not in info and info.get("drop_file_type") in ("DOOR32.SYS", "DOOR.SYS"):
+        value, scale = info.get("minutes_left"), 60
+    if type(value) not in (int, float):
+        return None
+    try:
+        seconds = float(value) * scale
+    except OverflowError:
+        return None
+    return _SessionClock(seconds, started) if math.isfinite(seconds) and seconds >= 0 else None
+
+
+def _check_session_time(*, warn: bool = False) -> None:
+    if _SESSION_CLOCK is not None:
+        _SESSION_CLOCK.check(warn=warn)
+
+
+def _session_read(read_byte, timeout: float | None) -> bytes | None:
+    """Poll the allowance without inventing decoder timeouts or eating bytes."""
+    if _SESSION_CLOCK is None:
+        return read_byte(timeout)
+    until = None if timeout is None else time.monotonic() + timeout
+    while True:
+        _check_session_time(warn=True)
+        now = time.monotonic()
+        if until is not None and now >= until:
+            return None
+        wait = min(0.25, max(0, _SESSION_CLOCK.exit_at - now))
+        if until is not None:
+            wait = min(wait, until - now)
+        byte = read_byte(wait)
+        _check_session_time()
+        if byte is not None:
+            return byte
+
+
 class _StdioBytes:
     """Unbuffered byte reads with a short timeout only for partial keys.
 
@@ -949,11 +1015,12 @@ class _DoorInput:
 
     def read_key(self) -> str:
         for _ in range(256):
+            _check_session_time(warn=True)
             if self.pending is not None:
                 byte, self.pending = self.pending, None
             else:
                 timeout = _INPUT_TIMEOUT if not self.after_timeout and (self.mode != "text" or self.utf8) else None
-                byte = self.read_byte(timeout)
+                byte = _session_read(self.read_byte, timeout)
             if byte is None:
                 self.after_timeout = True
                 if self.mode == "escape":
@@ -962,7 +1029,7 @@ class _DoorInput:
                     # CSI/SS3 introducer first. Without it a fragmented arrow key on a slow
                     # link erases a half-typed quantity or answers No (issue #413 review).
                     self.mode = "late_escape"
-                    follow = self.read_byte(_INPUT_TIMEOUT)
+                    follow = _session_read(self.read_byte, _INPUT_TIMEOUT)
                     if follow in (b"[", b"O"):
                         self.mode = "csi" if follow == b"[" else "ss3"
                         self.sequence.clear()
@@ -1143,6 +1210,7 @@ def motion_interrupted() -> bool:
     has opened stdin -- and an effect nobody is watching is only a delay, so it
     is skipped rather than slept through.
     """
+    _check_session_time()
     if not motion_enabled():
         return True
     reader = _INPUT_READER
@@ -6290,6 +6358,7 @@ def _splash_hold() -> None:
     """
     reader = _INPUT_READER
     while reader is not None and not _RESIZE_PENDING:
+        _check_session_time(warn=True)
         if reader.read_byte.waiting():
             try:
                 reader.read_key()
@@ -8461,7 +8530,14 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
         # is how the color was lost one slice at a time to begin with.
         row = style_body_line(row.replace(STICKY_MARK, "").replace(MEMBER_MARK, ""))
         out_line(f"{p.hull}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.hull}│{RESET}")
-    out_line(_box_bottom(p, border_color=p.hull))
+    if _SESSION_CLOCK is None:
+        out_line(_box_bottom(p, border_color=p.hull))
+    else:
+        # Keep the allowance visible on every page, including 40x12 terminals;
+        # a body-row badge could be paginated off the opening deck entirely.
+        label = _fit_text(_SESSION_CLOCK.label(), inner - 4)
+        tone = p.gold if _SESSION_CLOCK.deadline - time.monotonic() <= 180 else p.slate
+        out_line(f"{p.hull}╰{'─' * (inner - len(label) - 3)} {tone}{label}{p.hull} ─╯{RESET}")
 
 
 def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, page: int, *, pages: list[list[str]] | None = None) -> tuple[str, int, int]:
@@ -8570,6 +8646,7 @@ def _resized_while_idle() -> bool:
     import select
 
     while True:
+        _check_session_time(warn=True)
         if take_resize():
             return True
         if isinstance(live, _SocketTransport):
@@ -11527,7 +11604,8 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
 
 def main(drop_file: str | None = None) -> int:
     global _OUTPUT_STYLE, _DEFAULT_ENCODING, _CLASSIC_DROP_FILE, _SOCKET_TRANSPORT
-    global _INPUT_READER, _INPUT_STREAM
+    global _INPUT_READER, _INPUT_STREAM, _SESSION_CLOCK
+    session_started = time.monotonic()
     _OUTPUT_STYLE = "auto"
     # Resize notifications must reload the same metadata source as this launch.
     _CLASSIC_DROP_FILE = drop_file
@@ -11546,12 +11624,19 @@ def main(drop_file: str | None = None) -> int:
                 print("Voidrunner: cannot open inherited DOOR32 socket.", file=sys.stderr)
                 return 1
         started = True
+        _SESSION_CLOCK = _session_clock(info, session_started)
         return _run_game(info)
+    except _SessionExpired:
+        _SESSION_CLOCK = None
+        with contextlib.suppress(_CarrierLost):
+            out_line("Time limit reached. Returning to the BBS.")
+        return 0
     except _CarrierLost:
         # Pre-career output, or a busy/refused launch: nothing to checkpoint.
         # Once a World exists, _run_game handles EOF and checkpoints it.
         return 0
     finally:
+        _SESSION_CLOCK = None
         try:
             if started:
                 with contextlib.suppress(_CarrierLost):
@@ -11569,7 +11654,7 @@ def main(drop_file: str | None = None) -> int:
 
 
 def _run_game(info: dict) -> int:
-    global _DEFAULT_ENCODING
+    global _DEFAULT_ENCODING, _SESSION_CLOCK
     _DEFAULT_ENCODING = info.get("display_encoding", "utf-8")
     apply_display_encoding("auto")
     apply_display_style(info.get("display_style", "auto"))
@@ -11738,6 +11823,19 @@ def _run_game(info: dict) -> int:
         except EOFError:
             pass
         return 1
+    except _SessionExpired:
+        _SESSION_CLOCK = None
+        try:
+            if world is not None:
+                world.commit()
+        except SaveError:
+            with contextlib.suppress(_CarrierLost):
+                out_line("Save failed. Please contact your SysOp before playing again.")
+            return 1
+        with contextlib.suppress(_CarrierLost):
+            out_line()
+            out_line("Time limit reached. " + ("Career saved. " if world is not None else "") + "Returning to the BBS.")
+        return 0
     except EOFError:
         try:
             if world is not None:
