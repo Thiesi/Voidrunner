@@ -8649,10 +8649,13 @@ def _resized_while_idle() -> bool:
         _check_session_time(warn=True)
         if take_resize():
             return True
+        wait = _RESIZE_POLL_SECONDS
+        if _SESSION_CLOCK is not None:
+            wait = min(wait, max(0, _SESSION_CLOCK.exit_at - time.monotonic()))
         if isinstance(live, _SocketTransport):
-            ready = live.waiting(_RESIZE_POLL_SECONDS)
+            ready = live.waiting(wait)
         else:
-            ready = bool(select.select([fd], [], [], _RESIZE_POLL_SECONDS)[0])
+            ready = bool(select.select([fd], [], [], wait)[0])
         if ready:
             return False
 

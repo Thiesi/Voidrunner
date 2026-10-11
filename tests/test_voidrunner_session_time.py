@@ -210,6 +210,23 @@ def test_expiry_during_splash_hold(monkeypatch):
         vr._splash_hold()
 
 
+def test_idle_socket_wait_does_not_overshoot_short_allowance(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(vr.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(vr, "_SESSION_CLOCK", vr._SessionClock(2, 0))
+    transport = object.__new__(vr._SocketTransport)
+    transport.socket = object()
+    def waiting(timeout):
+        now[0] += timeout
+        return False
+    transport.waiting = waiting
+    monkeypatch.setattr(vr, "_INPUT_READER", vr._DoorInput(transport))
+    monkeypatch.setattr(vr, "take_resize", lambda: False)
+    with pytest.raises(vr._SessionExpired):
+        vr._resized_while_idle()
+    assert now[0] == pytest.approx(1.8)
+
+
 def test_expired_new_career_exits_without_creating_a_save(tmp_path):
     path = drop_file(tmp_path, changes={1: "0", 9: "0"})
     env = dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path / "saves"), DOOR_SPLASH="0")
