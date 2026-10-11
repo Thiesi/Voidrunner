@@ -82,6 +82,7 @@ SETTLE = 0.75
 ANSWER = 6.0  # a keypress can take a second to redraw; past this it did nothing.
 PATIENCE = 30.0  # a door still drawing after this is hung, not slow.
 WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
+GALLERY_ENCODING = "utf-8"
 
 # Each walk is (label, keys), pressed in order against a door that already has a
 # career or world: registration and the first-visit guide belong to the fixture,
@@ -293,8 +294,28 @@ class Door:
                    VOIDRUNNER_SAVE_DIR=str(state / "saves"),
                    DOOR_SPLASH="1" if splash else "0",
                    PYTHONIOENCODING="utf-8")
+        self.encoding = GALLERY_ENCODING
+        command = [sys.executable, str(door)]
+        if self.encoding == "cp437":
+            # Simulate foreign-host metadata at each gallery geometry. Classic
+            # drop files cannot express 40/64 columns; NetBBS forces UTF-8. The
+            # real main/input/output loop still runs in its own process. Strict
+            # mapping makes an unhandled glyph fail the gallery instead of
+            # hiding behind the fallback intended for arbitrary caller names.
+            info_path = env.pop("NETBBS_DOOR_INFO")
+            command = [sys.executable, "-c", """
+import json, runpy, sys
+main = runpy.run_path(sys.argv[1])["main"]
+namespace = main.__globals__
+with open(sys.argv[2], encoding="utf-8") as source:
+    info = json.load(source)
+info["display_encoding"] = "cp437"
+namespace["_load_door_info"] = lambda: info
+namespace["_cp437_text"] = lambda text: text.translate(namespace["_CP437_TRANSLATION"]).encode("cp437", "strict").decode("cp437")
+sys.exit(main())
+""", str(door), info_path]
         self.proc = subprocess.Popen(
-            [sys.executable, str(door)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=env)
         self.lock = threading.Lock()
         self.out, self.err = bytearray(), bytearray()
@@ -516,7 +537,7 @@ class Door:
 
     def read(self) -> str:
         with self.lock:
-            return bytes(self.out).decode("utf-8", "replace")
+            return bytes(self.out).decode(self.encoding, "replace")
 
     def kill(self) -> None:
         """Leave nothing running behind a failed capture."""
@@ -634,6 +655,7 @@ def apply_preset(state: pathlib.Path, extra: dict) -> dict:
                 continue
             data = json.loads(save.read_text(encoding="utf-8"))
             data["display_style"] = style
+            data["display_encoding"] = GALLERY_ENCODING
             save.write_text(json.dumps(data), encoding="utf-8")
     return {key: value for key, value in extra.items()
             if key != "display_style"}
@@ -1008,7 +1030,7 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
                             f'<div class="row">{"".join(panels)}</div></section>')
             panels, current = [], label
         for number, screen in enumerate(pages, 1):
-            caption = f"{width}x{height} · {preset}"
+            caption = f"{width}x{height} · {preset} · {GALLERY_ENCODING.upper()}"
             if len(pages) > 1:
                 caption += f" · page {number}/{len(pages)}"
             panels.append(
@@ -1054,13 +1076,17 @@ preset. Attach this page to any pull request that changes a screen.</p>
 
 
 def main() -> None:
+    global GALLERY_ENCODING
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--widths", type=int, nargs="+", default=[80, 64, 40],
                         help="terminal widths to render (the supported floor is 40)")
     parser.add_argument("--out", type=pathlib.Path, default=ROOT / "build" / "gallery")
     parser.add_argument("--fresh", action="store_true", help="rebuild the cached fixture first")
     parser.add_argument("--open", action="store_true", help="open the page when it is written")
+    parser.add_argument("--encoding", choices=("utf-8", "cp437"), default="utf-8",
+                        help="wire encoding; CP437 also checks every emitted glyph strictly")
     args = parser.parse_args()
+    GALLERY_ENCODING = args.encoding
 
     heights = {80: 24, 64: 20, 40: 12}
     out_dir = args.out.expanduser().resolve()

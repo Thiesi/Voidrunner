@@ -16,8 +16,8 @@ the standard library. It needs Python 3.11 or newer and a terminal of at least
 - **NetBBS:** bundled. NetBBS ships a tagged release of this file, so a NetBBS
   SysOp has nothing to install.
 - **Other BBS software** (Synchronet, Mystic, ENiGMA½, …): accepts DOOR32.SYS
-  and DOOR.SYS for stdio launches; see the SysOp setup below. CP437 output,
-  inherited socket I/O and host time-limit handling remain planned (#3–#5).
+  and DOOR.SYS for stdio launches, with CP437 or UTF-8 terminals; see the SysOp
+  setup below. Inherited socket I/O and host time-limit handling remain planned (#4–#5).
 - **Standalone**, for trying it out: `python3 voidrunner.py`.
 
 ## Saves
@@ -75,16 +75,21 @@ config: {
     cmd: /usr/bin/python3
     args: [ "/opt/doors/voidrunner/voidrunner.py", "{dropFilePath}" ]
     io: stdio
-    encoding: utf8
+    encoding: cp437
     env: { VOIDRUNNER_SAVE_DIR: "/var/lib/voidrunner" }
 }
 ```
 
-These are setup recipes awaiting the real-host checks in #6. Use a UTF-8
-terminal or a host that converts UTF-8 output. Classic drop files select the
+These are setup recipes awaiting the real-host checks in #6. Classic drop files select the
 16-color `basic` preset for new ANSI careers, or `plain` for ASCII callers;
-existing careers keep their saved Display Options choice. CP437 terminal
-output is still #3. DOOR32 communications fields and remaining minutes are
+existing careers keep their saved Display Options choice. Encoding defaults to
+CP437 for classic drop files and UTF-8 for standalone launches. In Display
+Options, `[E]` cycles Automatic, UTF-8 and CP437 independently of the color
+preset. Match the host's bridge encoding to that choice (the ENiGMA½ example
+uses CP437). NetBBS always receives UTF-8 and handles its caller's encoding
+itself, so its Display Options show a managed encoding. Saved names remain
+Unicode; characters outside CP437 are transliterated for display only.
+DOOR32 communications fields and remaining minutes are
 read, but socket-handle I/O (#4) and graceful time-limit handling (#5) are
 not implemented yet; configure redirected stdin/stdout for now.
 
@@ -99,6 +104,7 @@ python -m pip install pytest pytest-xdist
 python -m pytest -n auto              # the suite, about half a minute
 python tools/check_stdlib_only.py     # the door imports only the standard library
 python tools/door_gallery.py --open   # every screen at 80/64/40 columns, every preset
+python tools/door_gallery.py --encoding cp437 --out build/gallery-cp437
 ```
 
 A change to a screen comes with gallery pictures: the tests can prove that a
