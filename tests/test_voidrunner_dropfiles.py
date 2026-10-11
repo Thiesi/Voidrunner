@@ -185,3 +185,43 @@ def test_malformed_command_line_drop_file_does_not_crash(tmp_path):
     assert result.returncode == 0
     assert b"drop file ignored" in result.stderr
     assert b"Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("netbbs", [False, True])
+def test_resize_reloads_the_launch_metadata_source(tmp_path, netbbs):
+    path = drop_file(tmp_path, "DOOR.SYS")
+    env = dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path / "saves"))
+    if netbbs:
+        host = tmp_path / "door_info.json"
+        host.write_text(json.dumps({"terminal_width": 64, "terminal_height": 30}))
+        env["NETBBS_DOOR_INFO"] = str(host)
+    script = r'''
+import json, os, runpy, sys
+from pathlib import Path
+main = runpy.run_path(sys.argv[1])["main"]
+game = main.__globals__
+title = game["screen_title"]
+def resize_during_launch(*args):
+    width = 64 if os.environ.get("NETBBS_DOOR_INFO") else 80
+    assert (game["_OUTPUT_WIDTH"], game["_OUTPUT_HEIGHT"]) == (width, 30)
+    game["_note_resize"]()
+    assert game["take_resize"]() is False, "unchanged metadata changed the geometry"
+    assert (game["_OUTPUT_WIDTH"], game["_OUTPUT_HEIGHT"]) == (width, 30)
+    if os.environ.get("NETBBS_DOOR_INFO"):
+        Path(os.environ["NETBBS_DOOR_INFO"]).write_text(json.dumps({
+            "terminal_width": width, "terminal_height": 40}))
+    else:
+        path = Path(sys.argv[2])
+        lines = path.read_text().splitlines()
+        lines[20] = "40"
+        path.write_text("\n".join(lines) + "\n")
+    game["_note_resize"]()
+    assert game["take_resize"]() is True, "rewritten metadata was not reloaded"
+    assert (game["_OUTPUT_WIDTH"], game["_OUTPUT_HEIGHT"]) == (width, 40)
+    title(*args)
+game["screen_title"] = resize_during_launch
+sys.exit(main(sys.argv[2]))
+'''
+    result = subprocess.run([sys.executable, "-c", script, str(_VOIDRUNNER_PATH), path],
+                            input=b"Ace\rYQ", capture_output=True, env=env, timeout=60)
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
