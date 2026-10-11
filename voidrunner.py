@@ -19,7 +19,8 @@ the drop-file's stable numeric `user_id` (never the handle, which can
 change), under `VOIDRUNNER_SAVE_DIR`. NetBBS always sets it, to the node's
 own `<db path>.doors/voidrunner/` unless the SysOp chose another place
 (`netbbs.doors.runtime.voidrunner_save_dir`); standalone, the door falls back
-to `~/.netbbs/voidrunner_saves/`. Completed station actions commit before their success
+to `~/.voidrunner/`, with a fallback to an existing `~/.netbbs/voidrunner_saves/`
+when the new directory does not exist. Completed station actions commit before their success
 message, including actions inside nested menus. Each completed auto-route
 hop also commits without requiring the player to leave the chart. One process
 holds the pilot session lock from load through its final checkpoint. Writes
@@ -69,6 +70,7 @@ threaded into the middle of its existing call sequence.
 
 from __future__ import annotations
 
+import argparse
 import collections
 import contextlib
 import dataclasses
@@ -157,24 +159,105 @@ def _spark_ramp() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _load_door_info() -> dict:
+def _classic_door_info(path: Path) -> dict:
+    """Read the 11-line DOOR32 or 31/52-line DOOR.SYS format atomically.
+
+    Never accept a partial identity: a caller's record number, not their alias,
+    owns the save. Legacy hosts write CP437; UTF-8 drop files also occur.
+    """
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("cp437")
+    lines = [line.strip() for line in text.splitlines()]
+
+    def number(line: int, minimum: int = 0) -> int:
+        value = lines[line - 1]
+        if not value.isascii() or not value.isdecimal() or int(value) < minimum:
+            raise ValueError(f"invalid number on line {line}")
+        return int(value)
+
+    def name(line: int) -> str:
+        value = lines[line - 1]
+        if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError(f"invalid name on line {line}")
+        return value
+
+    kind = path.name.upper()
+    if kind not in ("DOOR32.SYS", "DOOR.SYS"):
+        if lines and re.fullmatch(r"COM\d+:", lines[0], re.IGNORECASE):
+            kind = "DOOR.SYS"
+        elif len(lines) == 11 and lines[0] in ("0", "1", "2"):
+            kind = "DOOR32.SYS"
+        else:
+            raise ValueError("unrecognized drop-file format")
+    if kind == "DOOR32.SYS":
+        if len(lines) < 11:
+            raise ValueError("DOOR32.SYS needs 11 lines")
+        comm_type = number(1)
+        emulation = number(10)
+        if comm_type not in (0, 1, 2) or emulation not in (0, 1, 2, 3, 4):
+            raise ValueError("invalid DOOR32 communications type or emulation")
+        number(3)  # baud rate (zero is valid for a local launch)
+        number(8)  # security level
+        number(11, 1)  # node number
+        info = {
+            "drop_file_type": kind, "user_id": number(5, 1),
+            "handle": name(7) if lines[6] else name(6),
+            "node_name": name(4) if lines[3] else "Local",
+            "terminal_height": 24, "emulation": emulation,
+            "minutes_left": number(9), "comm_type": comm_type,
+            "comm_handle": number(2),
+        }
+        graphics = emulation != 0
+    else:
+        if len(lines) < 31:
+            raise ValueError("DOOR.SYS needs at least 31 lines")
+        if not re.fullmatch(r"COM\d+:", lines[0], re.IGNORECASE):
+            raise ValueError("invalid DOOR.SYS communications port")
+        emulation = lines[19].upper()
+        if emulation not in ("GR", "NG", "7E"):
+            raise ValueError("invalid DOOR.SYS graphics mode")
+        info = {
+            "drop_file_type": kind, "user_id": number(26, 1),
+            "handle": name(36) if len(lines) >= 36 and lines[35] else name(10),
+            "terminal_height": number(21, 1), "emulation": emulation,
+            "minutes_left": number(19), "comm_port": lines[0],
+        }
+        graphics = emulation == "GR"
+    info.update(terminal_width=80, color_depth="16" if graphics else "none",
+                display_style="basic" if graphics else "plain")
+    return info
+
+
+def _load_door_info(drop_file: str | None = None) -> dict:
+    path = os.environ.get("NETBBS_DOOR_INFO")
     default = {
         "handle": "Guest",
         "user_id": 0,
         "terminal_width": 80,
         "terminal_height": 24,
         "color_depth": "256",
-        "node_name": "NetBBS",
+        "node_name": "NetBBS" if path else "Local",
     }
-    path = os.environ.get("NETBBS_DOOR_INFO")
-    if not path:
-        return default
-    try:
-        with open(path, encoding="utf-8") as f:
-            info = json.load(f)
-    except (OSError, ValueError):
-        return default
-    default.update(info)
+    if path:
+        try:
+            with open(path, encoding="utf-8") as f:
+                info = json.load(f)
+            if isinstance(info, dict):
+                default.update(info)
+        except (OSError, ValueError):
+            pass
+    elif drop_file is not None:
+        # Even a malformed foreign file must not select the 256-color palette.
+        default.update(color_depth="16", display_style="basic")
+        try:
+            default.update(_classic_door_info(Path(drop_file)))
+        except (OSError, ValueError) as exc:
+            # Do not echo drop-file contents (DOOR.SYS includes a password).
+            reason = "cannot read file" if isinstance(exc, OSError) else str(exc)
+            print(f"Voidrunner: drop file ignored ({reason}); using Guest defaults.", file=sys.stderr)
     return default
 
 
@@ -4099,6 +4182,8 @@ class SaveError(OSError):
 
 
 def _default_save_dir() -> Path:
+    # NetBBS backup imports this function, PilotBusy and maintenance_session.
+    # Keep this shared resolver and its legacy-directory fallback (NetBBS #1221).
     override = os.environ.get("VOIDRUNNER_SAVE_DIR")
     if override:
         return Path(override).expanduser().resolve()
@@ -4116,7 +4201,11 @@ def _default_save_dir() -> Path:
         # child environment, so a launched door does not take this fallback
         # merely because its scratch working directory is isolated.
         home = Path(tempfile.gettempdir())
-    return home / ".netbbs" / "voidrunner_saves"
+    legacy = home / ".netbbs" / "voidrunner_saves"
+    current = home / ".voidrunner"
+    if os.environ.get("NETBBS_DOOR_INFO") or (not current.exists() and legacy.is_dir()):
+        return legacy
+    return current
 
 
 def _save_path(save_dir: Path, user_id: int) -> Path:
@@ -5401,7 +5490,7 @@ def style_body_line(text: str, *, key_labels: bool = False) -> str:
 
 TITLE_LOGO = ("█░░█ █▀▀█ ▀█▀ █▀▀▄   █▀▀▄ █░░█ █▄░█ █▄░█ █▀▀ █▀▀▄",
               "░▀▄▀ █▄▄█ ░█░ █▄▄▀   █░▀▄ █▄▄█ █░▀█ █░▀█ ██▄ █░▀▄")
-TITLE_TAGLINE = "a NetBBS door game"
+TITLE_TAGLINE = "a BBS door game"
 TITLE_SUBTITLE = "Tactical Deep-Space Trading & Exploration"
 
 
@@ -5436,7 +5525,7 @@ def title_rows(info: dict, inner_w: int) -> list[tuple[str, str, str]]:
     fits, otherwise a complete compact one (wordmark, wrapped subtitle, stacked
     meta fields), following the portraits' rule of a whole composition or none.
     Kinds: "blank", "logo", "wordmark", "sub", "rule", "meta"."""
-    node = info.get("node_name", "NetBBS")
+    node = info.get("node_name", "Local")
     handle = info.get("handle", "Pilot")
     rows: list[tuple[str, str, str]] = []
     large = inner_w >= max(_visible_width(row) for row in TITLE_LOGO) + 2
@@ -5501,7 +5590,7 @@ def screen_title(p: Palette, info: dict) -> None:
         body = f"{styles[kind]}{text}{RESET}" if text else ""
         out_line(f"{edge}║{RESET}{_pad(body, inner_w, align)}{edge}║{RESET}")
     out_line(f"{edge}╚{'═' * inner_w}╝{RESET}")
-    out_line(f"{p.muted}A {info.get('node_name', 'NetBBS')} space trading door.{RESET}")
+    out_line(f"{p.muted}A {info.get('node_name', 'Local')} space trading door.{RESET}")
     out_line()
 
 
@@ -5989,7 +6078,7 @@ def splash_frames(width: int, height: int, info: dict) -> Iterator[str]:
     wire. A larger terminal gets the capped scene centred on a dark screen.
     """
     cols, rows, top, left = _splash_box(width, height)
-    layout = _SplashLayout(cols, rows, _splash_plain(info.get("node_name", "NetBBS")) or "NetBBS",
+    layout = _SplashLayout(cols, rows, _splash_plain(info.get("node_name", "Local")) or "Local",
                            _splash_plain(info.get("handle", "Pilot")) or "Pilot")
     previous = [[(" ", None, None)] * cols for _ in range(rows)]
     for frame in range(SPLASH_FRAMES):
@@ -11246,7 +11335,7 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
                 return RecoveryResult(restored, 0)
 
 
-def main() -> int:
+def main(drop_file: str | None = None) -> int:
     global _OUTPUT_WIDTH, _OUTPUT_HEIGHT, _OUTPUT_STYLE
     _OUTPUT_STYLE = "auto"
 
@@ -11254,7 +11343,8 @@ def main() -> int:
     # Before anything else: the host may signal at any moment after the spawn,
     # and SIGUSR1 ends a process that has not said what to do with it.
     install_resize_handler()
-    info = _load_door_info()
+    info = _load_door_info(drop_file) if drop_file is not None else _load_door_info()
+    apply_display_style(info.get("display_style", "auto"))
     reported_height = apply_terminal_size(info)
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
     set_palette(p)  # what every component in the style layer draws with
@@ -11263,9 +11353,8 @@ def main() -> int:
         _refuse_size(p, reported_height)
         return 0
     save_dir = _default_save_dir()
-    # Real NetBBS launches always carry a real positive user_id from the
-    # drop-file; this fallback only fires for standalone tinkering
-    # (`python3 voidrunner.py` with no NETBBS_DOOR_INFO) and must be
+    # Valid host drop files carry a positive user_id. The Guest fallback for a
+    # standalone launch or unreadable drop file must be
     # deterministic per handle -- Python's built-in hash() is randomized
     # per process (PYTHONHASHSEED), which would silently start a fresh
     # career file on every standalone run.
@@ -11301,6 +11390,8 @@ def main() -> int:
             if save is None:
                 return recovery.exit_code
             is_new, notice = False, "Previous checkpoint restored. Resuming this career."
+        if is_new:
+            save.display_style = info.get("display_style", "auto")
         apply_display_style(save.display_style)
         if splashable:
             # After the caller's own preset is known, so a caller who asked for
@@ -11432,4 +11523,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    parser = argparse.ArgumentParser(description="Voidrunner space trading door")
+    parser.add_argument("drop_file", nargs="?", help="path to DOOR32.SYS or DOOR.SYS")
+    sys.exit(main(parser.parse_args().drop_file))
