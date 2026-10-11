@@ -1,0 +1,5 @@
+# Every text file is LF in every checkout: the door ships as a single script,
+# and a CRLF checkout would end its shebang in CR and make the released file
+# differ from what git stores (Thiesi/NetBBS#1130).
+* text=auto eol=lf
+*.png binary

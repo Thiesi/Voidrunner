@@ -1,14 +1,10 @@
 """The Voidrunner suite's shared support: the door module, and the worlds.
 
 The door is loaded from its file path under a private module name rather than
-through `netbbs.doors.bundled` -- same reasoning as `test_doors_runtime.py`
-running it and `retro_trivia.py` this same way: this is the exact file NetBBS
-launches as a standalone subprocess (see `netbbs.doors.runtime`), not an
-ordinarily-imported library module, so testing it by path exercises precisely
-what ships. It is loaded once here and shared by every module in this package
-(issue #422); `test_backup.py` reaches the same file through the package, which
-is a second load under a second name and is deliberate -- that test is about the
-installed package, this suite is about the shipped script.
+imported: `voidrunner.py` is a standalone script that a BBS launches as a
+subprocess, not a library module, so testing it by path exercises precisely the
+file that ships. It is loaded once here and shared by every test module
+(Thiesi/NetBBS#422).
 """
 
 from __future__ import annotations
@@ -28,9 +24,7 @@ from pathlib import Path
 
 import pytest
 
-_VOIDRUNNER_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "src" / "netbbs" / "doors" / "bundled" / "voidrunner.py"
-)
+_VOIDRUNNER_PATH = Path(__file__).resolve().parent.parent / "voidrunner.py"
 
 
 def _load_voidrunner():

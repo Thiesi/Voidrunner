@@ -2963,8 +2963,9 @@ def test_futures_order_exceeding_stock_is_rejected_before_any_change():
 def test_a_live_pilot_session_refuses_maintenance_and_maintenance_refuses_a_launch(tmp_path):
     """Both directions of the gate, with a real second process holding the lock.
 
-    `maintenance_session` and `_maintenance_gate` had no game-side test at all:
-    `test_backup.py` only checked capture ordering (issue #423).
+    `maintenance_session` and `_maintenance_gate` had no game-side test at all
+    (Thiesi/NetBBS#423). NetBBS's backup reads the same gate; that half of the
+    check lives in NetBBS's own suite.
     """
     import json
     import os
@@ -2977,11 +2978,6 @@ def test_a_live_pilot_session_refuses_maintenance_and_maintenance_refuses_a_laun
         with pytest.raises(vr.PilotBusy):
             with vr.maintenance_session(saves):
                 pytest.fail("maintenance must not start while a pilot is aboard")
-        # And the same gate is what the backup component reports on.
-        from netbbs import backup as backup_module
-        with pytest.raises(backup_module.BackupError, match="active or undergoing maintenance"):
-            with backup_module._voidrunner_maintenance(saves):
-                pytest.fail("a capture must not start while a pilot is aboard")
 
     # The pilot has left: maintenance may start, and a launch during it reports busy.
     info = saves / "info-99.json"

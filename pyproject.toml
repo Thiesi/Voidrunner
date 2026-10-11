@@ -1,0 +1,12 @@
+# Voidrunner is a single script, not a package: this file only configures the
+# test run. The door itself needs nothing beyond Python's standard library.
+[project]
+name = "voidrunner"
+description = "A single-player space trading and exploration door game for BBSes"
+requires-python = ">=3.11"
+license = "BSD-2-Clause"
+dynamic = ["version"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

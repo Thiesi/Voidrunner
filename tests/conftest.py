@@ -7,6 +7,17 @@ import pytest
 from .support import vr
 
 
+@pytest.fixture(autouse=True)
+def _no_door_splash(monkeypatch):
+    """A door launched by a test opens straight on its first screen.
+
+    A finished launch splash waits for a key, so a test that starts the real door
+    and waits for its first prompt before typing would wait forever. The
+    splash's own tests take this back off (`monkeypatch.delenv`)."""
+    monkeypatch.setenv("DOOR_SPLASH", "0")
+    yield
+
+
 @pytest.fixture
 def without_action_bar(monkeypatch):
     """Removes the action bar from the frame that has just been drawn.
