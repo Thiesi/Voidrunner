@@ -2338,7 +2338,7 @@ def test_a_busy_node_skips_the_import_and_keeps_it_for_the_next_launch(tmp_path,
     path.write_text(json.dumps([{"user_id": 77, "handle": "Old", "best_credits": 9000}]), encoding="utf-8")
 
     @contextlib.contextmanager
-    def busy(save_dir):
+    def busy(save_dir, **kwargs):
         raise vr.PilotBusy
         yield  # pragma: no cover -- the raise is the whole point
 

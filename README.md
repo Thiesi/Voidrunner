@@ -101,8 +101,13 @@ and accepts CR-NUL or CR-LF as a single Enter. The host retains responsibility
 for option negotiation. A disconnected caller follows the normal EOF checkpoint
 path. Returning from the door closes its inherited handle without shutting down
 the host's connection. Real Windows Synchronet validation remains in #6.
-Remaining minutes are read, but graceful time-limit handling (#5) is not yet
-implemented.
+Known host time limits appear in each page's bottom border. The door warns at
+three minutes remaining and saves before returning to the BBS, reserving up to
+one second before the host cutoff. This also works while a prompt is unanswered.
+The allowance comes from classic drop-file minutes or NetBBS's
+`session_limit_seconds`, measured with a monotonic clock from door launch.
+Absent or invalid limits leave sessions unbounded; an explicit zero expires
+immediately. The limit belongs to this launch and is never stored in a career.
 
 Host references: [Synchronet DOOR.SYS](https://wiki.synchro.net/ref:door.sys),
 [Mystic external programs](https://wiki.mysticbbs.com/doku.php?id=menu_commands),

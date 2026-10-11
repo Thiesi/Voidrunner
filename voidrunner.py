@@ -108,6 +108,7 @@ _OUTPUT_STYLE = "auto"
 _OUTPUT_ENCODING = "utf-8"
 _DEFAULT_ENCODING = "utf-8"
 _SOCKET_TRANSPORT: _SocketTransport | None = None
+_SESSION_CLOCK: _SessionClock | None = None
 DISPLAY_ENCODINGS = {"auto": "Automatic", "utf-8": "UTF-8", "cp437": "CP437"}
 # One-column substitutes for artwork absent from the CP437 repertoire. Keep
 # terminal escapes untouched; using the low CP437 control bytes for arrows or
@@ -730,6 +731,71 @@ RESIZE_KEY = "<resize>"
 _INPUT_TIMEOUT = 0.15
 
 
+class _SessionExpired(Exception):
+    """The host's allowance ended at a safe input, motion or lock boundary."""
+
+
+class _SessionClock:
+    def __init__(self, seconds: float, started: float):
+        self.deadline = started + seconds
+        # Keep short allowances useful too; never reserve more than a tenth.
+        self.exit_at = self.deadline - min(1.0, seconds / 10)
+        self.warned = False
+
+    def label(self) -> str:
+        seconds = max(0, math.ceil(self.deadline - time.monotonic()))
+        return f"{'LOW TIME' if seconds <= 180 else 'Time'} {seconds // 60}:{seconds % 60:02d}"
+
+    def check(self, *, warn: bool = False) -> None:
+        if time.monotonic() >= self.exit_at:
+            raise _SessionExpired
+        if warn and not self.warned and self.deadline - time.monotonic() <= 180:
+            self.warned = True
+            # A one-line alert over the top border, without scrolling the page
+            # or moving the line editor's cursor. Both unstyled presets retain
+            # cursor controls, just as they retain clear_screen's controls.
+            message = "Time low: returning to the BBS soon."
+            out(f"{ESC}7{ESC}[1;1H{RESET}{pal().gold}{_fit_text(message, _OUTPUT_WIDTH - 1)}{RESET}{ESC}[K{ESC}8")
+
+
+def _session_clock(info: dict, started: float) -> _SessionClock | None:
+    value = info.get("session_limit_seconds")
+    scale = 1
+    if "session_limit_seconds" not in info and info.get("drop_file_type") in ("DOOR32.SYS", "DOOR.SYS"):
+        value, scale = info.get("minutes_left"), 60
+    if type(value) not in (int, float):
+        return None
+    try:
+        seconds = float(value) * scale
+    except OverflowError:
+        return None
+    return _SessionClock(seconds, started) if math.isfinite(seconds) and seconds >= 0 else None
+
+
+def _check_session_time(*, warn: bool = False) -> None:
+    if _SESSION_CLOCK is not None:
+        _SESSION_CLOCK.check(warn=warn)
+
+
+def _session_read(read_byte, timeout: float | None) -> bytes | None:
+    """Poll the allowance without inventing decoder timeouts or eating bytes."""
+    if _SESSION_CLOCK is None:
+        return read_byte(timeout)
+    until = None if timeout is None else time.monotonic() + timeout
+    while True:
+        _check_session_time(warn=True)
+        now = time.monotonic()
+        if until is not None and now >= until:
+            return None
+        wait = min(0.25, max(0, _SESSION_CLOCK.exit_at - now))
+        if until is not None:
+            wait = min(wait, until - now)
+        byte = read_byte(wait)
+        _check_session_time()
+        if byte is not None:
+            return byte
+
+
 class _StdioBytes:
     """Unbuffered byte reads with a short timeout only for partial keys.
 
@@ -949,11 +1015,12 @@ class _DoorInput:
 
     def read_key(self) -> str:
         for _ in range(256):
+            _check_session_time(warn=True)
             if self.pending is not None:
                 byte, self.pending = self.pending, None
             else:
                 timeout = _INPUT_TIMEOUT if not self.after_timeout and (self.mode != "text" or self.utf8) else None
-                byte = self.read_byte(timeout)
+                byte = _session_read(self.read_byte, timeout)
             if byte is None:
                 self.after_timeout = True
                 if self.mode == "escape":
@@ -962,7 +1029,7 @@ class _DoorInput:
                     # CSI/SS3 introducer first. Without it a fragmented arrow key on a slow
                     # link erases a half-typed quantity or answers No (issue #413 review).
                     self.mode = "late_escape"
-                    follow = self.read_byte(_INPUT_TIMEOUT)
+                    follow = _session_read(self.read_byte, _INPUT_TIMEOUT)
                     if follow in (b"[", b"O"):
                         self.mode = "csi" if follow == b"[" else "ss3"
                         self.sequence.clear()
@@ -1143,6 +1210,7 @@ def motion_interrupted() -> bool:
     has opened stdin -- and an effect nobody is watching is only a delay, so it
     is skipped rather than slept through.
     """
+    _check_session_time()
     if not motion_enabled():
         return True
     reader = _INPUT_READER
@@ -4557,7 +4625,7 @@ class SavesInMaintenance(PilotBusy):
 
 
 @contextlib.contextmanager
-def _file_lease(path: Path, *, wait: float = 0):
+def _file_lease(path: Path, *, wait: float = 0, session_deadline: float | None = None):
     """Hold a stable OS lock; never unlink its inode while another opener exists."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as handle:
@@ -4574,6 +4642,8 @@ def _file_lease(path: Path, *, wait: float = 0):
             acquire = lambda: fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         deadline = time.monotonic() + wait
         while True:
+            if session_deadline is not None and time.monotonic() >= session_deadline:
+                raise _SessionExpired
             try:
                 acquire()
                 break
@@ -4582,28 +4652,29 @@ def _file_lease(path: Path, *, wait: float = 0):
                     raise
                 if time.monotonic() >= deadline:
                     raise PilotBusy from exc
-                time.sleep(0.02)
+                remaining = 0.02 if session_deadline is None else max(0, session_deadline - time.monotonic())
+                time.sleep(min(0.02, remaining))
         # Closing the descriptor releases the lock on every exit, including a
         # killed process. Keep the file itself: unlinking it could split owners.
         yield
 
 
 @contextlib.contextmanager
-def _maintenance_gate(save_dir: Path):
+def _maintenance_gate(save_dir: Path, *, session_deadline: float | None = None):
     # Restore preserves this directory and its lock inodes, switching only data.
     # Existing service-owned directories need no write access to their parent.
-    with _file_lease(save_dir / ".maintenance.lock", wait=1):
+    with _file_lease(save_dir / ".maintenance.lock", wait=1, session_deadline=session_deadline):
         yield
 
 
 @contextlib.contextmanager
-def pilot_session(save_dir: Path, user_id: int):
+def pilot_session(save_dir: Path, user_id: int, *, session_deadline: float | None = None):
     save_dir = save_dir.resolve()
     with contextlib.ExitStack() as lease:
         try:
-            with _maintenance_gate(save_dir):
+            with _maintenance_gate(save_dir, session_deadline=session_deadline):
                 try:
-                    lease.enter_context(_file_lease(save_dir / f".{user_id}.lock"))
+                    lease.enter_context(_file_lease(save_dir / f".{user_id}.lock", session_deadline=session_deadline))
                 except PilotBusy as exc:
                     raise PilotInUse from exc
         except PilotInUse:
@@ -4614,16 +4685,16 @@ def pilot_session(save_dir: Path, user_id: int):
 
 
 @contextlib.contextmanager
-def maintenance_session(save_dir: Path):
+def maintenance_session(save_dir: Path, *, session_deadline: float | None = None):
     """Exclude new launches and refuse maintenance while any pilot is active."""
     save_dir = save_dir.resolve()
-    with _maintenance_gate(save_dir):
+    with _maintenance_gate(save_dir, session_deadline=session_deadline):
         # Probe every stable session lock while the gate prevents new owners.
         # The gate prevents new owners, so each probe can close immediately.
         # Permanent pilot files must not consume one descriptor per past caller.
         for path in save_dir.glob(".*.lock"):
             if re.fullmatch(r"\.[0-9]+\.lock", path.name):
-                with _file_lease(path):
+                with _file_lease(path, session_deadline=session_deadline):
                     pass
         yield
 
@@ -4820,7 +4891,7 @@ def _read_score_json(path: Path, limit: int = MAX_SAVE_BYTES):
     return None
 
 
-def import_hall_of_fame(save_dir: Path) -> None:
+def import_hall_of_fame(save_dir: Path, *, session_deadline: float | None = None) -> None:
     """Move a pre-`scores/` `leaderboard.json` into `scores/`, at launch (issue #421).
 
     Careers do not survive schema 2, but Hall of Fame records outlive careers by
@@ -4843,7 +4914,7 @@ def import_hall_of_fame(save_dir: Path) -> None:
     if not entries:
         return
     try:
-        with maintenance_session(save_dir):
+        with maintenance_session(save_dir, session_deadline=session_deadline):
             for user_id, entry in entries.items():
                 _import_one_score(save_dir, user_id, entry)
     except (OSError, PilotBusy):
@@ -6290,6 +6361,7 @@ def _splash_hold() -> None:
     """
     reader = _INPUT_READER
     while reader is not None and not _RESIZE_PENDING:
+        _check_session_time(warn=True)
         if reader.read_byte.waiting():
             try:
                 reader.read_key()
@@ -8461,7 +8533,14 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
         # is how the color was lost one slice at a time to begin with.
         row = style_body_line(row.replace(STICKY_MARK, "").replace(MEMBER_MARK, ""))
         out_line(f"{p.hull}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.hull}│{RESET}")
-    out_line(_box_bottom(p, border_color=p.hull))
+    if _SESSION_CLOCK is None:
+        out_line(_box_bottom(p, border_color=p.hull))
+    else:
+        # Keep the allowance visible on every page, including 40x12 terminals;
+        # a body-row badge could be paginated off the opening deck entirely.
+        label = _fit_text(_SESSION_CLOCK.label(), inner - 4)
+        tone = p.gold if _SESSION_CLOCK.deadline - time.monotonic() <= 180 else p.slate
+        out_line(f"{p.hull}╰{'─' * (inner - len(label) - 3)} {tone}{label}{p.hull} ─╯{RESET}")
 
 
 def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, page: int, *, pages: list[list[str]] | None = None) -> tuple[str, int, int]:
@@ -8570,12 +8649,16 @@ def _resized_while_idle() -> bool:
     import select
 
     while True:
+        _check_session_time(warn=True)
         if take_resize():
             return True
+        wait = _RESIZE_POLL_SECONDS
+        if _SESSION_CLOCK is not None:
+            wait = min(wait, max(0, _SESSION_CLOCK.exit_at - time.monotonic()))
         if isinstance(live, _SocketTransport):
-            ready = live.waiting(_RESIZE_POLL_SECONDS)
+            ready = live.waiting(wait)
         else:
-            ready = bool(select.select([fd], [], [], _RESIZE_POLL_SECONDS)[0])
+            ready = bool(select.select([fd], [], [], wait)[0])
         if ready:
             return False
 
@@ -11517,7 +11600,7 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
                     out_line("Recovery failed. No replacement was completed. Please contact your SysOp.")
                     try:
                         pause(p)
-                    except EOFError:
+                    except (EOFError, _SessionExpired):
                         pass
                     return RecoveryResult(None, 1)
                 # Said by `main`, on the deck the restored career opens at: a line
@@ -11527,7 +11610,8 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
 
 def main(drop_file: str | None = None) -> int:
     global _OUTPUT_STYLE, _DEFAULT_ENCODING, _CLASSIC_DROP_FILE, _SOCKET_TRANSPORT
-    global _INPUT_READER, _INPUT_STREAM
+    global _INPUT_READER, _INPUT_STREAM, _SESSION_CLOCK
+    session_started = time.monotonic()
     _OUTPUT_STYLE = "auto"
     # Resize notifications must reload the same metadata source as this launch.
     _CLASSIC_DROP_FILE = drop_file
@@ -11546,12 +11630,19 @@ def main(drop_file: str | None = None) -> int:
                 print("Voidrunner: cannot open inherited DOOR32 socket.", file=sys.stderr)
                 return 1
         started = True
+        _SESSION_CLOCK = _session_clock(info, session_started)
         return _run_game(info)
+    except _SessionExpired:
+        _SESSION_CLOCK = None
+        with contextlib.suppress(_CarrierLost):
+            out_line("Time limit reached. Returning to the BBS.")
+        return 0
     except _CarrierLost:
         # Pre-career output, or a busy/refused launch: nothing to checkpoint.
         # Once a World exists, _run_game handles EOF and checkpoints it.
         return 0
     finally:
+        _SESSION_CLOCK = None
         try:
             if started:
                 with contextlib.suppress(_CarrierLost):
@@ -11569,7 +11660,7 @@ def main(drop_file: str | None = None) -> int:
 
 
 def _run_game(info: dict) -> int:
-    global _DEFAULT_ENCODING
+    global _DEFAULT_ENCODING, _SESSION_CLOCK
     _DEFAULT_ENCODING = info.get("display_encoding", "utf-8")
     apply_display_encoding("auto")
     apply_display_style(info.get("display_style", "auto"))
@@ -11577,6 +11668,7 @@ def _run_game(info: dict) -> int:
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
     set_palette(p)  # what every component in the style layer draws with
     input_reader()  # opened before the first page, so it can reveal itself
+    _check_session_time()
     if _terminal_too_small():
         _refuse_size(p, reported_height)
         return 0
@@ -11589,13 +11681,14 @@ def _run_game(info: dict) -> int:
     user_id = int(info.get("user_id", 0)) or zlib.crc32(info["handle"].encode())
     # Before any pilot lock: the import needs the maintenance gate, and the gate
     # must never be asked for by a session that already owns a pilot (issue #421).
-    import_hall_of_fame(save_dir)
+    deadline_args = {"session_deadline": _SESSION_CLOCK.exit_at} if _SESSION_CLOCK is not None else {}
+    import_hall_of_fame(save_dir, **deadline_args)
 
     world = None
     lease = contextlib.ExitStack()
     try:
         try:
-            lease.enter_context(pilot_session(save_dir, user_id))
+            lease.enter_context(pilot_session(save_dir, user_id, **deadline_args))
         except OSError as exc:
             raise SaveError from exc
         outdated = False
@@ -11727,7 +11820,7 @@ def _run_game(info: dict) -> int:
             out_line(f"{p.wrong}{exc} Play has stopped; your saved career is unchanged. "
                      f"Please contact your SysOp.{RESET}")
             pause(p)
-        except EOFError:
+        except (EOFError, _SessionExpired):
             pass
         return 1
     except SaveError:
@@ -11735,9 +11828,22 @@ def _run_game(info: dict) -> int:
             out_line(f"{p.wrong}Save failed. Play has stopped to protect your last saved career. "
                      f"Please contact your SysOp before playing again.{RESET}")
             pause(p)
-        except EOFError:
+        except (EOFError, _SessionExpired):
             pass
         return 1
+    except _SessionExpired:
+        _SESSION_CLOCK = None
+        try:
+            if world is not None:
+                world.commit()
+        except SaveError:
+            with contextlib.suppress(_CarrierLost):
+                out_line("Save failed. Please contact your SysOp before playing again.")
+            return 1
+        with contextlib.suppress(_CarrierLost):
+            out_line()
+            out_line("Time limit reached. " + ("Career saved. " if world is not None else "") + "Returning to the BBS.")
+        return 0
     except EOFError:
         try:
             if world is not None:
