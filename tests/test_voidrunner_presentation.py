@@ -681,7 +681,7 @@ def test_screen_title_renders_full_splash_with_tagline_and_exact_box_width():
         with contextlib.redirect_stdout(buf):
             vr.screen_title(p, {"node_name": node, "handle": handle})
         output = buf.getvalue()
-        assert "a NetBBS door game" in output
+        assert "a BBS door game" in output
         assert "V O I D R U N N E R" in output
         stripped = [vr._ANSI_RE.sub("", line) for line in output.split("\r\n") if line.strip()]
         box_lines = [line for line in stripped if line.startswith(("╔", "║", "╠", "╚"))]
