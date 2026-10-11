@@ -183,12 +183,15 @@ NetBBS supplies `session_limit_seconds`, classic drop files supply minutes.
 Every page shows remaining time in its bottom border, refreshed when drawn,
 so pagination cannot hide it. At three minutes a single top-row warning
 preserves the current prompt and partially typed input. Idle reads, partial
-keys, resize waits and the splash hold still honor the deadline. The door
+keys, resize waits, storage-lock waits and the splash hold still honor the deadline. The door
 reserves the smaller of one second or ten percent of the allowance, commits
 the career and then reports its return to the BBS. A failed save stays an
 error and is never retried by the expiry path. Missing or invalid allowances
 do not bound play; zero expires immediately. Time limits are session metadata,
 never save data, and resizing does not restart the clock.
+Expiry is distinct from a disconnected input stream, so a caller waiting at an
+outdated-career or recovery prompt also receives the graceful return message
+without replacing the existing save.
 
 Voidrunner's Back key is `B` on every screen below the station deck, and `B` is
 never a live action anywhere (issue #400). List screens allocate their selection

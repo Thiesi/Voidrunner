@@ -463,9 +463,9 @@ def test_the_import_takes_the_exclusion_a_restore_takes(tmp_path, monkeypatch):
     taken, real = [], vr.maintenance_session
 
     @contextlib.contextmanager
-    def watched(save_dir):
+    def watched(save_dir, **kwargs):
         taken.append(save_dir)
-        with real(save_dir):
+        with real(save_dir, **kwargs):
             yield
 
     monkeypatch.setattr(vr, "maintenance_session", watched)

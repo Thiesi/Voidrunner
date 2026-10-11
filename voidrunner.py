@@ -731,8 +731,8 @@ RESIZE_KEY = "<resize>"
 _INPUT_TIMEOUT = 0.15
 
 
-class _SessionExpired(EOFError):
-    """The host's allowance ended at a safe input/motion boundary."""
+class _SessionExpired(Exception):
+    """The host's allowance ended at a safe input, motion or lock boundary."""
 
 
 class _SessionClock:
@@ -4625,7 +4625,7 @@ class SavesInMaintenance(PilotBusy):
 
 
 @contextlib.contextmanager
-def _file_lease(path: Path, *, wait: float = 0):
+def _file_lease(path: Path, *, wait: float = 0, session_deadline: float | None = None):
     """Hold a stable OS lock; never unlink its inode while another opener exists."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as handle:
@@ -4642,6 +4642,8 @@ def _file_lease(path: Path, *, wait: float = 0):
             acquire = lambda: fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         deadline = time.monotonic() + wait
         while True:
+            if session_deadline is not None and time.monotonic() >= session_deadline:
+                raise _SessionExpired
             try:
                 acquire()
                 break
@@ -4650,28 +4652,29 @@ def _file_lease(path: Path, *, wait: float = 0):
                     raise
                 if time.monotonic() >= deadline:
                     raise PilotBusy from exc
-                time.sleep(0.02)
+                remaining = 0.02 if session_deadline is None else max(0, session_deadline - time.monotonic())
+                time.sleep(min(0.02, remaining))
         # Closing the descriptor releases the lock on every exit, including a
         # killed process. Keep the file itself: unlinking it could split owners.
         yield
 
 
 @contextlib.contextmanager
-def _maintenance_gate(save_dir: Path):
+def _maintenance_gate(save_dir: Path, *, session_deadline: float | None = None):
     # Restore preserves this directory and its lock inodes, switching only data.
     # Existing service-owned directories need no write access to their parent.
-    with _file_lease(save_dir / ".maintenance.lock", wait=1):
+    with _file_lease(save_dir / ".maintenance.lock", wait=1, session_deadline=session_deadline):
         yield
 
 
 @contextlib.contextmanager
-def pilot_session(save_dir: Path, user_id: int):
+def pilot_session(save_dir: Path, user_id: int, *, session_deadline: float | None = None):
     save_dir = save_dir.resolve()
     with contextlib.ExitStack() as lease:
         try:
-            with _maintenance_gate(save_dir):
+            with _maintenance_gate(save_dir, session_deadline=session_deadline):
                 try:
-                    lease.enter_context(_file_lease(save_dir / f".{user_id}.lock"))
+                    lease.enter_context(_file_lease(save_dir / f".{user_id}.lock", session_deadline=session_deadline))
                 except PilotBusy as exc:
                     raise PilotInUse from exc
         except PilotInUse:
@@ -4682,16 +4685,16 @@ def pilot_session(save_dir: Path, user_id: int):
 
 
 @contextlib.contextmanager
-def maintenance_session(save_dir: Path):
+def maintenance_session(save_dir: Path, *, session_deadline: float | None = None):
     """Exclude new launches and refuse maintenance while any pilot is active."""
     save_dir = save_dir.resolve()
-    with _maintenance_gate(save_dir):
+    with _maintenance_gate(save_dir, session_deadline=session_deadline):
         # Probe every stable session lock while the gate prevents new owners.
         # The gate prevents new owners, so each probe can close immediately.
         # Permanent pilot files must not consume one descriptor per past caller.
         for path in save_dir.glob(".*.lock"):
             if re.fullmatch(r"\.[0-9]+\.lock", path.name):
-                with _file_lease(path):
+                with _file_lease(path, session_deadline=session_deadline):
                     pass
         yield
 
@@ -4888,7 +4891,7 @@ def _read_score_json(path: Path, limit: int = MAX_SAVE_BYTES):
     return None
 
 
-def import_hall_of_fame(save_dir: Path) -> None:
+def import_hall_of_fame(save_dir: Path, *, session_deadline: float | None = None) -> None:
     """Move a pre-`scores/` `leaderboard.json` into `scores/`, at launch (issue #421).
 
     Careers do not survive schema 2, but Hall of Fame records outlive careers by
@@ -4911,7 +4914,7 @@ def import_hall_of_fame(save_dir: Path) -> None:
     if not entries:
         return
     try:
-        with maintenance_session(save_dir):
+        with maintenance_session(save_dir, session_deadline=session_deadline):
             for user_id, entry in entries.items():
                 _import_one_score(save_dir, user_id, entry)
     except (OSError, PilotBusy):
@@ -11597,7 +11600,7 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
                     out_line("Recovery failed. No replacement was completed. Please contact your SysOp.")
                     try:
                         pause(p)
-                    except EOFError:
+                    except (EOFError, _SessionExpired):
                         pass
                     return RecoveryResult(None, 1)
                 # Said by `main`, on the deck the restored career opens at: a line
@@ -11665,6 +11668,7 @@ def _run_game(info: dict) -> int:
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
     set_palette(p)  # what every component in the style layer draws with
     input_reader()  # opened before the first page, so it can reveal itself
+    _check_session_time()
     if _terminal_too_small():
         _refuse_size(p, reported_height)
         return 0
@@ -11677,13 +11681,14 @@ def _run_game(info: dict) -> int:
     user_id = int(info.get("user_id", 0)) or zlib.crc32(info["handle"].encode())
     # Before any pilot lock: the import needs the maintenance gate, and the gate
     # must never be asked for by a session that already owns a pilot (issue #421).
-    import_hall_of_fame(save_dir)
+    deadline_args = {"session_deadline": _SESSION_CLOCK.exit_at} if _SESSION_CLOCK is not None else {}
+    import_hall_of_fame(save_dir, **deadline_args)
 
     world = None
     lease = contextlib.ExitStack()
     try:
         try:
-            lease.enter_context(pilot_session(save_dir, user_id))
+            lease.enter_context(pilot_session(save_dir, user_id, **deadline_args))
         except OSError as exc:
             raise SaveError from exc
         outdated = False
@@ -11815,7 +11820,7 @@ def _run_game(info: dict) -> int:
             out_line(f"{p.wrong}{exc} Play has stopped; your saved career is unchanged. "
                      f"Please contact your SysOp.{RESET}")
             pause(p)
-        except EOFError:
+        except (EOFError, _SessionExpired):
             pass
         return 1
     except SaveError:
@@ -11823,7 +11828,7 @@ def _run_game(info: dict) -> int:
             out_line(f"{p.wrong}Save failed. Play has stopped to protect your last saved career. "
                      f"Please contact your SysOp before playing again.{RESET}")
             pause(p)
-        except EOFError:
+        except (EOFError, _SessionExpired):
             pass
         return 1
     except _SessionExpired:

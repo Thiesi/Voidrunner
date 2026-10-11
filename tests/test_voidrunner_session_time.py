@@ -236,3 +236,57 @@ def test_expired_new_career_exits_without_creating_a_save(tmp_path):
     assert result.returncode == 0 and not result.stderr
     assert b"Time limit reached" in result.stdout and b"Career saved" not in result.stdout
     assert not (tmp_path / "saves" / "77.json").exists()
+
+
+@pytest.mark.parametrize("seconds", [0, 0.3])
+@pytest.mark.parametrize("legacy_scores", [False, True])
+def test_expiry_wins_over_a_held_maintenance_gate(tmp_path, seconds, legacy_scores):
+    saves = tmp_path / "saves"
+    saves.mkdir()
+    if legacy_scores:
+        (saves / "leaderboard.json").write_text(json.dumps([{
+            "user_id": 77, "handle": "Tester", "best_credits": 5000,
+            "retirements": 0, "kills": 0, "missions_completed": 0,
+        }]))
+    info = tmp_path / "info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester", "session_limit_seconds": seconds}))
+    env = dict(os.environ, VOIDRUNNER_SAVE_DIR=str(saves), NETBBS_DOOR_INFO=str(info))
+    with vr.maintenance_session(saves):
+        result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"", capture_output=True,
+                                env=env, timeout=12)
+    assert result.returncode == 0 and not result.stderr
+    assert b"Time limit reached" in result.stdout and b"busy with maintenance" not in result.stdout
+    assert not (saves / "77.json").exists()
+
+
+@pytest.mark.parametrize("kind", ["outdated", "corrupt"])
+def test_expiry_on_a_recovery_prompt_reports_graceful_exit_without_replacing_save(tmp_path, kind):
+    _seed(tmp_path)
+    path = tmp_path / "saves" / "77.json"
+    if kind == "outdated":
+        data = json.loads(path.read_text())
+        data["schema_version"] = 1
+        path.write_text(json.dumps(data))
+    else:
+        path.write_text("broken JSON")
+    before = path.read_bytes()
+    info = tmp_path / "info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester", "display_style": "plain",
+                                "session_limit_seconds": 2}))
+    env = dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path / "saves"), NETBBS_DOOR_INFO=str(info), DOOR_SPLASH="0")
+    with subprocess.Popen([sys.executable, str(_VOIDRUNNER_PATH)], stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as proc:
+        output = bytearray()
+        reader = threading.Thread(target=_drain_until, args=(proc.stdout, output, (), ()))
+        reader.start()
+        try:
+            proc.wait(timeout=12)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            reader.join(timeout=12)
+        _, error = proc.communicate()
+    assert proc.returncode == 0 and not error
+    assert (b"Career refused" if kind == "outdated" else b"Career recovery") in output
+    assert b"Time limit reached" in output and b"Career saved" not in output
+    assert path.read_bytes() == before
