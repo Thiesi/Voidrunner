@@ -168,6 +168,16 @@ Quantity fields accept ASCII decimal digits. Unsupported keys do not dismiss
 result acknowledgement pauses. Responsive layouts and broader retained-result
 presentation remain separate work in #310.
 
+DOOR32 comm type 2 selects the inherited socket as the terminal transport on
+Windows and POSIX. Telnet control sequences are discarded before the shared key
+decoder sees them; escaped IAC is data, and CR-NUL and CR-LF submit once. Output
+is encoded first, then literal IAC bytes are doubled. Option negotiation stays
+with the host. The door closes only its own inherited handle on return and does
+not shutdown the connection or change its blocking mode. Socket EOF and reset
+use the existing career checkpoint path, including when output detects the
+disconnect. A storage failure remains an error even if its diagnostic cannot
+reach the disconnected caller. Stdio remains the default for other launches.
+
 Voidrunner's Back key is `B` on every screen below the station deck, and `B` is
 never a live action anywhere (issue #400). List screens allocate their selection
 letters from `choice_letters`, which skips `B` and the screen's own hotkeys;

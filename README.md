@@ -16,8 +16,8 @@ the standard library. It needs Python 3.11 or newer and a terminal of at least
 - **NetBBS:** bundled. NetBBS ships a tagged release of this file, so a NetBBS
   SysOp has nothing to install.
 - **Other BBS software** (Synchronet, Mystic, ENiGMA½, …): accepts DOOR32.SYS
-  and DOOR.SYS for stdio launches, with CP437 or UTF-8 terminals; see the SysOp
-  setup below. Inherited socket I/O and host time-limit handling remain planned (#4–#5).
+  and DOOR.SYS, with CP437 or UTF-8 terminals and stdio or inherited DOOR32
+  sockets; see the SysOp setup below. Host time-limit handling remains planned (#5).
 - **Standalone**, for trying it out: `python3 voidrunner.py`.
 
 ## Saves
@@ -32,7 +32,7 @@ Each pilot is one JSON file, keyed by the caller's numeric user id. The director
 the session locks and the Hall of Fame records, so back it up as a whole and
 don't delete lock files while a BBS is running.
 
-## SysOp setup (stdio)
+## SysOp setup
 
 Install Python 3.11+ and copy `voidrunner.py` to a persistent door directory.
 Pass the caller's drop-file **filename**, quoted if it contains spaces:
@@ -89,9 +89,20 @@ preset. Match the host's bridge encoding to that choice (the ENiGMA½ example
 uses CP437). NetBBS always receives UTF-8 and handles its caller's encoding
 itself, so its Display Options show a managed encoding. Saved names remain
 Unicode; characters outside CP437 are transliterated for display only.
-DOOR32 communications fields and remaining minutes are
-read, but socket-handle I/O (#4) and graceful time-limit handling (#5) are
-not implemented yet; configure redirected stdin/stdout for now.
+For a native DOOR32 socket launch on Windows or Unix, pass the same command-line
+filename and configure the host to inherit the caller's connected socket.
+DOOR32 line 1 must be `2` and line 2 must contain that inherited handle. The door
+then sends and receives terminal traffic through the socket; it does not use
+redirected stdin/stdout. A stale or invalid socket handle stops the launch with
+a diagnostic on stderr. Comm type `0` and DOOR.SYS launches use stdio as before.
+
+The socket transport filters telnet commands, escapes literal IAC output bytes,
+and accepts CR-NUL or CR-LF as a single Enter. The host retains responsibility
+for option negotiation. A disconnected caller follows the normal EOF checkpoint
+path. Returning from the door closes its inherited handle without shutting down
+the host's connection. Real Windows Synchronet validation remains in #6.
+Remaining minutes are read, but graceful time-limit handling (#5) is not yet
+implemented.
 
 Host references: [Synchronet DOOR.SYS](https://wiki.synchro.net/ref:door.sys),
 [Mystic external programs](https://wiki.mysticbbs.com/doku.php?id=menu_commands),
