@@ -6765,7 +6765,7 @@ def play_splash(info: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 SCENE_FRAME_SECONDS = 0.07
-SCENE_HOLD_SECONDS = 0.8
+SCENE_HOLD_SECONDS = 2.0  # play-test: 0.8 s took the picture away before it had been seen
 SCENE_COLOR_STEP = 24
 
 
