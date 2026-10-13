@@ -224,10 +224,15 @@ def test_left_to_run_it_holds_the_last_frame_until_a_key(live_terminal, monkeypa
     monkeypatch.setattr(vr, "out", written.append)
 
     def press_later():
-        time.sleep(0.15)
+        time.sleep(0.3)
         os.write(write_fd, b"\x1b[Bq")  # an arrow key and a letter, both spent
-    threading.Thread(target=press_later, daemon=True).start()
+    # The clock starts before the thread does, and the bar sits well under the
+    # thread's sleep: on Windows the sleep and the monotonic clock both move in
+    # ~15.6ms ticks, and a bar equal to the sleep failed there by one tick. With
+    # motion stubbed out, a splash that did not hold returns in milliseconds,
+    # so half the sleep still tells waiting from not waiting.
     started = time.monotonic()
+    threading.Thread(target=press_later, daemon=True).start()
     assert vr.play_splash(INFO) is True
     assert time.monotonic() - started >= 0.15, "the finished splash did not wait"
     assert any(vr.SPLASH_HOLD_PROMPT in text for text in written)
