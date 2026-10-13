@@ -11650,13 +11650,26 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
         return "A new career begins."
 
 
+def pilot_record_footer() -> str:
+    """The Pilot Record's action bar, on one row at 80 columns (issue #20).
+
+    `[A] Achievements` pushed the bar past the 79 columns a prompt may use, so a
+    terminal too narrow for the full bar gets the compact paging token and a
+    shorter label. The page title still says Achievements.
+    """
+    full = ("[<] Prev [>] Next [O] Pilot [C] Jobs [H] Log [D] Dossiers [A] Achievements "
+            "[R] Finale [B] Back: ")
+    if _visible_width(full) <= _OUTPUT_WIDTH - 1:
+        return full
+    return "[<] [>] [O] Pilot [C] Jobs [H] Log [D] Dossiers [A] Awards [R] Finale [B] Back:"
+
+
 def screen_status(p: Palette, world: World, save_dir: Path | None = None) -> None:
     """`save_dir` lets the achievements view say how rare each one is here."""
     view, page, result = "O", 0, None
     cache = {}
     while True:
-        footer = "[<] Prev [>] Next [O] Pilot [C] Jobs [H] Log [D] Dossiers [A] Achievements "
-        footer += "[R] Finale [B] Back: "
+        footer = pilot_record_footer()
         title = "Pilot Record: " + {"O":"Overview", "C":"Contracts", "H":"History", "D":"Dossiers",
                                     "A":"Achievements"}[view]
         if view not in cache:
