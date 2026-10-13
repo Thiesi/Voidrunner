@@ -462,3 +462,21 @@ at a time would lose keystrokes to it. Scene randomness is a private
 size is asserted per scene at 80x24; a new effect that repaints the whole sky
 each frame needs one flat color (as the jump's flash does) or stepped values,
 not a per-pixel blend.
+
+Accolades (achievements) are captured in `World.commit` beside the rank: the
+unlock is part of the document being written, and `pending_accolades` is
+extended only after the write succeeds. A counter in `ACCOLADE_COUNTERS` must be
+bumped beside the effect it counts and before that effect's commit -- inside
+the block that sets a combat outcome, the encounter result, the bounty payout --
+so a resumed hop, which returns a kept outcome, cannot count it twice. A new
+destruction, rescue or customs path must bump the same counter the existing
+one does. The record is additive and omitted while empty (a Shuttle is implied,
+not recorded), which keeps a fresh career's document byte-identical to what it
+was; tests that compare saved bytes across a door launch must start from a
+career whose unlocks are already on file (`unlock_accolades` before `persist`),
+since the launch tick legitimately records retroactive ones. Ids this build
+does not know are preserved, never refused: a pilot who plays on an older node
+keeps what a newer one awarded. `retire_pilot` copies the record and the
+finale screen hands the fresh world's `pending_accolades` across, exactly as it
+does promotions; without that hand-off the retirement achievements are earned
+silently.

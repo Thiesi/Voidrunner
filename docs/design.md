@@ -872,6 +872,32 @@ fight screen's opponent and hull gauges are back with the frame, and give way to
 plain numbers -- never the other way round -- on a row too narrow for both.
 
 
+**Achievements (accolades in the code).** Sixty-six goals in twelve groups:
+ladders (10/100/1,000 jumps; first, 10, 50 and 100 victories and contracts;
+market margin; peak credits; charted systems; contraband milestones), one per
+rank above the first and per career ending, faction commissions and stories,
+ship milestones, encounter deeds, combat feats, and a hidden Misfortune group
+of wry ones. They are distinct from the Hall of Fame's achievement views,
+which rank careers against each other; these are goals a pilot completes.
+They belong to the account, not the career: kept through retirement with
+their own counters, and measured across every career at once -- running
+totals add each retired dossier to the current career, bests take the best of
+any, and "in one career" goals take the best single career. An achievement
+unlocks in `World.commit`, written by the save that earned it and announced
+only once that save succeeded, so it can never be shown and then lost. A career
+that already did a thing unlocks it at its first commit on a build that knows
+it; what only a new counter can know counts from that build on. The deck names
+up to three unlocks and plays one medal scene, struck in bronze, silver or gold
+for the best of them; more than three, as a returning veteran catches up, are a
+single count. A rank's achievement is the promotion's own moment and does not
+play a second scene. Pilot Record `[A] Achievements` lists them all by group:
+earned ones with the career that earned them and how many of this board's
+pilots hold them, the rest with their progress. Hidden ones are only a count
+until earned. Rarity reads the score records the Hall of Fame already keeps;
+a record written before achievements existed is left out of it rather than
+counted as a pilot who earned nothing.
+
+
 ## Terminal floor and presentation review
 
 **Voidrunner requires a terminal of at least 40 columns by 12 rows, and has

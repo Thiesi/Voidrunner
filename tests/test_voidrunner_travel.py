@@ -1461,6 +1461,10 @@ def test_real_customs_browsing_and_rejected_bribe_preserve_pending_save(tmp_path
     world = _world_waiting_at_customs()
     world.save.pilot.credits = credits
     world.save.pilot.highest_rank_seen = len(vr.RANKS) - 1
+    # A career this build has already seen: its rank achievements are on file,
+    # so the launch tick has nothing of its own to write and only browsing is
+    # being measured.
+    vr.unlock_accolades(world.save)
     vr.persist(world, tmp_path, 77)
     saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert saved.pending_travel["phase"] == "customs"

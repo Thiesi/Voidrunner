@@ -152,6 +152,7 @@ _GLYPHS = {
     "credits": ("◈", "$"), "brand": ("◤", ">"), "cursor": ("▌", ">"),
     "danger": ("▲", "!"), "note": ("◆", "*"), "info": ("●", "o"),
     "crew_on": ("●", "o"), "crew_off": ("○", "."),
+    "earned": ("●", "*"), "unearned": ("○", "."),
     "chip_l": ("⟦", "<"), "chip_r": ("⟧", ">"),
     "dot": ("·", "-"), "arrow": ("→", "->"), "rise": ("▲", "^"),
     "fall": ("▼", "v"), "flat": ("─", "-"),
@@ -1911,6 +1912,10 @@ class SaveData:
     market_depth: dict[int, dict[str, dict[str, int]]] = field(default_factory=dict)
     faction_stories: dict[str, dict] = field(default_factory=dict)
     retired_careers: list[dict] = field(default_factory=list)
+    # The account's achievements, kept through retirement; see `ACCOLADES`.
+    # Absent until something is earned or counted, so a save with none of it
+    # is the document it always was.
+    accolades: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -1946,6 +1951,7 @@ class SaveData:
             "market_depth": {str(sid): goods for sid, goods in self.market_depth.items()},
             **({"faction_stories": self.faction_stories} if self.faction_stories else {}),
             **({"retired_careers": self.retired_careers} if self.retired_careers else {}),
+            **({"accolades": self.accolades} if self.accolades else {}),
         }
 
     @classmethod
@@ -1988,6 +1994,7 @@ class SaveData:
                           for sid, goods in d.get("market_depth", {}).items()},
             faction_stories={faction: dict(story) for faction, story in d.get("faction_stories", {}).items()},
             retired_careers=[dict(item, highlights=list(item["highlights"])) for item in d.get("retired_careers", [])],
+            accolades=_copy_accolades(d.get("accolades", {})),
         )
 
 
@@ -2203,6 +2210,8 @@ def _validate_save_document(data: dict) -> None:
                 economies = economies or galaxy_economies(data["seed"])
                 require("Haven" in economies, "faction story Haven")
         else: require("choice" not in story, "premature faction story choice")
+    if "accolades" in data:
+        _validate_accolades(data["accolades"], pilot.get("retirements", 0))
     dossiers = data.get("retired_careers", [])
     require(isinstance(dossiers, list) and len(dossiers) <= MAX_RETIRED_CAREERS, "retired careers")
     previous_number = 0
@@ -2357,6 +2366,7 @@ class World:
         """
         self.sync_discovered()
         promoted = check_rank_up(self)
+        earned = unlock_accolades(self.save)
         remember_local_market(self)  # no-op mid-journey; `remember_local_market` checks
         if tracked_mission(self) is None:
             # A contract that ended mid-journey must not leave a dangling id in
@@ -2372,6 +2382,7 @@ class World:
                 raise SaveError("The completed action could not be saved.") from exc
         if promoted:
             self.pending_promotions.append(promoted)
+        self.pending_accolades.extend(earned)
 
     def checkpoint(self) -> None:
         """A turn boundary: process the turn, then commit it. Retained under its
@@ -2391,6 +2402,8 @@ class World:
         _validate_pending_travel_consistency(save)
         self.save = save
         self.pending_promotions: list[str] = []
+        # Accolades earned by a succeeded commit, for the next deck to announce.
+        self.pending_accolades: list[Accolade] = []
         # Narration of the current hop, retained for the next deck page (issue #410).
         # Transient: rebuilt from what the hop prints; never persisted.
         self.hop_report: list[str] = []
@@ -3487,6 +3500,7 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
             if world.save.pilot.missions_completed == 0:
                 world.save.pilot.highlight(f"First mission complete: {m.description}.")
             world.save.pilot.missions_completed += 1
+            bump_accolade(world.save, "deliveries" if m.kind == "delivery" else "surveys")
             msg = (f"Mission complete: {m.description} (+{paid}cr"
                    + (", scanner survey at half pay" if paid != m.reward else "")
                    + f", +{CONCORD_STANDING_PER_CONTRACT} Concord standing)")
@@ -4102,6 +4116,7 @@ def destroy_ship(world: World, *, patrol: bool = False, hull_before: int | None 
     if cleared:
         world.save.pilot.notoriety = 0
     world.ship_destroyed_this_hop = True
+    bump_accolade(world.save, "ships_lost")
     world.save.pilot.note(f"Ship destroyed -- salvage tug towed you back to Freeport ({penalty}cr charged)."
                           + (" Concord closed your file." if cleared
                              else f" Concord logged the unpaid {fine}cr fine." if patrol else ""))
@@ -4186,6 +4201,7 @@ def rescue_stranded_pilot(world: World) -> str:
     cheapest = min(fuel_cost_for_jump(home, world.by_id[nid], world.save.ship) for nid in home.connections)
     world.save.ship.fuel = max(world.save.ship.fuel, cheapest)
     if towed:
+        bump_accolade(world.save, "tows")
         msg = ("Stranded with an empty tank and empty pockets, a passing salvage tug answers "
                "your beacon and tows you back to Freeport Anchorage, no charge.")
     else:
@@ -4407,6 +4423,239 @@ def check_rank_up(world: World) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Accolades: what a player sees as Achievements. "Achievements" was taken first,
+# by the Hall of Fame's per-career score summaries (`score_achievements`), so the
+# code says accolade and the screens say achievement.
+#
+# Accolades belong to the account, not the career: they ride through retirement
+# in `SaveData.accolades` with the lifetime counters that only they need, and
+# whatever the save already records is measured across every career at once --
+# the current one plus each retired dossier. An accolade unlocks in
+# `World.commit`, beside the rank capture and for the same reason: it is written
+# by the save that earned it, and announced only once that save succeeded.
+# A career that already did the thing unlocks it at its first commit on this
+# build; what only a new counter can know counts from then on.
+# ---------------------------------------------------------------------------
+
+ACCOLADE_VERSION = 1
+# What only an accolade needs counted. Each is bumped beside the effect it
+# counts and committed with it, so a resumed hop cannot count it twice.
+ACCOLADE_COUNTERS = ("squadrons", "flawless", "giant_slayer", "close_calls", "escapes", "raider_bribes",
+                     "patrol_kills", "wrong_bounties", "deliveries", "surveys", "bounties", "escorts",
+                     "distress", "derelicts", "ships_lost", "tows", "busts", "customs_bribes")
+ACCOLADE_GROUPS = ("Travel", "Exploration", "Combat", "Contracts", "Encounters", "Trading", "Wealth",
+                   "Ranks", "Factions", "Ship", "Legacy", "Misfortune")
+# The id pattern a newer build's accolade may use; this build keeps those it
+# does not know rather than discarding what it cannot read.
+_ACCOLADE_ID = re.compile(r"[a-z][a-z0-9_]{0,47}")
+
+
+@dataclass(frozen=True)
+class Accolade:
+    id: str
+    group: str
+    name: str
+    description: str
+    metric: str
+    target: int = 1
+    tier: int = 3        # 1 bronze, 2 silver, 3 gold: the medal it is drawn as
+    hidden: bool = False  # named only once earned
+
+
+def _ladder(prefix: str, group: str, metric: str, steps, noun: str) -> list[Accolade]:
+    """A ladder of one metric: bronze, silver, then gold for the rest."""
+    return [Accolade(f"{prefix}_{target}", group, name, description.format(n=f"{target:,}", noun=noun), metric,
+                     target, tier=min(3, index + 1))
+            for index, (target, name, description) in enumerate(steps)]
+
+
+ACCOLADES: tuple[Accolade, ...] = tuple([
+    *_ladder("hops", "Travel", "hops", ((10, "First Light", "Make {n} jumps."),
+                                         (100, "Long Hauler", "Make {n} jumps."),
+                                         (1000, "Void Runner", "Make {n} jumps.")), "jumps"),
+    *_ladder("chart", "Exploration", "charted", ((10, "Cartographer", "Chart {n} systems in one career."),
+                                                  (24, "Pathfinder", "Chart half the galaxy, {n} systems, in one career."),
+                                                  (48, "Atlas Complete", "Chart all {n} systems in one career.")), ""),
+    Accolade("landmark", "Exploration", "Into the Silence", "Investigate a landmark.", "landmark", tier=2),
+    *_ladder("kills", "Combat", "kills", ((1, "First Blood", "Win your first fight."),
+                                          (10, "Raider Bane", "Win {n} fights."),
+                                          (50, "Warden of the Lanes", "Win {n} fights."),
+                                          (100, "Scourge of the Void", "Win {n} fights.")), ""),
+    Accolade("squadron", "Combat", "Two for One", "Destroy both ships of a raider squadron.", "squadrons", tier=2),
+    Accolade("flawless", "Combat", "Untouched", "Win a fight without taking hull damage.", "flawless", tier=2),
+    Accolade("giant_slayer", "Combat", "Giant Slayer", "Destroy a raider that outclassed your ship.", "giant_slayer"),
+    Accolade("close_call", "Combat", "Hanging by a Thread", "Win a fight with under 5% of your hull left.", "close_calls"),
+    Accolade("escapes_10", "Combat", "Slippery", "Break contact 10 times by evading or dumping cargo.",
+             "escapes", 10, tier=2),
+    Accolade("raider_bribe", "Combat", "Cost of Doing Business", "Buy off a raider.", "raider_bribes", tier=1),
+    Accolade("patrol_kill", "Combat", "Outlaw", "Destroy a Concord patrol vessel.", "patrol_kills", hidden=True),
+    *_ladder("missions", "Contracts", "missions", ((1, "Contractor", "Complete your first contract."),
+                                                    (10, "Reliable", "Complete {n} contracts."),
+                                                    (50, "Indispensable", "Complete {n} contracts."),
+                                                    (100, "Legend of the Board", "Complete {n} contracts.")), ""),
+    Accolade("deliveries_10", "Contracts", "Express Freight", "Complete 10 delivery contracts.", "deliveries", 10, tier=2),
+    Accolade("surveys_10", "Contracts", "Surveyor", "Complete 10 survey contracts.", "surveys", 10, tier=2),
+    Accolade("bounties_10", "Contracts", "Bounty Hunter", "Complete 10 bounty contracts.", "bounties", 10, tier=2),
+    Accolade("escorts_10", "Contracts", "Shepherd", "Complete 10 escort contracts.", "escorts", 10, tier=2),
+    Accolade("wrong_bounty", "Contracts", "Wrong Guy", "Destroy the wrong bounty target.", "wrong_bounties",
+             tier=1, hidden=True),
+    Accolade("distress_1", "Encounters", "Good Samaritan", "Answer a distress call.", "distress", tier=1),
+    Accolade("distress_10", "Encounters", "Guardian Angel", "Answer 10 distress calls.", "distress", 10),
+    Accolade("derelicts_1", "Encounters", "Scavenger", "Salvage a derelict hulk.", "derelicts", tier=1),
+    Accolade("derelicts_10", "Encounters", "Boneyard Picker", "Salvage 10 derelict hulks.", "derelicts", 10),
+    *_ladder("margin", "Trading", "margin", ((1000, "Buy Low", "Earn {n}cr of market margin."),
+                                             (10000, "Sell High", "Earn {n}cr of market margin."),
+                                             (50000, "Market Maker", "Earn {n}cr of market margin.")), ""),
+    *_ladder("contraband", "Trading", "contraband", ((1, "Discreet Cargo", "Earn Blackwake standing by trading contraband."),
+                                                      (5, "Smuggler", "Reach {n} contraband trade milestones in one career."),
+                                                      (10, "Cartel Supplier", "Reach {n} contraband trade milestones in one career.")), ""),
+    Accolade("customs_bribe", "Trading", "Move Along", "Bribe your way past a customs inspection.", "customs_bribes",
+             tier=2, hidden=True),
+    *_ladder("credits", "Wealth", "credits", ((10000, "Comfortable", "Hold {n}cr at once."),
+                                              (100000, "Wealthy", "Hold {n}cr at once."),
+                                              (1000000, "Void Tycoon", "Hold {n}cr at once.")), ""),
+    *[Accolade(f"rank_{index}", "Ranks", title, f"Reach the rank of {title}.", "rank", index,
+               tier=1 if index == 1 else 2 if index < len(RANKS) - 1 else 3)
+      for index, (_, title) in enumerate(RANKS) if index],
+    Accolade("concord", "Factions", "Privateer", "Accept the Concord privateer commission.", "concord", tier=2),
+    Accolade("blackwake", "Factions", "Made", "Join the Blackwake Cartel.", "blackwake", tier=2),
+    Accolade("story_concord", "Factions", "For the Concord", "Finish the Concord story.", "story_concord"),
+    Accolade("story_blackwake", "Factions", "Family Business", "Finish the Blackwake story.", "story_blackwake"),
+    Accolade("archive", "Factions", "Archivist", "Complete Mara Venn's archive assignment.", "archive", tier=2),
+    Accolade("module_max", "Ship", "Top of the Line", "Upgrade one ship module to its highest tier.", "modules_maxed", tier=2),
+    Accolade("modules_all", "Ship", "No Expense Spared", "Upgrade every ship module to its highest tier.",
+             "modules_maxed", len(UPGRADES)),
+    Accolade("full_crew", "Ship", "Full Complement", "Have a gunner, an engineer and a navigator aboard.", "full_crew", tier=2),
+    Accolade("carrier", "Ship", "Flagship", "Fly a Carrier.", "carrier"),
+    Accolade("all_hulls", "Ship", "Shipwright's Friend", "Fly every hull class over your careers.", "hulls",
+             len(HULL_CLASSES)),
+    Accolade("retire_1", "Legacy", "Clean Exit", "Retire a career.", "retirements", 1, tier=1),
+    Accolade("retire_3", "Legacy", "Old Hand", "Retire 3 careers.", "retirements", 3, tier=2),
+    Accolade("retire_5", "Legacy", "Legend Reborn", "Retire 5 careers.", "retirements", 5),
+    *[Accolade(f"finale_{key}", "Legacy", info["label"], f"End a career as {info['label']}.", f"finale_{key}")
+      for key, info in CAREER_FINALES.items()],
+    Accolade("lost_1", "Misfortune", "Scrap Metal", "Lose your ship.", "ships_lost", tier=1, hidden=True),
+    Accolade("lost_5", "Misfortune", "Tow Truck Regular", "Lose your ship 5 times.", "ships_lost", 5, tier=2, hidden=True),
+    Accolade("towed", "Misfortune", "Running on Fumes", "Get towed home with an empty tank and empty pockets.",
+             "tows", tier=1, hidden=True),
+    Accolade("busted", "Misfortune", "Busted", "Have your contraband confiscated by customs.", "busts",
+             tier=1, hidden=True),
+])
+ACCOLADES_BY_ID = {accolade.id: accolade for accolade in ACCOLADES}
+
+
+def _accolade_record(save: SaveData) -> dict:
+    """The save's accolade record, made on first use: a career that has earned
+    nothing and counted nothing writes no record at all."""
+    if not save.accolades:
+        save.accolades = {"version": ACCOLADE_VERSION, "unlocked": {}, "counters": {}, "hulls": []}
+    return save.accolades
+
+
+def bump_accolade(save: SaveData, counter: str, amount: int = 1) -> None:
+    """Count one of `ACCOLADE_COUNTERS`. Call it beside the effect it counts,
+    before that effect's commit."""
+    if counter not in ACCOLADE_COUNTERS:
+        raise ValueError(f"unknown accolade counter {counter!r}")
+    counters = _accolade_record(save)["counters"]
+    counters[counter] = counters.get(counter, 0) + amount
+
+
+def accolade_metrics(save: SaveData) -> dict[str, int]:
+    """Every metric an accolade measures, across the whole account.
+
+    Running totals add the retired dossiers to the current career; a best is
+    the best of any; "in one career" metrics take the best single career. A
+    retirement recorded before dossiers existed counts as a retirement and
+    adds nothing to the totals, because nothing else of it was kept."""
+    pilot, dossiers = save.pilot, save.retired_careers
+    record = save.accolades or {}
+    metrics = {counter: record.get("counters", {}).get(counter, 0) for counter in ACCOLADE_COUNTERS}
+    stories = save.faction_stories
+    # Every career starts in a Shuttle, so a Shuttle has always been flown.
+    flown = {"Shuttle", save.ship.hull_class, *record.get("hulls", ()), *(d["ship"] for d in dossiers)}
+    finales = {d["finale"] for d in dossiers}
+    metrics.update(
+        hops=save.turn + sum(d["days"] for d in dossiers),
+        kills=pilot.kills + sum(d["kills"] for d in dossiers),
+        missions=pilot.missions_completed + sum(d["missions"] for d in dossiers),
+        margin=career_accomplishments(save)["trader"] + sum(d["market_margin"] for d in dossiers),
+        charted=max([len(save.discovered)] + [d["charted"] for d in dossiers]),
+        credits=max(save.best_credits, pilot.credits),
+        rank=max([pilot.highest_rank_seen] + [d["rank"] for d in dossiers]),
+        retirements=pilot.retirements,
+        contraband=save.contraband_trade_milestones,
+        landmark=int(bool(save.flags.get("landmark_investigated"))),
+        concord=int(pilot.has_concord_commission),
+        blackwake=int(pilot.has_blackwake_made),
+        story_concord=int(stories.get(FACTION_CONCORD, {}).get("stage") == "complete"),
+        story_blackwake=int(stories.get(FACTION_BLACKWAKE, {}).get("stage") == "complete"),
+        archive=int(bool(save.flags.get("archive_v1_public") or save.flags.get("archive_v1_private"))),
+        modules_maxed=sum(1 for key, upgrade in UPGRADES.items()
+                          if getattr(save.ship, key + "_tier") >= upgrade["max_tier"]),
+        full_crew=int(save.ship.has_gunner and save.ship.has_engineer and save.ship.has_navigator),
+        carrier=int("Carrier" in flown),
+        hulls=len(flown & set(HULL_CLASSES)),
+        **{f"finale_{key}": int(key in finales) for key in CAREER_FINALES},
+    )
+    return metrics
+
+
+def accolade_unlocked(save: SaveData, accolade_id: str) -> bool:
+    return accolade_id in (save.accolades or {}).get("unlocked", {})
+
+
+def unlock_accolades(save: SaveData) -> list[Accolade]:
+    """Record every accolade the account now meets; returns those newly earned.
+
+    Also remembers the hull being flown, which is what `all_hulls` needs and
+    nothing else records. Starting hulls are implied, so a career that never
+    left its Shuttle writes no record for it."""
+    if save.ship.hull_class != "Shuttle" and save.ship.hull_class not in (save.accolades or {}).get("hulls", []):
+        _accolade_record(save)["hulls"].append(save.ship.hull_class)
+    metrics = accolade_metrics(save)
+    earned = [accolade for accolade in ACCOLADES
+              if not accolade_unlocked(save, accolade.id) and metrics[accolade.metric] >= accolade.target]
+    if earned:
+        unlocked = _accolade_record(save)["unlocked"]
+        for accolade in earned:
+            unlocked[accolade.id] = save.pilot.retirements + 1
+    return earned
+
+
+def _copy_accolades(value: dict) -> dict:
+    """An independent copy, so a retiring save and its successor share nothing."""
+    if not value:
+        return {}
+    return {"version": value["version"], "unlocked": dict(value["unlocked"]),
+            "counters": dict(value["counters"]), "hulls": list(value["hulls"])}
+
+
+def _validate_accolades(value, retirements: int) -> None:
+    """A malformed record is a broken save; a newer version is a newer build's.
+    Ids this build does not know are kept, not refused: a pilot who plays on an
+    older node after a newer one keeps what the newer one awarded."""
+    _validate_versioned(value, {"version", "unlocked", "counters", "hulls"}, "accolades",
+                        unsupported="This career's achievements come from a newer version of the game.")
+    unlocked, counters, hulls = value.get("unlocked"), value.get("counters"), value.get("hulls")
+    if not isinstance(unlocked, dict) or not isinstance(counters, dict) or not isinstance(hulls, list):
+        raise ValueError("invalid accolades")
+    if len(unlocked) > 512 or len(counters) > 256:
+        raise ValueError("invalid accolades")
+    for key, career in unlocked.items():
+        if (not isinstance(key, str) or not _ACCOLADE_ID.fullmatch(key) or type(career) is not int
+                or not 1 <= career <= retirements + 1):
+            raise ValueError("invalid accolade")
+    for key, count in counters.items():
+        if (not isinstance(key, str) or not _ACCOLADE_ID.fullmatch(key) or type(count) is not int
+                or not 0 <= count < 2**63):
+            raise ValueError("invalid accolade counter")
+    if len(set(hulls)) != len(hulls) or any(not isinstance(hull, str) or hull not in HULL_CLASSES
+                                            for hull in hulls):
+        raise ValueError("invalid accolade hulls")
+
+
+# ---------------------------------------------------------------------------
 # Storage layer -- the only code in this file that touches a filesystem
 # path for game state (see this module's own docstring).
 # ---------------------------------------------------------------------------
@@ -4484,6 +4733,7 @@ def retire_pilot(old_save: SaveData) -> SaveData:
     new_save.display_style = old_save.display_style
     new_save.display_encoding = old_save.display_encoding
     new_save.retired_careers = [dict(item, highlights=list(item["highlights"])) for item in old_save.retired_careers]
+    new_save.accolades = _copy_accolades(old_save.accolades)  # the account's, not the career's
     new_save.best_credits = max(old_save.best_credits, old_save.pilot.credits)
     new_save.pilot.retirements = retirements
     new_save.pilot.credits += retirements * RETIREMENT_STARTING_CREDITS_BONUS
@@ -4877,7 +5127,38 @@ def _score_entry(data, user_id: int | None = None) -> dict | None:
     achievements = _score_achievements(data.get("achievements"), entry["retirements"])
     if achievements is not None:
         entry["achievements"] = achievements
+    accolades = _score_accolades(data.get("accolades"))
+    if accolades is not None:
+        entry["accolades"] = accolades
     return entry
+
+
+def _score_accolades(data) -> list[str] | None:
+    """The ids a pilot has unlocked, as their score record lists them, or None
+    for a record that lists none -- one written before accolades existed, which
+    rarity leaves out rather than counting as a pilot who earned nothing."""
+    if (not isinstance(data, list) or len(data) > 512
+            or any(not isinstance(item, str) or not _ACCOLADE_ID.fullmatch(item) for item in data)
+            or len(set(data)) != len(data) or data != sorted(data)):
+        return None
+    return list(data)
+
+
+def accolade_rarity(save_dir: Path) -> tuple[dict[str, int], int]:
+    """How many of this board's pilots hold each accolade, and of how many.
+
+    Read from the same score records the Hall of Fame ranks, so it costs one
+    directory read and shares its snapshot rules: a record that will not read
+    is left out, never guessed at."""
+    holders: dict[str, int] = {}
+    pilots = 0
+    for entry in _load_score_records(save_dir):
+        if "accolades" not in entry:
+            continue
+        pilots += 1
+        for accolade_id in entry["accolades"]:
+            holders[accolade_id] = holders.get(accolade_id, 0) + 1
+    return holders, pilots
 
 
 def _read_score_json(path: Path, limit: int = MAX_SAVE_BYTES):
@@ -5015,7 +5296,8 @@ def update_hall_of_fame(save_dir: Path, user_id: int, save: SaveData) -> None:
     entry = {"user_id": user_id, "handle": pilot.handle, "best_credits": best,
              "rank": rank_for(best), "retirements": pilot.retirements,
              "kills": pilot.kills, "missions_completed": pilot.missions_completed,
-             "achievements": score_achievements(save)}
+             "achievements": score_achievements(save),
+             "accolades": sorted((save.accolades or {}).get("unlocked", {}))}
     if raw == entry and _score_entry(raw, user_id) == entry:
         return
     try:
@@ -7592,6 +7874,29 @@ class _FinaleScene(_Scene):
         self.caption(stage, t, 0.66, self.title, _SPLASH_GOLD, self.detail)
 
 
+def accolade_announcements(earned: list) -> list[str]:
+    """The deck's rows for what a moment earned: each one by name when there
+    are a few, a single count when a returning career catches up on many."""
+    if len(earned) <= 3:
+        return [f"Achievement unlocked: {a.name} -- {a.description}" for a in earned]
+    return [f"{len(earned)} achievements unlocked. [S] Status, [A] Achievements lists them."]
+
+
+# Bronze, silver and gold: (lit, shaded).
+_MEDAL_METALS = {1: ((222, 150, 92), (120, 66, 30)), 2: ((226, 232, 244), (118, 128, 150)),
+                 3: (_SPLASH_GOLD, (170, 104, 24))}
+
+
+def _accolade_scene(width: int, height: int, earned: list, *, seed: str) -> "_EmblemScene":
+    """One medal for whatever a moment earned, struck in its best metal."""
+    tier = max(accolade.tier for accolade in earned)
+    if len(earned) == 1:
+        return _EmblemScene(width, height, kind="medal", tier=tier, seed=seed,
+                            title=f"Achievement unlocked  ·  {earned[0].name}", detail=earned[0].description)
+    return _EmblemScene(width, height, kind="medal", tier=tier, seed=seed,
+                        title=f"{len(earned)} achievements unlocked", detail=[a.name for a in earned])
+
+
 class _EmblemScene(_Scene):
     """A milestone: an emblem swells out of a burst of light, a glint runs
     across it, and its name is set under it. `kind` is "rank" (gold
@@ -7601,12 +7906,22 @@ class _EmblemScene(_Scene):
     frames = 24
     hold = SCENE_HOLD_SECONDS + 0.6
 
-    def __init__(self, width: int, height: int, *, kind: str, rank: int = 0, title: str, detail: str, seed: str):
+    def __init__(self, width: int, height: int, *, kind: str, rank: int = 0, title: str,
+                 detail: str | list[str], seed: str, tier: int = 3):
         super().__init__(width, height, seed)
         self.kind, self.rank = kind, max(1, min(5, rank + 1))
-        self.color = {"concord": _SCENE_CONCORD, "blackwake": (255, 90, 200)}.get(kind, _SPLASH_GOLD)
+        self.metal = _MEDAL_METALS[max(1, min(3, tier))]
+        self.color = {"concord": _SCENE_CONCORD, "blackwake": (255, 90, 200),
+                      "medal": self.metal[0]}.get(kind, _SPLASH_GOLD)
         self.title = _scene_text(title).upper()
-        self.detail = [(_scene_text(detail), _SCENE_SLATE)]
+        # Several details are whole phrases: a narrow caption drops the last
+        # ones rather than cutting one in half.
+        parts = [detail] if isinstance(detail, str) else detail
+        self.detail = []
+        for index, part in enumerate(parts):
+            if index:
+                self.detail.append(("  ·  ", _SCENE_SLATE))
+            self.detail.append((_scene_text(part), _SCENE_SLATE if len(parts) == 1 else _SCENE_INK))
         self.size = max(4.0, min(self.sky_px * 0.44, width * 0.2))
 
     def emblem_pixel(self, u: float, v: float) -> tuple | None:
@@ -7622,6 +7937,24 @@ class _EmblemScene(_Scene):
             if math.hypot(u, v + 0.05) < max(0.13, 0.4 * (1 - 1.7 * abs(k - round(k)))):
                 return (255, 255, 255)
             return _mix((90, 150, 250), (30, 60, 150), (v + 0.85) / 1.75)
+        if self.kind == "medal":
+            # A medal on a ribbon: two straps, a rim, a struck star.
+            if -1.0 < v < -0.38:
+                along = (v + 1.0) / 0.62
+                if abs(abs(u) - (0.42 - 0.3 * along)) < 0.12:
+                    return _mix((200, 90, 180), (110, 50, 150), along) if u < 0 else _mix((150, 70, 200), (90, 40, 140), along)
+            r = math.hypot(u, v - 0.2)
+            if r > 0.62:
+                return None
+            bright, dark = self.metal
+            if r > 0.5:
+                return _mix(bright, (255, 255, 255), 0.3) if u + v < 0.2 else bright
+            angle = math.atan2(v - 0.2, u) + math.pi / 2
+            k = angle * 5 / (2 * math.pi)
+            # Flat shades, lit and shadowed: a gradient here snaps into stripes.
+            if r < max(0.12, 0.38 * (1 - 1.7 * abs(k - round(k)))):
+                return _mix(bright, (255, 255, 255), 0.55) if u + v < 0.3 else bright
+            return _mix(bright, dark, 0.35 if u + (v - 0.2) < 0 else 0.6)
         if self.kind == "blackwake":
             reach = abs(u) + abs(v)
             if reach > 0.9:
@@ -7969,6 +8302,13 @@ def screen_station_menu(p: Palette, world: World) -> str:
         rank = next((number for number, (_, name) in enumerate(RANKS) if name == title), 0)
         play_scene(lambda w, h: _EmblemScene(w, h, kind="rank", rank=rank, title=f"Promoted  ·  {title}",
                                              detail="rank retained for this career", seed=_scene_seed(world, "rank")))
+    earned = list(world.pending_accolades)
+    world.pending_accolades.clear()
+    # A rank's achievement is the promotion's own moment: listed, not played twice.
+    ceremony = [a for a in earned if not (world.pending_promotions and a.metric == "rank")]
+    if ceremony:
+        play_scene(lambda w, h: _accolade_scene(w, h, ceremony, seed=_scene_seed(world, "accolades")))
+    completed[0:0] = accolade_announcements(earned)
     completed[0:0] = [f"Promoted to {title}; rank retained for this career." for title in world.pending_promotions]
     world.pending_promotions.clear()
     completed[0:0] = world.hop_report
@@ -11064,6 +11404,47 @@ def screen_missions(p: Palette, world: World) -> None:
             screen_mission_details(p, world, mission, active=active)
 
 
+ACCOLADE_TIER_TONES = {1: "caution", 2: "value", 3: "key"}  # bronze, silver, gold
+
+
+def accolade_lines(save: SaveData, rarity: tuple[dict[str, int], int] | None = None) -> list[str]:
+    """Every achievement, group by group: earned ones with the career that
+    earned them and how rare they are on this board, the rest with their
+    progress. Hidden ones are only a count until earned, so a list cannot
+    spoil them. Read-only: nothing here unlocks or writes anything."""
+    p = pal()
+    record = save.accolades or {}
+    unlocked = record.get("unlocked", {})
+    metrics = accolade_metrics(save)
+    holders, pilots = rarity if rarity is not None else ({}, 0)
+    earned = sum(1 for accolade in ACCOLADES if accolade.id in unlocked)
+    lines = [f"{p.slate}Unlocked{RESET} {gauge(earned, len(ACCOLADES), 10, tone='good')} "
+             f"{p.ink}{earned}/{len(ACCOLADES)}{RESET}"
+             + (f"{p.slate}; rarity across {plural(pilots, 'pilot')} on this board.{RESET}" if pilots else f"{p.slate}.{RESET}")]
+    for group in ACCOLADE_GROUPS:
+        members = [accolade for accolade in ACCOLADES if accolade.group == group]
+        lines.append(section(group.upper()))
+        secret = 0
+        for accolade in members:
+            tone = p.tone(ACCOLADE_TIER_TONES[accolade.tier])
+            if accolade.id in unlocked:
+                share = holders.get(accolade.id, 0) * 100 // pilots if pilots else None
+                lines.append(f"{tone}{glyph('earned')} {accolade.name}{RESET} {p.slate}{accolade.description}"
+                             f" Career #{unlocked[accolade.id]}." + (f" {share}% of pilots." if share is not None else "")
+                             + RESET)
+            elif accolade.hidden:
+                secret += 1
+            else:
+                progress = (f" {min(metrics[accolade.metric], accolade.target):,}/{accolade.target:,}."
+                            if accolade.target > 1 else "")
+                lines.append(f"{p.deep}{glyph('unearned')}{RESET} {p.ink}{accolade.name}{RESET} "
+                             f"{p.slate}{accolade.description}{progress}{RESET}")
+        if secret:
+            lines.append(f"{p.deep}{glyph('unearned')}{RESET} {p.slate}{plural(secret, 'hidden achievement')}"
+                         f" still to find.{RESET}")
+    return lines
+
+
 def pilot_record_lines(world: World, view: str = "O") -> list[str]:
     """Complete retained records, without display truncation or state changes."""
     pilot, ship = world.save.pilot, world.save.ship
@@ -11244,6 +11625,7 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
         retired_ship = dataclasses.replace(world.save.ship)  # the ship that flew this career, for its portrait
         world.reset(fresh.save)
         world.pending_promotions.extend(fresh.pending_promotions)
+        world.pending_accolades.extend(fresh.pending_accolades)
         world.commit()
         # Saved first, shown second: the ending is narration of something durable.
         play_scene(lambda w, h: _FinaleScene(w, h, hull=retired_ship.hull_class, finale=label,
@@ -11256,22 +11638,27 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
         return "A new career begins."
 
 
-def screen_status(p: Palette, world: World) -> None:
+def screen_status(p: Palette, world: World, save_dir: Path | None = None) -> None:
+    """`save_dir` lets the achievements view say how rare each one is here."""
     view, page, result = "O", 0, None
     cache = {}
     while True:
-        footer = "[<] Prev [>] Next [O] Pilot [C] Jobs [H] Log [D] Dossiers "
+        footer = "[<] Prev [>] Next [O] Pilot [C] Jobs [H] Log [D] Dossiers [A] Achievements "
         footer += "[R] Finale [B] Back: "
-        title = "Pilot Record: " + {"O":"Overview", "C":"Contracts", "H":"History", "D":"Dossiers"}[view]
+        title = "Pilot Record: " + {"O":"Overview", "C":"Contracts", "H":"History", "D":"Dossiers",
+                                    "A":"Achievements"}[view]
         if view not in cache:
-            lines = pilot_record_lines(world, view)
+            if view == "A":
+                lines = accolade_lines(world.save, accolade_rarity(save_dir) if save_dir is not None else None)
+            else:
+                lines = pilot_record_lines(world, view)
             if result: lines.insert(0, "Result: " + result)
             cache[view] = _service_pages(lines, title, footer)
         key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[view])
         if key == RESIZE_KEY: cache, page = {}, 0  # the cached pages were cut for the old terminal
         if key in ("B", "Q"): return
         if (moved := page_step(key, page, count)) is not None: page = moved
-        elif key in ("O", "C", "H", "D"): view, page = key, 0
+        elif key in ("O", "C", "H", "D", "A"): view, page = key, 0
         elif key == "R":
             previous = world.save.pilot.retirements
             response = screen_career_finale(p, world)
@@ -12094,6 +12481,8 @@ def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySyste
             state.pop("combat", None)
             if outcome != "won":
                 state["index"] = len(pirates)
+            elif len(pirates) > 1 and state["index"] == len(pirates):
+                bump_accolade(world.save, "squadrons")  # the last of them, in the commit that moves on
             world.commit()
         _encounter_result(p, world, state, [])
     elif kind == "derelict":
@@ -12161,6 +12550,7 @@ def _encounter_derelict(p: Palette, world: World) -> None:
             reward = world.event_rng.randint(60, 100 + max(0, encounter_danger(world)) * 120)
             world.save.pilot.credits += reward
             world.save.pilot.note(f"Salvaged a derelict hulk (+{reward}cr).")
+            bump_accolade(world.save, "derelicts")
             _encounter_result(p, world, state, [f"Salvage recovered: {reward}cr."], scene=lambda w, h: _SalvageScene(
                 w, h, hull=world.save.ship.hull_class, credits=reward, site=None, seed=_scene_seed(world, "salvage")))
             return
@@ -12185,6 +12575,7 @@ def _encounter_distress_call(p: Palette, world: World) -> None:
     world.save.pilot.credits += reward
     adjust_reputation(world, FACTION_CONCORD, 3)
     world.save.pilot.note(f"Answered a distress call (+{reward}cr, Concord standing up).")
+    bump_accolade(world.save, "distress")
     _encounter_result(p, world, state, [
         f"You divert to help -- {fuel_cost} fuel spent. Grateful survivors "
         f"pay {reward}cr, and Concord takes note.",
@@ -12260,6 +12651,7 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
                     world.save.pilot.highlight(f"First mission complete: {mission.description}.")
                 world.save.pilot.missions_completed += 1
                 world.save.pilot.note(f"Escort complete: {mission.description} (+{reward}cr, +{CONCORD_STANDING_PER_CONTRACT} Concord standing)")
+                bump_accolade(world.save, "escorts")
                 world.save.pilot.highlight(f"Escorted a convoy safely to {dest.name}.")
                 lines.append(f"Convoy delivered safely! +{reward}cr and +{CONCORD_STANDING_PER_CONTRACT} Concord standing")
             else:
@@ -12340,11 +12732,13 @@ def _resolve_bounty(p: Palette, world: World, travel: dict) -> None:
             world.save.pilot.highlight(f"First mission complete: {bounty.description}.")
         world.save.pilot.missions_completed += 1
         world.save.pilot.note(f"Bounty complete: {bounty.description} (+{reward}cr)")
+        bump_accolade(world.save, "bounties")
         lines.append(f"Bounty complete! +{reward}cr")
         world.event_rng.random()  # Preserve the historical bounty-completion draw.
         if state.get("warrant") is not None and not state["warrant"]["matches"]:
             world.save.pilot.notoriety += NOTORIETY_PER_WRONG_BOUNTY_KILL
             adjust_reputation(world, FACTION_CONCORD, -3)
+            bump_accolade(world.save, "wrong_bounties")
             world.save.pilot.note("Bounty identification risk accepted: incorrect target destroyed -- notoriety rises.")
             lines.append("The target was an incorrect match. The stated identification penalty applies: "
                          f"+{NOTORIETY_PER_WRONG_BOUNTY_KILL} notoriety, Concord standing -3.")
@@ -12716,6 +13110,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         # What the two hulls read before the exchange, so the bars can be walked
         # to their new readings afterwards -- after the commit, never before it.
         opened_at = (pirate.hp, ship.hull_hp)
+        was_outclassed = not patrol and outclassed(world, pirate, tactics)
         engaging = (action in ("F", "E") or (action == "G" and tactics["brace_ready"])
                     or (action == "D" and not patrol and cargo_aboard) or (action == "P" and not patrol and can_pay))
         if warrant is not None and engaging: warrant["engaged"] = True
@@ -12744,6 +13139,12 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
                     adjust_reputation(world, FACTION_BLACKWAKE, -1)
                     lines.append(f"Salvage recovered: {loot}cr.")
                 outcome = "won"
+                # Counted with the kill, in the commit below: a resumed fight
+                # returns its kept outcome and never reaches here again.
+                if patrol: bump_accolade(world.save, "patrol_kills")
+                if was_outclassed: bump_accolade(world.save, "giant_slayer")
+                if ship.hull_hp >= hull_before: bump_accolade(world.save, "flawless")
+                if 0 < ship.hull_hp * 20 < hull_hp_max(ship): bump_accolade(world.save, "close_calls")
         elif action == "E" or (action == "D" and not patrol and cargo_aboard):
             dumped = False
             available_cargo = [c for c, quantity in world.save.cargo.items() if quantity > 0]
@@ -12761,6 +13162,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             if world.event_rng.random() < combat_evade_chance(world, pirate, dumped_cargo=dumped, tactics=tactics, patrol=patrol):
                 lines.append("You break contact and escape.")
                 outcome = "escaped"
+                bump_accolade(world.save, "escapes")
             else:
                 lines.append("Evasion failed -- they're still on you.")
                 _, retaliation = tactical_retaliation(world, pirate, tactics)
@@ -12772,6 +13174,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
                 adjust_reputation(world, FACTION_BLACKWAKE, 2)
                 lines.append(f"The {pirate.name} takes {cost}cr and peels off.")
                 outcome = "escaped"
+                bump_accolade(world.save, "raider_bribes")
             else:
                 lines.append("They refuse the bribe and press the attack!")
                 _, retaliation = tactical_retaliation(world, pirate, tactics)
@@ -12847,6 +13250,7 @@ def resolve_customs(world: World, action: str) -> list[str]:
             raise ValueError(f"Insufficient credits: bribe requires {cost}cr. No cargo or credits changed.")
         if world.event_rng.random() < 0.6:
             world.save.pilot.credits -= cost
+            bump_accolade(world.save, "customs_bribes")
             return [f"{cost}cr changes hands quietly. Move along."]
         paid = min(world.save.pilot.credits, fine)
         world.save.pilot.credits -= paid
@@ -12854,6 +13258,7 @@ def resolve_customs(world: World, action: str) -> list[str]:
             _dispose_cargo(world, c, world.save.cargo.get(c, 0))
         adjust_reputation(world, FACTION_CONCORD, -5)
         world.save.pilot.notoriety += NOTORIETY_PER_CUSTOMS_BUST
+        bump_accolade(world.save, "busts")
         return [f"Bribe refused -- contraband confiscated; {paid}cr collected against a {fine}cr fine. No debt remains."]
     for c in CONTRABAND_COMMODITIES:
         _dispose_cargo(world, c, world.save.cargo.get(c, 0))
@@ -13164,7 +13569,7 @@ def _run_game(info: dict) -> int:
                 if dest is not None:
                     screen_travel(p, world, dest)
             elif choice == "S":
-                screen_status(p, world)
+                screen_status(p, world, save_dir)
                 continue
             elif choice == "H":
                 screen_hall_of_fame(p, world, save_dir, user_id)

@@ -109,6 +109,11 @@ The allowance comes from classic drop-file minutes or NetBBS's
 Absent or invalid limits leave sessions unbounded; an explicit zero expires
 immediately. The limit belongs to this launch and is never stored in a career.
 
+Pilots earn achievements across all of their careers (Pilot Record,
+`[A] Achievements`). Each one shows how many of the board's pilots hold it,
+read from the same `scores/` records the Hall of Fame uses, so back that
+directory up with the saves.
+
 In the animated presets (`auto` and `basic`) the door opens on a short title
 splash and plays brief full-screen scenes during play: the jump, a contact, a
 kill or the loss of the ship, an escape, a customs sweep, docking, salvage,

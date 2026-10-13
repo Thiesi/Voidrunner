@@ -538,7 +538,8 @@ def test_a_stranded_pilot_is_towed_home_on_screen(scenes_played, monkeypatch):
     monkeypatch.setattr(vr, "read_key", lambda: "Q")
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_station_menu(vr.Palette(False), world)
-    assert played == [("_TowScene", True)]
+    # Towed home, and the hidden achievement for it announced on the deck.
+    assert played == [("_TowScene", True), ("_EmblemScene", True)]
 
 
 def test_a_top_up_at_home_is_no_tow(scenes_played, monkeypatch):
@@ -586,8 +587,11 @@ def test_a_promotion_is_a_ceremony_once_it_is_kept(scenes_played, monkeypatch):
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_station_menu(vr.Palette(False), world)
-    assert played == [("_EmblemScene", True)]
+    # The promotion, then the achievement the same credits earned ("Comfortable");
+    # the rank achievements themselves are the promotion's moment, not a second one.
+    assert played == [("_EmblemScene", True), ("_EmblemScene", True)]
     assert seen[0].kind == "rank" and seen[0].rank == 3 and "MERCHANT CAPTAIN" in seen[0].title
+    assert seen[1].kind == "medal" and "COMFORTABLE" in seen[1].title
 
 
 @pytest.mark.parametrize("faction", [vr.FACTION_CONCORD, vr.FACTION_BLACKWAKE])
