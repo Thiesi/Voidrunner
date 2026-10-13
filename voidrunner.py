@@ -197,8 +197,18 @@ def _classic_door_info(path: Path) -> dict:
             raise ValueError(f"invalid number on line {line}")
         return int(value)
 
+    def cleaned(line: int) -> str:
+        # C1 controls (U+0080-U+009F) only arrive through a UTF-8 file: CP437
+        # decodes those bytes as letters. U+009B is a one-character CSI and
+        # U+009D an OSC, so a name carrying them would reach a UTF-8 terminal
+        # as commands, and the save validator refuses them, so the caller
+        # could not keep a career either (issue #15). They are removed rather
+        # than refused, because a refused name throws the whole file away and
+        # the caller would launch as Guest instead of as themselves.
+        return "".join(char for char in lines[line - 1] if not 0x80 <= ord(char) <= 0x9F).strip()
+
     def name(line: int) -> str:
-        value = lines[line - 1]
+        value = cleaned(line)
         if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
             raise ValueError(f"invalid name on line {line}")
         return value
@@ -223,8 +233,8 @@ def _classic_door_info(path: Path) -> dict:
         number(11, 1)  # node number
         info = {
             "drop_file_type": kind, "user_id": number(5, 1),
-            "handle": name(7) if lines[6] else name(6),
-            "node_name": name(4) if lines[3] else "Local",
+            "handle": name(7) if cleaned(7) else name(6),
+            "node_name": name(4) if cleaned(4) else "Local",
             "terminal_height": 24, "emulation": emulation,
             "minutes_left": number(9), "comm_type": comm_type,
             "comm_handle": number(2),
@@ -240,7 +250,7 @@ def _classic_door_info(path: Path) -> dict:
             raise ValueError("invalid DOOR.SYS graphics mode")
         info = {
             "drop_file_type": kind, "user_id": number(26, 1),
-            "handle": name(36) if len(lines) >= 36 and lines[35] else name(10),
+            "handle": name(36) if len(lines) >= 36 and cleaned(36) else name(10),
             "terminal_height": number(21, 1), "emulation": emulation,
             "minutes_left": number(19), "comm_port": lines[0],
         }
@@ -5929,8 +5939,10 @@ _FOREIGN_ESCAPE = re.compile(r"\x1b\[[0-9;]*[a-ln-zA-Z]"
                              r"|\x1b\([AB0-2]|\x1b[78HDM]"
                              r"|\x1b(?!\[[0-9;]*m)"
                              # \x01-\x03 are this file's own row marks,
-                             # stripped by `draw_page` as it prints.
-                             r"|[\x00\x04-\x08\x0b-\x1a\x1c-\x1f\x7f]")
+                             # stripped by `draw_page` as it prints. C1
+                             # controls are escapes in a single character
+                             # (U+009B is CSI) on a UTF-8 terminal (issue #15).
+                             r"|[\x00\x04-\x08\x0b-\x1a\x1c-\x1f\x7f-\x9f]")
 _KEY_RE = re.compile(r"\[[^\[\]]{1,9}\]")
 _GAUGE_RE = re.compile(r"[▀-▐░-▓■]{2,}")
 
