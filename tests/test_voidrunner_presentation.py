@@ -1035,7 +1035,7 @@ def test_plain_display_keeps_utf8_input_and_wide_backspace(monkeypatch):
 
 
 @pytest.mark.parametrize("width,height", [(40,12),(80,24)])
-@pytest.mark.parametrize("style", list(vr.DISPLAY_STYLES))
+@pytest.mark.parametrize("style", ["mono", "plain"])  # the others draw pictures: test_voidrunner_viewport
 def test_viewport_visits_every_view_and_page_without_writes(monkeypatch, terminal,width,height,style):
     import copy,re
     world=_world_with_seed(42); world.save.current_system=world.landmark["system_id"]

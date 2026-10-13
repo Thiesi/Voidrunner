@@ -488,6 +488,22 @@ its station or after investigation, not merely through an accepted bearing.
 Ship commissioning previews and landmark inspection use these same portraits;
 backing out of either view leaves gameplay unchanged.
 
+In every preset with color (`auto`, `fast`, `basic`) the Viewport itself is a
+picture rather than a portrait, at the request of the first external SysOp: the
+in-flight scenes' half-block pixels, filling the terminal above a caption that
+carries every fact the portrait's text did. The ship is the pilot's hull, lit
+along its plating, its drive burning, the world it is docked at behind it;
+damage is scorch marks, then sparks, then smoke and a cockpit alarm. The station
+is the docking scene's, close and still, with traffic on its approach. Each of
+the four landmarks is drawn as itself, and with none recorded the scanner sweeps
+empty space. A picture opens its blast shutters and then idles -- a ring turns,
+a beacon blinks -- until a key, which is the command the action bar asked for,
+not a skip. The idle stops after about twenty seconds so an idle caller is not
+sent a picture forever; `fast`, `DOOR_SCENES=0` and a session with no live
+terminal get the still frame. `mono` and `plain` keep the portraits, and so does
+a terminal too small to hold a picture over its caption (a landmark's story at
+40x12). Opening and the whole idle send under 100 KB at 80x24 in truecolor.
+
 Hall of Fame offers five separate local achievement views: lifetime wealth,
 known-cost market margin, exploration, combat victories and completed careers.
 Wealth and completion counts rank pilots; trading, exploration and combat rank
