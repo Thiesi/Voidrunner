@@ -833,7 +833,7 @@ def test_general_route_flies_only_one_leg_until_another_command(monkeypatch, out
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_auto_route(vr.Palette(False), world, destination=target.id)
     assert calls == [expected]
-    assert ("Last hop: arrived" if outcome == "arrive" else "Travel diverted") in output.getvalue()
+    assert ("Last hop: arrived" if outcome == "arrive" else "Travel diverted") in plain(output.getvalue())
 
 
 @pytest.mark.parametrize("width,height", [(40,12), (80,24)])
@@ -873,7 +873,7 @@ def test_general_route_opens_on_a_destination_and_cancel_preserves_the_preview(m
     monkeypatch.setattr(vr, "read_line_raw", lambda **kw: pytest.fail("Entry asked a question"))
     keys = iter("DB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_auto_route(vr.Palette(False), world)
-    text = output.getvalue()
+    text = plain(output.getvalue())
     assert text.count("Destination: " + world.by_id[chosen].name) == 2
     assert all(world.by_id[sid].discovered for sid, label in choices_seen)
     assert world.save.turn == 0

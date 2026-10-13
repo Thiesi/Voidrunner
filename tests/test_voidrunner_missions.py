@@ -84,7 +84,7 @@ def test_mission_navigation_tracks_before_one_hop_and_recalculates_after_it(monk
     assert calls==[first] and world.save.turn==1
     if outcome=="divert": assert "Travel diverted" in output.getvalue()
     elif outcome=="fail": assert "no longer active" in output.getvalue() and world.save.tracked_mission_id is None
-    else: assert "Last hop: arrived" in output.getvalue() and world.save.tracked_mission_id==mission.id
+    else: assert "Last hop: arrived" in plain(output.getvalue()) and world.save.tracked_mission_id==mission.id
 
 
 def test_mission_navigation_save_failure_stops_before_departure(monkeypatch):
