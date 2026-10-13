@@ -448,6 +448,16 @@ results and landmark salvage status ahead of portraits so small terminals do
 not displace the outcome. Commissioning tests must select the preview's C action
 before answering its final confirmation; a lone Y no longer purchases a hull.
 
+Viewport pictures (`show_viewport_picture`) are not scenes: the key that ends
+the idle is returned as the command, never drained, and the bottom row is the
+action bar's, so a picture never draws on it and every idle frame moves the
+cursor back to the end of the bar. A picture that does not `fit` -- too little
+sky left above its caption -- falls back to the ASCII portrait for that view
+only. Keep idle effects cheap: a moving element should change the cells it
+leaves and enters, not shift a gradient across the cells it covers (the drive
+plume's gradient is anchored to the nozzle for that reason). Opening plus the
+whole idle is asserted under 100 KB at 80x24 in truecolor.
+
 In-flight scenes (`play_scene`) run after the commit they illustrate; a call
 placed before a commit would let an interrupted session show an outcome that
 was never kept. The contact scene belongs only to a fight whose combat slot was
