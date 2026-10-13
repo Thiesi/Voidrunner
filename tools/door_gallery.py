@@ -171,6 +171,7 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Pilot Record, jobs", b"SC", "played"),
         ("Pilot Record, log", b"SH", "played"),
         ("Career Dossiers", b"SD", "played"),
+        ("Pilot Record, achievements", b"SA", "played"),
         ("Career Finale", b"SR", "played"),
         # The ending a retirement is shown (issue #644): Status, Finale, Retire,
         # yes. It needs a career that *may* retire, which is its own fixture.
@@ -182,8 +183,12 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Hall of Fame, combat", b"H4", "played"),
         ("Hall of Fame, careers", b"H5", "played"),
         ("Pilot Guide", b"G"),
+        # A new career at Freeport on day zero is offered First Flight.
+        ("First Flight offer", b"GO"),
         ("Trading Ledger", b"T"),
         ("Viewport", b"V"),
+        ("Viewport, station", b"V2"),
+        ("Viewport, discovery", b"V3"),
         ("Display Options", b"O"),
         ("Archive Contacts", b"N"),
         ("Concord Contacts", b"P"),

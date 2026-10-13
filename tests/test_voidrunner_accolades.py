@@ -379,3 +379,42 @@ def test_the_pilot_record_action_bar_is_one_row(monkeypatch, terminal, width, he
     assert bars and all("[O] Pilot" in row and label in row and "[R] Finale" in row for row in bars)
     # The bar ends at its colon; the key echoed after it sits in the last column.
     assert all(vr._visible_width(row[:row.index("Back:") + 5]) <= width - 1 for row in bars)
+
+
+@pytest.mark.parametrize("tier", [1, 2, 3])
+def test_progress_blends_toward_its_medals_color_as_it_closes_in(monkeypatch, tier):
+    """The goal wears its medal's color; the count so far starts at plasma and
+    takes a step toward that color every tenth of the way (play-test, v1.2.2)."""
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
+    monkeypatch.setattr(vr, "_PALETTE", vr.Palette(truecolor=True))
+    goal = vr.ACCOLADE_TIER_RGB[tier]
+    p = vr.pal()
+    distances = []
+    for current in range(0, 100, 10):
+        drawn = vr.accolade_progress(current, 100, tier)
+        assert drawn.endswith(f"{p.rgb(goal)}/100{vr.RESET}")
+        color = tuple(int(part) for part in drawn[len("\x1b[38;2;"):drawn.index("m")].split(";"))
+        distances.append(sum(abs(a - b) for a, b in zip(color, goal)))
+    assert vr.accolade_progress(0, 100, tier).startswith(p.rgb(vr.ACCOLADE_PROGRESS_START))
+    assert distances == sorted(distances, reverse=True) and len(set(distances)) == 10
+
+
+@pytest.mark.parametrize("style", ["mono", "plain"])
+def test_progress_has_no_color_where_the_preset_has_none(monkeypatch, style):
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    # No color of its own; the resets every component writes are `out`'s to strip.
+    assert vr.accolade_progress(4, 10, 3).replace(vr.RESET, "") == "4/10"
+
+
+def test_numbers_in_a_description_are_values_and_credits_are_gold(monkeypatch):
+    """`Complete 10 delivery contracts.` hid its 10 in the prose (play-test, v1.2.2).
+    Bold, because ink beside prose is too close in brightness to stand out."""
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
+    monkeypatch.setattr(vr, "_PALETTE", vr.Palette(truecolor=True))
+    p = vr.pal()
+    drawn = vr.accolade_description("Complete 10 delivery contracts.")
+    assert f"{p.text}Complete " in drawn and f"{p.ink}{vr.BOLD}10{vr.RESET}" in drawn
+    assert f"{p.text} delivery contracts." in drawn
+    assert f"{p.ink}{vr.BOLD}5%{vr.RESET}" in vr.accolade_description("Win a fight with under 5% of your hull left.")
+    assert f"{p.gold}{vr.BOLD}10,000cr{vr.RESET}" in vr.accolade_description("Hold 10,000cr at once.")
+    assert vr._ANSI_RE.sub("", vr.accolade_description("Make 1,000 jumps.")) == "Make 1,000 jumps."

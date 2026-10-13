@@ -1801,3 +1801,19 @@ def test_a_scanner_survey_pays_half_and_arrival_pays_in_full():
     arrived.save.current_system = target
     assert any("+441cr, +1 Concord" in row for row in vr.check_mission_completions(arrived, just_discovered=target))
     assert arrived.save.pilot.credits == 1200 + 441
+
+
+def test_journey_resumed_names_the_pilot_in_the_screens_accent(monkeypatch):
+    """The resume notice was one color from end to end (play-test, v1.2.2)."""
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
+    monkeypatch.setattr(vr, "_PALETTE", vr.Palette(truecolor=True))
+    world = _world_with_seed(42)
+    destination = next(s for s in world.galaxy if s.discovered and s.id != world.here.id)
+    world.save.pending_travel = {"destination": destination.id}
+    world.save.turn = 7
+    drawn = "".join(vr.journey_resumed_lines(world))
+    p = vr.pal()
+    assert f"{p.plasma}{vr.BOLD}{world.save.pilot.handle}" in drawn
+    assert f"{p.hull}{destination.name}" in drawn and f"{p.ink}7" in drawn
+    destination.discovered = False
+    assert f"{p.text}an uncharted system" in "".join(vr.journey_resumed_lines(world))
