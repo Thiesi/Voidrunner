@@ -6862,7 +6862,7 @@ class _JumpScene(_Scene):
 
 def _contact_title(kind: str, count: int) -> tuple[str, tuple]:
     return {"patrol": ("CONCORD INTERDICTION", _SCENE_CONCORD), "bounty": ("BOUNTY TARGET ACQUIRED", _SPLASH_GOLD),
-            "escort": ("CONVOY UNDER ATTACK", _SCENE_ALARM),
+            "escort": ("CONVOY UNDER ATTACK", _SCENE_ALARM), "ambush": ("THE WRECK WAKES UP", _SCENE_ALARM),
             "squadron": (f"RAIDER SQUADRON  ·  {count} SHIPS", _SCENE_ALARM)}.get(kind, ("RAIDER CONTACT", _SCENE_ALARM))
 
 
@@ -6882,7 +6882,8 @@ class _ContactScene(_Scene):
         self.title, self.color = _contact_title(kind, self.count)
         name = _scene_text(names[target] if names else "unknown")
         why = {"patrol": "your transponder flags as wanted", "bounty": "the warrant names this hull",
-               "escort": "raiders close on the convoy"}.get(kind, f"threat tier {tier}")
+               "escort": "raiders close on the convoy",
+               "ambush": "its guns were never dead"}.get(kind, f"threat tier {tier}")
         self.detail = [(name, _SCENE_INK), ("  ·  ", _SCENE_SLATE), (why, _SCENE_SLATE)]
 
     def enemy_spots(self, t: float) -> list[tuple[float, float]]:
@@ -7291,6 +7292,302 @@ class _DockScene(_Scene):
         self.caption(stage, t, 0.6, self.title, _SPLASH_GOLD, self.detail)
 
 
+# The wrecks and workboats of the quieter scenes. A hulk is a freighter with
+# the light gone out of it and holes where its plating was; the tug wears
+# hazard stripes so it reads as a workboat at a glance.
+_SCENE_HULK = ("...dd..d........",
+               ".hhhh.hhhhh.....",
+               "fhll..lllldhh...",
+               "fhhh.hhhhhh.hh..",
+               "fhdd..ddd.dd....",
+               ".hhh...hhhh.....",
+               "...d............")
+_SCENE_TUG = ("..hhh.......",
+              ".tqtqtqthh..",
+              "tqtqtqtqtqhc",
+              ".tqtqtqthh..",
+              "..hhh.......")
+_SCENE_COLORS.update(t=(240, 190, 40), q=(44, 40, 36))
+
+
+class _SalvageScene(_Scene):
+    """Salvage: a dead hulk tumbles past, and a tractor beam draws its prize
+    aboard. A landmark's investigation is the same moment at a named site."""
+
+    frames = 24
+
+    def __init__(self, width: int, height: int, *, hull: str, credits: int, site: str | None, seed: str):
+        super().__init__(width, height, seed)
+        self.art = _SCENE_HULLS.get(hull, _SPLASH_SHIP)
+        self.title = "SITE INVESTIGATED" if site else "SALVAGE RECOVERED"
+        place = _scene_text(site) if site else "a derelict hulk"
+        self.detail = [(f"+{credits:,}cr", _SPLASH_GOLD), ("  ·  ", _SCENE_SLATE), (place, _SCENE_INK)]
+
+    def draw(self, stage: _Stage, index: int, t: float) -> None:
+        w, mid, z = self.width, self.mid, self.zoom
+        self.starfield(stage, drift=index * 0.15)
+        art_w, art_h = self.sprite_size(self.art)
+        sx, sy = w * 0.2 - art_w / 2, mid - art_h // 2
+        _scene_sprite(stage, self.art, sx, sy, zoom=z)
+        hulk_w, hulk_h = self.sprite_size(_SCENE_HULK)
+        # The hulk drifts and rolls: every few frames it shows its belly.
+        hx = w * 0.7 - hulk_w / 2 - t * w * 0.05
+        hy = mid - hulk_h // 2 - 2 * z + math.sin(t * 3) * z
+        _scene_sprite(stage, _SCENE_HULK if index // 6 % 2 == 0 else tuple(reversed(_SCENE_HULK)), hx, hy,
+                      zoom=z, tint=(16, 14, 26), amount=0.55)
+        # A spark where a cable has parted, now and then.
+        if index % 5 == 0:
+            stage.plot(hx + hulk_w * 0.4, hy + hulk_h * 0.4, _heat(0.9))
+        pull = _ease_out(_span(t, 0.18, 0.66))
+        start_x, start_y = hx + hulk_w * 0.3, hy + hulk_h // 2
+        end_x, end_y = sx + art_w + 1, mid
+        crate_x = start_x + (end_x - start_x) * pull
+        crate_y = start_y + (end_y - start_y) * pull
+        if 0.12 < t < 0.7:
+            # The tractor beam: a dotted green line that crawls toward the ship.
+            steps = max(2, int(abs(start_x - end_x)))
+            for step in range(steps):
+                if (step + index) % 3:
+                    continue
+                along = step / steps
+                stage.blend(end_x + (start_x - end_x) * along, end_y + (start_y - end_y) * along, (110, 255, 170), 0.6)
+        if pull < 1.0:
+            glow = (255, 220, 110) if index % 2 else (255, 190, 70)
+            for dy in range(2 * z):
+                for dx in range(3 * z):
+                    stage.plot(crate_x + dx - z, crate_y + dy - z, glow)
+        else:
+            # Taken aboard: the hold lights up for a moment.
+            if t < 0.8:
+                for dx in range(art_w // 2):
+                    stage.blend(sx + art_w // 4 + dx, mid, (255, 220, 110), 0.7)
+        self.caption(stage, t, 0.62, self.title, _SPLASH_GOLD, self.detail)
+
+
+class _DistressScene(_Scene):
+    """A distress call answered: a crippled freighter blinks its beacon and
+    vents, and its escape pods cross the gap to the pilot's ship."""
+
+    frames = 24
+
+    def __init__(self, width: int, height: int, *, hull: str, credits: int, fuel: int, seed: str):
+        super().__init__(width, height, seed)
+        self.art = _SCENE_HULLS.get(hull, _SPLASH_SHIP)
+        rng = random.Random(f"scene-pods:{seed}")
+        self.pods = [(rng.uniform(0.0, 0.3), rng.uniform(-3, 3)) for _ in range(5)]
+        self.vents = [(rng.uniform(0, 1), rng.uniform(-1, 1)) for _ in range(10)]
+        self.detail = [(f"+{credits:,}cr", _SPLASH_GOLD), ("  ·  ", _SCENE_SLATE),
+                       (f"{fuel} fuel spent", _SCENE_SLATE), ("  ·  ", _SCENE_SLATE), ("Concord takes note", _SCENE_CONCORD)]
+
+    def draw(self, stage: _Stage, index: int, t: float) -> None:
+        w, mid, z = self.width, self.mid, self.zoom
+        self.starfield(stage, drift=index * 0.1)
+        art_w, art_h = self.sprite_size(self.art)
+        approach = _ease_out(_span(t, 0.0, 0.3))
+        sx, sy = w * 0.28 - art_w / 2 - (1 - approach) * w * 0.25, mid - art_h // 2
+        _scene_sprite(stage, self.art, sx, sy, zoom=z)
+        wreck = _SCENE_HULLS["Freighter"]
+        ww, wh = self.sprite_size(wreck)
+        wx, wy = w * 0.68 - ww / 2, mid - wh // 2
+        _scene_sprite(stage, wreck, wx, wy, zoom=z, flip=True, tint=(40, 24, 30), amount=0.5)
+        # The beacon: amber and red, three short and three long, roughly.
+        beacon = (255, 70, 60) if index % 3 == 0 else (255, 180, 60) if index % 3 == 1 else None
+        if beacon is not None:
+            for dy in range(z):
+                for dx in range(z):
+                    stage.plot(wx + ww // 2 + dx, wy - z + dy, beacon)
+        # Atmosphere venting from a breach: a plume of cooling grey.
+        for along, side in self.vents:
+            age = (along + index * 0.05) % 1.0
+            stage.plot(wx + ww * 0.3 + side * 2, wy + wh + age * 8 * z, _mix((200, 210, 230), (40, 44, 60), age))
+        for delay, lane in self.pods:
+            cross = _span(t, 0.3 + delay, 0.62 + delay)
+            if 0 < cross < 1:
+                px = wx - 1 - (wx - 1 - (sx + art_w)) * cross
+                stage.plot(px, mid + lane * z, (240, 246, 255))
+                stage.plot(px + 1, mid + lane * z, (120, 200, 255))
+        self.caption(stage, t, 0.62, "SURVIVORS ABOARD", _SCENE_MINT, self.detail)
+
+
+class _DataBurstScene(_Scene):
+    """A trader's data burst: a freighter crosses far off, its signal rings
+    spread, and the numbers stream into the pilot's ship."""
+
+    frames = 20
+
+    def __init__(self, width: int, height: int, *, hull: str, what: str, where: str, seed: str):
+        super().__init__(width, height, seed)
+        self.art = _SCENE_HULLS.get(hull, _SPLASH_SHIP)
+        self.detail = [(_scene_text(what), _SCENE_INK), (" at ", _SCENE_SLATE), (_scene_text(where), _SCENE_INK),
+                       ("  ·  ", _SCENE_SLATE), ("quote recorded", _SCENE_SLATE)]
+
+    def draw(self, stage: _Stage, index: int, t: float) -> None:
+        w, mid, z = self.width, self.mid, self.zoom
+        self.starfield(stage, drift=index * 0.2)
+        art_w, art_h = self.sprite_size(self.art)
+        sx, sy = w * 0.22 - art_w / 2, mid - art_h // 2 + 2 * z
+        _scene_sprite(stage, self.art, sx, sy, zoom=z)
+        trader = _SCENE_HULLS["Freighter"]
+        tw, th = self.sprite_size(trader)
+        tx, ty = w * 0.85 - tw / 2 - t * w * 0.25, max(1, mid // 3)
+        _scene_sprite(stage, trader, tx, ty, zoom=z, flip=True, tint=(20, 26, 50), amount=0.3)
+        ox, oy = tx, ty + th // 2
+        if t < 0.7:
+            for ring in range(3):
+                phase = (t * 2.2 + ring / 3) % 1.0
+                _scene_ring(stage, ox, oy, 2 + phase * w * 0.5, (110, 220, 255), 0.55 * (1 - phase), squash=0.6)
+        # The quote itself, a stream of bits along the line between the ships.
+        flow = _span(t, 0.15, 0.7)
+        if 0 < flow < 1:
+            target_x, target_y = sx + art_w // 2, sy
+            for bit in range(8):
+                along = (flow * 2 + bit / 8) % 1.0
+                x = ox + (target_x - ox) * along
+                y = oy + (target_y - oy) * along
+                stage.mark(int(y // 2), int(x), "1" if (bit + index) % 3 else "0", (110, 220, 255))
+        self.caption(stage, t, 0.62, "DATA BURST INTERCEPTED", _SCENE_CONCORD, self.detail)
+
+
+class _TowScene(_Scene):
+    """Stranded: a salvage tug hauls the dark ship home on a cable."""
+
+    frames = 24
+
+    def __init__(self, width: int, height: int, *, hull: str, seed: str):
+        super().__init__(width, height, seed)
+        self.art = _SCENE_HULLS.get(hull, _SPLASH_SHIP)
+        self.detail = [("empty tank, empty pockets", _SCENE_SLATE), ("  ·  ", _SCENE_SLATE), ("no charge", _SCENE_MINT)]
+
+    def draw(self, stage: _Stage, index: int, t: float) -> None:
+        w, mid, z = self.width, self.mid, self.zoom
+        self.starfield(stage, drift=index * 0.5)
+        art_w, art_h = self.sprite_size(self.art)
+        tug_w, tug_h = self.sprite_size(_SCENE_TUG)
+        travel = t * w * 0.35
+        tug_x = w * 0.55 + travel - tug_w / 2
+        ship_x = tug_x - w * 0.3 - art_w
+        _scene_sprite(stage, self.art, ship_x, mid - art_h // 2, zoom=z, tint=(10, 12, 24), amount=0.6)
+        _scene_sprite(stage, _SCENE_TUG, tug_x, mid - tug_h // 2, zoom=z)
+        # The cable, sagging a little, from the tug's stern to the ship's nose.
+        start, end = ship_x + art_w, tug_x - 1
+        for x in range(math.floor(start), math.floor(end) + 1):
+            along = (x - start) / max(1, end - start)
+            stage.plot(x, mid + math.sin(along * math.pi) * 1.5 * z, (150, 150, 160))
+        if index % 4 < 2:
+            stage.plot(tug_x + tug_w // 2, mid - tug_h // 2 - 1, (255, 190, 60))
+        for d in range(1, 3 + index % 2):
+            stage.plot(tug_x - d, mid - z, _heat(0.8 - d * 0.2))
+        self.caption(stage, t, 0.6, "TOWED TO FREEPORT ANCHORAGE", _SPLASH_GOLD, self.detail)
+
+
+class _RefitScene(_Scene):
+    """A commissioning: the old hull sits in the drydock's gantry, a welding
+    seam runs along it, and the new hull is what is left behind."""
+
+    frames = 28
+
+    def __init__(self, width: int, height: int, *, old: str, new: str, hull_hp: int, seed: str):
+        super().__init__(width, height, seed)
+        self.old = _SCENE_HULLS.get(old, _SPLASH_SHIP)
+        self.new = _SCENE_HULLS.get(new, _SPLASH_SHIP)
+        self.zoom_ship = min(3, self.zoom + 1) if self.sky_px >= 30 else self.zoom
+        self.title = f"COMMISSIONED  ·  {_scene_text(new).upper()}-CLASS"
+        self.detail = [(f"refit from {_scene_text(old)}", _SCENE_SLATE), ("  ·  ", _SCENE_SLATE),
+                       (f"hull {hull_hp}", _SCENE_INK)]
+
+    def draw(self, stage: _Stage, index: int, t: float) -> None:
+        w, mid, z = self.width, self.mid, self.zoom_ship
+        self.starfield(stage)
+        widest = max(len(self.old[0]), len(self.new[0])) * z
+        tallest = max(len(self.old), len(self.new)) * z
+        left = w / 2 - widest / 2
+        seam = left - 2 + _span(t, 0.12, 0.62) * (widest + 4)
+        done = t >= 0.62
+        # The gantry: rails above and below, posts every so often, work lights.
+        top, bottom = mid - tallest // 2 - 3, mid + tallest // 2 + 2
+        for x in range(math.floor(left) - 6, math.ceil(left + widest) + 6):
+            stage.plot(x, top, (96, 104, 128))
+            stage.plot(x, bottom, (96, 104, 128))
+            if (x - math.floor(left)) % 8 == 0:
+                for y in range(top - 2, top):
+                    stage.plot(x, y, (70, 76, 96))
+                for y in range(bottom + 1, bottom + 3):
+                    stage.plot(x, y, (70, 76, 96))
+                light = (120, 255, 150) if done else (255, 170, 60) if index % 4 < 2 else (110, 70, 30)
+                stage.plot(x, top + 1, light)
+                stage.plot(x, bottom - 1, light)
+        for art, keep in ((self.old, lambda x: x >= seam), (self.new, lambda x: x < seam)):
+            art_w, art_h = len(art[0]) * z, len(art) * z
+            x0, y0 = w / 2 - art_w / 2, mid - art_h // 2
+            for row_index, row in enumerate(art):
+                for column, key in enumerate(row):
+                    if key == ".":
+                        continue
+                    for dy in range(z):
+                        for dx in range(z):
+                            x = x0 + column * z + dx
+                            if keep(x):
+                                stage.plot(x, y0 + row_index * z + dy, _SCENE_COLORS[key])
+        if 0.12 < t < 0.62:
+            # The seam: a white-hot line with sparks thrown off it.
+            spark = random.Random(f"scene-weld:{index}")
+            for y in range(top + 1, bottom):
+                stage.plot(seam, y, (255, 250, 230))
+            for _ in range(8):
+                stage.plot(seam + spark.uniform(-1, 4), spark.uniform(top + 1, bottom - 1), _heat(spark.uniform(0.5, 1.0)))
+        if done:
+            art_w = len(self.new[0]) * z
+            for d in range(1, 2 + int(_span(t, 0.62, 0.8) * 4) * z):
+                stage.plot(w / 2 - art_w / 2 - d, mid, _heat(0.9 - d * 0.08))
+        self.caption(stage, t, 0.64, self.title, _SPLASH_GOLD, self.detail)
+
+
+class _FinaleScene(_Scene):
+    """Retirement: the ship that flew the career sails for a rising sun under
+    the name the career ends with."""
+
+    frames = 32
+    hold = SCENE_HOLD_SECONDS + 1.2
+
+    def __init__(self, width: int, height: int, *, hull: str, finale: str, pilot: str, seed: str):
+        super().__init__(width, height, seed)
+        self.art = _SCENE_HULLS.get(hull, _SPLASH_SHIP)
+        self.title = _scene_text(finale).upper()
+        self.detail = [(_scene_text(pilot), _SCENE_INK), ("  ·  ", _SCENE_SLATE), ("career archived", _SCENE_SLATE),
+                       ("  ·  ", _SCENE_SLATE), ("a new voyage begins", _SPLASH_GOLD)]
+        # The sun never moves: its disc and corona are composed once.
+        self.sun: dict[tuple[int, int], tuple] = {}
+        radius = max(5.0, min(self.sky_px * 0.7, width * 0.3))
+        cx, cy = width * 0.72, self.sky_px * 1.05
+        for y in range(self.sky_px):
+            for x in range(width):
+                d = math.hypot(x + 0.5 - cx, (y + 0.5 - cy) * 1.1) / radius
+                if d <= 1.0:
+                    self.sun[(x, y)] = _mix((255, 250, 220), (255, 150, 60), d ** 2)
+                elif d <= 1.5:
+                    self.sun[(x, y)] = _mix((150, 60, 70), (30, 10, 30), (d - 1.0) / 0.5)
+        self.sun_x, self.sun_y = cx, cy - radius
+
+    def draw(self, stage: _Stage, index: int, t: float) -> None:
+        w, mid, z = self.width, self.mid, self.zoom
+        self.starfield(stage)
+        # Two steps of dawn, not a fade: the disc is a third of the sky, and
+        # every shade of it is the whole disc sent again.
+        light = 0.55 if t < 0.12 else 1.0
+        for (x, y), color in self.sun.items():
+            stage.plot(x, y, _scale(color, light))
+        art_w, art_h = self.sprite_size(self.art)
+        # The ship sails out, slowly, into the light; its engine is the last of it.
+        go = _ease_in(_span(t, 0.1, 0.85))
+        x = w * 0.18 - art_w / 2 + go * (self.sun_x - w * 0.18)
+        y = mid - art_h // 2 + go * (self.sun_y - mid) * 0.6
+        if go < 0.95:
+            _scene_sprite(stage, self.art, x, y, zoom=z, tint=(40, 20, 40), amount=go * 0.8)
+            for d in range(1, 3 + index % 2):
+                stage.plot(x - d, y + art_h // 2, _heat(0.85 - d * 0.2))
+        self.caption(stage, t, 0.66, self.title, _SPLASH_GOLD, self.detail)
+
+
 def play_scene(make: Callable[[int, int], _Scene]) -> bool:
     """Play one in-flight scene, if anyone is watching. Returns whether it drew.
 
@@ -7339,6 +7636,8 @@ def play_contact_scene(world: World, pirate: Pirate, encounter: dict, *, patrol:
         kind = "patrol"
     elif encounter.get("warrant") is not None:
         kind = "bounty"
+    elif encounter.get("ambush") is not None:
+        kind = "ambush"
     elif travel is not None and travel.get("phase") == "escorts":
         kind = "escort"
     elif len(encounter.get("pirates", ())) > 1:
@@ -7572,10 +7871,13 @@ def screen_station_menu(p: Palette, world: World) -> str:
         # state (a refuel/repair that spent the last credits, a jump
         # that burned the last fuel with no encounter) in one place.
         out_line()
+        towed = world.save.current_system != 0
         rescued = rescue_stranded_pilot(world)
         # The tow puts the pilot at Freeport: that is a station transition, so
         # Freeport's board is prepared here rather than left stale (#417 review).
         world.checkpoint()
+        if towed:
+            play_scene(lambda w, h: _TowScene(w, h, hull=world.save.ship.hull_class, seed=_scene_seed(world, "tow")))
         out_line(f"{p.wrong}{rescued}{RESET}")
         pause(p)
     if career_rank_index(world.save.pilot) > world.save.pilot.highest_rank_seen:
@@ -8197,6 +8499,9 @@ def screen_landmark(p: Palette, world: World) -> None:
         if action == "I" and available:
             result = investigate_landmark(world)
             world.commit()
+            play_scene(lambda w, h: _SalvageScene(w, h, hull=world.save.ship.hull_class,
+                                                  credits=world.landmark["reward_credits"], site=world.landmark["label"],
+                                                  seed=_scene_seed(world, "landmark")))
             page = 0
 
 
@@ -10004,6 +10309,8 @@ def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -
         world.save.pilot.note(f"Commissioned a {target_class}-class hull refit.")
         world.save.pilot.highlight(f"Commissioned a {target_class}-class hull refit.")
         world.commit()
+        play_scene(lambda w, h: _RefitScene(w, h, old=previous_class, new=target_class, hull_hp=ship.hull_hp,
+                                            seed=_scene_seed(world, "refit")))
         out_line(f"{p.gold}{BOLD}Your {previous_class} is towed into drydock and emerges a {target_class}.{RESET}")
         return f"Commissioned a {target_class} hull for {cost}cr."
 
@@ -10848,6 +11155,8 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
         world.pending_promotions.extend(fresh.pending_promotions)
         world.commit()
         # Saved first, shown second: the ending is narration of something durable.
+        play_scene(lambda w, h: _FinaleScene(w, h, hull=retired_ship.hull_class, finale=label,
+                                             pilot=world.save.pilot.handle, seed=_scene_seed(world, "finale")))
         screen_career_ending(p, world.save, retired_ship)
         # `reset` cleared the notes with everything else, so this is set after
         # it. Written to the terminal instead, the line was erased by the new
@@ -11649,10 +11958,16 @@ def _show_result(p: Palette, world: World, lines: list[str]) -> None:
         out_line(f"{p.gold}{line}{RESET}")
 
 
-def _encounter_result(p: Palette, world: World, state: dict, lines: list[str]) -> None:
-    """Commit both effects and completion before revealing their result."""
+def _encounter_result(p: Palette, world: World, state: dict, lines: list[str],
+                      scene: Callable[[int, int], "_Scene"] | None = None) -> None:
+    """Commit both effects and completion before revealing their result.
+
+    A `scene` plays between the two, so it shows what is already kept, and
+    never on a resume: a done encounter returns before reaching here."""
     state.update(done=True, result=lines)
     world.commit()
+    if scene is not None:
+        play_scene(scene)
     _show_result(p, world, lines)
 
 
@@ -11755,7 +12070,8 @@ def _encounter_derelict(p: Palette, world: World) -> None:
             reward = world.event_rng.randint(60, 100 + max(0, encounter_danger(world)) * 120)
             world.save.pilot.credits += reward
             world.save.pilot.note(f"Salvaged a derelict hulk (+{reward}cr).")
-            _encounter_result(p, world, state, [f"Salvage recovered: {reward}cr."])
+            _encounter_result(p, world, state, [f"Salvage recovered: {reward}cr."], scene=lambda w, h: _SalvageScene(
+                w, h, hull=world.save.ship.hull_class, credits=reward, site=None, seed=_scene_seed(world, "salvage")))
             return
         state["ambush"] = dataclasses.asdict(generate_pirate(world, danger=encounter_danger(world)))
         world.commit()
@@ -11781,7 +12097,8 @@ def _encounter_distress_call(p: Palette, world: World) -> None:
     _encounter_result(p, world, state, [
         f"You divert to help -- {fuel_cost} fuel spent. Grateful survivors "
         f"pay {reward}cr, and Concord takes note.",
-    ])
+    ], scene=lambda w, h: _DistressScene(w, h, hull=world.save.ship.hull_class, credits=reward, fuel=fuel_cost,
+                                        seed=_scene_seed(world, "distress")))
 
 
 def _encounter_market_tip(p: Palette, world: World, dest: GalaxySystem) -> None:
@@ -11804,7 +12121,8 @@ def _encounter_market_tip(p: Palette, world: World, dest: GalaxySystem) -> None:
     buy = f"{quote['buy']}cr" if quote["buy"] is not None else "prohibited"
     _encounter_result(p, world, state, [
         f"You intercept a trader's data burst: {label} at {system.name}, buy {buy}, sell {quote['sell']}cr. Recorded on day {world.save.turn}.",
-    ])
+    ], scene=lambda w, h: _DataBurstScene(w, h, hull=world.save.ship.hull_class, what=label, where=system.name,
+                                         seed=_scene_seed(world, "tip")))
 
 
 def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:

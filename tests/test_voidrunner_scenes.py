@@ -19,7 +19,8 @@ import time
 
 import pytest
 
-from .support import _add_cargo, _world_with_pending_fight, _world_with_seed, vr
+from .support import (_add_cargo, _finale_world, _world_with_exploration_choice, _world_with_pending_fight,
+                      _world_with_seed, vr)
 
 CUP = re.compile(r"\x1b\[(\d+);(\d+)H")
 SIZES = [(40, 12), (59, 17), (80, 24), (132, 50)]
@@ -59,6 +60,16 @@ def every_scene(width: int, height: int) -> dict[str, "vr._Scene"]:
         "lost": vr._LostScene(width, height, hull="Carrier", patrol=False, name="Red Jackal", seed="t"),
         "escape": vr._EscapeScene(width, height, hull="Freighter", patrol=True, name="CNS Vigilant", seed="t"),
         "scan": vr._ScanScene(width, height, hull="Freighter", units=12, seed="t"),
+        "ambush": vr._ContactScene(width, height, hull="Cutter", kind="ambush", names=["Red Jackal"],
+                                   target=0, tier=2, seed="t"),
+        "salvage": vr._SalvageScene(width, height, hull="Shuttle", credits=340, site=None, seed="t"),
+        "landmark": vr._SalvageScene(width, height, hull="Carrier", credits=2400, site="the Silent Cathedral", seed="t"),
+        "distress": vr._DistressScene(width, height, hull="Freighter", credits=140, fuel=3, seed="t"),
+        "databurst": vr._DataBurstScene(width, height, hull="Cutter", what="Medical Supplies",
+                                        where="Kepler Reach", seed="t"),
+        "tow": vr._TowScene(width, height, hull="Freighter", seed="t"),
+        "refit": vr._RefitScene(width, height, old="Shuttle", new="Carrier", hull_hp=180, seed="t"),
+        "finale": vr._FinaleScene(width, height, hull="Cutter", finale="Frontier Legend", pilot="Thiesi", seed="t"),
     }
     for economy in vr.ECONOMIES:
         scenes[f"dock-{economy}"] = vr._DockScene(width, height, economy=economy, station="Harbor Lights",
@@ -123,6 +134,14 @@ def test_the_last_frame_says_what_happened(width, height, depth):
     assert "CONTRABAND DETECTED" in last("scan")
     assert "HARBOR LIGHTS" in last("dock-Agricultural") and "Kepler Reach" in last("dock-Agricultural")
     assert "new system charted" in last("dock-Tech") and "charted" not in last("dock-Haven")
+    assert "THE WRECK WAKES UP" in last("ambush")
+    assert "SALVAGE RECOVERED" in last("salvage") and "+340cr" in last("salvage")
+    assert "SITE INVESTIGATED" in last("landmark") and "+2,400cr" in last("landmark")
+    assert "SURVIVORS ABOARD" in last("distress") and "+140cr" in last("distress")
+    assert "DATA BURST INTERCEPTED" in last("databurst")
+    assert "TOWED TO FREEPORT" in last("tow")
+    assert "COMMISSIONED" in last("refit") and "CARRIER" in last("refit")
+    assert "FRONTIER LEGEND" in last("finale") and "Thiesi" in last("finale")
 
 
 def test_an_uncharted_destination_keeps_its_name(depth):
@@ -410,3 +429,108 @@ def test_a_customs_inspection_sweeps_before_its_terms(scenes_played, monkeypatch
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_customs(vr.Palette(False), world)
     assert played == [("_ScanScene", True)]
+
+
+def test_a_salvaged_derelict_shows_its_prize(scenes_played, monkeypatch):
+    world = _world_with_exploration_choice("derelict")
+    played = scenes_played(world)
+    world.event_rng.random = lambda: 0.0  # the salvage, not the ambush
+    monkeypatch.setattr(vr, "read_key", lambda: "S")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._encounter_derelict(vr.Palette(False), world)
+    assert played == [("_SalvageScene", True)]
+
+
+def test_a_derelict_that_was_never_dead_opens_as_an_ambush(monkeypatch):
+    seen = []
+    monkeypatch.setattr(vr, "play_scene", lambda make: seen.append(make(80, 24)) or True)
+    world, pirate = _world_with_pending_fight()
+    world.save.pending_travel["primary"] = "random"
+    vr.play_contact_scene(world, pirate, {"ambush": {"name": pirate.name}}, patrol=False)
+    assert [scene.kind for scene in seen] == ["ambush"]
+
+
+def test_an_answered_distress_call_brings_the_survivors_aboard(scenes_played, monkeypatch):
+    world = _world_with_exploration_choice("distress")
+    played = scenes_played(world)
+    monkeypatch.setattr(vr, "read_key", lambda: "H")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._encounter_distress_call(vr.Palette(False), world)
+    assert played == [("_DistressScene", True)]
+
+
+@pytest.mark.parametrize("kind,key", [("derelict", "I"), ("distress", "I")])
+def test_passing_by_plays_nothing(scenes_played, monkeypatch, kind, key):
+    world = _world_with_exploration_choice(kind)
+    played = scenes_played(world)
+    monkeypatch.setattr(vr, "read_key", lambda: key)
+    with contextlib.redirect_stdout(io.StringIO()):
+        (vr._encounter_derelict if kind == "derelict" else vr._encounter_distress_call)(vr.Palette(False), world)
+    assert played == []
+
+
+def test_an_intercepted_data_burst_streams_in(scenes_played):
+    world = _world_with_exploration_choice("tip")
+    played = scenes_played(world)
+    dest = world.by_id[world.save.pending_travel["destination"]]
+    for system in world.galaxy:
+        system.discovered = True
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._encounter_market_tip(vr.Palette(False), world, dest)
+    assert played == [("_DataBurstScene", True)]
+
+
+def test_an_investigated_landmark_names_its_site(scenes_played, monkeypatch):
+    keys = iter("IB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    world = _world_with_seed(121)
+    world.save.current_system = world.landmark["system_id"]
+    played = scenes_played(world)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_landmark(vr.Palette(False), world)
+    assert played == [("_SalvageScene", True)]
+
+
+def test_a_stranded_pilot_is_towed_home_on_screen(scenes_played, monkeypatch):
+    world = _world_with_seed(27)
+    world.save.current_system = world.here.connections[0]
+    world.save.ship.fuel = 0
+    world.save.pilot.credits = 0
+    played = scenes_played(world)
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_station_menu(vr.Palette(False), world)
+    assert played == [("_TowScene", True)]
+
+
+def test_a_top_up_at_home_is_no_tow(scenes_played, monkeypatch):
+    world = _world_with_seed(27)
+    world.save.ship.fuel = 0
+    world.save.pilot.credits = 0
+    played = scenes_played(world)
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_station_menu(vr.Palette(False), world)
+    assert played == []
+
+
+def test_a_commissioned_hull_leaves_the_drydock(scenes_played, monkeypatch):
+    world = _world_with_seed(120)
+    world.save.pilot.credits = 100_000
+    played = scenes_played(world)
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+    monkeypatch.setattr(vr, "read_key", lambda: "C")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._hull_refit_screen(vr.Palette(False), world, "Freighter", 5000)
+    assert played == [("_RefitScene", True)]
+
+
+def test_a_retirement_sails_for_the_sun_before_its_ending(scenes_played, monkeypatch):
+    world = _finale_world("legend")
+    played = scenes_played(world)
+    keys = iter(["S", "x"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert vr.screen_career_finale(vr.Palette(False), world) == "A new career begins."
+    assert played == [("_FinaleScene", True)]

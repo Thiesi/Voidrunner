@@ -1100,7 +1100,13 @@ streaks, a flash, the tunnel), a contact (raider, squadron, Concord
 interdiction, bounty target or convoy ambush, each with its own alert and
 caption), a kill, the loss of the ship, a clean escape by Evade or Dump, a
 customs sweep, and the approach to a station drawn by its economy in front of
-its banded world. The pilot's own hull class flies in every one. A scene
+its banded world. Quieter moments get scenes of their own: a derelict
+salvaged by tractor beam (or waking up as an ambush), a distress call
+answered as escape pods cross the gap, a trader's data burst, a landmark
+investigated, a stranded pilot towed home, a hull commissioned in drydock under
+a welding seam, and a retirement that sails for a rising sun under the
+finale's name. The pilot's own hull class flies in every one. Passing a
+derelict or a distress call by plays nothing. A scene
 is about two seconds and ends on a captioned frame held for under a second,
 then play goes on: unlike the splash it never waits for a key. Otherwise the
 splash's rules apply, including the stricter two. A scene takes the key that
