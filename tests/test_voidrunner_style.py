@@ -688,8 +688,22 @@ def test_no_cockpit_row_shows_its_label_and_its_value_in_one_role(monkeypatch):
     p = _at(monkeypatch)
     drawn = "".join(vr.ship_gauge_rows(_world_with_seed(7)))
     for value in ("Intact", "Shuttle"):
-        assert _role_of(drawn, value) == p.ink, (value, plain(drawn))
+        assert _role_of(drawn, value) != p.slate, (value, plain(drawn))
     assert _role_of(drawn, "HULL") == p.slate, plain(drawn)
+
+
+@pytest.mark.parametrize("fraction,tone", [(1, "good"), (0.75, "text"), (0.5, "caution"), (0.2, "danger")])
+def test_a_gauges_words_are_not_the_color_of_its_number(monkeypatch, fraction, tone):
+    """`60/60 Intact` read as one value (play-test, v1.2.2): the condition takes
+    its severity, the other gauges' words are prose, and the numbers stay ink."""
+    p = _at(monkeypatch)
+    world = _world_with_seed(7)
+    ship = world.save.ship
+    ship.hull_hp = int(vr.hull_hp_max(ship) * fraction)
+    drawn = "".join(vr.ship_gauge_rows(world))
+    assert _role_of(drawn, vr.hull_condition(ship)) == p.tone(tone), plain(drawn)
+    assert _role_of(drawn, f"{ship.hull_hp}/{vr.hull_hp_max(ship)}") == p.ink, plain(drawn)
+    assert _role_of(drawn, "Shuttle") == p.text and _role_of(drawn, "0 lots") == p.text, plain(drawn)
 
 
 def test_a_neutral_standing_is_a_value_and_its_bar_is_not(monkeypatch):

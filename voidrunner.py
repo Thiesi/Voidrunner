@@ -414,6 +414,18 @@ class Palette:
     def alarm(self) -> str:
         return self._sgr((255, 92, 108), 203)
 
+    def rgb(self, color: tuple[int, int, int]) -> str:
+        """Any color, at this preset's depth: for a value whose color is
+        computed, such as achievement progress, rather than one of the roles."""
+        if _OUTPUT_STYLE in ("mono", "plain"):
+            return ""
+        if _OUTPUT_STYLE == "basic":
+            index = _splash_16(color, True)
+            return f"{ESC}[{30 + index if index < 8 else 90 + index - 8}m"
+        if self._truecolor:
+            return f"{ESC}[38;2;{color[0]};{color[1]};{color[2]}m"
+        return f"{ESC}[38;5;{_splash_256(color)}m"
+
     # -- legacy aliases ----------------------------------------------------
     @property
     def title(self) -> str:
@@ -459,7 +471,7 @@ class Palette:
         """A severity tone by name, for a component handed one as data."""
         return {"good": self.mint, "caution": self.amber, "danger": self.alarm,
                 "info": self.hull, "brand": self.plasma, "key": self.gold,
-                "value": self.ink, "label": self.slate,
+                "value": self.ink, "label": self.slate, "text": self.text,
                 # A column heading is a section header, which `hull` already
                 # means. It was `label`, so a table's headings were the color
                 # of the sentence above them and the footnote below them and
@@ -8197,8 +8209,13 @@ def ship_gauge_rows(world: World) -> list[str]:
     # crew roster -- every one of them a value a caller reads off the row. It
     # was declared `label`, so it came out the color of `HULL` and `FUEL` in
     # column 0, which really are labels (issue #532).
+    # Its words are not the color of the number beside them, though: `60/60
+    # Intact` read as one value. The hull's condition takes its severity, the
+    # rest are prose (play-test, v1.2.2).
+    condition = {"Intact": "good", "Scuffed": "text", "Damaged": "caution", "Critical": "danger"}[hull_condition(ship)]
     drawn = table(["", "", "", ""], rows, "llrl",
-                  styles=[["label", "value", "value", "value"] for _ in rows],
+                  styles=[["label", "value", "value", condition if number == 0 else "text"]
+                          for number in range(len(rows))],
                   optional=(3,))[1:]  # the headers are the gauge labels themselves
     # Tinted before it is laid in: a row that carries the art is already styled,
     # so raw art would be the one thing on the deck with no role (#493 review).
@@ -11620,12 +11637,17 @@ def journey_resumed_lines(world: World) -> list[str]:
     # An uncharted bearing stays unnamed until the pilot arrives.
     destination = system.name if system is not None and system.discovered else "an uncharted system"
     # Short enough to fit the 40x12 floor with its frame and the pause under it.
-    text = [f"Welcome back, {world.save.pilot.handle}.",
-            f"Resuming your interrupted journey to {destination}, day {world.save.turn}: the same "
-            "encounter, nothing rerolled. Station access follows its resolution."]
+    # The callsign is the screen's one accent, the destination a place name.
+    p = pal()
+    named = system is not None and system.discovered
+    text = [f"{p.text}Welcome back, {RESET}{p.plasma}{BOLD}{_mission_plain(world.save.pilot.handle)}{RESET}{p.text}.{RESET}",
+            f"{p.text}Resuming your interrupted journey to {RESET}"
+            f"{p.hull if named else p.text}{_mission_plain(destination)}{RESET}{p.text}, day {RESET}"
+            f"{p.ink}{world.save.turn}{RESET}{p.text}: the same encounter, nothing rerolled. "
+            f"Station access follows its resolution.{RESET}"]
     rows: list[str] = []
     for line in text:
-        rows.extend(wrap_styled(style_body_line(_mission_plain(line)), _page_content_width()))
+        rows.extend(wrap_styled(line, _page_content_width()))
     return rows
 
 
@@ -12018,6 +12040,21 @@ def screen_missions(p: Palette, world: World) -> None:
 
 
 ACCOLADE_TIER_TONES = {1: "caution", 2: "value", 3: "key"}  # bronze, silver, gold
+# The same three as colors, for progress: the goal is drawn in its medal's color
+# and the count so far blends toward it from the brand's plasma as it closes in.
+# Plasma rather than anything cooler, because a blend from blue or grey into
+# gold passes through brown on the way (play-test, v1.2.2).
+ACCOLADE_TIER_RGB = {1: (255, 179, 71), 2: (232, 240, 255), 3: (255, 200, 60)}
+ACCOLADE_PROGRESS_START = (255, 90, 190)
+
+
+def accolade_progress(current: int, target: int, tier: int) -> str:
+    """`current/target`, the count a step of the way from plasma to the goal's
+    medal color for every tenth of the way there."""
+    p = pal()
+    goal = ACCOLADE_TIER_RGB[tier]
+    near = _mix(ACCOLADE_PROGRESS_START, goal, (current * 10 // max(1, target)) / 10)
+    return f"{p.rgb(near)}{current:,}{RESET}{p.rgb(goal)}/{target:,}{RESET}"
 
 
 def accolade_lines(save: SaveData, rarity: tuple[dict[str, int], int] | None = None) -> list[str]:
@@ -12042,19 +12079,19 @@ def accolade_lines(save: SaveData, rarity: tuple[dict[str, int], int] | None = N
             tone = p.tone(ACCOLADE_TIER_TONES[accolade.tier])
             if accolade.id in unlocked:
                 share = holders.get(accolade.id, 0) * 100 // pilots if pilots else None
-                lines.append(f"{tone}{glyph('earned')} {accolade.name}{RESET} {p.slate}{accolade.description}"
-                             f" Career #{unlocked[accolade.id]}." + (f" {share}% of pilots." if share is not None else "")
-                             + RESET)
+                lines.append(f"{tone}{glyph('earned')} {accolade.name}{RESET} {p.text}{accolade.description}{RESET}"
+                             f" {p.slate}Career{RESET} {p.ink}#{unlocked[accolade.id]}{RESET}{p.text}.{RESET}"
+                             + (f" {p.ink}{share}%{RESET}{p.text} of pilots.{RESET}" if share is not None else ""))
             elif accolade.hidden:
                 secret += 1
             else:
-                progress = (f" {min(metrics[accolade.metric], accolade.target):,}/{accolade.target:,}."
-                            if accolade.target > 1 else "")
+                progress = (f" {accolade_progress(min(metrics[accolade.metric], accolade.target), accolade.target, accolade.tier)}"
+                            f"{p.text}.{RESET}" if accolade.target > 1 else "")
                 lines.append(f"{p.deep}{glyph('unearned')}{RESET} {p.ink}{accolade.name}{RESET} "
-                             f"{p.slate}{accolade.description}{progress}{RESET}")
+                             f"{p.text}{accolade.description}{RESET}{progress}")
         if secret:
-            lines.append(f"{p.deep}{glyph('unearned')}{RESET} {p.slate}{plural(secret, 'hidden achievement')}"
-                         f" still to find.{RESET}")
+            lines.append(f"{p.deep}{glyph('unearned')}{RESET} {p.ink}{secret}{RESET} {p.text}"
+                         f"{'hidden achievement' if secret == 1 else 'hidden achievements'} still to find.{RESET}")
     return lines
 
 
