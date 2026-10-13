@@ -259,3 +259,52 @@ sys.exit(main(sys.argv[2]))
     result = subprocess.run([sys.executable, "-c", script, str(_VOIDRUNNER_PATH), path],
                             input=b"Ace\rYQ", capture_output=True, env=env, timeout=60)
     assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+
+
+# C1 controls (issue #15). U+009B is a one-character CSI and U+009D an OSC: a
+# UTF-8 drop file can carry them in a name, where they would reach a UTF-8
+# terminal as commands and make the career unsaveable besides.
+CSI, OSC = "\u009b", "\u009d"
+
+
+@pytest.mark.parametrize("kind,line,key", [("DOOR32.SYS", 7, "handle"), ("DOOR32.SYS", 4, "node_name"),
+                                          ("DOOR.SYS", 36, "handle")])
+def test_c1_controls_are_stripped_from_caller_names(tmp_path, kind, line, key):
+    info = vr._load_door_info(drop_file(tmp_path, kind, changes={line: f"Star{CSI}2Jfox{OSC}0;x"}))
+    assert info[key] == "Star2Jfox0;x"
+    assert not any(0x80 <= ord(char) <= 0x9F for char in info[key])
+
+
+@pytest.mark.parametrize("kind,line", [("DOOR32.SYS", 7), ("DOOR.SYS", 36)])
+def test_an_alias_of_nothing_but_c1_controls_falls_back_to_the_real_name(tmp_path, kind, line):
+    info = vr._load_door_info(drop_file(tmp_path, kind, changes={line: CSI + OSC}))
+    assert info["handle"] == "Test Pilot"
+
+
+def test_cp437_drop_files_keep_their_accented_letters(tmp_path):
+    # Bytes 0x80-0x9F are letters in CP437, never controls: nothing to strip.
+    info = vr._load_door_info(drop_file(tmp_path, changes={7: "Çédric"}, encoding="cp437"))
+    assert info["handle"] == "Çédric"
+
+
+def test_a_body_row_drops_c1_controls_from_data():
+    row = vr.style_body_line(f"Pilot Star{CSI}2Jfox")
+    assert CSI not in row and "Star2Jfox" in vr.ANSI_ESCAPE_RE.sub("", row)
+
+
+@pytest.mark.parametrize("kind", ["DOOR32.SYS", "DOOR.SYS"])
+def test_a_c1_alias_launches_and_keeps_a_career(tmp_path, kind):
+    """Before #15 this caller could not play: the alias was accepted, offered as
+    the default callsign, and refused by the save validator at the first save."""
+    line = 7 if kind == "DOOR32.SYS" else 36
+    changes = {line: f"Star{CSI}2Jfox"}
+    if kind == "DOOR32.SYS":
+        changes.update({1: "0", 2: "0"})
+    path = drop_file(tmp_path, kind, changes=changes)
+    saves = tmp_path / "saves"
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH), path], input=b"\rYQ", capture_output=True,
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(saves)), timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads((saves / "77.json").read_text(encoding="utf-8"))["pilot"]["handle"] == "Star2Jfox"
+    # The UTF-8 encoding of U+009B. (A lone 0x9B byte would be a CP437 cent sign.)
+    assert b"\xc2\x9b" not in result.stdout
