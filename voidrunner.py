@@ -7157,14 +7157,18 @@ class _DockScene(_Scene):
     frames = 26
 
     def __init__(self, width: int, height: int, *, economy: str, station: str, system: str,
-                 charted: bool, seed: str):
+                 charted: bool, seed: str, contracts: int = 0, paid: int = 0):
         super().__init__(width, height, seed)
         self.economy = economy if economy in _SCENE_LIGHTS else "Industrial"
         self.lights = _SCENE_LIGHTS[self.economy]
         self.title = f"DOCKING  ·  {_scene_text(station).upper()}"
-        # A first visit is news; the economy is on the deck either way, so it
-        # is what a narrow caption drops.
-        self.detail = [(_scene_text(system), _SCENE_INK), ("  ·  ", _SCENE_SLATE)]
+        # A payday leads, then a first visit, which is news; the economy is on
+        # the deck either way, so it is what a narrow caption drops first.
+        self.detail = []
+        if contracts:
+            done = "contract complete" if contracts == 1 else f"{contracts} contracts complete"
+            self.detail += [(f"+{paid:,}cr ", _SPLASH_GOLD), (done, _SCENE_MINT), ("  ·  ", _SCENE_SLATE)]
+        self.detail += [(_scene_text(system), _SCENE_INK), ("  ·  ", _SCENE_SLATE)]
         if charted:
             self.detail += [("new system charted", _SCENE_MINT), ("  ·  ", _SCENE_SLATE)]
         self.detail.append((self.economy, _SCENE_SLATE))
@@ -12445,12 +12449,16 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
     if travel["phase"] == "arrival":
         lines = []
         inspect = False
+        completed = paid = 0  # contracts this arrival finished, and what they paid
         if not world.ship_destroyed_this_hop:
             world.save.current_system = dest_id
             lines = settle_futures_contracts(world)
+            credits_before = world.save.pilot.credits
             lines += check_mission_completions(
                 world, just_discovered=None if travel["was_discovered"] else dest_id,
             )
+            completed = sum(1 for line in lines if line.startswith("Mission complete:"))
+            paid = max(0, world.save.pilot.credits - credits_before)
             if has_contraband(world) and dest.economy != "Haven":
                 chance = customs_risk_for(world, dest)
                 inspect = world.event_rng.random() < chance
@@ -12460,7 +12468,8 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         if not world.ship_destroyed_this_hop:
             play_scene(lambda w, h: _DockScene(
                 w, h, economy=dest.economy, station=dest.station_name, system=dest.name,
-                charted=not travel["was_discovered"], seed=_scene_seed(world, "dock")))
+                charted=not travel["was_discovered"], seed=_scene_seed(world, "dock"),
+                contracts=completed, paid=paid))
         _show_result(p, world, lines)
     if travel["encounter"].get("inspect"):
         screen_customs(p, world)

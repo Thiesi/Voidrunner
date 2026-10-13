@@ -379,6 +379,36 @@ def test_a_quiet_hop_jumps_and_docks_after_each_commit(scenes_played, monkeypatc
     assert played == [("_JumpScene", True), ("_DockScene", True)]
 
 
+def test_a_delivery_is_paid_in_the_docking_caption(monkeypatch):
+    seen = []
+    monkeypatch.setattr(vr, "play_scene", lambda make: seen.append(make(80, 24)) or True)
+    world = _world_with_seed(42)
+    dest_id = sorted(world.here.connections)[0]
+    mission = vr.Mission(7, "delivery", "Haul ore", 420, 0, dest_id, commodity="ore", quantity=2)
+    world.save.active_missions = [mission]
+    _add_cargo(world, "ore", 2)
+    world.event_rng.random = lambda: 0.99
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(False), world, dest_id)
+    dock = seen[-1]
+    assert isinstance(dock, vr._DockScene)
+    caption = text_of(dock.frame(dock.frames - 1))
+    assert "+420cr contract complete" in caption
+
+
+@pytest.mark.parametrize("width", [40, 80])
+def test_a_payday_leads_the_caption_and_the_economy_goes_first(width, depth):
+    depth("auto", True)
+    scene = vr._DockScene(width, 24, economy="Mining", station="Harbor Lights", system="Kepler Reach",
+                          charted=True, seed="t", contracts=2, paid=1500)
+    detail = text_of(scene.frame(scene.frames - 1)).splitlines()[scene.caption_row + 1]
+    assert "+1,500cr 2 contracts complete" in detail
+    # The economy is the first thing a full caption gives up, and at the floor
+    # the payday stands alone rather than beside half a system name.
+    assert ("Kepler Reach" in detail and "new system charted" in detail) == (width == 80)
+    assert "Mining" not in detail
+
+
 def test_a_fresh_fight_opens_on_contact_and_a_kill_ends_it(scenes_played, monkeypatch):
     world, pirate = _world_with_pending_fight()
     played = scenes_played(world)

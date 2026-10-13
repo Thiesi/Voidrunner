@@ -1100,7 +1100,9 @@ streaks, a flash, the tunnel), a contact (raider, squadron, Concord
 interdiction, bounty target or convoy ambush, each with its own alert and
 caption), a kill, the loss of the ship, a clean escape by Evade or Dump, a
 customs sweep, and the approach to a station drawn by its economy in front of
-its banded world. Quieter moments get scenes of their own: a derelict
+its banded world. A contract finished on arrival is paid in the docking
+caption, ahead of the system's name, rather than in a scene of its own that
+would lengthen the hop. Quieter moments get scenes of their own: a derelict
 salvaged by tractor beam (or waking up as an ambush), a distress call
 answered as escape pods cross the gap, a trader's data burst, a landmark
 investigated, a stranded pilot towed home, a hull commissioned in drydock under
