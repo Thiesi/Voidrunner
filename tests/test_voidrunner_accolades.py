@@ -404,3 +404,17 @@ def test_progress_has_no_color_where_the_preset_has_none(monkeypatch, style):
     monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
     # No color of its own; the resets every component writes are `out`'s to strip.
     assert vr.accolade_progress(4, 10, 3).replace(vr.RESET, "") == "4/10"
+
+
+def test_numbers_in_a_description_are_values_and_credits_are_gold(monkeypatch):
+    """`Complete 10 delivery contracts.` hid its 10 in the prose (play-test, v1.2.2).
+    Bold, because ink beside prose is too close in brightness to stand out."""
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
+    monkeypatch.setattr(vr, "_PALETTE", vr.Palette(truecolor=True))
+    p = vr.pal()
+    drawn = vr.accolade_description("Complete 10 delivery contracts.")
+    assert f"{p.text}Complete " in drawn and f"{p.ink}{vr.BOLD}10{vr.RESET}" in drawn
+    assert f"{p.text} delivery contracts." in drawn
+    assert f"{p.ink}{vr.BOLD}5%{vr.RESET}" in vr.accolade_description("Win a fight with under 5% of your hull left.")
+    assert f"{p.gold}{vr.BOLD}10,000cr{vr.RESET}" in vr.accolade_description("Hold 10,000cr at once.")
+    assert vr._ANSI_RE.sub("", vr.accolade_description("Make 1,000 jumps.")) == "Make 1,000 jumps."

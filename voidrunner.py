@@ -12048,6 +12048,20 @@ ACCOLADE_TIER_RGB = {1: (255, 179, 71), 2: (232, 240, 255), 3: (255, 200, 60)}
 ACCOLADE_PROGRESS_START = (255, 90, 190)
 
 
+def accolade_description(text: str) -> str:
+    """A description as prose, with the numbers in it -- the 10 of `Complete
+    10 contracts`, the 5% of `under 5% of your hull` -- drawn as the values
+    they are, in bold: ink beside prose is too close in brightness to stand
+    out on its own. A credit figure is gold, as credits always are."""
+    p = pal()
+
+    def value(match: re.Match) -> str:
+        role = p.gold if match.group(0).endswith("cr") else p.ink
+        return f"{RESET}{role}{BOLD}{match.group(0)}{RESET}{p.text}"
+
+    return f"{p.text}{_VALUE_RE.sub(value, text)}{RESET}"
+
+
 def accolade_progress(current: int, target: int, tier: int) -> str:
     """`current/target`, the count a step of the way from plasma to the goal's
     medal color for every tenth of the way there."""
@@ -12079,7 +12093,7 @@ def accolade_lines(save: SaveData, rarity: tuple[dict[str, int], int] | None = N
             tone = p.tone(ACCOLADE_TIER_TONES[accolade.tier])
             if accolade.id in unlocked:
                 share = holders.get(accolade.id, 0) * 100 // pilots if pilots else None
-                lines.append(f"{tone}{glyph('earned')} {accolade.name}{RESET} {p.text}{accolade.description}{RESET}"
+                lines.append(f"{tone}{glyph('earned')} {accolade.name}{RESET} {accolade_description(accolade.description)}"
                              f" {p.slate}Career{RESET} {p.ink}#{unlocked[accolade.id]}{RESET}{p.text}.{RESET}"
                              + (f" {p.ink}{share}%{RESET}{p.text} of pilots.{RESET}" if share is not None else ""))
             elif accolade.hidden:
@@ -12088,7 +12102,7 @@ def accolade_lines(save: SaveData, rarity: tuple[dict[str, int], int] | None = N
                 progress = (f" {accolade_progress(min(metrics[accolade.metric], accolade.target), accolade.target, accolade.tier)}"
                             f"{p.text}.{RESET}" if accolade.target > 1 else "")
                 lines.append(f"{p.deep}{glyph('unearned')}{RESET} {p.ink}{accolade.name}{RESET} "
-                             f"{p.text}{accolade.description}{RESET}{progress}")
+                             f"{accolade_description(accolade.description)}{progress}")
         if secret:
             lines.append(f"{p.deep}{glyph('unearned')}{RESET} {p.ink}{secret}{RESET} {p.text}"
                          f"{'hidden achievement' if secret == 1 else 'hidden achievements'} still to find.{RESET}")
