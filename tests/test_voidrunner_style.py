@@ -564,7 +564,7 @@ def test_labels_are_off_the_cockpits_own_hue():
 
 def test_every_palette_role_stays_distinct_in_both_depths():
     p = vr.Palette(truecolor=True)
-    roles = ["hull", "deep", "plasma", "gold", "ink", "slate", "mint", "amber", "alarm"]
+    roles = ["hull", "deep", "plasma", "gold", "ink", "slate", "text", "mint", "amber", "alarm"]
     truecolor = [getattr(p, role) for role in roles]
     assert len(set(truecolor)) == len(roles)
     indexed = [getattr(vr.Palette(truecolor=False), role) for role in roles]
@@ -650,7 +650,25 @@ def test_a_body_row_is_still_read_as_prose(monkeypatch):
     p = _at(monkeypatch)
     runs = _role_runs(vr.style_body_line("Press [B] to go back."))
     assert runs.get("[B]") == p.gold, runs
-    assert runs.get(" to go back.") == p.slate, runs
+    assert runs.get(" to go back.") == p.text, runs
+
+
+def test_a_label_value_row_separates_label_value_and_prose(monkeypatch):
+    """A screen of sentences was nearly all `slate`, the label color, so the
+    labels it exists to mark disappeared into it (v1.2.2 play-test). A short label is slate,
+    the clause it introduces is ink, and the sentence after it is prose."""
+    p = _at(monkeypatch)
+    runs = _role_runs(vr.style_body_line("Deadline: none. Jumps advance the day."))
+    assert runs == {"Deadline: ": p.slate, "none": p.ink, ". Jumps advance the day.": p.text}, runs
+    runs = _role_runs(vr.style_body_line("Cargo: deliver 3 Machinery; 0 aboard."))
+    assert runs["Cargo: "] == p.slate and runs["deliver "] == p.ink and runs[" Machinery"] == p.ink
+    runs = _role_runs(vr.style_body_line("Gross payout: 341 cr. Credits available: 1,200 cr."))
+    # A second label after a full stop is a label too; credits stay gold.
+    assert runs["Gross payout: "] == p.slate and runs["Credits available: "] == p.slate, runs
+    assert runs["341 cr"] == p.gold and runs["1,200 cr"] == p.gold
+    # Five words before the colon is a sentence, not a label.
+    runs = _role_runs(vr.style_body_line("Estimate is not total profit: repairs and detours"))
+    assert set(runs.values()) == {p.text}, runs
 
 
 def test_a_tables_headings_are_not_the_color_of_its_labels(monkeypatch):

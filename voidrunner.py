@@ -77,6 +77,7 @@ import contextlib
 import dataclasses
 import errno
 import functools
+import itertools
 import json
 import math
 import os
@@ -293,7 +294,7 @@ def _load_door_info(drop_file: str | None = None) -> dict:
 class Palette:
     """Voidrunner's presentation palette (issue #493 §4).
 
-    Nine named roles, not nine colors a screen may pick from: *what a token
+    Ten named roles, not ten colors a screen may pick from: *what a token
     is* decides its color, so the same fact is the same color on every
     screen, and chrome is never the color of content. Truecolor is the
     design target; the 256-color index beside each RGB is the first
@@ -322,14 +323,16 @@ class Palette:
                      # already holds 33. 110 is `hull` and 237 is `deep`, the
                      # two chrome roles: dark cyan and bright black are the
                      # sixteen-color readings of "recedes behind the content".
-                     110: 36, 237: 90, 255: 97, 137: 37, 84: 92, 215: 33}.get(idx256, 37)
+                     110: 36, 237: 90, 255: 97, 137: 37, 84: 92, 215: 33,
+                     # 250 is `text`, prose: white, like the labels around it.
+                     250: 37}.get(idx256, 37)
             return f"{ESC}[{color}m"
         if self._truecolor:
             r, g, b = rgb
             return f"{ESC}[38;2;{r};{g};{b}m"
         return f"{ESC}[38;5;{idx256}m"
 
-    # -- the nine roles ----------------------------------------------------
+    # -- the ten roles -----------------------------------------------------
     @property
     def hull(self) -> str:
         """Frames, section headers, station names.
@@ -384,6 +387,20 @@ class Palette:
         money and hotkeys.
         """
         return self._sgr((179, 155, 125), 137)
+
+    @property
+    def text(self) -> str:
+        """Running prose: the sentences a row is made of when it is not a
+        `Label: value` pair or a table (v1.2.2 play-test).
+
+        Prose used to fall to `slate`, so a screen made of sentences -- the
+        guide, the viewport, a contract's terms -- was nearly all the label
+        color, and the labels that color exists to separate disappeared into
+        it. A cool light grey sits between `ink` and `slate`: readable as the
+        body of the screen, a step below the values in it, and neutral so the
+        warm labels still read as a different kind of thing.
+        """
+        return self._sgr((188, 196, 208), 250)
 
     @property
     def mint(self) -> str:
@@ -5927,6 +5944,13 @@ _ROLE_TONES = (
 # A number, a credit figure, a ratio, a percentage, a signed delta: the values
 # a caller reads off a row.
 _VALUE_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?(?:\s?cr|%|/\d[\d,]*)?")
+# `Label: value` -- a short label opening a row or a clause, and the clause it
+# introduces (v1.2.2 play-test). Up to four words: `Procurement at this station:` is a
+# label, `Estimate is not total profit:` is a sentence. The clause ends at a
+# sentence or a semicolon, because what follows one is usually a hint
+# (`Deadline: none. Jumps advance the day.`), which stays in the prose role.
+_LABEL_VALUE_RE = re.compile(r"(?:^|(?<=[.;] ))\s*[A-Za-z][\w'-]*(?: [\w'-]+){0,3}: +"
+                             r"(?P<value>(?:[^.;]|\.(?! ))+?)(?=[.;](?: |$)|$)")
 # Gold is hotkeys and credits and nothing else, so a credit figure is claimed
 # before the generic value pass that would paint it as an ordinary number.
 _CREDIT_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?\s?cr\b")
@@ -6013,15 +6037,29 @@ def style_body_line(text: str, *, key_labels: bool = False) -> str:
     for match in _VALUE_RE.finditer(text):
         claim(match.start(), match.end(), f"{p.ink}{match.group(0)}{RESET}")
 
+    # Whatever no pattern claimed is prose, colored by where it sits: a label's
+    # words are slate, the clause it introduces is ink like the numbers in it,
+    # and everything else is text. A credit, a key or a severity word inside a
+    # value clause keeps the role it claimed above.
+    base = [p.text] * len(text)
+    for match in _LABEL_VALUE_RE.finditer(text):
+        base[match.start():match.start("value")] = [p.slate] * (match.start("value") - match.start())
+        base[match.start("value"):match.end("value")] = [p.ink] * (match.end("value") - match.start("value"))
+
+    def prose(start: int, end: int) -> list[str]:
+        parts = []
+        for role, run in itertools.groupby(range(start, end), key=base.__getitem__):
+            run = list(run)
+            parts.append(f"{role}{text[run[0]:run[-1] + 1]}{RESET}")
+        return parts
+
     spans.sort()
     out_parts, cursor = [], 0
     for start, end, styled in spans:
-        if start > cursor:
-            out_parts.append(f"{p.slate}{text[cursor:start]}{RESET}")
+        out_parts.extend(prose(cursor, start))
         out_parts.append(styled)
         cursor = end
-    if cursor < len(text):
-        out_parts.append(f"{p.slate}{text[cursor:]}{RESET}")
+    out_parts.extend(prose(cursor, len(text)))
     return "".join(out_parts)
 
 

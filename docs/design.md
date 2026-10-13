@@ -936,17 +936,18 @@ that builds its own rows cannot opt out. This is asserted, at 80 and at 40
 columns, on the deck, market, yard, record, board, chart, crew, display,
 customs and combat screens.
 
-**Nine roles, not nine colors.** What a token *is* decides its color.
-`hull` `#7fa3bf` frames, section headers and station names; `deep` `#2f3844`
-frame shadow, gauge tracks and separators; `plasma` `#ff5abe` the brand, the
-rank and the cursor; `gold` `#ffc83c` hotkeys and credits and nothing else;
-`ink` `#e8f0ff` values -- the thing the caller reads off the row; `slate`
-`#b39b7d` labels, hints and units; and `mint` `#6cf2a0` / `amber` `#ffb347` /
-`alarm` `#ff5c6c` for good, caution and danger on gauges and severity glyphs.
-A hotkey is always gold and bold; a value is always ink; a label is always
-slate; chrome is never the color of content; one accent carries the eye per
-screen. That the hotkey, label, value and frame colors differ, and that all
-four appear on a drawn screen, is asserted rather than eyeballed.
+**Ten roles, not ten colors.** What a token *is* decides its color. `hull`
+`#7fa3bf` frames, section headers and station names; `deep` `#2f3844` frame
+shadow, gauge tracks and separators; `plasma` `#ff5abe` the brand, the rank and
+the cursor; `gold` `#ffc83c` hotkeys and credits and nothing else; `ink`
+`#e8f0ff` values -- the thing the caller reads off the row; `slate` `#b39b7d`
+labels and units; `text` `#bcc4d0` running prose; and `mint` `#6cf2a0` / `amber`
+`#ffb347` / `alarm` `#ff5c6c` for good, caution and danger on gauges and
+severity glyphs. A hotkey is always gold and bold; a value is always ink; a
+label is always slate; a sentence is text; chrome is never the color of content;
+one accent carries the eye per screen. That the hotkey, label, value and frame
+colors differ, and that all four appear on a drawn screen, is asserted rather
+than eyeballed.
 
 The label role is deliberately the one drawn from outside the cockpit's own hue
 (issue #519). It was `#7f8fae` -- a desaturated *blue* on a blue screen -- so a
@@ -970,6 +971,17 @@ before/after is judged from `scripts/door_gallery.py`, not from the hex; the
 command deck and the market, before above and after below, are kept as
 `docs/images/door-chrome-519-voidrunner-deck.png` and
 `door-chrome-519-voidrunner-market.png`.
+
+Prose is not a label (v1.2.2 play-test). Everything `style_body_line` could not
+place used to fall to `slate`, so a screen made of sentences -- the Pilot Guide,
+the viewport, a contract's terms -- was nearly all the label color, and the
+labels it exists to mark disappeared into it. Prose is now `text`, a cool light
+grey a step below `ink`. A row shaped `Label: value` is read as one: a label of
+up to four words, opening the row or a clause, is slate, and the clause it
+introduces is ink up to the next full stop or semicolon, because what follows
+is usually a hint (`Deadline: none. Jumps advance the day.`). Five words before
+a colon is a sentence (`Estimate is not total profit: ...`). Tables and composed
+rows were never affected; they choose their own roles.
 
 A preview count inside a label is a *value*, not part of the label: the service
 menu writes `Board: 4 offers` with the count in `ink` between two `slate`
