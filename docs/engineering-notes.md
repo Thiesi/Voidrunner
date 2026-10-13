@@ -447,3 +447,18 @@ Sanitize and wrap dynamic details before styling the trusted art. Keep action
 results and landmark salvage status ahead of portraits so small terminals do
 not displace the outcome. Commissioning tests must select the preview's C action
 before answering its final confirmation; a lone Y no longer purchases a hull.
+
+In-flight scenes (`play_scene`) run after the commit they illustrate; a call
+placed before a commit would let an interrupted session show an outcome that
+was never kept. The contact scene belongs only to a fight whose combat slot was
+just created, and the outcome scenes only to the exchange that set the outcome;
+the cached-outcome return at the top of `_screen_combat_session` must stay free
+of them, or a resumed hop replays its explosion. `play_scene` takes a factory
+and builds the scene only once it will play, so scripted sessions and `fast`
+callers pay nothing. Every subprocess test and every gallery walk runs with
+`DOOR_SCENES=0`: a scene takes the key that ends it, and a walk typed one key
+at a time would lose keystrokes to it. Scene randomness is a private
+`random.Random` seeded from text, never the event or galaxy generators. Wire
+size is asserted per scene at 80x24; a new effect that repaints the whole sky
+each frame needs one flat color (as the jump's flash does) or stepped values,
+not a per-pixel blend.

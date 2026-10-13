@@ -293,6 +293,9 @@ class Door:
         env.update(NETBBS_DOOR_INFO=str(drop_file(state, width, height, info_extra)),
                    VOIDRUNNER_SAVE_DIR=str(state / "saves"),
                    DOOR_SPLASH="1" if splash else "0",
+                   # A panel is the screen a walk arrives at, not a scene
+                   # played on the way; scenes are reviewed frame by frame.
+                   DOOR_SCENES="0",
                    PYTHONIOENCODING="utf-8")
         self.encoding = GALLERY_ENCODING
         command = [sys.executable, str(door)]

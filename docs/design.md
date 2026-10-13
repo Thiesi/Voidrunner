@@ -1094,6 +1094,28 @@ from 72x20, a 39-column compact one below). At sixteen colors each color is
 read by hue family rather than nearest distance, which kept the planet magenta
 instead of grey.
 
+**The voyage has scenes too.** The splash's machinery plays at the moments a
+voyage turns on: the jump out (the drive spools up, the stars stretch into
+streaks, a flash, the tunnel), a contact (raider, squadron, Concord
+interdiction, bounty target or convoy ambush, each with its own alert and
+caption), a kill, the loss of the ship, a clean escape by Evade or Dump, a
+customs sweep, and the approach to a station drawn by its economy in front of
+its banded world. The pilot's own hull class flies in every one. A scene
+is about two seconds and ends on a captioned frame held for under a second,
+then play goes on: unlike the splash it never waits for a key. Otherwise the
+splash's rules apply, including the stricter two. A scene takes the key that
+ends it, because the screen that follows is one the caller has not seen, and
+keys typed before it starts are left for the game. Each scene plays after the
+commit it shows, so a resumed session never replays a moment that has passed:
+a resumed fight does not announce its contact again, and a kept outcome does
+not explode twice. A bribe, a surrender and a withdrawal play nothing. They are
+a conversation, not a spectacle. Nothing a caller needs is only in a scene.
+Every caption repeats what the hop report or the next screen says. Sixteen
+colors may read red here, which the splash never does: a raider, an alarm and a
+fireball are red. Pixel colors are snapped to a coarse step, and gradients
+cool in steps, so a frame sends only what visibly changed. Each scene stays
+under 90 KB at 80x24 truecolor.
+
 Voidrunner offers saved display presets from station Display Options: full palette
 using the existing terminal color depth, the same palette with motion off
 (`fast`), basic 16-color, monochrome artwork, and plain text with ASCII artwork.

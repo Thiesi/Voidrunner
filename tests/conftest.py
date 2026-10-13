@@ -13,8 +13,13 @@ def _no_door_splash(monkeypatch):
 
     A finished launch splash waits for a key, so a test that starts the real door
     and waits for its first prompt before typing would wait forever. The
-    splash's own tests take this back off (`monkeypatch.delenv`)."""
+    splash's own tests take this back off (`monkeypatch.delenv`).
+
+    The in-flight scenes are off for the same kind of reason: a scene takes the
+    key that ends it, and a test types its keys one at a time into a live pipe.
+    The scenes' own tests take this back off too."""
     monkeypatch.setenv("DOOR_SPLASH", "0")
+    monkeypatch.setenv("DOOR_SCENES", "0")
     yield
 
 
