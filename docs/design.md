@@ -893,7 +893,8 @@ single count. A rank's achievement is the promotion's own moment and does not
 play a second scene. Pilot Record `[A] Achievements` lists them all by group:
 earned ones with the career that earned them and how many of this board's
 pilots hold them, the rest with their progress. Hidden ones are only a count
-until earned. Rarity reads the score records the Hall of Fame already keeps;
+until earned. The full action bar needs 96 columns, so a narrower terminal gets
+`[<] [>]` for paging and `[A] Awards`, which keeps the bar on one row at 80. Rarity reads the score records the Hall of Fame already keeps;
 a record written before achievements existed is left out of it rather than
 counted as a pilot who earned nothing.
 

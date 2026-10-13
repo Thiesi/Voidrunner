@@ -361,3 +361,21 @@ def test_the_achievements_view_fits_the_terminal(monkeypatch, terminal, width, h
     # The first two pages: the count, then the Travel group's ladder.
     assert "Pilot Record: Achievements" in text and "TRAVEL" in text and "First Light" in text
     assert all(vr._visible_width(row) <= width for row in text.splitlines())
+
+
+@pytest.mark.parametrize("width,height,label", [(80, 24, "[A] Awards"), (132, 50, "[A] Achievements")])
+@pytest.mark.parametrize("view", ["O", "A"])
+def test_the_pilot_record_action_bar_is_one_row(monkeypatch, terminal, width, height, label, view):
+    """`[A] Achievements` wrapped the bar after `[R]` at 80 columns (issue #20)."""
+    terminal(width, height)
+    world = _world_with_seed(42)
+    world.commit()
+    keys = iter([view, "B"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_status(vr.Palette(False), world)
+    bars = [row for row in plain(buf.getvalue()).splitlines() if "[B] Back" in row]
+    assert bars and all("[O] Pilot" in row and label in row and "[R] Finale" in row for row in bars)
+    # The bar ends at its colon; the key echoed after it sits in the last column.
+    assert all(vr._visible_width(row[:row.index("Back:") + 5]) <= width - 1 for row in bars)
