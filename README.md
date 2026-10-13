@@ -109,6 +109,15 @@ The allowance comes from classic drop-file minutes or NetBBS's
 Absent or invalid limits leave sessions unbounded; an explicit zero expires
 immediately. The limit belongs to this launch and is never stored in a career.
 
+In the animated presets (`auto` and `basic`) the door opens on a short title
+splash and plays brief full-screen scenes during play: the jump, a contact, a
+kill or the loss of the ship, an escape, a customs sweep, docking, salvage,
+a rescue, a data burst, a tow, a hull refit, promotions, joining a faction and
+retirement. Any key skips one. Callers who want none choose `fast` in Display Options. A SysOp can
+switch them off for everyone with `DOOR_SPLASH=0` (the title splash) and
+`DOOR_SCENES=0` (the in-flight scenes) in the door's environment. A scene sends
+under 90 KB at 80x24 in truecolor, less at lower color depths.
+
 Host references: [Synchronet DOOR.SYS](https://wiki.synchro.net/ref:door.sys),
 [Mystic external programs](https://wiki.mysticbbs.com/doku.php?id=menu_commands),
 [ENiGMA½ scripts and native binaries](https://enigma-bbs.github.io/doors/scripts-and-binaries/).
