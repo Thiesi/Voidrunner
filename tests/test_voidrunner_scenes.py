@@ -70,6 +70,12 @@ def every_scene(width: int, height: int) -> dict[str, "vr._Scene"]:
         "tow": vr._TowScene(width, height, hull="Freighter", seed="t"),
         "refit": vr._RefitScene(width, height, old="Shuttle", new="Carrier", hull_hp=180, seed="t"),
         "finale": vr._FinaleScene(width, height, hull="Cutter", finale="Frontier Legend", pilot="Thiesi", seed="t"),
+        "rank": vr._EmblemScene(width, height, kind="rank", rank=4, title="Promoted  ·  Legend of the Frontier",
+                                detail="rank retained for this career", seed="t"),
+        "concord": vr._EmblemScene(width, height, kind="concord", title="Concord Privateer Commission",
+                                   detail="Commission accepted", seed="t"),
+        "blackwake": vr._EmblemScene(width, height, kind="blackwake", title="Blackwake Cartel Membership",
+                                     detail="Welcome to the family", seed="t"),
     }
     for economy in vr.ECONOMIES:
         scenes[f"dock-{economy}"] = vr._DockScene(width, height, economy=economy, station="Harbor Lights",
@@ -142,6 +148,8 @@ def test_the_last_frame_says_what_happened(width, height, depth):
     assert "TOWED TO FREEPORT" in last("tow")
     assert "COMMISSIONED" in last("refit") and "CARRIER" in last("refit")
     assert "FRONTIER LEGEND" in last("finale") and "Thiesi" in last("finale")
+    assert "PROMOTED" in last("rank") and "CONCORD PRIVATEER" in last("concord")
+    assert "BLACKWAKE CARTEL" in last("blackwake")
 
 
 def test_an_uncharted_destination_keeps_its_name(depth):
@@ -534,3 +542,32 @@ def test_a_retirement_sails_for_the_sun_before_its_ending(scenes_played, monkeyp
     with contextlib.redirect_stdout(io.StringIO()):
         assert vr.screen_career_finale(vr.Palette(False), world) == "A new career begins."
     assert played == [("_FinaleScene", True)]
+
+
+def test_a_promotion_is_a_ceremony_once_it_is_kept(scenes_played, monkeypatch):
+    world = _world_with_seed(123)
+    played = scenes_played(world)
+    world.save.pilot.credits = vr.RANKS[2][0]
+    world.checkpoint()
+    seen = []
+    real = vr.play_scene
+    monkeypatch.setattr(vr, "play_scene", lambda make: seen.append(make(80, 24)) or real(make))
+    keys = iter([" ", "Q"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_station_menu(vr.Palette(False), world)
+    assert played == [("_EmblemScene", True)]
+    assert seen[0].kind == "rank" and seen[0].rank == 3 and "MERCHANT CAPTAIN" in seen[0].title
+
+
+@pytest.mark.parametrize("faction", [vr.FACTION_CONCORD, vr.FACTION_BLACKWAKE])
+def test_joining_a_faction_shows_its_emblem(scenes_played, monkeypatch, faction):
+    world = _world_with_seed(186)
+    world.save.pilot.reputation[faction] = 100
+    played = scenes_played(world)
+    keys = iter("JB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._screen_faction_contact(vr.Palette(False), world, faction)
+    assert played == [("_EmblemScene", True)]

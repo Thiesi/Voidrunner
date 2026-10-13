@@ -7588,6 +7588,81 @@ class _FinaleScene(_Scene):
         self.caption(stage, t, 0.66, self.title, _SPLASH_GOLD, self.detail)
 
 
+class _EmblemScene(_Scene):
+    """A milestone: an emblem swells out of a burst of light, a glint runs
+    across it, and its name is set under it. `kind` is "rank" (gold
+    chevrons, one per rank held), "concord" (a shield and star) or
+    "blackwake" (a dark diamond cut by a wake)."""
+
+    frames = 24
+    hold = SCENE_HOLD_SECONDS + 0.6
+
+    def __init__(self, width: int, height: int, *, kind: str, rank: int = 0, title: str, detail: str, seed: str):
+        super().__init__(width, height, seed)
+        self.kind, self.rank = kind, max(1, min(5, rank + 1))
+        self.color = {"concord": _SCENE_CONCORD, "blackwake": (255, 90, 200)}.get(kind, _SPLASH_GOLD)
+        self.title = _scene_text(title).upper()
+        self.detail = [(_scene_text(detail), _SCENE_SLATE)]
+        self.size = max(4.0, min(self.sky_px * 0.44, width * 0.2))
+
+    def emblem_pixel(self, u: float, v: float) -> tuple | None:
+        """The emblem at (u, v), in units of its own size, centre at 0."""
+        if self.kind == "concord":
+            if v < -0.85 or abs(u) > 0.75 * (1.0 if v < 0.3 else max(0.0, 1 - (v - 0.3) / 0.6)):
+                return None
+            edge = abs(u) > 0.75 * (1.0 if v < 0.3 else max(0.0, 1 - (v - 0.3) / 0.6)) - 0.1 or v < -0.75
+            if edge:
+                return (232, 240, 255)
+            angle = math.atan2(v + 0.05, u) + math.pi / 2
+            k = angle * 5 / (2 * math.pi)
+            if math.hypot(u, v + 0.05) < max(0.13, 0.4 * (1 - 1.7 * abs(k - round(k)))):
+                return (255, 255, 255)
+            return _mix((90, 150, 250), (30, 60, 150), (v + 0.85) / 1.75)
+        if self.kind == "blackwake":
+            reach = abs(u) + abs(v)
+            if reach > 0.9:
+                return None
+            if reach > 0.78:
+                return (255, 90, 200)
+            if abs(v - 0.2 * math.sin(u * 6.0)) < 0.08 and reach < 0.66:
+                return (255, 130, 220)
+            return _mix((70, 30, 80), (24, 10, 34), (v + 0.9) / 1.8)
+        # Chevrons point up, stacked from the top, one per rank held.
+        for number in range(self.rank):
+            centre = -0.75 + number * 0.34 + 0.5 * abs(u)
+            if abs(u) < 0.8 and abs(v - centre) < 0.11:
+                return _mix((255, 236, 150), (210, 140, 40), (v + 0.8) / 1.6)
+        return None
+
+    def draw(self, stage: _Stage, index: int, t: float) -> None:
+        w, mid = self.width, self.mid
+        self.starfield(stage)
+        cx = w / 2
+        # The burst behind it: rays that come up in two steps and stay.
+        rays = 0.0 if t < 0.1 else 0.35 if t < 0.2 else 0.6
+        if rays:
+            for ray in range(16):
+                angle = ray * math.pi / 8 + 0.2
+                for step in range(int(self.size * 0.9), int(self.size * 2.2)):
+                    stage.blend(cx + math.cos(angle) * step, mid + math.sin(angle) * step * 0.8, self.color,
+                                rays * (1 - (step - self.size * 0.9) / (self.size * 1.3)))
+        scale = 0.3 + 0.7 * _ease_out(_span(t, 0.0, 0.3))
+        size = self.size * scale
+        glint = _span(t, 0.36, 0.6)
+        reach = int(size) + 1
+        for y in range(math.floor(mid) - reach, math.floor(mid) + reach + 1):
+            for x in range(math.floor(cx) - reach, math.floor(cx) + reach + 1):
+                u, v = (x + 0.5 - cx) / size, (y + 0.5 - mid) / size
+                color = self.emblem_pixel(u, v)
+                if color is None:
+                    continue
+                # A glint runs across it on the diagonal.
+                if 0 < glint < 1 and abs((u + v) * 0.5 - (glint * 2.4 - 1.2)) < 0.1:
+                    color = _mix(color, (255, 255, 255), 0.8)
+                stage.plot(x, y, color)
+        self.caption(stage, t, 0.6, self.title, self.color, self.detail)
+
+
 def play_scene(make: Callable[[int, int], _Scene]) -> bool:
     """Play one in-flight scene, if anyone is watching. Returns whether it drew.
 
@@ -7882,6 +7957,14 @@ def screen_station_menu(p: Palette, world: World) -> str:
         pause(p)
     if career_rank_index(world.save.pilot) > world.save.pilot.highest_rank_seen:
         world.checkpoint()  # a rank earned since the last tick is noticed and saved here
+    if world.pending_promotions:
+        # `commit` lists a promotion only once the save holding it succeeded,
+        # so the scene shows a rank that is already kept. The highest one is
+        # the one worth a ceremony when an action earned two.
+        title = world.pending_promotions[-1]
+        rank = next((number for number, (_, name) in enumerate(RANKS) if name == title), 0)
+        play_scene(lambda w, h: _EmblemScene(w, h, kind="rank", rank=rank, title=f"Promoted  ·  {title}",
+                                             detail="rank retained for this career", seed=_scene_seed(world, "rank")))
     completed[0:0] = [f"Promoted to {title}; rank retained for this career." for title in world.pending_promotions]
     world.pending_promotions.clear()
     completed[0:0] = world.hop_report
@@ -7940,6 +8023,10 @@ def _screen_faction_contact(p: Palette, world: World, faction: str) -> None:
         if not confirm(f"Join {info['label']} with a one-time {info['grant']:,}cr grant?", p): continue
         result = join_faction(world, faction)
         world.commit()
+        play_scene(lambda w, h: _EmblemScene(
+            w, h, kind="concord" if faction == FACTION_CONCORD else "blackwake", title=info["label"],
+            detail=("Commission accepted" if faction == FACTION_CONCORD else "Welcome to the family")
+            + f"  ·  {info['contact']}", seed=_scene_seed(world, f"join:{faction}")))
         page = 0
 
 

@@ -1104,8 +1104,11 @@ its banded world. Quieter moments get scenes of their own: a derelict
 salvaged by tractor beam (or waking up as an ambush), a distress call
 answered as escape pods cross the gap, a trader's data burst, a landmark
 investigated, a stranded pilot towed home, a hull commissioned in drydock under
-a welding seam, and a retirement that sails for a rising sun under the
-finale's name. The pilot's own hull class flies in every one. Passing a
+a welding seam, a retirement that sails for a rising sun under the
+finale's name, and the milestones a career is measured by: a promotion's
+chevrons (one per rank held, shown once the save that earned it has
+succeeded) and the emblem of a faction joined, the Concord's shield or
+Blackwake's diamond. The pilot's own hull class flies in every one. Passing a
 derelict or a distress call by plays nothing. A scene
 is about two seconds and ends on a captioned frame held for under a second,
 then play goes on: unlike the splash it never waits for a key. Otherwise the
