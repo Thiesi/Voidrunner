@@ -114,6 +114,13 @@ Pilots earn achievements across all of their careers (Pilot Record,
 read from the same `scores/` records the Hall of Fame uses, so back that
 directory up with the saves.
 
+On NetBBS v7.31.0 or later, a SysOp who switches game events on for this door
+lets the node's chat bot announce promotions and silver or gold achievements
+("Nib reached Merchant Captain in Voidrunner.") and answer `!top voidrunner`
+from the Hall of Fame. Only what a caller earns while playing is reported: a
+career that unlocks old achievements on its first launch in a new version sends
+none of them. Other hosts, and NetBBS with events off, are unaffected.
+
 In the animated presets (`auto` and `basic`) the door opens on a short title
 splash and plays brief full-screen scenes during play: the jump, a contact, a
 kill or the loss of the ship, an escape, a customs sweep, docking, salvage, a
