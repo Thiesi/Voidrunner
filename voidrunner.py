@@ -2373,6 +2373,9 @@ class World:
 
     def __init__(self, save: SaveData, *, checkpoint: Callable[[World], None] | None = None):
         self._checkpoint = checkpoint
+        # Told what each saved commit earned; bound by the executable, after
+        # the launch checkpoint. Like the storage binding, a reset keeps it.
+        self.reporter: Callable[[World, list[str], list[Accolade]], None] | None = None
         self.reset(save)
 
     def advance_station_state(self) -> None:
@@ -2422,6 +2425,12 @@ class World:
         if promoted:
             self.pending_promotions.append(promoted)
         self.pending_accolades.extend(earned)
+        self.report_earned([promoted] if promoted else [], earned)
+
+    def report_earned(self, promotions: list[str], accolades: list[Accolade]) -> None:
+        """Tell the bound reporter (NetBBS game events) what a saved action earned."""
+        if self.reporter is not None:
+            self.reporter(self, promotions, accolades)
 
     def checkpoint(self) -> None:
         """A turn boundary: process the turn, then commit it. Retained under its
@@ -5354,6 +5363,130 @@ def persist(world: World, save_dir: Path, user_id: int) -> None:
     world.save.pilot.retirements = max(world.save.pilot.retirements, prior.get("retirements", 0))
     write_save(save_dir, user_id, world.save)
     update_hall_of_fame(save_dir, user_id, world.save)
+
+
+# NetBBS game events (door API 5, issue #25). A NetBBS node whose SysOp has
+# switched game events on for this door lists `outbound.events` in
+# `door_info.json`; a chat bot then announces what a caller earned, worded by
+# NetBBS, and answers `!top voidrunner` from the standings this door sends.
+# Everywhere else -- Synchronet, Mystic, standalone, NetBBS with events off --
+# there is no such key and nothing here runs. The contract is NetBBS's
+# Developer Handbook, "Game events and standings".
+EVENT_REQUEST_MAX_BYTES = 2048
+STANDINGS_REQUEST_MAX_BYTES = 8192
+STANDINGS_TITLE = "Hall of Fame"
+STANDINGS_VALUE_MAX = 24
+STANDINGS_LABEL_MAX = 40
+# Bronze accolades are not announced: milestones and top-tier achievements
+# only (NetBBS decision #1378).
+EVENT_ACCOLADE_TIER = 2
+
+
+class GameEvents:
+    """Reports a NetBBS caller's promotions, silver and gold accolades and the
+    Hall of Fame standings, as request files in the node's drop directory.
+
+    Only what is earned live is reported: the reporter is bound after the
+    launch checkpoint, which is where a career opened by a newer build
+    catches up on accolades it already met, and it is told only about
+    commits whose save succeeded. Reporting is optional, so a request that
+    cannot be written is dropped rather than allowed to stop play."""
+
+    def __init__(self, directory: Path, user_id: int, save_dir: Path, *, types: list | None = None,
+                 title_max: int = 80, rows: int = 10):
+        self.directory, self.user_id, self.save_dir = directory, user_id, save_dir
+        self.types, self.title_max, self.rows = types, title_max, rows
+        self._sequence = 0
+        self._mine: tuple | None = None
+        self._standings: list[dict] | None = None
+
+    @classmethod
+    def from_door_info(cls, info: dict, save_dir: Path) -> GameEvents | None:
+        """A reporter when this launch's `door_info.json` asks for one, else None.
+
+        The caller must be a NetBBS account: a launch without a positive
+        `user_id` from the file is a Guest fallback, whose career key is a
+        hash of its handle and names no account."""
+        path = os.environ.get("NETBBS_DOOR_INFO")
+        outbound = info.get("outbound")
+        if not path or not isinstance(outbound, dict):
+            return None
+        events, directory = outbound.get("events"), outbound.get("directory")
+        user_id = info.get("user_id")
+        if (not isinstance(events, dict) or not isinstance(directory, str) or not directory
+                or type(user_id) is not int or user_id <= 0):
+            return None
+        types = events.get("types")
+
+        def bound(key: str, default: int) -> int:
+            value = events.get(key)
+            return min(value, default) if type(value) is int and value > 0 else default
+
+        return cls(Path(path).parent / directory, user_id, save_dir,
+                   types=types if isinstance(types, list) else None,
+                   title_max=bound("title_max", 80), rows=bound("standings_rows", 10))
+
+    def bind(self, world: World) -> None:
+        """Start reporting for `world`, and send the standings as they stand,
+        so `!top` agrees with the Hall from the first session that reports."""
+        world.reporter = self.committed
+        self._mine = self._own_entry(world)
+        self._send_standings()
+
+    def committed(self, world: World, promotions: list[str], accolades: list[Accolade]) -> None:
+        """What a succeeded commit earned, and the standings if it moved them."""
+        for title in promotions:
+            self._event("rank", title)
+        for accolade in accolades:
+            # A promotion unlocks its rank's accolade, of the same name; the
+            # rank event already says it, as the deck's ceremony does.
+            if accolade.tier >= EVENT_ACCOLADE_TIER and not (promotions and accolade.metric == "rank"):
+                self._event("achievement", accolade.name)
+        # Only this pilot's own record can have moved: every other pilot's
+        # session reports its own. Reading every score record costs a file per
+        # pilot, so it is paid only when this one changed.
+        mine = self._own_entry(world)
+        if mine != self._mine:
+            self._mine = mine
+            self._send_standings()
+
+    @staticmethod
+    def _own_entry(world: World) -> tuple:
+        return world.save.best_credits, world.save.pilot.handle
+
+    def standings_rows(self) -> list[dict]:
+        """The Hall of Fame's default view, best first, as NetBBS rows."""
+        ranked = achievement_ranking(_load_score_records(self.save_dir), "wealth")[:self.rows]
+        return [{"user_id": entry["user_id"],
+                 "value": f"{entry['best_credits']:,} cr"[:STANDINGS_VALUE_MAX],
+                 "label": str(entry.get("rank", ""))[:STANDINGS_LABEL_MAX]}
+                for entry in ranked]
+
+    def _send_standings(self) -> None:
+        rows = self.standings_rows()
+        if rows == self._standings or (not rows and self._standings is None):
+            return
+        if self._write({"standings": {"title": STANDINGS_TITLE, "rows": rows}}, STANDINGS_REQUEST_MAX_BYTES):
+            self._standings = rows
+
+    def _event(self, kind: str, title: str) -> None:
+        if self.types is not None and kind not in self.types:
+            return
+        self._write({"event": {"type": kind, "user_id": self.user_id, "title": title[:self.title_max]}},
+                    EVENT_REQUEST_MAX_BYTES)
+
+    def _write(self, request: dict, limit: int) -> bool:
+        data = json.dumps(request, ensure_ascii=False).encode("utf-8")
+        if len(data) > limit:
+            return False
+        # NetBBS answers requests in name order: zero-padded, so the tenth
+        # request is not answered before the ninth.
+        self._sequence += 1
+        try:
+            _write_bytes_atomic(self.directory / f"voidrunner-{self._sequence:06d}.json", data)
+        except OSError:
+            return False
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -12291,6 +12424,9 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
         world.pending_promotions.extend(fresh.pending_promotions)
         world.pending_accolades.extend(fresh.pending_accolades)
         world.commit()
+        # What retiring earned was found by `fresh`, which has no storage; it
+        # is reported now that the save holding it has succeeded.
+        world.report_earned(fresh.pending_promotions, fresh.pending_accolades)
         # Saved first, shown second: the ending is narration of something durable.
         play_scene(lambda w, h: _FinaleScene(w, h, hull=retired_ship.hull_class, finale=label,
                                              pilot=world.save.pilot.handle, seed=_scene_seed(world, "finale")))
@@ -14203,6 +14339,10 @@ def _run_game(info: dict) -> int:
                 replace_unsupported_career(save_dir, user_id, save)
         world = World(save, checkpoint=lambda current: persist(current, save_dir, user_id))
         world.checkpoint()  # the launch tick prepares the station this career opens at
+        # After that tick, never before: it is where a career first opened by
+        # this build catches up on accolades, and those are history (#25).
+        if (events := GameEvents.from_door_info(info, save_dir)) is not None:
+            events.bind(world)
         # `notice` is what loading had to say (a career rolled back to its previous
         # checkpoint). It waits for the first deck with the rest, even when a
         # resumed journey comes first.

@@ -490,3 +490,17 @@ keeps what a newer one awarded. `retire_pilot` copies the record and the
 finale screen hands the fresh world's `pending_accolades` across, exactly as it
 does promotions; without that hand-off the retirement achievements are earned
 silently.
+
+NetBBS game events (door API 5, #25) are reported by `GameEvents`, which
+exists only when `door_info.json` lists `outbound.events` and names a positive
+`user_id`. It is bound to the world after the launch checkpoint, never before:
+that tick is where a career first opened by a newer build records retroactive
+accolades, and announcing them would flood the channel with history. It is
+told about a commit only after the save succeeded (`World.report_earned`), and
+the finale screen reports the fresh world's earnings explicitly, because the
+fresh world that found them has no reporter. Bronze accolades are not sent,
+nor a rank's own accolade when its promotion is. Standings are the Hall's
+wealth view, recomputed only when this pilot's best credits or callsign moved,
+and sent when the rows differ from the last snapshot. Every request is written
+atomically under a zero-padded name, since NetBBS answers in name order; a
+request that cannot be written is dropped, never raised.
