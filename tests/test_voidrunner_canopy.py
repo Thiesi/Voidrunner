@@ -91,11 +91,86 @@ def test_turning_a_page_gives_back_only_the_rows_the_last_page_covered(canopy):
     _written(lambda: vr.out_line("N"))  # the echoed key, as `_draw_service_page` writes it
     second = _written(lambda: vr.draw_page(vr.pal(), "Guide", ["row"], 1, 2))
     assert "\x1b[2J" not in second, "the same sky was cleared and resent"
-    repainted = {int(m[1]) for m in CUP.finditer(second)}
-    # The short page covers rows 1-3; rows 4-16 (the long page, its bar and the
-    # echo's line feed) are given back to the sky, and nothing below them.
-    assert repainted and min(repainted) >= 1 and max(repainted) <= 16
+    starts = {int(m[1]): int(m[2]) for m in CUP.finditer(second)}
+    # The short page covers rows 1-3. Every row from 4 to 16 -- the long page's
+    # body and foot, its bar and the echo's line feed -- is given back to the
+    # sky from its first column, and nothing below them is touched.
+    assert {row for row, column in starts.items() if column == 1} == set(range(4, 17))
+    assert max(starts) == 16
     assert len(second) < len(first) / 2
+
+    # And a taller page after a short one: the short page's strip and echo
+    # are under the new console, so only the sky beside it is given back.
+    _written(lambda: vr.out_prompt("[N] Next [P] Prev [B] Back: "))
+    _written(lambda: vr.out_line("N"))
+    third = _written(lambda: vr.draw_page(vr.pal(), "Guide", [f"row {n}" for n in range(12)], 0, 2))
+    assert "\x1b[2J" not in third
+    assert all(column == vr.CANOPY_PANEL_WIDTH + 1 for row, column in
+               ((int(m[1]), int(m[2])) for m in CUP.finditer(third)) if row != 1)
+
+
+def test_a_full_screen_picture_between_pages_means_a_fresh_canopy(canopy):
+    """Deck, star map, Back: the chart was drawn after the deck's bar, so the
+    deck must not keep what it thinks is its own sky (code review, #30)."""
+    world = _world_with_seed(42)
+    canopy(80, 24, world=world)
+    _written(lambda: vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1))
+    _written(lambda: vr.out_prompt("[C] Chart [Q] Exit: "))
+    _written(lambda: vr.out_line("C"))
+    footer = "[N/P] Sector [O] Overview [L] List [I] Info [B] Back: "
+    _written(lambda: (vr.clear_screen(), vr.out(vr.star_chart(world, [], None, None, footer)),
+                      vr.chart_strip(), vr.out_prompt(footer)))
+    _written(lambda: vr.out_line("B"))
+    assert "\x1b[2J" in _written(lambda: vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1))
+
+
+def test_a_contracts_action_rows_sit_on_the_strip_and_keep_the_sky(canopy):
+    canopy(80, 24, world=_world_with_seed(42))
+    _written(lambda: vr.draw_page(vr.pal(), "First Flight", ["a"], 0, 2))
+    row = _written(lambda: vr.out_action_row("[A] on last page."))
+    r, g, b = vr.CANOPY_STRIP
+    assert f"48;2;{r};{g};{b}" in row and plain(row).startswith("[A] on last page.")
+    _written(lambda: vr.out_prompt("[N] Next [B] Back: "))
+    _written(lambda: vr.out_line("N"))
+    turned = _written(lambda: vr.draw_page(vr.pal(), "First Flight", ["b"], 1, 2))
+    assert "\x1b[2J" not in turned
+    assert max(int(m[1]) for m in CUP.finditer(turned)) == 6  # page 3, action row, bar, echo
+
+
+def test_output_between_a_page_and_its_bar_is_not_mistaken_for_sky(canopy):
+    canopy(80, 24, world=_world_with_seed(42))
+    _written(lambda: vr.draw_page(vr.pal(), "First Flight", ["a"], 0, 2))
+    _written(lambda: vr.out_line("[A] on last page."))
+    _written(lambda: vr.out_prompt("[N] Next [B] Back: "))
+    _written(lambda: vr.out_line("N"))
+    assert "\x1b[2J" in _written(lambda: vr.draw_page(vr.pal(), "First Flight", ["b"], 1, 2))
+
+
+def test_the_strips_tint_ends_with_the_echoed_key(canopy):
+    canopy(80, 24, world=_world_with_seed(42))
+    _written(lambda: vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1))
+    _written(lambda: vr.out_prompt("[Q] Exit: "))
+    echo = _written(lambda: vr.out_line("Q"))
+    assert echo == "Q" + vr.RESET + "\r\n"
+    assert _written(lambda: vr.out_line("Fly safe.")) == "Fly safe.\r\n"
+    vr.chart_strip()
+    _written(lambda: vr.out_prompt("[Q] Exit: "))
+    assert _written(vr.clear_screen).startswith(vr.RESET + "\x1b[2J")
+
+
+def test_the_canopy_is_not_composed_for_a_huge_terminal(canopy):
+    canopy(vr.CANOPY_MAX_WIDTH + 1, 40, world=_world_with_seed(42))
+    assert not vr.canopy_active()
+
+
+def test_a_canopy_composed_in_truecolor_is_not_served_at_256(canopy, monkeypatch):
+    world = _world_with_seed(42)
+    canopy(80, 24, world=world)
+    scene = vr.canopy_scene(world)
+    deep = vr.canopy_cells(scene, 80, 24)
+    monkeypatch.setattr(vr, "_PALETTE", vr.Palette(truecolor=False))
+    assert vr.canopy_cells(scene, 80, 24) is not deep
+    assert vr.canopy_cells(scene, 80, 24)[0][0][2] == (0, 0, 0)
 
 
 def test_anything_else_drawn_between_pages_means_a_fresh_canopy(canopy):
@@ -179,7 +254,7 @@ def test_the_star_chart_names_only_what_the_grid_may(canopy):
         station.discovered = station.id < 6
     world.sync_discovered()
     target = next(s for s in world.galaxy if not s.discovered)
-    chart = plain(vr.star_chart(world, [], target.id, None))
+    chart = plain(vr.star_chart(world, [], target.id, None, "[B] Back: "))
     assert "Star Map: Galaxy" in chart and "danger 4+" in chart
     assert target.name in chart  # a contract's target is named, charted or not
     for station in world.galaxy:
@@ -192,7 +267,12 @@ def test_the_star_chart_names_only_what_the_grid_may(canopy):
 def test_the_star_chart_fits_and_spares_the_bottom_right_cell(canopy, width, height):
     world = _world_with_seed(42)
     canopy(width, height, world=world)
-    chart = vr.star_chart(world, [], None, None)
+    footer = "[N/P] Sector [O] Overview [L] List [I] Info [B] Back: "
+    chart = vr.star_chart(world, [], None, None, footer)
+    bar_rows = len(vr._wrap_output(footer, width - 1).split("\r\n"))
+    # The cursor is left where the bar starts, so the bar ends a row above the
+    # bottom and the echoed key's line feed cannot scroll the picture.
+    assert chart.endswith(f"\x1b[{height - bar_rows};1H")
     for match in CUP.finditer(chart):
         assert int(match[1]) <= height
         if int(match[1]) == height:

@@ -1085,7 +1085,7 @@ greyscale ramp for the same reason.
 
 **One glyph vocabulary, every glyph with an ASCII substitute.** `╭─╮ │ ╰─╯
 ├─┤` frames; `━╾─` gauges (a heavy reading to half a cell on a light track);
-`━` the header's lane streak; `◢` a station's running lights; `▁▂▃▄▅▆▇█` sparklines; `⟦ ⟧` chips; `◈` credits;
+`━` the header's lane streak; `◢` a station's running lights; `⟦ ⟧` chips; `◈` credits;
 `▲ ◆ ●` severity; `◤` the brand; `●○` crew pips; `→` a delta. A screen asks for
 one by role -- `glyph("danger")` -- rather than typing the character, so the
 `plain` preset is a designed rendering and a new glyph cannot arrive without
@@ -1093,7 +1093,7 @@ its substitute. No Unicode from the vocabulary may reach a `plain` terminal.
 
 **A component library, local to the door.** Voidrunner ships as a single
 self-contained file a SysOp can point straight at, so this is the game's own
-vocabulary rather than something shared: `gauge`, `sparkline`, `chip`, `badge`,
+vocabulary rather than something shared: `gauge`, `chip`, `badge`,
 `table`, `menu_grid`, `alert`, `status_band`, `portrait`, plus `section` for a
 named rule across the page frame. Every screen is built from them, which is what
 makes the contract enforceable -- a gauge is the same gauge on the deck, in the

@@ -27,7 +27,7 @@ PRESETS = list(vr.DISPLAY_STYLES)
 # The Unicode half of the glyph vocabulary (issue #493 §4). None of it may reach
 # a `plain` terminal: every one has an ASCII substitute, and a preset that lets
 # one through is not a designed rendering, it is an accident.
-UNICODE_GLYPHS = "".join(unicode_form for unicode_form, _ in vr._GLYPHS.values()) + vr._SPARK[0] + "╭╮╰╯│─├┤═║╔╗╚╝■"
+UNICODE_GLYPHS = "".join(unicode_form for unicode_form, _ in vr._GLYPHS.values()) + "▁▂▃▄▅▆▇█╭╮╰╯│─├┤═║╔╗╚╝■"
 
 FOREGROUND = re.compile(r"\x1b\[(?:1m\x1b\[)?(?:38;[25];|3[0-7]m|9[0-7]m)")
 
