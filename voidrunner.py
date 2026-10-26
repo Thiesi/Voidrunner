@@ -8809,6 +8809,19 @@ def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
         if side:
             canopy.label(1, side_left + 2, [("▲ ", _SCENE_ALARM), ("RED ALERT", _SCENE_ALARM)], side - 3)
             canopy.label(2, side_left + 4, [(scene["name"], _SCENE_INK)], side - 5)
+    elif kind == "void" and (side or band):
+        # Before there is a career: the title's violet world, and the Shuttle
+        # every career starts in, waiting in front of it.
+        glow = (190, 150, 255)
+        if side:
+            radius = min(side * 0.7, h2 * 0.36)
+            canopy.planet("Haven", side_left + side * 0.74, h2 - radius * 0.62, radius, glow)
+            canopy.sprite(_SPLASH_SHIP, side_left + side * 0.40, h2 * 0.34, max(1.0, side * 0.3 / len(_SPLASH_SHIP[0])))
+        else:
+            top, depth = band_top * 2, band * 2
+            radius = width * 1.6
+            canopy.planet("Haven", width * 0.36, top + depth * 0.52 + radius, radius, glow, sun=(-0.25, -0.75, 0.6))
+            canopy.sprite(_SPLASH_SHIP, width * 0.78, top + depth * 0.32, max(1.0, depth * 0.3 / len(_SPLASH_SHIP)))
     elif kind == "transit":
         # The lane: long streaks of drive-light, the jump still in the glass.
         for _ in range(width * height // 40):
@@ -9040,7 +9053,35 @@ def glass(text: str, color: tuple = CANOPY_GLASS) -> str:
     return tint + text.replace(RESET, RESET + tint) + RESET
 
 
+def _commission_lines(p: Palette, welcome: str, callsign: str | None) -> list[str]:
+    """The registration as a page on the canopy: the welcome, then the
+    commission's terms beside the Shuttle the pilot will fly."""
+    lines = wrap_styled(f"{p.text}{welcome}{RESET}", _page_content_width())
+    lines.append(section("COMMISSION"))
+    terms = [f"{p.slate}Callsign{RESET} {p.gold}{BOLD}{callsign}{RESET}" if callsign else
+             f"{p.slate}Callsign{RESET} {p.ink}enter it below{RESET}",
+             f"{p.slate}Deployment{RESET} {p.hull}{BOLD}FREEPORT ANCHORAGE{RESET}",
+             f"{p.slate}Vessel{RESET} {p.ink}Battered Shuttle{RESET}",
+             f"{p.slate}Bank{RESET} {p.gold}{glyph('credits')} 1,200cr{RESET}  {p.slate}Hold{RESET} {p.ink}empty{RESET}"]
+    return lines + beside(terms, pixel_hull(Ship(hull_class="Shuttle", hull_hp=60, fuel=24)), overhang=True)
+
+
 def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str | None:
+    if canopy_active():
+        # On a canopy terminal the commission is a page of its own (#30): the
+        # same questions, asked on the strip under it.
+        handle = info["handle"]
+        welcome = _ANSI_RE.sub("", welcome) if welcome else f"Welcome to the void, pilot. No career dossier found for {handle}."
+        title = "Pilot Commission"
+        draw_page(p, title, _commission_lines(p, welcome, None), 0, 1)
+        out_prompt(f"{p.muted}Pilot callsign [{p.gold}{handle}{p.muted}]: {RESET}")
+        entered = read_line_raw(max_len=16, allowed=lambda c: c.isalnum() or bool(unicodedata.combining(c)) or c == " ").strip()
+        callsign = entered or handle
+        draw_page(p, title, _commission_lines(p, welcome, callsign), 0, 1)
+        if confirm(f"Launch {p.gold}{callsign}{p.muted}'s career?", p):
+            return callsign
+        out_line(f"{p.muted}Career launch cancelled. No career was saved.{RESET}")
+        return None
     out_line()
     inner_w = _box_inner_width()
     title = "Pilot Commission Registration"
