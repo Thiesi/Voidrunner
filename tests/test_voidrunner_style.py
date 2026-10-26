@@ -471,10 +471,12 @@ def test_drawing_a_page_twice_over_reveals_it_once(monkeypatch):
         vr.draw_page(palette, "Deck", ["one", "two", "three"], 0, 2)
         again = len(paused)
         vr.draw_page(palette, "Deck", ["four", "five"], 1, 2)
-    assert first == 3, "the first draw did not reveal its rows"
+    # Three rows, after the header's lane streak has left the title (#30).
+    streak = len(vr.LANE_STREAK_STEPS)
+    assert first == streak + 3, "the first draw did not reveal its rows"
     assert again == first, "an unchanged redraw revealed itself again"
     assert len(paused) > again, "paging to a new page did not reveal it"
-    assert sum(paused) <= vr.MOTION_REVEAL_BUDGET * 2 + 1e-9
+    assert sum(paused) <= (vr.MOTION_REVEAL_BUDGET + streak * vr.LANE_STREAK_STEP) * 2 + 1e-9
 
 
 # -- in-place redraw, service labels and the label hue ---------------------
