@@ -616,7 +616,9 @@ def out_prompt(text: str) -> None:
     wrapped = _wrap_output(style_action_bar(text), max(1, _OUTPUT_WIDTH - 1))
     strip, _CANOPY_STRIP_WIDTH = _CANOPY_STRIP_WIDTH, None
     if strip is None:
-        out(wrapped)
+        # A key read without an echo leaves the last strip's tint set.
+        lead, _STRIP_TINT = (RESET if _STRIP_TINT else ""), False
+        out(lead + wrapped)
         return
     # Under a canopy page the bar is the console's command strip: its own
     # glass under the frame, across the frame's width. The strip is laid
@@ -641,6 +643,11 @@ def out_prompt(text: str) -> None:
                          if covered + len(rows) < _OUTPUT_HEIGHT else None)
 
 
+def action_bar_rows(text: str) -> int:
+    """How many rows `out_prompt` will take for this action bar."""
+    return len(_wrap_output(style_action_bar(text), max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
+
+
 def out_action_row(text: str) -> None:
     """A row of actions printed between a page and its action bar -- a contract's
     `[A] Accept contract`, `[T] Track` -- which is the bar's own first row. On a
@@ -652,9 +659,10 @@ def out_action_row(text: str) -> None:
         return
     shown, before = _CANOPY_SHOWN, _OUT_COUNT
     color = CANOPY_ALERT_STRIP if red_alert() else CANOPY_STRIP
-    out(glass(_pad(style_action_bar(text), _CANOPY_STRIP_WIDTH), color) + "\r\n")
+    rows = _wrap_output(style_action_bar(text), _CANOPY_STRIP_WIDTH).split("\r\n")
+    out("".join(glass(_pad(row, _CANOPY_STRIP_WIDTH), color) + "\r\n" for row in rows))
     if shown is not None and shown[3] == before:
-        _CANOPY_SHOWN = (shown[0], shown[1], shown[2] + 1, _OUT_COUNT)
+        _CANOPY_SHOWN = (shown[0], shown[1], shown[2] + len(rows), _OUT_COUNT)
 
 
 def clear_screen() -> None:
@@ -6127,17 +6135,14 @@ def beside(rows: list[str], art: list[str], *, width: int | None = None, gap: in
     return out_rows
 
 
+#: A danger tone's word on the status band, and the sky the canopy lights it with.
+DANGER_WORDS = {"good": "CALM", "caution": "CAUTION", "danger": "DANGER"}
+DANGER_SKIES = {"good": "calm", "caution": "caution", "danger": "danger"}
+
+
 def danger_tone(danger: int) -> str:
     """A system's danger as a severity tone: calm to 1, caution to 3, danger above."""
     return "good" if danger <= 1 else ("caution" if danger <= 3 else "danger")
-
-
-def danger_pips(danger: int) -> str:
-    """A system's danger as five pips, lit in its severity's tone."""
-    p = pal()
-    tone = p.tone(danger_tone(danger))
-    return (f"{tone}{glyph('crew_on') * danger}{RESET}"
-            f"{p.deep}{glyph('crew_off') * max(0, 5 - danger)}{RESET}")
 
 
 def status_band(world: "World") -> list[str]:
@@ -6156,8 +6161,7 @@ def status_band(world: "World") -> list[str]:
     beacon = p.rgb(_SCENE_LIGHTS.get(here.economy, Palette.ROLE_RGB["hull"])) if _OUTPUT_STYLE in ("auto", "fast") else p.hull
     first = (f"{beacon}{glyph('beacon')}{RESET} {p.hull}{BOLD}{here.station_name.upper()}{RESET}  "
              f"{p.slate}{here.economy}{RESET} {p.deep}{glyph('dot')}{RESET} {p.slate}{sector_for(here)}{RESET}  "
-             + badge(f"{'DANGER' if here.danger > 3 else 'CAUTION' if here.danger > 1 else 'CALM'} {here.danger}", tone)
-             + " " + danger_pips(here.danger))
+             + badge(f"{DANGER_WORDS[tone]} {here.danger}", tone) + " " + danger_dots(here.danger))
     second = "  ".join([
         f"{p.slate}Day{RESET} {p.ink}{world.save.turn}{RESET}",
         f"{p.slate}Rank{RESET} {p.plasma}{career_rank(pilot)}{RESET}",
@@ -8559,7 +8563,7 @@ def canopy_scene(world) -> dict:
                     "name": name, "seed": f"combat:{name}"}
         return {"kind": "transit", "sky": "transit", "hull": hull, "seed": f"transit:{world.save.turn}"}
     here = world.here
-    sky = {"good": "calm", "caution": "caution", "danger": "danger"}[danger_tone(here.danger)]
+    sky = DANGER_SKIES[danger_tone(here.danger)]
     return {"kind": "dock", "sky": sky, "hull": hull, "economy": here.economy if here.economy in _SCENE_LIGHTS
             else "Industrial", "station": _scene_text(here.station_name), "danger": here.danger,
             "seed": f"dock:{here.id}"}
@@ -8765,9 +8769,10 @@ class _Canopy:
         return rows
 
 
-def canopy_key(scene: dict) -> tuple:
+def canopy_key(scene: dict, width: int | None = None, height: int | None = None) -> tuple:
     """Everything a canopy's picture depends on: the scene, the terminal, its blocks and its depth."""
-    return (tuple(sorted(scene.items())), _OUTPUT_WIDTH, _OUTPUT_HEIGHT, canopy_across(), _PALETTE._truecolor)
+    return (tuple(sorted(scene.items())), _OUTPUT_WIDTH if width is None else width,
+            _OUTPUT_HEIGHT if height is None else height, canopy_across(), _PALETTE._truecolor)
 
 
 def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
@@ -8779,8 +8784,7 @@ def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
     serves every page of a place, so paging redraws none of it."""
     across = canopy_across()
     panel_w = min(width, CANOPY_PANEL_WIDTH)
-    # The color depth is part of the picture: below truecolor the sky is black.
-    key = (tuple(sorted(scene.items())), width, height, across, _PALETTE._truecolor)
+    key = canopy_key(scene, width, height)
     if key in _CANOPY_CACHE:
         return _CANOPY_CACHE[key]
     canopy = _Canopy(width, height, across, scene["sky"], scene["seed"])
@@ -8800,7 +8804,7 @@ def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
             canopy.planet(economy, side_left + side * 0.74, h2 - radius * 0.62, radius, glow)
             canopy.station(economy, side_left + side * 0.42, h2 * 0.36, min(side * 0.25, h2 * 0.15))
             canopy.label(1, side_left + 2, [("◢ ", _SCENE_LIGHTS[economy]), (scene["station"].upper(), _SCENE_INK)], side - 3)
-            tone = Palette.ROLE_RGB[Palette.TONE_ROLES[danger_tone(scene["danger"])]]
+            tone = {"good": _SCENE_MINT, "caution": (255, 179, 71), "danger": _SCENE_ALARM}[danger_tone(scene["danger"])]
             canopy.label(2, side_left + 4, [(economy, _SCENE_SLATE), (" · ", (70, 80, 100)),
                                             (f"danger {scene['danger']}", tone)], side - 5)
         else:
@@ -8935,7 +8939,7 @@ def star_chart(world: World, path: list[int], public_target: int | None, sector:
     action bar) wraps to, which end a row above the bottom: the key echoed
     after it must not scroll the picture."""
     width, height = _OUTPUT_WIDTH, _OUTPUT_HEIGHT
-    bar_rows = len(_wrap_output(footer, max(1, width - 1)).split("\r\n"))
+    bar_rows = action_bar_rows(footer)
     legend_row = max(1, height - 2 - bar_rows)
     scene = canopy_scene(world)
     canopy = _Canopy(width, height, canopy_across(), scene["sky"], f"chart:{sector}")
@@ -13595,7 +13599,7 @@ def danger_dots(level: int, *, known: bool = True) -> str:
     p = pal()
     if not known:
         return f"{p.slate}?{RESET}"
-    tone = p.mint if level <= 1 else (p.amber if level <= 3 else p.alarm)
+    tone = p.tone(danger_tone(level))
     return f"{tone}{glyph('crew_on') * level}{RESET}{p.deep}{glyph('crew_off') * (5 - level)}{RESET}"
 
 

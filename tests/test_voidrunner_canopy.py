@@ -146,6 +146,14 @@ def test_output_between_a_page_and_its_bar_is_not_mistaken_for_sky(canopy):
     assert "\x1b[2J" in _written(lambda: vr.draw_page(vr.pal(), "First Flight", ["b"], 1, 2))
 
 
+def test_a_bar_after_an_unechoed_key_starts_off_the_strip(canopy):
+    canopy(80, 24, world=_world_with_seed(42))
+    _written(lambda: vr.draw_page(vr.pal(), "Contract", ["a"], 0, 1))
+    _written(lambda: vr.out_prompt("[D] Abandon [B] Back: "))
+    # `screen_mission_details` reads D without echoing it, then asks to confirm.
+    assert _written(lambda: vr.out_prompt("Abandon it? [Y/N] ")).startswith(vr.RESET)
+
+
 def test_the_strips_tint_ends_with_the_echoed_key(canopy):
     canopy(80, 24, world=_world_with_seed(42))
     _written(lambda: vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1))
@@ -317,7 +325,7 @@ def test_the_lane_streak_fills_exactly_its_width(monkeypatch, style, width):
 
 def test_danger_reads_as_pips_and_the_quote_as_a_mark_on_its_scale(monkeypatch):
     monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
-    assert plain(vr.danger_pips(3)) == "●●●○○"
+    assert plain(vr.danger_dots(3)) == "●●●○○"
     ladder = [10, 20, 30]
     assert plain(vr.price_scale(10, ladder, "good")).index("●") == 0
     assert plain(vr.price_scale(30, ladder, "caution")).index("●") == 6
