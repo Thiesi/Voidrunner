@@ -634,8 +634,8 @@ def out_prompt(text: str) -> None:
         # line feed leaves the cursor on.
         # A bar on the last row is different: that line feed scrolls the
         # whole screen, sky and all, so the next page has to start afresh.
-        key, covered, _ = _CANOPY_SHOWN
-        _CANOPY_SHOWN = ((key, covered + len(rows) + 1, _OUT_COUNT)
+        key, panel_h, covered, _ = _CANOPY_SHOWN
+        _CANOPY_SHOWN = ((key, panel_h, covered + len(rows) + 1, _OUT_COUNT)
                          if covered + len(rows) < _OUTPUT_HEIGHT else None)
 
 
@@ -6409,6 +6409,7 @@ SPLASH_FRAME_SECONDS = 0.08  # 32 frames, about 2.6 s; a frame is never more tha
 # Attract mode: the finished title keeps moving while it waits, a tick at a
 # time, for a minute at most -- an idle caller does not cost bandwidth forever.
 SPLASH_ATTRACT_SECONDS, SPLASH_ATTRACT_LIMIT, SPLASH_FLYBY_TICKS = 0.12, 60.0, 72
+SPLASH_ATTRACT_DELAY = 2.0  # the finished title rests, still, before it comes alive
 # A paste is drained, not read forever: past this many keys the rest belongs to
 # whatever screen comes next, and the splash is long gone by then.
 SPLASH_DRAIN_LIMIT = 256
@@ -6857,14 +6858,25 @@ def _splash_delta(previous, current, top: int = 0, left: int = 0, red: bool = Fa
                 continue
             if cursor != (row, column):
                 out_parts.append(f"{ESC}[{top + row + 1};{left + column + 1}H")
-            wanted = (new[1], new[2]) if new[0] != " " or new[2] is not None else (None, None)
+            # A blank cell shows no ink, so it keeps whatever ink is set: across a
+            # sky (Thiesi/Voidrunner#30) every cell has a ground and most of them
+            # differ from their neighbour only in the ink, or not at all.
+            ink = new[1] if new[0] != " " else (style[0] if style is not None else None)
+            wanted = (ink, new[2]) if new[0] != " " or new[2] is not None else (None, None)
             if wanted != style:
                 if wanted == (None, None):
                     out_parts.append(f"{ESC}[0m")
                 else:
-                    # A color only needs a reset when it takes one away.
-                    takes_away = style is None or (style[0] is not None and wanted[0] is None)                         or (style[1] is not None and wanted[1] is None)
-                    out_parts.append(_splash_sgr(wanted[0], wanted[1], reset=takes_away, red=red))
+                    # A color only needs a reset when it takes one away, and
+                    # without one only the color that changed is sent.
+                    takes_away = style is None or (style[0] is not None and wanted[0] is None) \
+                        or (style[1] is not None and wanted[1] is None)
+                    if takes_away:
+                        out_parts.append(_splash_sgr(wanted[0], wanted[1], reset=True, red=red))
+                    else:
+                        out_parts.append(_splash_sgr(wanted[0] if wanted[0] != style[0] else None,
+                                                     wanted[1] if wanted[1] != style[1] else None,
+                                                     reset=False, red=red))
                 style = wanted
             out_parts.append(new[0])
             cursor = (row, column + max(1, _char_width(new[0])))
@@ -6941,7 +6953,7 @@ def _splash_hold(attract: tuple | None = None) -> None:
     """
     reader = _INPUT_READER
     started = time.monotonic()
-    due, tick = started + SPLASH_ATTRACT_SECONDS, 0
+    due, tick = started + SPLASH_ATTRACT_DELAY, 0
     while reader is not None and not _RESIZE_PENDING:
         _check_session_time(warn=True)
         if reader.read_byte.waiting():
@@ -7129,13 +7141,20 @@ class _Stage:
     drawn over everything; marks (stars, mostly) only where the sky is empty.
     """
 
-    def __init__(self, width: int, height: int):
+    def __init__(self, width: int, height: int, sky: str | None = None):
         self.width, self.height = width, height
         self.rows = height - 1
         self.px_h = self.rows * 2
         self.pixels: list[list[tuple | None]] = [[None] * width for _ in range(self.px_h)]
         self.marks: dict[tuple[int, int], tuple] = {}
         self.text_cells: dict[tuple[int, int], tuple] = {}
+        # The canopy's sky behind everything (Thiesi/Voidrunner#30), one color a
+        # row: a scene and the page after it are the same place, not a picture on
+        # black and then a console on a sky. None keeps the terminal's own black.
+        self.ground: list[tuple | None] = [None] * self.rows
+        if sky is not None:
+            zenith, horizon = _CANOPY_SKIES[sky][:2]
+            self.ground = [_mix(zenith, horizon, (row / max(1, self.rows - 1)) ** 1.3) for row in range(self.rows)]
 
     def get(self, x: float, y: float) -> tuple | None:
         x, y = math.floor(x), math.floor(y)
@@ -7147,10 +7166,10 @@ class _Stage:
             self.pixels[y][x] = color
 
     def blend(self, x: float, y: float, color: tuple, amount: float) -> None:
-        """Mix toward `color` over what is there, empty sky counting as black."""
+        """Mix toward `color` over what is there, empty sky counting as its ground."""
         x, y = math.floor(x), math.floor(y)
         if amount > 0 and 0 <= x < self.width and 0 <= y < self.px_h:
-            self.pixels[y][x] = _mix(self.pixels[y][x] or (0, 0, 0), color, amount)
+            self.pixels[y][x] = _mix(self.pixels[y][x] or self.ground[y // 2] or (0, 0, 0), color, amount)
 
     def mark(self, row: int, column: int, ch: str, color: tuple) -> None:
         if 0 <= row < self.rows and 0 <= column < self.width:
@@ -7185,6 +7204,7 @@ class _Stage:
         rows = []
         for row in range(self.height):
             line = []
+            ground = self.ground[row] if row < self.rows else None
             for x in range(self.width):
                 cell = self.text_cells.get((row, x))
                 if cell is None and row < self.rows:
@@ -7195,7 +7215,10 @@ class _Stage:
                         cell = (" ", None, a) if a == b else ("▀", a, b)
                     else:
                         cell = ("▀", a, None) if a is not None else ("▄", b, None)
-                line.append(cell or (" ", None, None))
+                cell = cell or (" ", None, None)
+                if ground is not None and cell[2] is None:
+                    cell = (cell[0], cell[1], ground)
+                line.append(cell)
             rows.append(line)
         return rows
 
@@ -7316,8 +7339,11 @@ class _Scene:
         self.stars = [(rng.uniform(0, width), rng.randrange(max(1, self.sky_rows)), rng.random() < 0.2)
                       for _ in range(count)]
 
+    #: The canopy sky the scene is lit by; fights are red alert, a jump is the lane.
+    sky = "calm"
+
     def frame(self, index: int) -> list[list[tuple[str, tuple | None, tuple | None]]]:
-        stage = _Stage(self.width, self.height)
+        stage = _Stage(self.width, self.height, scene_sky(self.sky))
         self.draw(stage, index, index / max(1, self.frames - 1))
         return stage.cells()
 
@@ -7364,6 +7390,14 @@ class _Scene:
             stage.text(self.caption_row + 1, fitted)
 
 
+def scene_sky(sky: str) -> str | None:
+    """The sky a scene is drawn on, where the full palette can draw one: in
+    truecolor only. The 256-color cube has no dark tones but greys -- its
+    darkest red is already 95,0,0 -- so a dark gradient turns into bands of
+    black and brick there, and black is the better sky."""
+    return sky if _OUTPUT_STYLE in ("auto", "fast") and _PALETTE._truecolor else None
+
+
 def _scene_text(text: str) -> str:
     """A caller-visible name as plain characters: what a scene may print."""
     return _splash_plain(text) or "?"
@@ -7375,6 +7409,8 @@ class _JumpScene(_Scene):
     destination's name."""
 
     frames = 26
+
+    sky = "transit"
 
     def __init__(self, width: int, height: int, *, hull: str, destination: str | None,
                  burn: int, fuel: int, day: int, seed: str):
@@ -7459,6 +7495,8 @@ class _ContactScene(_Scene):
 
     frames = 24
 
+    sky = "alert"
+
     def __init__(self, width: int, height: int, *, hull: str, kind: str, names: list[str],
                  target: int, tier: int, seed: str):
         super().__init__(width, height, seed)
@@ -7539,6 +7577,8 @@ class _KillScene(_Scene):
 
     frames = 26
 
+    sky = "alert"
+
     def __init__(self, width: int, height: int, *, hull: str, patrol: bool, name: str, loot: int, seed: str):
         super().__init__(width, height, seed)
         self.art = _SCENE_HULLS.get(hull, _SPLASH_SHIP)
@@ -7588,6 +7628,8 @@ class _LostScene(_Scene):
 
     frames = 30
     hold = SCENE_HOLD_SECONDS + 0.4
+
+    sky = "alert"
 
     def __init__(self, width: int, height: int, *, hull: str, patrol: bool, name: str, seed: str):
         super().__init__(width, height, seed)
@@ -7641,6 +7683,8 @@ class _EscapeScene(_Scene):
 
     frames = 20
 
+    sky = "alert"
+
     def __init__(self, width: int, height: int, *, hull: str, patrol: bool, name: str, seed: str):
         super().__init__(width, height, seed)
         self.art = _SCENE_HULLS.get(hull, _SPLASH_SHIP)
@@ -7683,6 +7727,8 @@ class _ScanScene(_Scene):
     hold lights up where the contraband is."""
 
     frames = 26
+
+    sky = "caution"
 
     def __init__(self, width: int, height: int, *, hull: str, units: int, seed: str):
         super().__init__(width, height, seed)
@@ -8441,8 +8487,9 @@ _CANOPY_WORLD = None  # the World the canopy shows: set by `_run_game` once one 
 _CANOPY_QUADRANTS: bool | None = None  # NetBBS's word on the caller's font, when it says
 _CANOPY_STRIP_WIDTH: int | None = None  # set while a canopy page waits for its action bar
 _CANOPY_CACHE: dict = {}
-#: The canopy on screen: its key, how many rows from the top something other
-#: than sky was drawn on, and the output count when it was left intact.
+#: The canopy on screen: its key, the console's height, how many rows from the
+#: top something other than sky was drawn on (the console, its strip and the
+#: echoed key), and the output count when it was left intact.
 _CANOPY_SHOWN: tuple | None = None
 #: Characters written so far: how a page knows nothing else has drawn since.
 _OUT_COUNT = 0
@@ -8524,6 +8571,11 @@ class _Canopy:
         self.width, self.height, self.across = width, height, across
         self.pw, self.ph = width * across, height * 2
         zenith, horizon, self.haze, self.dust = _CANOPY_SKIES[sky]
+        # Below truecolor the sky is black and has no haze (see `scene_sky`);
+        # the world, the station and the stars quantize well enough.
+        self.flat = not _PALETTE._truecolor
+        if self.flat:
+            zenith = horizon = (0, 0, 0)
         rows = [_mix(zenith, horizon, (y / max(1, self.ph - 1)) ** 1.3) for y in range(self.ph)]
         self.px = [[row] * self.pw for row in rows]
         self.art: set[tuple[int, int]] = set()  # pixels something solid was drawn on
@@ -8553,8 +8605,10 @@ class _Canopy:
         waves = [(rng.uniform(0.05, 0.11), rng.uniform(0.08, 0.15), rng.uniform(0, math.tau)) for _ in range(3)]
         slope = rng.uniform(-0.55, -0.25)
         across = self.width / 2 + rng.uniform(-0.2, 0.2) * self.width
-        breadth = self.height * 0.55
-        self.band = (slope, across, breadth)
+        self.band = (slope, across, self.height * 0.55)
+        if self.flat:
+            return
+        breadth = self.band[2]
         for y in range(self.ph):
             depth = (y / max(1, self.ph - 1)) ** 0.8
             for x in range(self.pw):
@@ -9948,7 +10002,7 @@ class _ViewportScene(_Scene):
                       for _ in range(count)]
 
     def frame(self, index: int) -> list[list[tuple[str, tuple | None, tuple | None]]]:
-        stage = _Stage(self.width, self.height)
+        stage = _Stage(self.width, self.height, scene_sky(canopy_scene(_CANOPY_WORLD)["sky"]))
         self.draw(stage, index, 0.0)
         self.shutters(stage, index)
         self.caption_block(stage)
@@ -11025,8 +11079,16 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choi
         # called it and left every page turned in the scroll (issue #643). The
         # clear takes the blank line's row, so the height budget is unchanged.
         clear_screen()
-        out_line(f"{current['title']} {page + 1}/{len(pages)}")
-        for row in current["rows"]: out_line(row)
+        lines = [f"{current['title']} {page + 1}/{len(pages)}"] + current["rows"]
+        if canopy_active():
+            # On the canopy like any page (Thiesi/Voidrunner#30): the list on the
+            # console's glass, its title in the frame's color, the bar on the strip.
+            width = _box_outer_width()
+            out(canopy_paint(canopy_scene(_CANOPY_WORLD), width, len(lines)))
+            lines = [glass(_pad(f"{pal().hull}{BOLD}{lines[0]}{RESET}", width))] + [
+                glass(_pad(style_body_line(row), width)) for row in lines[1:]]
+            chart_strip()
+        for row in lines: out_line(row)
         seen.add(page)
         controls = current["footer"] if current["choices"] or current["required"] else "[N] Next [P] Prev [B] Back: "
         if current["choices"] and not current["required"]:
@@ -11764,7 +11826,7 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
     # the key that turned it -- is kept: only the rows that page covered and
     # this one does not are given back to the sky.
     keep = (canopy and shown is not None and shown[0] == canopy_key(scene)
-            and _OUT_COUNT - shown[2] <= CANOPY_ECHO_ALLOWANCE)
+            and _OUT_COUNT - shown[3] <= CANOPY_ECHO_ALLOWANCE)
     if not keep:
         clear_screen()
     header = _page_header(title, page, count)
@@ -11796,7 +11858,9 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
     _CANOPY_STRIP_WIDTH = _box_outer_width() if canopy else None
     if canopy:
         if keep:
-            out(f"{ESC}[H" + canopy_paint(scene, _box_outer_width(), len(lines), range(len(lines), shown[1])))
+            # From the last page's foot: its strip and the key echoed on it may
+            # run past the frame's edge, onto sky this page does not cover.
+            out(f"{ESC}[H" + canopy_paint(scene, _box_outer_width(), len(lines), range(shown[1], shown[2])))
         else:
             out(canopy_paint(scene, _box_outer_width(), len(lines)))
         tint = CANOPY_ALERT_GLASS if scene["kind"] == "combat" else CANOPY_GLASS
@@ -11824,7 +11888,7 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
     if canopy:
         # Until the action bar is down this page covers its own rows; the bar
         # (`out_prompt`) extends the claim to the strip and the key echoed on it.
-        _CANOPY_SHOWN = (canopy_key(scene), len(lines), _OUT_COUNT)
+        _CANOPY_SHOWN = (canopy_key(scene), len(lines), len(lines), _OUT_COUNT)
 
 
 def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, page: int, *, pages: list[list[str]] | None = None) -> tuple[str, int, int]:

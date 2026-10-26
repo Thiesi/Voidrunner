@@ -163,7 +163,9 @@ def test_the_action_bar_fits_on_the_pictures_bottom_row(width):
     assert "[B] Back" in footer and ("[1-3] View" in footer or "[3] Discovery" in footer)
 
 
-@pytest.mark.parametrize("style,truecolor,budget", [("auto", True, 100_000), ("basic", False, 60_000)])
+# The truecolor picture is drawn on the canopy's sky since Voidrunner#30, which
+# measured about 7% more over a whole idle loop: a twinkle on a sky has a ground.
+@pytest.mark.parametrize("style,truecolor,budget", [("auto", True, 110_000), ("basic", False, 60_000)])
 def test_opening_and_idling_stays_small_on_the_wire(style, truecolor, budget, depth):
     """Everything a picture sends from opening to holding still, at 80x24."""
     depth(style, truecolor)
