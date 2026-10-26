@@ -2,7 +2,9 @@ name: Release
 
 # Push a tag such as v1.0.0 to publish that commit's voidrunner.py, unchanged,
 # as a GitHub release. NetBBS vendors exactly this file (Thiesi/NetBBS#1216),
-# so the asset must be byte-identical to what git stores at the tag.
+# so the asset must be byte-identical to what git stores at the tag. The
+# release also carries the NetBBS door profile, for a SysOp who runs it before
+# NetBBS bundles it (#29), and SHA256SUMS covers both.
 on:
   push:
     tags: ["v*"]
@@ -22,12 +24,15 @@ jobs:
         run: |
           python -m pip install "pytest>=7.0" "pytest-xdist>=3.0"
           python -m pytest -q -n auto
-      - name: Check the asset is the stored file
-        run: test "$(git hash-object voidrunner.py)" = "$(git rev-parse "$GITHUB_REF_NAME:voidrunner.py")"
+      - name: Check the assets are the stored files
+        run: |
+          test "$(git hash-object voidrunner.py)" = "$(git rev-parse "$GITHUB_REF_NAME:voidrunner.py")"
+          test "$(git hash-object profiles/netbbs.json)" = "$(git rev-parse "$GITHUB_REF_NAME:profiles/netbbs.json")"
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          sha256sum voidrunner.py > SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" voidrunner.py SHA256SUMS \
+          cp profiles/netbbs.json netbbs.json
+          sha256sum voidrunner.py netbbs.json > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" voidrunner.py netbbs.json SHA256SUMS \
             --title "Voidrunner $GITHUB_REF_NAME" --generate-notes --verify-tag

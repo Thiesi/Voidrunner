@@ -171,6 +171,21 @@ Pushing a tag such as `v1.0.0` runs the suite and publishes that commit's
 `voidrunner.py`, byte-for-byte as stored in git, with a `SHA256SUMS` file.
 NetBBS vendors these releases.
 
+Each release also carries `netbbs.json`, the NetBBS door profile from
+`profiles/`, which `SHA256SUMS` covers too. A SysOp who runs a release before
+NetBBS bundles it imports it with **[J] Import JSON** and corrects its paths.
+It sets no `VOIDRUNNER_SAVE_DIR`: NetBBS passes the node's own save directory,
+which its backups cover.
+
+Every release's notes say whether that is safe, in one line:
+
+> **NetBBS:** saved data unchanged; runs on NetBBS 7.31.0 or later.
+
+or, when the save layout or the `maintenance_session` / `PilotBusy` names that
+NetBBS's backups import change:
+
+> **NetBBS:** changes the save format; wait for the NetBBS release that bundles it.
+
 The banner is drawn from the game's own launch splash by `art/render_banner.py`.
 
 ## License

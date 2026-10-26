@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import io
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -3280,3 +3281,73 @@ def test_a_paging_key_never_leaves_the_ending_and_the_keys_a_caller_presses_do(m
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_career_ending(vr.Palette(False), fresh, world.save.ship)
     assert next(pressed) == "SENTINEL", "left early, or did not leave on the key"
+
+
+# The node's calendar (#27): career dates are the node's, stored in ISO,
+# shown in the node's own date format.
+
+class _LateEvening(vr.datetime):
+    """23:30 UTC on 26 October 2026, wherever it is asked from."""
+    @classmethod
+    def now(cls, tz=None):
+        instant = vr.datetime(2026, 10, 26, 23, 30, tzinfo=vr.timezone.utc)
+        return instant.astimezone(tz) if tz is not None else instant.replace(tzinfo=None)
+
+
+@pytest.fixture
+def calendar(monkeypatch):
+    monkeypatch.setattr(vr, "_NODE_ZONE", None)
+    monkeypatch.setattr(vr, "_DATE_FORMAT", "%Y-%m-%d")
+    monkeypatch.setattr(vr, "datetime", _LateEvening)
+
+
+def test_a_career_is_dated_on_the_nodes_calendar_not_the_hosts(calendar, monkeypatch):
+    vr.set_node_calendar({"timezone": "UTC"})
+    assert vr.career_date() == "2026-10-26"
+    # Two hours east of UTC it is already the 27th on the node.
+    monkeypatch.setattr(vr, "_NODE_ZONE", vr.timezone(timedelta(hours=2)))
+    assert vr.career_date() == "2026-10-27"
+    assert vr._new_career("Nib").pilot.career_started == "2026-10-27"
+
+
+def test_an_unknown_or_missing_zone_keeps_the_hosts_calendar(calendar):
+    vr.set_node_calendar({"timezone": "Not/A_Zone"})
+    assert vr._NODE_ZONE is None
+    vr.set_node_calendar({})
+    assert vr._NODE_ZONE is None and vr._DATE_FORMAT == "%Y-%m-%d"
+
+
+def test_a_zone_the_tz_database_cannot_open_does_not_stop_the_door(calendar, monkeypatch):
+    # On POSIX, ZoneInfo("America") opens a directory and raises IsADirectoryError.
+    def unreadable(key):
+        raise IsADirectoryError(key)
+    monkeypatch.setattr(vr, "ZoneInfo", unreadable)
+    vr.set_node_calendar({"timezone": "America"})
+    assert vr._NODE_ZONE is None
+
+
+@pytest.mark.parametrize("pattern,date", [
+    ("%d.%m.%Y %H:%M", "%d.%m.%Y"),
+    ("%H:%M %d/%m/%Y", "%d/%m/%Y"),
+    ("%Y-%m-%d %H:%M:%S %Z", "%Y-%m-%d"),
+    ("%a %d %b %Y, %I:%M %p", "%a %d %b %Y"),
+    ("%H:%M", None),
+    (None, None),
+    (42, None),
+])
+def test_the_date_is_taken_out_of_the_nodes_date_and_time_format(pattern, date):
+    assert vr.date_part(pattern) == date
+
+
+def test_recorded_dates_are_shown_the_way_the_node_shows_dates(calendar):
+    vr.set_node_calendar({"datetime_format": "%d.%m.%Y %H:%M"})
+    assert vr.show_date("2026-10-27") == "27.10.2026"
+    # An unrecorded start or a date this build did not write is shown as it is.
+    assert vr.show_date("") == ""
+    assert vr.show_date("someday") == "someday"
+    save = vr._new_career("Nib")
+    dossier = {"number": 1, "finale": next(iter(vr.CAREER_FINALES)), "started": "2026-01-05", "ended": "2026-10-27",
+               "seed": 1, "days": 3, "rank": 0, "ship": "Shuttle", "credits": 0, "market_margin": 0, "charted": 1,
+               "kills": 0, "missions": 0, "failed": 0, "expired": 0, "highlights": []}
+    save.retired_careers = [dossier]
+    assert "05.01.2026 to 27.10.2026" in " ".join(vr.career_dossier_lines(save))
