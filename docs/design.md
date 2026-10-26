@@ -1075,12 +1075,17 @@ something a caller must answer belongs.
 
 **Truecolor is the design target**, degrading to 256, to 16 (`basic`), to
 monochrome, to plain ASCII, in that order, each deliberate rather than
-accidental. The only effect that truecolor buys outright is the title splash's
-gradient rule, which degrades to a single role color rather than being
-approximated.
+accidental. Truecolor buys two things outright: the title splash's gradient
+rule, which degrades to a single role color rather than being approximated,
+and the canopy's sky (below), which is black at 256 colors, because the
+256-color cube has no dark tones but greys -- its darkest red is already
+95,0,0 -- and a dark gradient turns into bands of black and brick there. Dark
+grounds at 256 colors (the console's glass and strip) are taken from the
+greyscale ramp for the same reason.
 
 **One glyph vocabulary, every glyph with an ASCII substitute.** `╭─╮ │ ╰─╯
-├─┤` frames; `█░` gauges; `▁▂▃▄▅▆▇█` sparklines; `⟦ ⟧` chips; `◈` credits;
+├─┤` frames; `━╾─` gauges (a heavy reading to half a cell on a light track);
+`━` the header's lane streak; `◢` a station's running lights; `▁▂▃▄▅▆▇█` sparklines; `⟦ ⟧` chips; `◈` credits;
 `▲ ◆ ●` severity; `◤` the brand; `●○` crew pips; `→` a delta. A screen asks for
 one by role -- `glyph("danger")` -- rather than typing the character, so the
 `plain` preset is a designed rendering and a new glyph cannot arrive without
@@ -1139,7 +1144,11 @@ drawn two pixels to a cell in half blocks, a ship crossing on a cooling plasma
 trail, and the wordmark resolving in over it. It follows every rule above but two.
 Left to run to its end, it holds its last frame under a "press any key to
 launch" prompt until the caller presses a key, or input ends, or the terminal
-is resized: a title card that vanished the moment it was complete was gone
+is resized, and after two seconds of rest that frame comes alive -- attract
+mode (Thiesi/Voidrunner#30): the stars keep drifting, the ship comes round
+again every few seconds and a glint crosses the wordmark, for a minute at most
+so an idle caller does not cost bandwidth forever. Each tick is a pure function
+of its number, drawn by changed cell like every other frame: a title card that vanished the moment it was complete was gone
 before anyone had looked at it. And it is the one effect that takes the key
 that ends it: whatever follows is a new
 screen the caller has not seen yet, so a key pressed to skip a title card must
@@ -1183,6 +1192,63 @@ colors may read red here, which the splash never does: a raider, an alarm and a
 fireball are red. Pixel colors are snapped to a coarse step, and gradients
 cool in steps, so a frame sends only what visibly changed. Each scene stays
 under 90 KB at 80x24 truecolor.
+
+**The canopy (Thiesi/Voidrunner#30).** The pilot is always in the cockpit and
+the void is always outside it. On a live terminal in a full-palette preset
+(`auto` or `fast` -- the picture does not move, so `fast` keeps it), every paged
+screen is drawn on a full-screen picture of where the ship is: docked, the
+system's world banded by its economy and its station with running lights in its
+trade's color, as the docking scene drew them; in a fight, the contact under a
+red lock; between, the lane; before a career exists, the title's violet world
+with the Shuttle every career starts in. The page is the console, printed over
+it row for row as it always was on a tinted pane of glass, and its action bar
+sits on a strip of its own. Whatever the console leaves uncovered is the
+window: a column beside it on a terminal wide enough (the console stays 79
+columns; on 120 the window is 40), a band along the bottom of a narrower one.
+The light is the system's danger: a calm system's sky is a cool indigo with a
+haze and the galaxy's band across it, caution warms it, danger red-shifts it,
+and a fight is red alert -- the console's glass and its header's streak go red
+with it. The in-flight scenes and the Viewport are lit by the same sky, so a
+scene and the page after it are one place.
+
+It is a picture, not information: everything in it is on the page (the status
+band names the station, its economy and its danger), and it is drawn only
+where someone can see it -- a scripted session or a transcript is the same
+with it or without it, which is also why the suite's in-process screens are
+unchanged by it. It is painted first by cursor address, never into the
+bottom-right cell, and the page goes over it. One picture serves every page of
+a place, because the composition never depends on the console's height: a page
+turn with the sky intact (nothing written since but the echoed key) clears
+nothing and gives back only the rows the last page covered. A full canopy is
+about 15 KB at 80x24 and 30 KB at 120x36 (a plain page is about 2 KB); a page
+turn under the same sky measured about 5 KB at either size, the rows it gives
+back included. Pixels are quadrant blocks, two across a cell, where
+the terminal is sent UTF-8 and NetBBS has not said the caller's font lacks them
+(`quadrants: false`, as Lunar Lander reads it); half blocks otherwise, and
+always over CP437. A SysOp can switch it off for everyone with `DOOR_CANOPY=0`,
+or keep everyone to half blocks with `DOOR_PIXELS=half`.
+
+**The star map is a picture there too.** Drawn in the canopy's pixels: charted
+space glowing faintly in its trades' colors with the unknown dark between,
+lanes as fine lines, the plotted route in the lane's gold-to-plasma, each
+charted system a star in its economy's light ringed red at danger 4 or more,
+the ship, the objective and the route's end ringed and named, an uncharted
+bearing a hollow grey mark, and charted names beside their stars where there is
+room. It is the grid's projection under the grid's rules -- an uncharted system
+gives away no name (a contract's target excepted), no economy and no danger --
+and the grid remains for every terminal the canopy is not drawn on.
+
+**The console's instruments.** Gauges are instrument lines read to half a
+cell; full blocks on consecutive rows had fused the deck's hull and fuel into
+one slab. The ship on the deck, the record, a refit preview and a career's
+ending is the scenes' own pixel hull in half blocks, its damage scorched
+plating (as many marks as the ASCII art's `x`s, which mono and plain keep). A
+page's header carries the lane streak, which shoots out of the title on
+arrival in `auto`. Combat's fuel, hold and day are one row of chips, and its
+identification paragraph follows the options it qualifies, so every option is
+on the first page at 80x24 (#28). A market quote is a mark on the scale from the
+galaxy's cheapest price to its dearest. The deck names a system's danger in
+pips beside its word.
 
 Voidrunner offers saved display presets from station Display Options: full palette
 using the existing terminal color depth, the same palette with motion off

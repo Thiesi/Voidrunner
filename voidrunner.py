@@ -8845,6 +8845,11 @@ def _canopy_sgr(fg: tuple | None, bg: tuple | None) -> str:
             continue
         if _PALETTE._truecolor:
             parts.append(f"{base};2;{rgb[0]};{rgb[1]};{rgb[2]}")
+        elif base == 48 and max(rgb) < 72:
+            # A dark ground on the greyscale ramp: the cube's nearest to the
+            # console's glass is a loud navy, 0,0,95.
+            level = sum(rgb) / 3
+            parts.append(f"48;5;{16 if level < 4 else 232 + max(0, min(23, round((level - 8) / 10)))}")
         else:
             parts.append(f"{base};5;{_splash_256(rgb)}")
     return f"{ESC}[{';'.join(parts)}m" if parts else ""
@@ -8924,7 +8929,7 @@ def star_chart(world: World, path: list[int], public_target: int | None, sector:
     reach = 9.0 if sector is None else 13.0
     for sid, (sx, sy) in shown.items():
         station = world.by_id[sid]
-        if not station.discovered:
+        if not station.discovered or canopy.flat:
             continue
         light = _mix(_SCENE_LIGHTS.get(station.economy, (150, 150, 170)), canopy.haze, 0.45)
         for x, y, px, py in canopy.each(sx - reach, sy - reach, sx + reach, sy + reach):
