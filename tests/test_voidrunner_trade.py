@@ -2758,15 +2758,22 @@ def test_real_hire_records_the_previewed_identity_before_ack(tmp_path, role, let
 
 @pytest.mark.parametrize("hull", list(vr.HULL_CLASSES))
 @pytest.mark.parametrize("condition,fraction,marks", [("Intact",1,0),("Scuffed",.75,1),("Damaged",.5,3),("Critical",.2,6)])
-def test_ship_portrait_damage_matches_real_hull_without_changing_ship(hull,condition,fraction,marks):
+def test_ship_portrait_damage_matches_real_hull_without_changing_ship(monkeypatch,hull,condition,fraction,marks):
     import copy
     world=_world_with_seed(42); ship=world.save.ship; ship.hull_class=hull
     ship.hull_hp=int(vr.hull_hp_max(ship)*fraction)
     before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate(); registry=copy.deepcopy(vr.PORTRAITS)
+    # The authored ASCII art marks damage with `x`, where no color is drawn.
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "plain")
     large,compact,details,title=vr.viewport_content(world,"1")
     assert title==hull and condition in details[0] and f"{ship.hull_hp}/{vr.hull_hp_max(ship)}" in details[0]
     assert sum(row.count("x") for row in large)==marks
     assert sum(row.count("x") for row in compact)==marks
+    # The pixel hull marks the same damage as scorched plating (Voidrunner#30).
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
+    pixels=[color for row in vr.hull_pixels(ship) for color in row]
+    assert sum(color in (vr.HULL_SCORCH, vr.HULL_EMBER) for color in pixels)==marks
+    assert vr.viewport_content(world,"1")[0]==vr.pixel_hull(ship,zoom=2)
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng and vr.PORTRAITS==registry
 
 

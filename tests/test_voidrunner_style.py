@@ -367,7 +367,7 @@ def test_the_colorless_presets_preview_themselves_colorlessly(monkeypatch):
         """The preview itself: from its gauge to its last reading, with the
         frame's own right-hand border -- which is always hull-colored -- left
         outside."""
-        start = min((row.index(glyph) for glyph in ("█", "░", "#", ".") if glyph in row),
+        start = min((row.index(glyph) for glyph in ("━", "─", "#", ".") if glyph in row),
                     default=0)
         # Find the last reading in the *visible* text: a bare `rindex("12")`
         # matched inside the border's own escape once the frame color became
@@ -716,7 +716,7 @@ def test_a_neutral_standing_is_a_value_and_its_bar_is_not(monkeypatch):
     for row in standing:
         assert _role_of(row, "Neutral") == p.ink, plain(row)
         bars = [text for text, esc in _role_runs(row).items()
-                if text and set(text) <= {"█", "░"}]
+                if text and set(text) <= {"━", "╾", "─"}]
         assert bars, plain(row)
         assert all(_role_runs(row)[bar] != p.ink for bar in bars), plain(row)
 

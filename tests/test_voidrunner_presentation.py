@@ -851,10 +851,10 @@ def test_command_deck_gauges_hull_fuel_and_hold_at_every_supported_size(terminal
                          ("FUEL", f"{ship.fuel}/{vr.fuel_capacity(ship)}"),
                          ("HOLD", f"0/{vr.cargo_capacity(ship)}")):
         row = next(row for row in rows if row.startswith(label))
-        assert "█" in row or "░" in row, f"no gauge in {row!r}"
+        assert re.search(r"[━╾─]", row), f"no gauge in {row!r}"
         assert value in row, f"no reading in {row!r}"
     # The bars are all the same length, whatever the readings are.
-    bars = {len(re.search(r"[█░]+", row).group(0)) for row in rows if re.search(r"[█░]+", row)}
+    bars = {len(re.search(r"[━╾─]+", row).group(0)) for row in rows if re.search(r"[━╾─]+", row)}
     assert len(bars) == 1, f"gauges of different lengths on one screen: {bars}"
 
 

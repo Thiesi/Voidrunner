@@ -120,6 +120,11 @@ _CP437_TRANSLATION = str.maketrans({
     "→": ">", "▲": "^", "▼": "v", "◆": "*", "◈": "*",
     "○": "o", "●": "o", "◤": ">", "⟦": "[", "⟧": "]",
     "★": "*", "•": "·", "–": "-", "—": "-", "…": ".",
+    "━": "═", "╾": "═", "◢": "»", "◣": "«",
+    # Quadrant blocks: the canopy never sends them to a CP437 terminal (it
+    # draws half blocks there), but no artwork may reach one unmapped.
+    "▘": "▀", "▝": "▀", "▖": "▄", "▗": "▄", "▞": "▒", "▚": "▒",
+    "▛": "█", "▜": "█", "▙": "█", "▟": "█",
     "‘": "'", "’": "'", "“": '"', "”": '"',
 })
 DISPLAY_STYLES = {"auto": "Full palette", "fast": "Full palette, no motion", "basic": "16-color",
@@ -143,6 +148,7 @@ _ASCII_ART_TRANSLATION = str.maketrans({
     chr(0x25C6): "*", chr(0x25CF): "o", chr(0x25CB): ".", chr(0x25E4): ">",
     chr(0x258C): ">", chr(0x2022): "-", chr(0x00B7): "-", chr(0x2192): "-",
     chr(0x25BC): "v", chr(0x2013): "-", chr(0x2014): "-",
+    chr(0x2501): "=", chr(0x257E): "=", chr(0x25E2): ">", chr(0x25E3): "<",
 })
 
 # Name -> (Unicode, ASCII). One vocabulary, one substitution per glyph, asked
@@ -158,6 +164,9 @@ _GLYPHS = {
     "dot": ("·", "-"), "arrow": ("→", "->"), "rise": ("▲", "^"),
     "fall": ("▼", "v"), "flat": ("─", "-"),
     "fill": ("█", "#"), "track": ("░", "."),
+    # An instrument line (Thiesi/Voidrunner#30): a heavy reading on a light
+    # track, with a half step where the reading ends partway through a cell.
+    "bar": ("━", "#"), "bar_half": ("╾", "#"), "bar_track": ("─", "."),
 }
 # Eight sparkline levels and their ASCII ramp, lightest first.
 _SPARK = ("▁▂▃▄▅▆▇█", ".. :-=+*#".replace(" ", ""))
@@ -467,6 +476,13 @@ class Palette:
             pieces.append(f"{ESC}[38;2;{r};{g};{b}m{character}")
         return "".join(pieces) + RESET
 
+    #: The roles' own colors, for a component that ramps between them rather
+    #: than printing one: an instrument line glowing toward its reading.
+    ROLE_RGB = {"hull": (127, 163, 191), "deep": (47, 56, 68), "plasma": (255, 90, 190),
+                "gold": (255, 200, 60), "ink": (232, 240, 255), "slate": (179, 155, 125),
+                "text": (188, 196, 208), "mint": (108, 242, 160), "amber": (255, 179, 71),
+                "alarm": (255, 92, 108)}
+
     def tone(self, name: str) -> str:
         """A severity tone by name, for a component handed one as data."""
         return {"good": self.mint, "caution": self.amber, "danger": self.alarm,
@@ -570,6 +586,8 @@ def out(text: str = "") -> None:
         text = text.translate(_ASCII_ART_TRANSLATION)
     if _OUTPUT_ENCODING == "cp437":
         text = _cp437_text(text)
+    global _OUT_COUNT
+    _OUT_COUNT += len(text)
     if _SOCKET_TRANSPORT is not None:
         _SOCKET_TRANSPORT.write(text.encode(_OUTPUT_ENCODING, "strict"))
     else:
@@ -594,7 +612,30 @@ def out_prompt(text: str) -> None:
     follows for a composed body row: a component's decision beats a pattern's
     guess.
     """
-    out(_wrap_output(style_action_bar(text), max(1, _OUTPUT_WIDTH - 1)))
+    global _CANOPY_STRIP_WIDTH, _CANOPY_SHOWN
+    wrapped = _wrap_output(style_action_bar(text), max(1, _OUTPUT_WIDTH - 1))
+    strip, _CANOPY_STRIP_WIDTH = _CANOPY_STRIP_WIDTH, None
+    if strip is None:
+        out(wrapped)
+        return
+    # Under a canopy page the bar is the console's command strip: its own
+    # glass under the frame, across the frame's width. The strip is laid
+    # first and the bar written over it, so the bar's last character is still
+    # the last thing before the key the caller types -- which then lands on
+    # the strip as well, in the tint the bar leaves set.
+    rows = wrapped.split("\r\n")
+    tint = _canopy_sgr(None, CANOPY_ALERT_STRIP if red_alert() else CANOPY_STRIP)
+    up = f"{ESC}[{len(rows) - 1}A" if len(rows) > 1 else ""
+    out("\r\n".join(f"\r{tint}{' ' * strip}{RESET}" for _ in rows) + up + "\r"
+        + "\r\n".join(tint + row.replace(RESET, RESET + tint) for row in rows))
+    if _CANOPY_SHOWN is not None:
+        # The page now covers its strip too, and the row the echoed key's
+        # line feed leaves the cursor on.
+        # A bar on the last row is different: that line feed scrolls the
+        # whole screen, sky and all, so the next page has to start afresh.
+        key, covered, _ = _CANOPY_SHOWN
+        _CANOPY_SHOWN = ((key, covered + len(rows) + 1, _OUT_COUNT)
+                         if covered + len(rows) < _OUTPUT_HEIGHT else None)
 
 
 def clear_screen() -> None:
@@ -1251,12 +1292,16 @@ def motion_interrupted() -> bool:
     is skipped rather than slept through.
     """
     _check_session_time()
-    if not motion_enabled():
+    if not motion_enabled() or not _live_terminal():
         return True
+    return _INPUT_READER.read_byte.waiting()
+
+
+def _live_terminal() -> bool:
+    """Whether a caller's terminal is on the other end: an input reader over
+    stdio or a socket, rather than a test driving screens directly."""
     reader = _INPUT_READER
-    if reader is None or not isinstance(reader.read_byte, (_StdioBytes, _SocketTransport)):
-        return True
-    return reader.read_byte.waiting()
+    return reader is not None and isinstance(reader.read_byte, (_StdioBytes, _SocketTransport))
 
 
 def motion_pause(seconds: float) -> bool:
@@ -5702,23 +5747,39 @@ def _gauge_bar(val: int, max_val: int, width: int = 10, p: Palette | None = None
 
 def gauge(value: int, maximum: int, cells: int = 10, *, ramp: bool = True,
           tone: str | None = None) -> str:
-    """A filled bar. `ramp` colors it by how full it is; `tone` overrides.
+    """An instrument line. `ramp` colors it by how full it is; `tone` overrides.
 
-    The track is `deep` rather than absent so the bar's full length reads as a
+    A heavy reading on a light track, read to half a cell (Thiesi/Voidrunner#30):
+    full-height blocks on consecutive rows fused into one slab, so the deck's
+    hull and fuel read as a single shape rather than two readings. On a full
+    palette the reading glows toward its head, the way an instrument does. The
+    track is `deep` rather than absent so the bar's full length reads as a
     scale even when it is nearly empty -- an eighth of a bar with nothing
     behind it looks like a short bar, not a low reading.
     """
     p = pal()
     fraction = 0.0 if maximum <= 0 else max(0.0, min(1.0, value / maximum))
-    filled = round(fraction * cells)
     if tone is not None:
-        color = p.tone(tone)
+        role = {"good": "mint", "caution": "amber", "danger": "alarm", "info": "hull", "brand": "plasma",
+                "key": "gold", "value": "ink", "label": "slate", "text": "text", "heading": "hull"}.get(tone, "ink")
     elif ramp:
-        color = p.mint if fraction > 0.5 else (p.amber if fraction > 0.2 else p.alarm)
+        role = "mint" if fraction > 0.5 else ("amber" if fraction > 0.2 else "alarm")
     else:
-        color = p.hull
-    return (f"{color}{glyph('fill') * filled}{RESET}"
-            f"{p.deep}{glyph('track') * (cells - filled)}{RESET}")
+        role = "hull"
+    if _OUTPUT_STYLE == "plain":
+        filled = round(fraction * cells)
+        return glyph("bar") * filled + glyph("bar_track") * (cells - filled)
+    full, half = divmod(round(fraction * cells * 2), 2)
+    reading = [glyph("bar")] * full + ([glyph("bar_half")] if half else [])
+    track = f"{p.deep}{glyph('bar_track') * (cells - len(reading))}{RESET}"
+    color = getattr(p, role)
+    if _OUTPUT_STYLE not in ("auto", "fast") or not reading:
+        return f"{color}{''.join(reading)}{RESET}{track}" if reading else track
+    head = Palette.ROLE_RGB[role]
+    tail = _mix(Palette.ROLE_RGB["deep"], head, 0.45)
+    steps = max(1, len(reading) - 1)
+    lit = "".join(f"{p.rgb(_mix(tail, head, (index / steps) ** 0.7))}{mark}" for index, mark in enumerate(reading))
+    return f"{lit}{RESET}{track}"
 
 
 def sparkline(values, *, tone: str = "info") -> str:
@@ -6033,7 +6094,8 @@ def table_member(row: str) -> str:
     return MEMBER_MARK + row
 
 
-def beside(rows: list[str], art: list[str], *, width: int | None = None, gap: int = 3) -> list[str]:
+def beside(rows: list[str], art: list[str], *, width: int | None = None, gap: int = 3,
+           overhang: bool = False) -> list[str]:
     """Put authored art to the right of a block of rows, or leave the rows alone.
 
     Whole composition or none, the same rule the portraits already follow: a
@@ -6046,8 +6108,10 @@ def beside(rows: list[str], art: list[str], *, width: int | None = None, gap: in
         return list(rows)
     art_width = max(_visible_width(row) for row in art)
     body_width = max([_visible_width(row) for row in rows] or [0])
-    if body_width + gap + art_width > width or len(art) > len(rows):
+    if body_width + gap + art_width > width or (len(art) > len(rows) and not overhang):
         return list(rows)
+    # Art taller than its rows may hang below them, on rows of its own.
+    rows = list(rows) + [""] * max(0, len(art) - len(rows))
     top = (len(rows) - len(art)) // 2
     out_rows = []
     for index, row in enumerate(rows):
@@ -6113,7 +6177,7 @@ _FOREIGN_ESCAPE = re.compile(r"\x1b\[[0-9;]*[a-ln-zA-Z]"
                              # (U+009B is CSI) on a UTF-8 terminal (issue #15).
                              r"|[\x00\x04-\x08\x0b-\x1a\x1c-\x1f\x7f-\x9f]")
 _KEY_RE = re.compile(r"\[[^\[\]]{1,9}\]")
-_GAUGE_RE = re.compile(r"[▀-▐░-▓■]{2,}")
+_GAUGE_RE = re.compile(r"[▀-▐░-▓■━╾─]{2,}")
 
 
 def style_action_bar(text: str) -> str:
@@ -6450,7 +6514,7 @@ def _splash_sgr(fg: tuple[int, int, int] | None, bg: tuple[int, int, int] | None
     Without `reset` it only sets: right after a cell whose colors this one
     replaces completely, which is most of them, and it is the commonest SGR."""
     parts = ["0"] if reset else []
-    truecolor = _PALETTE._truecolor and _OUTPUT_STYLE == "auto"
+    truecolor = _PALETTE._truecolor and _OUTPUT_STYLE in ("auto", "fast")
     for rgb, base in ((fg, 38), (bg, 48)):
         if rgb is None:
             continue
@@ -7635,20 +7699,98 @@ def _scene_planet(width: int, height_px: int, economy: str, pcx: float, pcy: flo
     bands = _SCENE_WORLD_BANDS.get(economy, _SCENE_WORLD_BANDS["Industrial"])
     for y in range(height_px):
         for x in range(width):
-            dx, dy = (x + 0.5 - pcx) / radius, (y + 0.5 - pcy) / radius
-            disc = dx * dx + dy * dy
-            if disc > 1.0:
-                continue
-            z = math.sqrt(1.0 - disc)
-            light = max(0.0, -0.62 * dx - 0.5 * dy + 0.6 * z)
-            band = (dy * 3.0 + 0.2 * math.sin(dx * 5.0 + dy * 3.0)) % len(bands)
-            low = int(band)
-            color = _mix(bands[low], bands[(low + 1) % len(bands)], band - low)
-            shaded = _mix((8, 6, 20), color, 0.08 + 0.95 * light)
-            if z < 0.3 and light > 0.15:
-                shaded = _mix(shaded, (150, 210, 255), (0.3 - z) * 1.5)
-            planet[(x, y)] = shaded
+            shaded = _planet_shade((x + 0.5 - pcx) / radius, (y + 0.5 - pcy) / radius, bands)
+            if shaded is not None:
+                planet[(x, y)] = shaded
     return planet
+
+
+def _planet_shade(dx: float, dy: float, bands: tuple,
+                  sun: tuple[float, float, float] = (-0.62, -0.5, 0.6)) -> tuple | None:
+    """A banded world's color at (dx, dy) in units of its radius, lit from
+    `sun` (the upper left unless told otherwise), or None off its disc."""
+    disc = dx * dx + dy * dy
+    if disc > 1.0:
+        return None
+    z = math.sqrt(1.0 - disc)
+    light = max(0.0, sun[0] * dx + sun[1] * dy + sun[2] * z)
+    band = (dy * 3.0 + 0.2 * math.sin(dx * 5.0 + dy * 3.0)) % len(bands)
+    low = int(band)
+    color = _mix(bands[low], bands[(low + 1) % len(bands)], band - low)
+    shaded = _mix((8, 6, 20), color, 0.08 + 0.95 * light)
+    if z < 0.3 and light > 0.15:
+        shaded = _mix(shaded, (150, 210, 255), (0.3 - z) * 1.5)
+    return shaded
+
+
+def _station_pixel(economy: str, lights: tuple, u: float, v: float, spin: float, blink: bool) -> tuple | None:
+    """A station of `economy` at (u, v), in units of its own radius, centre at 0:
+    the docking scene's and the canopy's, so a station is the same place in both."""
+    hull_lit, hull_dark = (196, 204, 222), (92, 100, 124)
+    if economy == "Haven":
+        hull_lit, hull_dark = (120, 100, 150), (52, 40, 72)
+    shade = _mix(hull_lit, hull_dark, max(0.0, min(1.0, (u + v) * 0.5 + 0.5)))
+    if economy == "Mining":
+        # A worked asteroid with a lit docking arm cut into its face.
+        angle = math.atan2(v, u)
+        edge = 0.78 + 0.07 * math.sin(3 * angle + 0.6) + 0.05 * math.sin(7 * angle + 2.0)
+        if abs(v) < 0.07 and -1.3 < u < -0.4:
+            return lights if blink and abs(u + 1.25) < 0.06 else (150, 150, 160)
+        r = math.hypot(u, v)
+        if r <= edge:
+            z = math.sqrt(max(0.0, 1 - (r / edge) ** 2))
+            light = max(0.0, -0.6 * u - 0.5 * v + 0.6 * z)
+            rock = _mix((50, 40, 36), (176, 150, 124), 0.15 + 0.85 * light)
+            pit = math.sin(u * 13 + 1.0) * math.sin(v * 11 + 2.0)
+            if pit > 0.75:
+                rock = _scale(rock, 0.7)
+            if abs(u + 0.3) < 0.06 and abs(v - 0.1) < 0.06:
+                return lights
+            return rock
+        return None
+    if economy == "Tech":
+        # A spire with its sensor dish and two wings of panels.
+        if abs(u) < 0.05 and -1.0 < v < 0.8:
+            return lights if v < -0.92 and blink else shade
+        if 0.3 < abs(u) < 1.25 and abs(v) < 0.16:
+            cell = (abs(u) * 10) % 1 < 0.15 or abs(v) > 0.12
+            return (40, 70, 140) if not cell else (150, 170, 200)
+        if abs(u) <= 0.3 and abs(v) < 0.04:
+            return shade
+        if math.hypot(u, v + 0.75) < 0.28 and v > -0.75:
+            return _mix((220, 228, 240), (110, 120, 140), (u + 0.3) / 0.6)
+        if math.hypot(u, v) < 0.22:
+            return lights if blink and math.hypot(u, v) < 0.07 else shade
+        return None
+    # The ring stations: Agricultural, Industrial and Haven.
+    tilt = 0.42
+    rho = math.hypot(u, v / tilt)
+    angle = math.atan2(v / tilt, u)
+    ring = 0.78 <= rho <= 1.0
+    front = v > 0
+    hub = math.hypot(u, v) < 0.24
+    if economy == "Industrial" and abs(v) < 0.06 and 0.2 < abs(u) < 1.35:
+        if abs(u) > 1.28:
+            return lights if blink else (120, 80, 50)
+        return shade if (abs(u) * 12) % 1 > 0.25 else hull_dark
+    if economy == "Industrial" and abs(abs(u) - 1.15) < 0.12 and abs(v) < 0.14:
+        return _mix((170, 120, 80), hull_dark, (v + 0.14) / 0.28)
+    if ring and (front or not hub):
+        seam = (angle * 6 / math.pi + spin) % 1.0
+        if 0.86 <= rho <= 0.92 and seam < 0.18:
+            return lights if (blink or economy != "Haven") else _scale(lights, 0.5)
+        if economy == "Agricultural" and seam > 0.55:
+            return _mix((70, 150, 90), (30, 70, 50), (v / tilt + 1) / 2)
+        return _mix(shade, (20, 20, 30), 0.35 if not front else 0.0)
+    if hub:
+        z = math.sqrt(max(0.0, 1 - (math.hypot(u, v) / 0.24) ** 2))
+        dome = (120, 200, 130) if economy == "Agricultural" and v < -0.05 else hull_lit
+        if abs(u) < 0.05 and abs(v) < 0.05 and blink:
+            return lights
+        return _mix(hull_dark, dome, 0.2 + 0.8 * max(0.0, -0.5 * u - 0.5 * v + 0.6 * z))
+    if (abs(v) < 0.04 and 0.24 < abs(u) < 0.8) or (abs(u) < 0.03 and 0.1 < abs(v) < 0.8 * tilt):
+        return hull_dark
+    return None
 
 
 class _DockScene(_Scene):
@@ -7681,72 +7823,7 @@ class _DockScene(_Scene):
 
     def station_pixel(self, u: float, v: float, spin: float, blink: bool) -> tuple | None:
         """The station at (u, v), in units of its own radius, centre at 0."""
-        economy, lights = self.economy, self.lights
-        hull_lit, hull_dark = (196, 204, 222), (92, 100, 124)
-        if economy == "Haven":
-            hull_lit, hull_dark = (120, 100, 150), (52, 40, 72)
-        shade = _mix(hull_lit, hull_dark, max(0.0, min(1.0, (u + v) * 0.5 + 0.5)))
-        if economy == "Mining":
-            # A worked asteroid with a lit docking arm cut into its face.
-            angle = math.atan2(v, u)
-            edge = 0.78 + 0.07 * math.sin(3 * angle + 0.6) + 0.05 * math.sin(7 * angle + 2.0)
-            if abs(v) < 0.07 and -1.3 < u < -0.4:
-                return lights if blink and abs(u + 1.25) < 0.06 else (150, 150, 160)
-            r = math.hypot(u, v)
-            if r <= edge:
-                z = math.sqrt(max(0.0, 1 - (r / edge) ** 2))
-                light = max(0.0, -0.6 * u - 0.5 * v + 0.6 * z)
-                rock = _mix((50, 40, 36), (176, 150, 124), 0.15 + 0.85 * light)
-                pit = math.sin(u * 13 + 1.0) * math.sin(v * 11 + 2.0)
-                if pit > 0.75:
-                    rock = _scale(rock, 0.7)
-                if abs(u + 0.3) < 0.06 and abs(v - 0.1) < 0.06:
-                    return lights
-                return rock
-            return None
-        if economy == "Tech":
-            # A spire with its sensor dish and two wings of panels.
-            if abs(u) < 0.05 and -1.0 < v < 0.8:
-                return lights if v < -0.92 and blink else shade
-            if 0.3 < abs(u) < 1.25 and abs(v) < 0.16:
-                cell = (abs(u) * 10) % 1 < 0.15 or abs(v) > 0.12
-                return (40, 70, 140) if not cell else (150, 170, 200)
-            if abs(u) <= 0.3 and abs(v) < 0.04:
-                return shade
-            if math.hypot(u, v + 0.75) < 0.28 and v > -0.75:
-                return _mix((220, 228, 240), (110, 120, 140), (u + 0.3) / 0.6)
-            if math.hypot(u, v) < 0.22:
-                return lights if blink and math.hypot(u, v) < 0.07 else shade
-            return None
-        # The ring stations: Agricultural, Industrial and Haven.
-        tilt = 0.42
-        rho = math.hypot(u, v / tilt)
-        angle = math.atan2(v / tilt, u)
-        ring = 0.78 <= rho <= 1.0
-        front = v > 0
-        hub = math.hypot(u, v) < 0.24
-        if economy == "Industrial" and abs(v) < 0.06 and 0.2 < abs(u) < 1.35:
-            if abs(u) > 1.28:
-                return lights if blink else (120, 80, 50)
-            return shade if (abs(u) * 12) % 1 > 0.25 else hull_dark
-        if economy == "Industrial" and abs(abs(u) - 1.15) < 0.12 and abs(v) < 0.14:
-            return _mix((170, 120, 80), hull_dark, (v + 0.14) / 0.28)
-        if ring and (front or not hub):
-            seam = (angle * 6 / math.pi + spin) % 1.0
-            if 0.86 <= rho <= 0.92 and seam < 0.18:
-                return lights if (blink or economy != "Haven") else _scale(lights, 0.5)
-            if economy == "Agricultural" and seam > 0.55:
-                return _mix((70, 150, 90), (30, 70, 50), (v / tilt + 1) / 2)
-            return _mix(shade, (20, 20, 30), 0.35 if not front else 0.0)
-        if hub:
-            z = math.sqrt(max(0.0, 1 - (math.hypot(u, v) / 0.24) ** 2))
-            dome = (120, 200, 130) if economy == "Agricultural" and v < -0.05 else hull_lit
-            if abs(u) < 0.05 and abs(v) < 0.05 and blink:
-                return lights
-            return _mix(hull_dark, dome, 0.2 + 0.8 * max(0.0, -0.5 * u - 0.5 * v + 0.6 * z))
-        if (abs(v) < 0.04 and 0.24 < abs(u) < 0.8) or (abs(u) < 0.03 and 0.1 < abs(v) < 0.8 * tilt):
-            return hull_dark
-        return None
+        return _station_pixel(self.economy, self.lights, u, v, spin, blink)
 
     def draw(self, stage: _Stage, index: int, t: float) -> None:
         w = self.width
@@ -8277,6 +8354,439 @@ def play_combat_outcome_scene(world: World, pirate: Pirate, outcome: str, action
     return False
 
 
+# ---------------------------------------------------------------------------
+# The canopy (Thiesi/Voidrunner#30). The pilot is always in the cockpit and the
+# void is always outside it: every paged screen is drawn on a full-screen
+# picture of where the ship is -- the system's world and its station when
+# docked, the contact in a fight, the lane in between -- and the page itself is
+# the console, a pane of tinted glass in front of it. Whatever the console
+# leaves uncovered is the window: a column beside it on a wide terminal, a band
+# below it on a tall one. The light out there is the system's danger. A calm
+# system's sky is a cool indigo void; caution warms it, danger red-shifts it,
+# and a fight is red alert.
+#
+# It is a picture, not information. Everything it shows is on the page already
+# -- the status band names the station, its economy and its danger -- so it is
+# drawn only where someone can see it: a live terminal in a full-palette preset.
+# A scripted session's transcript is the same with it or without it. It is
+# painted first, by cursor address and never in the bottom-right cell, and the
+# page is then printed over it exactly as it always was, row for row.
+# ---------------------------------------------------------------------------
+
+#: The console's glass, and the strip its action bar sits on; in a fight the
+#: cockpit is lit red.
+CANOPY_GLASS, CANOPY_STRIP = (17, 22, 40), (24, 30, 52)
+CANOPY_ALERT_GLASS, CANOPY_ALERT_STRIP = (30, 14, 24), (46, 18, 30)
+#: (zenith, horizon, haze, dust) of the sky, by how dangerous the place is: the
+#: haze is the nebula's color, the dust the galaxy's band across it.
+_CANOPY_SKIES = {
+    "calm": ((7, 8, 22), (17, 16, 44), (82, 58, 150), (70, 110, 170)),
+    "caution": ((11, 8, 20), (36, 18, 38), (146, 80, 72), (150, 110, 90)),
+    "danger": ((16, 5, 12), (54, 10, 28), (170, 30, 58), (150, 60, 90)),
+    "alert": ((26, 5, 10), (80, 11, 24), (210, 36, 48), (190, 70, 70)),
+    "transit": ((6, 5, 22), (18, 12, 52), (104, 72, 214), (90, 120, 230)),
+}
+QUADRANT_GLYPHS = " ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█"
+CANOPY_PANEL_WIDTH = 79  # the console: `_box_outer_width()` on any terminal wide enough
+#: What may be written between a page and the next with its sky still intact:
+#: the key the caller typed, echoed on the strip.
+CANOPY_ECHO_ALLOWANCE = 16
+_CANOPY_WORLD = None  # the World the canopy shows: set by `_run_game` once one exists
+_CANOPY_QUADRANTS: bool | None = None  # NetBBS's word on the caller's font, when it says
+_CANOPY_STRIP_WIDTH: int | None = None  # set while a canopy page waits for its action bar
+_CANOPY_CACHE: dict = {}
+#: The canopy on screen: its key, how many rows from the top something other
+#: than sky was drawn on, and the output count when it was left intact.
+_CANOPY_SHOWN: tuple | None = None
+#: Characters written so far: how a page knows nothing else has drawn since.
+_OUT_COUNT = 0
+
+
+def canopy_switched_off() -> bool:
+    """`DOOR_CANOPY=0` (or `off`, `no`, `false`): the SysOp's switch, like `DOOR_SCENES`."""
+    return os.environ.get("DOOR_CANOPY", "").strip().lower() in ("0", "off", "no", "false")
+
+
+def canopy_active() -> bool:
+    """Whether pages are drawn on the canopy: a live terminal, a full-palette
+    preset (`auto` or `fast` -- the picture does not move, so `fast` keeps it)
+    and the SysOp has not switched it off. Sixteen colors cannot draw a sky
+    worth having, so `basic` keeps the black one it always had."""
+    return (_OUTPUT_STYLE in ("auto", "fast") and not canopy_switched_off()
+            and _live_terminal() and not _terminal_too_small())
+
+
+def canopy_across() -> int:
+    """Pixels to a cell across. Quadrant blocks show two, but need Unicode all
+    the way to the terminal and a font that has them: CP437 has half blocks and
+    no quadrants, and NetBBS says when a caller's font has none (as it does for
+    Lunar Lander). `DOOR_PIXELS=half` keeps every caller to half blocks."""
+    if _OUTPUT_ENCODING != "utf-8" or _CANOPY_QUADRANTS is False:
+        return 1
+    return 1 if os.environ.get("DOOR_PIXELS", "").strip().lower() == "half" else 2
+
+
+def canopy_scene(world) -> dict:
+    """What is outside the glass, from the career alone: no draw, no state."""
+    if world is None:
+        return {"kind": "void", "sky": "calm", "seed": "void"}
+    hull = world.save.ship.hull_class
+    travel = world.save.pending_travel
+    if travel is not None:
+        combat = (travel.get("encounter") or {}).get("combat")
+        if combat is not None and combat.get("outcome") is None:
+            patrol = travel.get("phase") == "primary" and travel.get("primary") == "patrol"
+            name = _scene_text(combat.get("pirate", {}).get("name", ""))
+            return {"kind": "combat", "sky": "alert", "hull": hull, "enemy": "patrol" if patrol else "raider",
+                    "name": name, "seed": f"combat:{name}"}
+        return {"kind": "transit", "sky": "transit", "hull": hull, "seed": f"transit:{world.save.turn}"}
+    here = world.here
+    sky = "calm" if here.danger <= 1 else "caution" if here.danger <= 3 else "danger"
+    return {"kind": "dock", "sky": sky, "hull": hull, "economy": here.economy if here.economy in _SCENE_LIGHTS
+            else "Industrial", "station": _scene_text(here.station_name), "danger": here.danger,
+            "seed": f"dock:{here.id}"}
+
+
+@functools.lru_cache(maxsize=65536)
+def _quadrant_cell(a: tuple, b: tuple, c: tuple, d: tuple) -> tuple:
+    """A cell for four pixels (upper left, upper right, lower left, lower right).
+    A cell has two colors, so three or four are split into the two groups that
+    lose least, each shown as its average. Lunar Lander's reduction."""
+    quad = (a, b, c, d)
+    if len(set(quad)) <= 2:
+        mask = sum(1 << n for n, color in enumerate(quad) if color != d)
+        fg = next((color for color in quad if color != d), d)
+        return (QUADRANT_GLYPHS[mask], fg, d) if mask else (" ", None, d)
+    best = None
+    for mask in range(1, 8):  # the lower-right pixel always takes the background
+        groups = ([p for n, p in enumerate(quad) if mask >> n & 1], [p for n, p in enumerate(quad) if not mask >> n & 1])
+        means = [tuple(round(sum(p[i] for p in g) / len(g)) for i in range(3)) for g in groups]
+        loss = sum((p[i] - m[i]) ** 2 for g, m in zip(groups, means) for p in g for i in range(3))
+        if best is None or loss < best[0]:
+            best = (loss, mask, means)
+    _, mask, (fg, bg) = best
+    return (QUADRANT_GLYPHS[mask], fg, bg) if fg != bg else (" ", None, bg)
+
+
+class _Canopy:
+    """One canopy being composed, in pixels: `across` to a cell horizontally and
+    two vertically, so a pixel is square either way. Drawing is done in
+    *square units* -- a cell is one wide and two tall -- so a planet is round
+    whichever blocks the terminal is sent."""
+
+    def __init__(self, width: int, height: int, across: int, sky: str, seed: str):
+        self.width, self.height, self.across = width, height, across
+        self.pw, self.ph = width * across, height * 2
+        zenith, horizon, self.haze, self.dust = _CANOPY_SKIES[sky]
+        rows = [_mix(zenith, horizon, (y / max(1, self.ph - 1)) ** 1.3) for y in range(self.ph)]
+        self.px = [[row] * self.pw for row in rows]
+        self.art: set[tuple[int, int]] = set()  # pixels something solid was drawn on
+        self.text: dict[tuple[int, int], tuple] = {}
+        self.rng = random.Random(f"canopy:{seed}")
+
+    def each(self, left: float, top: float, right: float, bottom: float):
+        """(x, y, sx, sy) for the pixels inside a box given in square units."""
+        x0, x1 = max(0, math.floor(left * self.across)), min(self.pw, math.ceil(right * self.across))
+        y0, y1 = max(0, math.floor(top)), min(self.ph, math.ceil(bottom))
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                yield x, y, (x + 0.5) / self.across, y + 0.5
+
+    def put(self, x: int, y: int, color: tuple, amount: float = 1.0) -> None:
+        if amount >= 1.0:
+            self.px[y][x] = color
+            self.art.add((x, y))
+        elif amount > 0:
+            self.px[y][x] = _mix(self.px[y][x], color, amount)
+
+    def nebula(self) -> None:
+        """Haze in slow folds, and the galaxy's band slanting across the sky
+        with its dust: atmosphere, nothing else. Each is a few gentle waves, so
+        neighbouring cells mostly share a color and a row costs few changes."""
+        rng = self.rng
+        waves = [(rng.uniform(0.05, 0.11), rng.uniform(0.08, 0.15), rng.uniform(0, math.tau)) for _ in range(3)]
+        slope = rng.uniform(-0.55, -0.25)
+        across = self.width / 2 + rng.uniform(-0.2, 0.2) * self.width
+        breadth = self.height * 0.55
+        self.band = (slope, across, breadth)
+        for y in range(self.ph):
+            depth = (y / max(1, self.ph - 1)) ** 0.8
+            for x in range(self.pw):
+                sx, sy = (x + 0.5) / self.across, y + 0.5
+                color = self.px[y][x]
+                n = sum(math.sin(a * sx + b * sy + phase) for a, b, phase in waves) / 3
+                density = max(0.0, n - 0.12) / 0.88
+                if density > 0:
+                    color = _mix(color, self.haze, density ** 1.5 * 0.4 * (0.45 + 0.55 * depth))
+                off = (sx - across - (sy - self.ph / 2) * slope * -1.6) / breadth
+                glow = math.exp(-off * off * 3.2) * (0.75 + 0.25 * math.sin(sx * 0.21 + sy * 0.13))
+                if glow > 0.02:
+                    color = _mix(color, self.dust, glow * 0.22)
+                self.px[y][x] = color
+
+    def in_band(self, sx: float, sy: float) -> float:
+        slope, across, breadth = self.band
+        off = (sx - across - (sy - self.ph / 2) * slope * -1.6) / breadth
+        return math.exp(-off * off * 3.2)
+
+    def planet(self, economy: str, cx: float, cy: float, radius: float, glow: tuple,
+               sun: tuple[float, float, float] = (-0.62, -0.5, 0.6)) -> None:
+        """A banded world, and an atmosphere a couple of units thick just off
+        its limb -- the same thickness on a world the size of the window and
+        on a horizon wider than the screen."""
+        bands = _SCENE_WORLD_BANDS.get(economy, _SCENE_WORLD_BANDS["Industrial"])
+        air = 2.6
+        reach = radius + air
+        for x, y, sx, sy in self.each(cx - reach, cy - reach, cx + reach, cy + reach):
+            dx, dy = (sx - cx) / radius, (sy - cy) / radius
+            color = _planet_shade(dx, dy, bands, sun)
+            if color is not None:
+                self.put(x, y, color)
+                continue
+            rim = (math.hypot(dx, dy) - 1.0) * radius
+            if rim < air:
+                toward = max(0.0, (sun[0] * dx + sun[1] * dy) / max(0.01, math.hypot(dx, dy)))
+                self.put(x, y, glow, (1 - rim / air) ** 2 * (0.2 + 0.65 * toward))
+
+    def station(self, economy: str, cx: float, cy: float, radius: float) -> None:
+        lights = _SCENE_LIGHTS.get(economy, _SCENE_LIGHTS["Industrial"])
+        for x, y, sx, sy in self.each(cx - radius * 1.45, cy - radius * 1.15, cx + radius * 1.45, cy + radius * 1.15):
+            color = _station_pixel(economy, lights, (sx - cx) / radius, (sy - cy) / radius, 0.0, True)
+            if color is not None:
+                self.put(x, y, color)
+
+    def sprite(self, art: tuple[str, ...], cx: float, cy: float, size: float, *, flip: bool = False) -> None:
+        """Pixel art centred on (cx, cy), each of its pixels `size` square units."""
+        rows, cols = len(art), len(art[0])
+        left, top = cx - cols * size / 2, cy - rows * size / 2
+        for x, y, sx, sy in self.each(left, top, left + cols * size, top + rows * size):
+            column, row = int((sx - left) / size), int((sy - top) / size)
+            if 0 <= row < rows and 0 <= column < cols:
+                key = art[row][cols - 1 - column if flip else column]
+                if key != ".":
+                    self.put(x, y, _SCENE_COLORS[key])
+
+    def line(self, x0: float, y0: float, x1: float, y1: float, color: tuple, amount: float = 1.0) -> None:
+        steps = max(1, int(max(abs(x1 - x0) * self.across, abs(y1 - y0)) * 1.5))
+        for step in range(steps + 1):
+            sx, sy = x0 + (x1 - x0) * step / steps, y0 + (y1 - y0) * step / steps
+            x, y = math.floor(sx * self.across), math.floor(sy)
+            if 0 <= x < self.pw and 0 <= y < self.ph:
+                self.put(x, y, color, amount)
+
+    def label(self, row: int, column: int, pieces: list[tuple[str, tuple]], limit: int) -> None:
+        """Text on the sky, left-aligned at a cell, cut to `limit` columns."""
+        for piece, color in pieces:
+            for ch in piece:
+                if limit <= 0 or not (0 <= row < self.height and 0 <= column < self.width):
+                    return
+                self.text[(row, column)] = (ch, color)
+                column += 1
+                limit -= 1
+
+    def stars(self, density: float) -> None:
+        """Stars where nothing solid is, thickest in the galaxy's band."""
+        for row in range(self.height):
+            for column in range(self.width):
+                band = self.in_band(column + 0.5, row * 2 + 1)
+                if self.rng.random() >= density * (1 + 3.5 * band):
+                    continue
+                pixels = [(column * self.across + dx, row * 2 + dy) for dy in (0, 1) for dx in range(self.across)]
+                if any(pixel in self.art for pixel in pixels):
+                    continue
+                bright = self.rng.random()
+                if bright > 0.95:
+                    glyph_, tone = "+", (200, 214, 255)
+                elif bright > 0.8:
+                    glyph_, tone = "•" if _OUTPUT_ENCODING == "utf-8" else "·", (150, 162, 214)
+                else:
+                    glyph_, tone = "·", _mix((60, 70, 112), (140, 150, 196), bright)
+                self.text.setdefault((row, column), (glyph_, tone))
+
+    def cells(self) -> list[list[tuple]]:
+        """The canopy as cells. Sky is one color a cell -- the average of its
+        pixels, snapped to a coarse step -- because it is smooth, and a color
+        sent once covers the run of cells that share it; only a cell with
+        something drawn on it spends a block glyph and two colors."""
+        def snap(color: tuple, step: int) -> tuple:
+            return tuple(min(255, (c + step // 2) // step * step) for c in color)
+
+        rows = []
+        for row in range(self.height):
+            upper, lower, line = self.px[row * 2], self.px[row * 2 + 1], []
+            for column in range(self.width):
+                xs = range(column * self.across, column * self.across + self.across)
+                quad = [upper[x] for x in xs] + [lower[x] for x in xs]
+                mean = tuple(sum(c[i] for c in quad) // len(quad) for i in range(3))
+                spread = max(max(c[i] for c in quad) - min(c[i] for c in quad) for i in range(3))
+                if not any((x, y) in self.art for x in xs for y in (row * 2, row * 2 + 1)):
+                    cell = (" ", None, snap(mean, 6))
+                elif spread <= 14:
+                    # Smooth art -- the face of a world -- needs no edge either.
+                    cell = (" ", None, snap(mean, 4))
+                elif self.across == 2:
+                    cell = _quadrant_cell(*(snap(color, 4) for color in quad))
+                else:
+                    a, b = snap(quad[0], 4), snap(quad[1], 4)
+                    cell = (" ", None, a) if a == b else ("▀", a, b)
+                text = self.text.get((row, column))
+                if text is not None:
+                    # Text sits on the sky behind it: one color, the cell's own.
+                    ground = cell[2] if cell[0] == " " else _mix(cell[1], cell[2], 0.5)
+                    cell = (text[0], text[1], ground)
+                line.append(cell)
+            rows.append(line)
+        return rows
+
+
+def canopy_key(scene: dict) -> tuple:
+    """Everything a canopy's picture depends on: the scene, the terminal and its blocks."""
+    return (tuple(sorted(scene.items())), _OUTPUT_WIDTH, _OUTPUT_HEIGHT, canopy_across())
+
+
+def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
+    """The whole canopy for a `width` x `height` terminal. The console covers
+    the top left, `CANOPY_PANEL_WIDTH` across and as many rows as its page
+    has, so what the window shows is placed where the window is: beside the
+    console on a wide terminal, along the bottom of a narrower one. Never on
+    the console's own height, which changes from page to page -- one picture
+    serves every page of a place, so paging redraws none of it."""
+    across = canopy_across()
+    panel_w = min(width, CANOPY_PANEL_WIDTH)
+    key = (tuple(sorted(scene.items())), width, height, across)
+    if key in _CANOPY_CACHE:
+        return _CANOPY_CACHE[key]
+    canopy = _Canopy(width, height, across, scene["sky"], scene["seed"])
+    canopy.nebula()
+    h2 = height * 2
+    side_left = panel_w + 1
+    side = width - side_left if width - side_left >= 22 else 0
+    # The bottom of the screen, where a short page leaves the window open.
+    band_top = max(1, round(height * 0.58))
+    band = height - band_top if not side and height - band_top >= 4 else 0
+    kind = scene["kind"]
+    if kind == "dock" and (side or band):
+        economy = scene["economy"]
+        glow = _mix(_SCENE_LIGHTS[economy], (140, 190, 255), 0.6)
+        if side:
+            radius = min(side * 0.7, h2 * 0.36)
+            canopy.planet(economy, side_left + side * 0.74, h2 - radius * 0.62, radius, glow)
+            canopy.station(economy, side_left + side * 0.42, h2 * 0.36, min(side * 0.25, h2 * 0.15))
+            canopy.label(1, side_left + 2, [("◢ ", _SCENE_LIGHTS[economy]), (scene["station"].upper(), _SCENE_INK)], side - 3)
+            tone = _SCENE_MINT if scene["danger"] <= 1 else (255, 179, 71) if scene["danger"] <= 3 else _SCENE_ALARM
+            canopy.label(2, side_left + 4, [(economy, _SCENE_SLATE), (" · ", (70, 80, 100)),
+                                            (f"danger {scene['danger']}", tone)], side - 5)
+        else:
+            # A horizon: the top of a world wider than the screen, lit from
+            # above, with the station riding above its limb.
+            top, depth = band_top * 2, band * 2
+            radius = width * 1.6
+            canopy.planet(economy, width * 0.36, top + depth * 0.52 + radius, radius, glow, sun=(-0.25, -0.75, 0.6))
+            canopy.station(economy, width * 0.78, top + depth * 0.36, min(depth * 0.42, width * 0.12))
+    elif kind == "combat" and (side or band):
+        enemy = _SCENE_PATROL if scene["enemy"] == "patrol" else _SCENE_RAIDER
+        own = _SCENE_HULLS.get(scene["hull"], _SPLASH_SHIP)
+        if side:
+            size = max(1.0, min(side * 0.62 / len(enemy[0]), h2 * 0.26 / len(enemy)))
+            ex, ey = side_left + side * 0.60, h2 * 0.40
+            sx, sy, own_size = side_left + side * 0.22, h2 * 0.70, max(0.5, size * 0.45)
+        else:
+            top, depth = band_top * 2, band * 2
+            size = max(1.0, depth * 0.55 / len(enemy))
+            ex, ey = width * 0.72, top + depth * 0.5
+            sx, sy, own_size = width * 0.24, top + depth * 0.55, max(0.5, size * 0.6)
+        canopy.sprite(own, sx, sy, own_size)
+        canopy.sprite(enemy, ex, ey, size)
+        # The lock: four red corners around the contact, and the line to it.
+        half_w, half_h = len(enemy[0]) * size / 2 + 1.5, len(enemy) * size / 2 + 1.5
+        arm_w, arm_h = half_w * 0.35, half_h * 0.35
+        for fx in (-1, 1):
+            for fy in (-1, 1):
+                corner_x, corner_y = ex + fx * half_w, ey + fy * half_h
+                canopy.line(corner_x, corner_y, corner_x - fx * arm_w, corner_y, _SCENE_ALARM)
+                canopy.line(corner_x, corner_y, corner_x, corner_y - fy * arm_h, _SCENE_ALARM)
+        if side:
+            canopy.label(1, side_left + 2, [("▲ ", _SCENE_ALARM), ("RED ALERT", _SCENE_ALARM)], side - 3)
+            canopy.label(2, side_left + 4, [(scene["name"], _SCENE_INK)], side - 5)
+    elif kind == "transit":
+        # The lane: long streaks of drive-light, the jump still in the glass.
+        for _ in range(width * height // 40):
+            y = canopy.rng.uniform(0, h2)
+            x = canopy.rng.uniform(0, width)
+            length = canopy.rng.uniform(3, 14)
+            canopy.line(x, y, x + length, y, _mix(canopy.haze, (220, 226, 255), canopy.rng.random() * 0.6), 0.55)
+    canopy.stars(0.022 if kind != "combat" else 0.012)
+    cells = canopy.cells()
+    if len(_CANOPY_CACHE) > 24:
+        _CANOPY_CACHE.clear()
+    _CANOPY_CACHE[key] = cells
+    return cells
+
+
+def _canopy_sgr(fg: tuple | None, bg: tuple | None) -> str:
+    """Set the colors that changed, at this terminal's depth (truecolor or 256)."""
+    parts = []
+    for rgb, base in ((fg, 38), (bg, 48)):
+        if rgb is None:
+            continue
+        if _PALETTE._truecolor:
+            parts.append(f"{base};2;{rgb[0]};{rgb[1]};{rgb[2]}")
+        else:
+            parts.append(f"{base};5;{_splash_256(rgb)}")
+    return f"{ESC}[{';'.join(parts)}m" if parts else ""
+
+
+def canopy_paint(scene: dict, panel_w: int, panel_h: int, rows: range | None = None) -> str:
+    """The canopy as bytes: every cell the console will not cover, by cursor
+    address, and never the bottom-right cell, where a terminal may scroll.
+    A color is sent only when it changes, which is why the sky is in rows.
+    `rows` limits it to the rows a previous page uncovered."""
+    width, height = _OUTPUT_WIDTH, _OUTPUT_HEIGHT
+    cells = canopy_cells(scene, width, height)
+    parts = [RESET]
+    for row in rows if rows is not None else range(height):
+        start = panel_w if row < panel_h else 0
+        end = width - 1 if row == height - 1 else width
+        if start >= end:
+            continue
+        parts.append(f"{ESC}[{row + 1};{start + 1}H")
+        fg = bg = None
+        for column in range(start, end):
+            ch, cell_fg, cell_bg = cells[row][column]
+            want_fg = cell_fg if ch != " " else fg
+            change = (want_fg if want_fg != fg else None, cell_bg if cell_bg != bg else None)
+            if change != (None, None):
+                parts.append(_canopy_sgr(*change))
+                fg, bg = want_fg, cell_bg
+            parts.append(ch)
+    parts.append(f"{RESET}{ESC}[H")
+    return "".join(parts)
+
+
+def red_alert() -> bool:
+    """Whether the ship is in a fight, for the chrome that says so: the header's
+    streak burns alarm-red and the console's glass takes the red of the light
+    outside. The career's own state, read without a draw; never in a transcript
+    driven without a career, where there is no cockpit to light."""
+    return _CANOPY_WORLD is not None and canopy_scene(_CANOPY_WORLD)["kind"] == "combat"
+
+
+def set_canopy_world(world) -> None:
+    global _CANOPY_WORLD
+    _CANOPY_WORLD = world
+
+
+def set_canopy_quadrants(quadrants: bool | None) -> None:
+    global _CANOPY_QUADRANTS
+    _CANOPY_QUADRANTS = quadrants
+
+
+def glass(text: str, color: tuple = CANOPY_GLASS) -> str:
+    """A console row on its glass: the tint survives every reset inside the row."""
+    tint = _canopy_sgr(None, color)
+    return tint + text.replace(RESET, RESET + tint) + RESET
+
+
 def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str | None:
     out_line()
     inner_w = _box_inner_width()
@@ -8354,7 +8864,8 @@ def ship_gauge_rows(world: World) -> list[str]:
     # so raw art would be the one thing on the deck with no role (#493 review).
     return beside(drawn, portrait(ship_portrait(ship, "compact"),
                                   "danger" if hull_condition(ship) == "Critical" else
-                                  "caution" if hull_condition(ship) != "Intact" else "info"))
+                                  "caution" if hull_condition(ship) != "Intact" else "info"),
+                  overhang=True)
 
 
 def _gauge_cells() -> int:
@@ -9048,7 +9559,53 @@ def hull_condition(ship: Ship) -> str:
     return "Scuffed" if ship.hull_hp < maximum else "Intact"
 
 
+#: Where hull damage shows on a pixel hull: scorched plating, and on a badly
+#: hurt ship an ember still glowing in it. The same counts the ASCII art marks.
+_HULL_DAMAGE_MARKS = {"Intact": 0, "Scuffed": 1, "Damaged": 3, "Critical": 6}
+HULL_SCORCH, HULL_EMBER = (64, 46, 48), (255, 128, 56)
+
+
+def hull_pixels(ship: Ship) -> list[list[tuple | None]]:
+    """The pilot's hull as every scene flies it, one color (or None) a pixel,
+    with its damage: scorched plating, as many marks as the ASCII art has `x`s,
+    and on a badly hurt ship an ember still glowing in the first of them."""
+    art = _SCENE_HULLS.get(ship.hull_class, _SPLASH_SHIP)
+    grid = [[None if key == "." else _SCENE_COLORS[key] for key in row] for row in art]
+    solid = [(r, c) for r, row in enumerate(art) for c, key in enumerate(row) if key in "hld"]
+    marks = min(_HULL_DAMAGE_MARKS[hull_condition(ship)], len(solid))
+    for index in range(marks):
+        r, c = solid[index * len(solid) // marks]
+        grid[r][c] = HULL_EMBER if index == 0 and marks >= 3 else HULL_SCORCH
+    return grid
+
+
+def pixel_hull(ship: Ship, *, zoom: int = 1) -> list[str]:
+    """`hull_pixels` for a page, two pixels to a cell in half blocks
+    (Thiesi/Voidrunner#30). The deck used to draw the ship as `<===[__]=== >`
+    on the same screen a pixel-art hull had just docked from."""
+    grid = hull_pixels(ship)
+    grid = [[color for color in row for _ in range(zoom)] for row in grid for _ in range(zoom)]
+    if len(grid) % 2:
+        grid.append([None] * len(grid[0]))
+    rows = []
+    for top, bottom in zip(grid[::2], grid[1::2]):
+        cells = []
+        for a, b in zip(top, bottom):
+            if a is None and b is None:
+                cells.append(" ")
+            elif b is None or a == b:
+                cells.append(f"{_splash_sgr(a, None, reset=False)}{'█' if a == b else '▀'}{RESET}")
+            elif a is None:
+                cells.append(f"{_splash_sgr(b, None, reset=False)}▄{RESET}")
+            else:
+                cells.append(f"{_splash_sgr(a, b, reset=False)}▀{RESET}")
+        rows.append("".join(cells).rstrip())
+    return rows
+
+
 def ship_portrait(ship: Ship, layout: str) -> list[str]:
+    if _OUTPUT_STYLE in ("auto", "fast", "basic"):
+        return pixel_hull(ship, zoom=2 if layout == "large" else 1)
     rows = [list(row) for row in PORTRAITS["ship"][ship.hull_class][layout]]
     marks = {"Intact":0,"Scuffed":1,"Damaged":3,"Critical":6}[hull_condition(ship)]
     positions = [(r,c) for r,row in enumerate(rows) for c,char in enumerate(row) if char in "_=#"]
@@ -9091,7 +9648,8 @@ def viewport_content(world: World, view: str) -> tuple[list[str],list[str],list[
     if view=="1":
         details=[f"Your {ship.hull_class}: {hull_condition(ship)}. Hull {ship.hull_hp}/{hull_hp_max(ship)}.",
                  f"Fuel {ship.fuel}/{fuel_capacity(ship)}; cargo {sum(world.save.cargo.values())}/{cargo_capacity(ship)} used.",
-                 "Hull damage is marked with x shading. Capacity is separate from hull condition."]
+                 ("Hull damage shows as scorched plating." if _OUTPUT_STYLE in ("auto", "fast", "basic")
+                  else "Hull damage is marked with x shading.") + " Capacity is separate from hull condition."]
         return ship_portrait(ship,"large"),ship_portrait(ship,"compact"),details,ship.hull_class
     if view=="2":
         art=PORTRAITS["port"][here.economy]
@@ -10903,7 +11461,24 @@ def _brand() -> str:
     return f"{glyph('brand')} VOIDRUNNER"
 
 
-def _box_header(p: "Palette", title: str, counter: str) -> str:
+def lane_streak(width: int, *, alert: bool = False) -> str:
+    """The lane: the border fill behind a page's title, drawn as a streak that
+    leaves the title at speed and thins out toward the counter -- heavy and
+    hot for its first stretch, cooling from plasma into the frame's shadow,
+    then the light rule (Thiesi/Voidrunner#30). One quiet cue of motion on
+    every screen. Plain is a rule, as a rule is all ASCII can draw."""
+    p = pal()
+    if _OUTPUT_STYLE == "plain" or width <= 0:
+        return f"{p.deep}{'─' * max(0, width)}{RESET}"
+    hot = min(width, max(2, round(width * (0.6 if alert else 0.42))))
+    if _OUTPUT_STYLE not in ("auto", "fast"):
+        return f"{p.alarm if alert else p.plasma}{'━' * hot}{RESET}{p.deep}{'─' * (width - hot)}{RESET}"
+    start, end = Palette.ROLE_RGB["alarm" if alert else "plasma"], Palette.ROLE_RGB["deep"]
+    streak = "".join(f"{p.rgb(_mix(start, end, (index / max(1, hot - 1)) ** 0.6))}━" for index in range(hot))
+    return f"{streak}{p.deep}{'─' * (width - hot)}{RESET}"
+
+
+def _box_header(p: "Palette", title: str, counter: str, *, alert: bool = False) -> str:
     """`╭─ ◤ VOIDRUNNER · TITLE ────────────── n/m ╮`.
 
     The brand goes in the border rather than costing a body row, and the page
@@ -10917,11 +11492,11 @@ def _box_header(p: "Palette", title: str, counter: str) -> str:
     # hull, and chrome is never the color of the thing it frames (#493 review).
     brand = f"{p.plasma}{BOLD}{_brand()}{RESET}{edge}"
     tail = f" {p.slate}{counter}{RESET}{edge} " if counter else ""
-    for lead in (f"{brand} {glyph('dot')} {title}", title):
+    for lead in (f"{brand} {glyph('dot')} {p.ink}{BOLD}{title}{RESET}{edge}", title):
         head = f"─ {lead} "
         fill = inner - _visible_width(head) - _visible_width(tail)
         if fill >= 1:
-            return f"{edge}╭{head}{RESET}{dim}{'─' * fill}{RESET}{tail}{edge}╮{RESET}"
+            return f"{edge}╭{head}{RESET}{lane_streak(fill, alert=alert)}{tail}{edge}╮{RESET}"
     head = f"─ {_fit_text(title, max(1, inner - 4))} "
     return f"{edge}╭{head}{'─' * max(1, inner - _visible_width(head))}╮{RESET}"
 
@@ -10962,28 +11537,33 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
     Every paged screen draws through here, so the frame is one decision rather
     than thirty (issue #486). The action bar is deliberately left to the caller
     and printed outside the box, where the cursor waits.
+
+    On a live full-palette terminal the page is the console on the canopy
+    (Thiesi/Voidrunner#30): the picture of where the ship is goes down first,
+    the page is printed over it row for row on its glass, and the action bar
+    that follows gets a strip of its own (`out_prompt`).
     """
-    global _LAST_PAGE_DRAWN
-    clear_screen()
+    global _LAST_PAGE_DRAWN, _CANOPY_STRIP_WIDTH, _CANOPY_SHOWN
+    canopy = canopy_active()
+    scene = canopy_scene(_CANOPY_WORLD) if canopy else None
+    shown, _CANOPY_SHOWN = _CANOPY_SHOWN, None
+    # The same sky still intact behind the last page -- nothing drawn since but
+    # the key that turned it -- is kept: only the rows that page covered and
+    # this one does not are given back to the sky.
+    keep = (canopy and shown is not None and shown[0] == canopy_key(scene)
+            and _OUT_COUNT - shown[2] <= CANOPY_ECHO_ALLOWANCE)
+    if not keep:
+        clear_screen()
     header = _page_header(title, page, count)
     inner = _box_inner_width()
     if _header_fits_border(header):
-        out_line(_box_header(p, title, f"{page + 1}/{count}"))
+        lines = [_box_header(p, title, f"{page + 1}/{count}", alert=red_alert())]
     else:
-        out_line(_box_top(p))
+        lines = [_box_top(p)]
         rows = wrap_styled(style_body_line(header), _page_content_width()) + list(rows)
-    # A reveal belongs to arriving somewhere, not to every keypress: a screen
-    # redrawn unchanged (a key that did nothing, a prompt reprinted) must cost
-    # the caller nothing. Paging counts as arriving; pressing `X` twice does not.
-    signature = (title, page, count, len(rows))
-    revealing = signature != _LAST_PAGE_DRAWN and not motion_interrupted()
-    _LAST_PAGE_DRAWN = signature
-    pace = MOTION_REVEAL_BUDGET / max(1, len(rows)) if revealing else 0.0
     for row in rows:
-        if pace and not motion_pause(pace):
-            pace = 0.0
         if row.startswith(SECTION_MARK):
-            out_line(_box_section(p, row[1:]))
+            lines.append(_box_section(p, row[1:]))
             continue
         # The last place a body row can still be colorless. Screens that build
         # their own rows -- the contract board, the star map, a screen that
@@ -10991,15 +11571,39 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
         # `wrapped_group`, and a rule that held for most pages and not the rest
         # is how the color was lost one slice at a time to begin with.
         row = style_body_line(row.replace(STICKY_MARK, "").replace(MEMBER_MARK, ""))
-        out_line(f"{p.hull}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.hull}│{RESET}")
+        lines.append(f"{p.hull}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.hull}│{RESET}")
     if _SESSION_CLOCK is None:
-        out_line(_box_bottom(p, border_color=p.hull))
+        lines.append(_box_bottom(p, border_color=p.hull))
     else:
         # Keep the allowance visible on every page, including 40x12 terminals;
         # a body-row badge could be paginated off the opening deck entirely.
         label = _fit_text(_SESSION_CLOCK.label(), inner - 4)
         tone = p.gold if _SESSION_CLOCK.deadline - time.monotonic() <= 180 else p.slate
-        out_line(f"{p.hull}╰{'─' * (inner - len(label) - 3)} {tone}{label}{p.hull} ─╯{RESET}")
+        lines.append(f"{p.hull}╰{'─' * (inner - len(label) - 3)} {tone}{label}{p.hull} ─╯{RESET}")
+    _CANOPY_STRIP_WIDTH = _box_outer_width() if canopy else None
+    if canopy:
+        if keep:
+            out(f"{ESC}[H" + canopy_paint(scene, _box_outer_width(), len(lines), range(len(lines), shown[1])))
+        else:
+            out(canopy_paint(scene, _box_outer_width(), len(lines)))
+        tint = CANOPY_ALERT_GLASS if scene["kind"] == "combat" else CANOPY_GLASS
+        lines = [glass(line, tint) for line in lines]
+    # A reveal belongs to arriving somewhere, not to every keypress: a screen
+    # redrawn unchanged (a key that did nothing, a prompt reprinted) must cost
+    # the caller nothing. Paging counts as arriving; pressing `X` twice does not.
+    signature = (title, page, count, len(rows))
+    revealing = signature != _LAST_PAGE_DRAWN and not motion_interrupted()
+    _LAST_PAGE_DRAWN = signature
+    # Each body row arrives in its turn; the borders around them are the frame.
+    pace = MOTION_REVEAL_BUDGET / max(1, len(lines) - 2) if revealing else 0.0
+    for number, line in enumerate(lines):
+        if pace and 0 < number < len(lines) - 1 and not motion_pause(pace):
+            pace = 0.0
+        out_line(line)
+    if canopy:
+        # Until the action bar is down this page covers its own rows; the bar
+        # (`out_prompt`) extends the claim to the strip and the key echoed on it.
+        _CANOPY_SHOWN = (canopy_key(scene), len(lines), _OUT_COUNT)
 
 
 def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, page: int, *, pages: list[list[str]] | None = None) -> tuple[str, int, int]:
@@ -13716,9 +14320,6 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         lines.append(section("LAST EXCHANGE"))
         for message in result:
             lines.extend(wrap_styled(style_body_line(_mission_plain(message)), _page_content_width()))
-    if warrant is not None:
-        lines.append(section("IDENTIFICATION"))
-        lines += bounty_identification_lines(world, warrant)
     if squadron_terms(world):
         lines.append(section("SQUADRON"))
         lines += squadron_terms(world)
@@ -13732,15 +14333,17 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     contact = [[_mission_plain(pirate.name), gauge(pirate.hp, pirate.hp_max, cells, tone="danger"),
                 f"{pirate.hp}/{pirate.hp_max}", f"tier {pirate.tier}"],
                ["Your hull", gauge(ship.hull_hp, hull_hp_max(ship), cells),
-                f"{ship.hull_hp}/{hull_hp_max(ship)}", hull_condition(ship)],
-               ["Fuel", gauge(ship.fuel, fuel_capacity(ship), cells, tone="info"),
-                f"{ship.fuel}/{fuel_capacity(ship)}", f"day {world.save.turn}"],
-               ["Hold", gauge(used, cargo_capacity(ship), cells, tone="info"),
-                f"{used}/{cargo_capacity(ship)}",
-                plural(sum(1 for quantity in world.save.cargo.values() if quantity > 0), "lot")]]
+                f"{ship.hull_hp}/{hull_hp_max(ship)}", hull_condition(ship)]]
     lines += table(["", "", "", ""], contact, "llrl",
                    styles=[["label", "value", "value", "label"] for _ in contact],
                    optional=(3,), repeat_header=False)[1:]
+    # Fuel and hold are the stakes of an escape and a dump, not readings that
+    # move in a fight: one row of chips rather than two more gauges, which is
+    # the row that let every option onto the first page at 80x24 (#28).
+    lots = plural(sum(1 for quantity in world.save.cargo.values() if quantity > 0), "lot")
+    lines.append("  ".join([chip("Fuel", f"{ship.fuel}/{fuel_capacity(ship)}"),
+                            chip("Hold", f"{used}/{cargo_capacity(ship)}", tone="value") + f" {p.slate}{lots}{RESET}",
+                            chip("day", str(world.save.turn))]))
     # Whose pattern it is, said on the row: "Bulwark intent COVER" one row under
     # "Ravage" read as a second contact or a ship class (#648).
     lines.append(f"{p.ink}{_mission_plain(pirate.name)}{RESET} {p.slate}flies {tactics['profile']}; intent{RESET} "
@@ -13794,6 +14397,11 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                      f"{cost}cr only if accepted (about {bribe_chance(world, pirate):.0%}); "
                      "Blackwake +2 if accepted; refusal draws enemy fire. " + ("Available." if pilot.credits >= cost else "UNAFFORDABLE; bribe unavailable.")
                      + (" An accepted bribe fails the escort contract." if escort_at_stake else ""))
+    if warrant is not None:
+        # After the options it qualifies: as the page's opening paragraph it
+        # pushed Bribe and Dump onto page two at 80x24 (#28).
+        lines.append(section("IDENTIFICATION"))
+        lines += bounty_identification_lines(world, warrant)
     if details:
         lines += [f"Destruction: {salvage_fee(ship)}cr salvage fee, all cargo lost, tow to Freeport; paying less than the fee leaves the hull "
                   f"at a quarter of maximum plus the paid share of the rest, never full and never above the hull you brought into the fight; "
@@ -14252,6 +14860,7 @@ def main(drop_file: str | None = None) -> int:
                     out(RESET)
         finally:
             _OUTPUT_STYLE = "auto"
+            set_canopy_world(None)
             _CLASSIC_DROP_FILE = None
             _DEFAULT_ENCODING = "utf-8"
             apply_display_encoding("auto")
@@ -14270,6 +14879,7 @@ def _run_game(info: dict) -> int:
     reported_height = apply_terminal_size(info)
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
     set_palette(p)  # what every component in the style layer draws with
+    set_canopy_quadrants(info.get("quadrants") if type(info.get("quadrants")) is bool else None)
     input_reader()  # opened before the first page, so it can reveal itself
     _check_session_time()
     if _terminal_too_small():
@@ -14338,6 +14948,7 @@ def _run_game(info: dict) -> int:
                 # confirmed; a cancelled registration changes nothing (#421).
                 replace_unsupported_career(save_dir, user_id, save)
         world = World(save, checkpoint=lambda current: persist(current, save_dir, user_id))
+        set_canopy_world(world)
         world.checkpoint()  # the launch tick prepares the station this career opens at
         # After that tick, never before: it is where a career first opened by
         # this build catches up on accolades, and those are history (#25).

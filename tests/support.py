@@ -89,7 +89,8 @@ def _add_cargo(world, commodity: str, quantity, *, unit_cost: int | None = None)
 
 
 
-_BORDER = "╭╮╰╯│─═║╔╗╚╝├┤╠╣+-=|"
+# `━` is the lane streak a page header draws as part of its fill (Voidrunner#30).
+_BORDER = "╭╮╰╯│─━═║╔╗╚╝├┤╠╣+-=|"
 
 
 def plain(text: str) -> str:
@@ -138,7 +139,7 @@ def shows_page(data, title: str) -> bool:
     literal `"Title 1/"` is no longer in the bytes a door wrote.
     """
     text = data.decode("utf-8", "replace") if isinstance(data, (bytes, bytearray)) else data
-    pattern = re.compile(re.escape(title) + r"[\s─═+\-]*\d+/\d+")
+    pattern = re.compile(re.escape(title) + r"[\s─━═+\-]*\d+/\d+")
     return any(pattern.search(row) for row in plain(text).splitlines())
 
 
@@ -189,11 +190,11 @@ def page_title(frame: str) -> str:
         if not row or re.fullmatch(r"[A-Za-z0-9<>?]", row):
             continue
         if row[0] in "╭╔" or re.match(r"\+[-=]", row):
-            row = row.strip("╭╮╔╗+ ").strip("─═- ")
+            row = row.strip("╭╮╔╗+ ").strip("─━═- ")
             # One box-drawing dash is already fill. An ASCII one is fill when
             # it stands alone between spaces or runs; a hyphen inside a
             # word (`Long-Range`) is part of the title.
-            title = " ".join(re.sub(r"[─═]+|(?<=\s)-+(?=\s)|-{2,}", " ", row).split())
+            title = " ".join(re.sub(r"[─━═]+|(?<=\s)-+(?=\s)|-{2,}", " ", row).split())
             if title:
                 return title
             continue  # a plain top border: the header is the page's first row
