@@ -465,7 +465,19 @@ the next pilot starts with. Any key but a paging key leaves it, Enter, Space and
 Escape included. The record's Dossiers view includes every retained dossier. Old
 retirement counts do not fabricate missing dossiers. Storage permits 128 dossiers
 and refuses further retirement visibly at capacity; it never evicts an older
-record. Existing careers remain playable at the cap. The Retire action preflights
+record. Existing careers remain playable at the cap.
+
+A career's dates (its start, and a dossier's end) are the node's (#27). They are
+recorded on the calendar of the `timezone` NetBBS names in its door info, so a
+career begun just after the node's midnight is dated that day whatever zone the
+host runs in. They are shown in the date part of the node's `datetime_format`
+(NetBBS 7.41.0), the longest run of date directives no time directive
+interrupts, as Lunar Lander reads it. The stored form stays ISO `YYYY-MM-DD`:
+it sorts, and every older save holds it. Standalone, or on a node that names
+neither, both stay the host's own; an unknown zone keeps the host's calendar
+rather than guessing one.
+
+The Retire action preflights
 the normalized replacement against the existing save-size/schema envelope before
 final confirmation; insufficient space retains the current career with an explicit
 unavailability result. Accepted legacy highlights are preserved, not clipped to

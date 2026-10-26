@@ -357,3 +357,67 @@ def test_the_title_comes_round_again_while_it_waits():
     assert any(frame != rest for frame in ticks)
     # The same tick is the same picture: attract mode is a function, not a state.
     assert vr.splash_frame(layout, 0, attract=7) == vr.splash_frame(layout, 0, attract=7)
+
+
+def test_a_pickers_long_rows_stay_on_the_console_glass(canopy, monkeypatch):
+    """Wrapped to a 120-column terminal, a long label or notice ran off the
+    79-column glass onto the sky beside it (#33)."""
+    canopy(120, 36, world=_world_with_seed(42))
+    keys = iter("B")
+    monkeypatch.setattr(vr, "read_command", lambda: next(keys))
+    monkeypatch.setattr(vr, "_resized_while_idle", lambda: False)
+    label = "Deliver 14 units of Medical Supplies to Kepler Reach for the Free Traders Union, reward 4,200cr"
+    notice = "A notice about the exchange that is a long sentence, as wide as a sentence on a wide terminal gets."
+    written = _written(lambda: vr._pick_trade_field("Charted Destination", [(1, label), (2, "Short")], notice=[notice]))
+    rows = [plain(row) for row in written.split("\r\n")[1:]]
+    listed = [row for row in rows if row.strip() and "Select" not in row]
+    assert any(row.startswith("[1] Deliver") for row in listed)
+    assert all(len(row.rstrip()) <= vr.CANOPY_PANEL_WIDTH for row in listed)
+    assert "reward 4,200cr" in " ".join(listed)
+    # The picker cleared the screen, so the page after it draws a fresh sky.
+    assert "\x1b[2J" in _written(lambda: vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1))
+
+
+def _commission(monkeypatch, keys, welcome=None):
+    stream = iter(keys)
+    monkeypatch.setattr(vr, "read_key", lambda: next(stream))
+    result = []
+    written = _written(lambda: result.append(vr.create_career(vr.pal(), {"handle": "Nib"}, welcome=welcome)))
+    return result[0], written
+
+
+def test_a_new_pilot_is_commissioned_on_the_canopy(canopy, monkeypatch):
+    canopy(120, 36)
+    callsign, written = _commission(monkeypatch, [*"Nova", "\r", "Y"])
+    assert callsign == "Nova"
+    prompt = written.index("Pilot callsign")
+    # The page is drawn before the question, and again with the answer on it.
+    assert "COMMISSION" in plain(written[:prompt]) and "enter it below" in plain(written[:prompt])
+    second = plain(written[prompt:])
+    assert "Callsign Nova" in second and "Launch Nova's career?" in second
+
+
+def test_escape_at_the_commission_saves_no_career(canopy, monkeypatch):
+    canopy(80, 24)
+    callsign, written = _commission(monkeypatch, ["\r", vr.ESCAPE_KEY])
+    assert callsign is None and "No career was saved." in plain(written)
+
+
+def test_the_commission_states_the_terms_the_career_will_start_with(canopy, monkeypatch):
+    """Said once: change the starting bank and the commission says so (#34)."""
+    canopy(80, 24)
+    monkeypatch.setattr(vr, "STARTING_CREDITS", 1500)
+    _, written = _commission(monkeypatch, ["\r", "Y"])
+    assert "1,500cr" in plain(written) and "1,200cr" not in plain(written)
+    assert vr._new_career("Nib").pilot.credits == 1500
+
+
+def test_the_commission_picks_the_callsign_out_in_gold(canopy, monkeypatch):
+    canopy(80, 24)
+    p = vr.pal()
+    outdated = f"Welcome to the void, pilot. The dossier for {p.gold}Nib{p.muted} predates this version."
+    for welcome in (None, outdated):
+        _, written = _commission(monkeypatch, ["\r", "Y"], welcome)
+        greeting = written[:written.index("COMMISSION")]
+        # Gold for the callsign, then back to the page's prose, not the box's muted.
+        assert f"{p.gold}Nib{p.text}" in greeting

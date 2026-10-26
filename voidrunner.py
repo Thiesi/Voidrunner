@@ -92,7 +92,9 @@ import weakref
 import zlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 ESC = "\x1b"
 RESET = f"{ESC}[0m"
@@ -349,7 +351,7 @@ class Palette:
         still distinct from every content role, but behind the content rather
         than beside it.
         """
-        return self._sgr((127, 163, 191), 110)
+        return self._sgr(self.ROLE_RGB["hull"], 110)
 
     @property
     def deep(self) -> str:
@@ -360,22 +362,22 @@ class Palette:
         has nothing to say about hue; a near-neutral dark lets the filled half
         of a gauge be the only colored thing on its row.
         """
-        return self._sgr((47, 56, 68), 237)
+        return self._sgr(self.ROLE_RGB["deep"], 237)
 
     @property
     def plasma(self) -> str:
         """The brand, the rank, the cursor: one accent per screen."""
-        return self._sgr((255, 90, 190), 205)
+        return self._sgr(self.ROLE_RGB["plasma"], 205)
 
     @property
     def gold(self) -> str:
         """Hotkeys and credits. Nothing else, ever."""
-        return self._sgr((255, 200, 60), 220)
+        return self._sgr(self.ROLE_RGB["gold"], 220)
 
     @property
     def ink(self) -> str:
         """A value: the thing the caller actually reads off the row."""
-        return self._sgr((232, 240, 255), 255)
+        return self._sgr(self.ROLE_RGB["ink"], 255)
 
     @property
     def slate(self) -> str:
@@ -390,7 +392,7 @@ class Palette:
         desaturated so it cannot be mistaken for `gold` or `amber`, which mean
         money and hotkeys.
         """
-        return self._sgr((179, 155, 125), 137)
+        return self._sgr(self.ROLE_RGB["slate"], 137)
 
     @property
     def text(self) -> str:
@@ -404,19 +406,19 @@ class Palette:
         body of the screen, a step below the values in it, and neutral so the
         warm labels still read as a different kind of thing.
         """
-        return self._sgr((188, 196, 208), 250)
+        return self._sgr(self.ROLE_RGB["text"], 250)
 
     @property
     def mint(self) -> str:
-        return self._sgr((108, 242, 160), 84)
+        return self._sgr(self.ROLE_RGB["mint"], 84)
 
     @property
     def amber(self) -> str:
-        return self._sgr((255, 179, 71), 215)
+        return self._sgr(self.ROLE_RGB["amber"], 215)
 
     @property
     def alarm(self) -> str:
-        return self._sgr((255, 92, 108), 203)
+        return self._sgr(self.ROLE_RGB["alarm"], 203)
 
     def rgb(self, color: tuple[int, int, int]) -> str:
         """Any color, at this preset's depth: for a value whose color is
@@ -471,8 +473,9 @@ class Palette:
             pieces.append(f"{ESC}[38;2;{r};{g};{b}m{character}")
         return "".join(pieces) + RESET
 
-    #: The roles' own colors, for a component that ramps between them rather
-    #: than printing one: an instrument line glowing toward its reading.
+    #: The roles' own colors: what each role property prints, and what a
+    #: component reads when it ramps between them rather than printing one --
+    #: an instrument line glowing toward its reading (#34).
     ROLE_RGB = {"hull": (127, 163, 191), "deep": (47, 56, 68), "plasma": (255, 90, 190),
                 "gold": (255, 200, 60), "ink": (232, 240, 255), "slate": (179, 155, 125),
                 "text": (188, 196, 208), "mint": (108, 242, 160), "amber": (255, 179, 71),
@@ -2687,7 +2690,7 @@ def generate_galaxy(seed: int) -> list[GalaxySystem]:
     home.economy = "Industrial"
     home.danger = 1
     home.name = "Freeport"
-    home.station_name = "Freeport Anchorage"
+    home.station_name = HOME_STATION_NAME
     home.discovered = True
     for nid in home.connections:
         neighbor = systems[nid]
@@ -4470,7 +4473,7 @@ def finish_career(save: SaveData, finale: str) -> SaveData:
     abandoned = [f"Abandoned at retirement: {m.description} (forfeited {mission_reward_for(save, m.kind, m.reward):,}cr)."
                  for m in save.active_missions]
     dossier = {"version":1, "number":save.pilot.retirements+1, "seed":save.seed,
-               "started":save.pilot.career_started, "ended":time.strftime("%Y-%m-%d"), "finale":finale,
+               "started":save.pilot.career_started, "ended":career_date(), "finale":finale,
                "rank":career_rank_index(save.pilot), "ship":save.ship.hull_class, "days":save.turn,
                "credits":save.pilot.credits, "kills":save.pilot.kills, "missions":save.pilot.missions_completed,
                "failed":save.pilot.missions_failed + len(abandoned), "expired":save.pilot.missions_expired,
@@ -4493,7 +4496,7 @@ def career_dossier_lines(save: SaveData) -> list[str]:
     if not save.retired_careers: return lines + ["No career dossiers recorded yet."]
     for item in reversed(save.retired_careers):
         info = CAREER_FINALES[item["finale"]]
-        lines += [f"Career #{item['number']}: {info['label']}. {item['started'] or 'Unknown start'} to {item['ended']}.",
+        lines += [f"Career #{item['number']}: {info['label']}. {show_date(item['started']) or 'Unknown start'} to {show_date(item['ended'])}.",
                   f"Seed {item['seed']}; {item['days']} days; {RANKS[item['rank']][1]}; {item['ship']}.",
                   f"Final credits {item['credits']:,}cr; market margin {item['market_margin']:+,}cr; {item['charted']}/{GALAXY_SYSTEM_COUNT} charted; {item['kills']} victories; "
                   f"{item['missions']} missions completed" + (f", {item['failed']} failed, {item['expired']} expired." if "failed" in item else "."), info["closing"]]
@@ -4525,7 +4528,7 @@ def career_finale_lines(save: SaveData, selected: str) -> list[str]:
             f"  {p.slate}{blocker}{RESET}" if blocker else f"  {badge('Available', 'good')}"]))
     lines.append(section("NEW GAME+"))
     info = CAREER_FINALES[selected]
-    credits = 1200 + (save.pilot.retirements+1)*RETIREMENT_STARTING_CREDITS_BONUS
+    credits = STARTING_CREDITS + (save.pilot.retirements+1)*RETIREMENT_STARTING_CREDITS_BONUS
     gear = f"{info['tier'].title()} tier 1" if info["tier"] else "ordinary starting modules"
     lines += ["Selected ending: " + info["closing"],
               f"New Game+: a fresh galaxy, Shuttle with {gear}, full starting hull/fuel and {credits:,}cr including the accumulated retirement bonus.",
@@ -4827,14 +4830,89 @@ def _save_path(save_dir: Path, user_id: int) -> Path:
     return save_dir / f"{user_id}.json"
 
 
+# The node's calendar (#27). A career's dates are stored in ISO, which sorts
+# and which every existing save already holds, but they are the node's dates:
+# NetBBS names its timezone in door_info.json, and a career begun just after
+# the node's midnight belongs to that day whatever zone the host runs in. They
+# are shown the way the rest of the node shows a date. Standalone, or on a
+# node that says neither, both stay the host's own, as before.
+_NODE_ZONE = None
+_DATE_FORMAT = "%Y-%m-%d"
+
+
+def date_part(datetime_format: object) -> str | None:
+    """The date in NetBBS's node-wide date-and-time format (`datetime_format`,
+    NetBBS 7.41.0): the longest run of date directives and the separators
+    between them that no time directive interrupts, trimmed to start and end
+    on a date directive. None when no usable date is left. Lunar Lander reads
+    the same field the same way."""
+    if not isinstance(datetime_format, str) or len(datetime_format) > 64:
+        return None
+    best: list[str] = []
+    run: list[str] = []
+    for token in re.findall(r"%.|[^%]+|%$", datetime_format) + ["%H"]:
+        if token in ("%Y", "%y", "%m", "%d", "%b", "%B", "%a", "%A"):
+            run.append(token)
+        elif token.startswith("%"):
+            # A time directive (or %%) ends the run; keep it if it holds the most dates.
+            while run and not run[-1].startswith("%"):
+                run.pop()
+            if sum(t.startswith("%") for t in run) > sum(t.startswith("%") for t in best):
+                best = run
+            run = []
+        elif run:
+            run.append(token)
+    candidate = "".join(best)
+    return candidate if candidate and re.fullmatch(r"(?:%[YymdbBaA]|[ ./,\-])+", candidate) else None
+
+
+def set_node_calendar(info: dict) -> None:
+    """The node's timezone and date format from its door info, where it names them."""
+    global _NODE_ZONE, _DATE_FORMAT
+    zone = info.get("timezone")
+    _NODE_ZONE = None
+    if isinstance(zone, str) and zone:
+        try:
+            _NODE_ZONE = timezone.utc if zone == "UTC" else ZoneInfo(zone)
+        except (ValueError, ZoneInfoNotFoundError):
+            pass  # an unknown zone keeps the host's calendar rather than guessing one
+    _DATE_FORMAT = date_part(info.get("datetime_format")) or "%Y-%m-%d"
+
+
+def career_date() -> str:
+    """Today on the node's calendar, as a career records it: ISO."""
+    now = datetime.now(_NODE_ZONE) if _NODE_ZONE is not None else datetime.now()
+    return now.date().isoformat()
+
+
+def show_date(recorded: str) -> str:
+    """A recorded career date the way the node shows dates. Anything that is
+    not an ISO date -- an unrecorded start, a hand-edited save -- is shown as
+    it is."""
+    try:
+        return datetime.strptime(recorded, "%Y-%m-%d").strftime(_DATE_FORMAT)
+    except (TypeError, ValueError):
+        return recorded
+
+
+#: What every new career starts with. The commission states these terms before
+#: the career exists, so they are named once rather than written there again (#34).
+STARTING_CREDITS = 1200
+HOME_STATION_NAME = "Freeport Anchorage"
+
+
+def starting_ship() -> Ship:
+    return Ship(hull_class="Shuttle", hull_hp=60, fuel=24)
+
+
 def _new_career(handle: str) -> SaveData:
     seed = random.randrange(1, 2**31 - 1)
     return SaveData(
         schema_version=SCHEMA_VERSION,
         seed=seed,
-        pilot=Pilot(handle=handle, credits=1200, reputation={f: 0 for f in FACTIONS},
-                    career_started=time.strftime("%Y-%m-%d")),
-        ship=Ship(hull_class="Shuttle", hull_hp=60, fuel=24),
+        pilot=Pilot(handle=handle, credits=STARTING_CREDITS, reputation={f: 0 for f in FACTIONS},
+                    career_started=career_date()),
+        ship=starting_ship(),
         current_system=0,
         turn=0,
         cargo={},
@@ -9103,12 +9181,13 @@ def _commission_lines(p: Palette, welcome: str, callsign: str | None) -> list[st
     commission's terms beside the Shuttle the pilot will fly."""
     lines = wrap_styled(f"{p.text}{welcome}{RESET}", _page_content_width())
     lines.append(section("COMMISSION"))
+    ship = starting_ship()
     terms = [f"{p.slate}Callsign{RESET} {p.gold}{BOLD}{callsign}{RESET}" if callsign else
              f"{p.slate}Callsign{RESET} {p.ink}enter it below{RESET}",
-             f"{p.slate}Deployment{RESET} {p.hull}{BOLD}FREEPORT ANCHORAGE{RESET}",
-             f"{p.slate}Vessel{RESET} {p.ink}Battered Shuttle{RESET}",
-             f"{p.slate}Bank{RESET} {p.gold}{glyph('credits')} 1,200cr{RESET}  {p.slate}Hold{RESET} {p.ink}empty{RESET}"]
-    return lines + beside(terms, pixel_hull(Ship(hull_class="Shuttle", hull_hp=60, fuel=24)), overhang=True)
+             f"{p.slate}Deployment{RESET} {p.hull}{BOLD}{HOME_STATION_NAME.upper()}{RESET}",
+             f"{p.slate}Vessel{RESET} {p.ink}Battered {ship.hull_class}{RESET}",
+             f"{p.slate}Bank{RESET} {p.gold}{glyph('credits')} {STARTING_CREDITS:,}cr{RESET}  {p.slate}Hold{RESET} {p.ink}empty{RESET}"]
+    return lines + beside(terms, pixel_hull(ship), overhang=True)
 
 
 def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str | None:
@@ -9116,7 +9195,10 @@ def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str 
         # On a canopy terminal the commission is a page of its own (#30): the
         # same questions, asked on the strip under it.
         handle = info["handle"]
-        welcome = _ANSI_RE.sub("", welcome) if welcome else f"Welcome to the void, pilot. No career dossier found for {handle}."
+        # The greeting picks the callsign out in gold, as the boxed one does;
+        # the rest of it is prose on this page, so `text` stands in for `muted`.
+        welcome = (welcome or f"Welcome to the void, pilot. No career dossier found for {p.gold}{handle}{p.muted}.")
+        welcome = welcome.replace(p.muted, p.text) if p.muted else welcome
         title = "Pilot Commission"
         draw_page(p, title, _commission_lines(p, welcome, None), 0, 1)
         out_prompt(f"{p.muted}Pilot callsign [{p.gold}{handle}{p.muted}]: {RESET}")
@@ -9149,8 +9231,8 @@ def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str 
     entered = read_line_raw(max_len=16, allowed=lambda c: c.isalnum() or bool(unicodedata.combining(c)) or c == " ").strip()
     callsign = entered or handle
     out_line()
-    out_line(f"{p.muted}  Starting deployment: Freeport Anchorage{RESET}")
-    out_line(f"{p.muted}  Vessel: Battered Shuttle  │  Starting Bank: 1,200 cr  │  Cargo: Empty Hold{RESET}")
+    out_line(f"{p.muted}  Starting deployment: {HOME_STATION_NAME}{RESET}")
+    out_line(f"{p.muted}  Vessel: Battered {starting_ship().hull_class}  │  Starting Bank: {STARTING_CREDITS:,} cr  │  Cargo: Empty Hold{RESET}")
     if confirm(f"Launch {p.gold}{callsign}{p.muted}'s career?", p):
         return callsign
     out_line(f"{p.muted}Career launch cancelled. No career was saved.{RESET}")
@@ -11110,14 +11192,18 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
 
 def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choices: int = 9, notice: list[str] | None = None, page_state: dict[str, int] | None = None) -> object | None:
     footer = f"[1-{max_choices}] Select [N] Next [P] Prev [B] Back: "
-    notice_rows = [row for line in notice or [] for row in _wrap_output(_mission_plain(line), max(1, _OUTPUT_WIDTH - 1)).split("\r\n")]
-    wrapped_options = [(value, _mission_plain(label), _wrap_output(_mission_plain(label), max(1, _OUTPUT_WIDTH - 5)).split("\r\n"))
+    # On the canopy the list is printed on the console's glass, which is narrower
+    # than a wide terminal: wrapped to the terminal, a long label ran off the
+    # glass onto the sky beside it (#33).
+    reach = _box_outer_width() if canopy_active() else _OUTPUT_WIDTH
+    notice_rows = [row for line in notice or [] for row in _wrap_output(_mission_plain(line), max(1, reach - 1)).split("\r\n")]
+    wrapped_options = [(value, _mission_plain(label), _wrap_output(_mission_plain(label), max(1, reach - 5)).split("\r\n"))
                        for value, label in options]
     maximum_pages = max(1, sum(len(rows) for _, _, rows in wrapped_options) + len(options) + len(notice_rows))
     def budget(heading, controls):
         # Same measurement as every other screen; the worst-case counter is this
         # picker's own, because one oversized label can occupy a page by itself.
-        width = max(1, _OUTPUT_WIDTH - 1)
+        width = max(1, reach - 1)
         overhead = len(_wrap_output(f"{heading} {maximum_pages}/{maximum_pages}", width).split("\r\n"))
         overhead += len(_wrap_output(controls, width).split("\r\n")) + 3
         return max(1, _OUTPUT_HEIGHT - overhead)
@@ -11137,7 +11223,7 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choi
             select_footer = "[1] Pick [N/P] [B] Back: "
             more_footer = "[N] More [P] Prev [B] Back: "
             size = min(budget(heading, select_footer), budget(heading, more_footer))
-            rows = _wrap_output(label, max(1, _OUTPUT_WIDTH - 1)).split("\r\n")
+            rows = _wrap_output(label, max(1, reach - 1)).split("\r\n")
             chunks = [rows[i:i + size] for i in range(0, len(rows), size)]
             first = len(pages)
             required = tuple(range(first, first + len(chunks)))
@@ -13327,7 +13413,7 @@ def career_ending_lines(fresh: SaveData) -> tuple[list[str], list[str]]:
                f"{p.slate}of{RESET} {p.plasma}{BOLD}{_mission_plain(fresh.pilot.handle)}{RESET}",
                info["closing"]]
     details = [section("THE CAREER"),
-               f"{plural(dossier['days'], 'day')}, {dossier['started'] or 'an unrecorded start'} to {dossier['ended']}; "
+               f"{plural(dossier['days'], 'day')}, {show_date(dossier['started']) or 'an unrecorded start'} to {show_date(dossier['ended'])}; "
                f"retired a {RANKS[dossier['rank']][1]} in a {dossier['ship']}.",
                f"Final credits {dossier['credits']:,}cr; market margin {dossier['market_margin']:+,}cr.",
                f"{dossier['charted']}/{GALAXY_SYSTEM_COUNT} systems charted; "
@@ -15264,6 +15350,7 @@ def _run_game(info: dict) -> int:
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
     set_palette(p)  # what every component in the style layer draws with
     set_canopy_quadrants(info.get("quadrants") if type(info.get("quadrants")) is bool else None)
+    set_node_calendar(info)
     input_reader()  # opened before the first page, so it can reveal itself
     _check_session_time()
     if _terminal_too_small():
