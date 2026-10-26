@@ -128,7 +128,17 @@ rescue, a data burst, a tow, a hull refit, promotions, joining a faction and
 retirement. Any key skips one, and each holds its last frame for two seconds.
 The Viewport is drawn the same way: the pilot's ship, the station and any
 landmark found, idling until a key. Callers who want none choose `fast` in
-Display Options. A SysOp can switch them off for everyone with `DOOR_SPLASH=0`
+Display Options.
+
+On a truecolor or 256-color terminal in the `auto` and `fast` presets, every
+screen is drawn as the ship's console in front of a picture of where the ship
+is: the system's world and station, the contact in a fight, the star map as a
+chart of glowing systems and lanes. A page costs about 15 KB at 80x24 (30 KB at
+120x36) the first time a place is shown, and about 5 KB per page turn after
+that, against about 2 KB for a plain page. The
+pictures use quadrant blocks, or half blocks for CP437 callers and for NetBBS
+callers whose font lacks quadrants. A SysOp can switch the pictures off with
+`DOOR_CANOPY=0`, or keep every caller to half blocks with `DOOR_PIXELS=half`. A SysOp can switch them off for everyone with `DOOR_SPLASH=0`
 (the title splash) and `DOOR_SCENES=0` (the in-flight scenes) in the door's
 environment. A scene sends under 90 KB at 80x24 in truecolor, less at lower
 color depths.

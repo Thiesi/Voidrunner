@@ -27,7 +27,7 @@ PRESETS = list(vr.DISPLAY_STYLES)
 # The Unicode half of the glyph vocabulary (issue #493 §4). None of it may reach
 # a `plain` terminal: every one has an ASCII substitute, and a preset that lets
 # one through is not a designed rendering, it is an accident.
-UNICODE_GLYPHS = "".join(unicode_form for unicode_form, _ in vr._GLYPHS.values()) + vr._SPARK[0] + "╭╮╰╯│─├┤═║╔╗╚╝■"
+UNICODE_GLYPHS = "".join(unicode_form for unicode_form, _ in vr._GLYPHS.values()) + "▁▂▃▄▅▆▇█╭╮╰╯│─├┤═║╔╗╚╝■"
 
 FOREGROUND = re.compile(r"\x1b\[(?:1m\x1b\[)?(?:38;[25];|3[0-7]m|9[0-7]m)")
 
@@ -367,7 +367,7 @@ def test_the_colorless_presets_preview_themselves_colorlessly(monkeypatch):
         """The preview itself: from its gauge to its last reading, with the
         frame's own right-hand border -- which is always hull-colored -- left
         outside."""
-        start = min((row.index(glyph) for glyph in ("█", "░", "#", ".") if glyph in row),
+        start = min((row.index(glyph) for glyph in ("━", "─", "#", ".") if glyph in row),
                     default=0)
         # Find the last reading in the *visible* text: a bare `rindex("12")`
         # matched inside the border's own escape once the frame color became
@@ -471,10 +471,12 @@ def test_drawing_a_page_twice_over_reveals_it_once(monkeypatch):
         vr.draw_page(palette, "Deck", ["one", "two", "three"], 0, 2)
         again = len(paused)
         vr.draw_page(palette, "Deck", ["four", "five"], 1, 2)
-    assert first == 3, "the first draw did not reveal its rows"
+    # Three rows, after the header's lane streak has left the title (#30).
+    streak = len(vr.LANE_STREAK_STEPS)
+    assert first == streak + 3, "the first draw did not reveal its rows"
     assert again == first, "an unchanged redraw revealed itself again"
     assert len(paused) > again, "paging to a new page did not reveal it"
-    assert sum(paused) <= vr.MOTION_REVEAL_BUDGET * 2 + 1e-9
+    assert sum(paused) <= (vr.MOTION_REVEAL_BUDGET + streak * vr.LANE_STREAK_STEP) * 2 + 1e-9
 
 
 # -- in-place redraw, service labels and the label hue ---------------------
@@ -716,7 +718,7 @@ def test_a_neutral_standing_is_a_value_and_its_bar_is_not(monkeypatch):
     for row in standing:
         assert _role_of(row, "Neutral") == p.ink, plain(row)
         bars = [text for text, esc in _role_runs(row).items()
-                if text and set(text) <= {"█", "░"}]
+                if text and set(text) <= {"━", "╾", "─"}]
         assert bars, plain(row)
         assert all(_role_runs(row)[bar] != p.ink for bar in bars), plain(row)
 
