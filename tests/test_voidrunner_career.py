@@ -3317,6 +3317,15 @@ def test_an_unknown_or_missing_zone_keeps_the_hosts_calendar(calendar):
     assert vr._NODE_ZONE is None and vr._DATE_FORMAT == "%Y-%m-%d"
 
 
+def test_a_zone_the_tz_database_cannot_open_does_not_stop_the_door(calendar, monkeypatch):
+    # On POSIX, ZoneInfo("America") opens a directory and raises IsADirectoryError.
+    def unreadable(key):
+        raise IsADirectoryError(key)
+    monkeypatch.setattr(vr, "ZoneInfo", unreadable)
+    vr.set_node_calendar({"timezone": "America"})
+    assert vr._NODE_ZONE is None
+
+
 @pytest.mark.parametrize("pattern,date", [
     ("%d.%m.%Y %H:%M", "%d.%m.%Y"),
     ("%H:%M %d/%m/%Y", "%d/%m/%Y"),

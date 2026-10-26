@@ -4874,8 +4874,10 @@ def set_node_calendar(info: dict) -> None:
     if isinstance(zone, str) and zone:
         try:
             _NODE_ZONE = timezone.utc if zone == "UTC" else ZoneInfo(zone)
-        except (ValueError, ZoneInfoNotFoundError):
-            pass  # an unknown zone keeps the host's calendar rather than guessing one
+        except (ValueError, OSError, ZoneInfoNotFoundError):
+            # An unknown zone keeps the host's calendar rather than guessing one.
+            # A tz directory such as "America" is an OSError on POSIX, not a miss.
+            pass
     _DATE_FORMAT = date_part(info.get("datetime_format")) or "%Y-%m-%d"
 
 
