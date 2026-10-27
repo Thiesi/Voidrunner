@@ -12062,7 +12062,7 @@ def screen_workshop(p: Palette, world: World, key: str) -> str | None:
         elif action == "I" and available:
             quote = workshop_quote(world, key)
             if confirm(f"Install {UPGRADES[key]['label']} tier {quote['tier']} for {quote['credits']}cr and {quote['quantity']} {COMMODITIES[quote['commodity']]['label']}? Materials are consumed.", p):
-                result = install_workshop_module(world, key)
+                result = set_status(install_workshop_module(world, key), "good")
                 world.commit()
                 page = 0
 

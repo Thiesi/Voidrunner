@@ -2734,13 +2734,15 @@ def test_specialist_directory_flies_real_route_then_installs_with_known_material
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     monkeypatch.setattr(world.event_rng, "random", lambda: 0.99)
     world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
-    with contextlib.redirect_stdout(io.StringIO()): result = vr.screen_specialists(vr.Palette(False), world)
+    with contextlib.redirect_stdout(io.StringIO()) as output: result = vr.screen_specialists(vr.Palette(False), world)
     saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert saved.current_system == destination and saved.turn == len(path)
     assert saved.ship.cargo_tier == 1 and saved.pilot.credits == 680 and not saved.cargo
     assert saved.ship.fuel < 24 and saved.pending_travel is None
     assert saved.trading_ledger.workshop_material_cost == 100
     assert "Iona Rusk installed" in result
+    # Done, like a yard upgrade: green on the workshop and on the directory it returns to.
+    assert plain(output.getvalue()).count("● Iona Rusk installed") == 2 and vr._STATUS["tone"] == "good"
 
 
 @pytest.mark.parametrize("role,letter", [("gunner", b"A"), ("engineer", b"C"), ("navigator", b"D")])
