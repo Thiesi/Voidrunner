@@ -781,7 +781,7 @@ def test_commission_and_cartel_screens_fit_standard_terminal(monkeypatch, termin
         with contextlib.redirect_stdout(output): screen(vr.Palette(False), world)
         assert len(output.getvalue().splitlines()) <= 24
         assert all(vr._visible_width(row) <= 80 for row in output.getvalue().splitlines())
-        assert "Back" in output.getvalue() and "Standing:" in output.getvalue()
+        assert "Back" in output.getvalue() and "STANDING" in vr._ANSI_RE.sub("", output.getvalue())
 
 
 @pytest.mark.parametrize("width,height", [(80, 24), (64, 20), (40, 16)])

@@ -4166,19 +4166,49 @@ def faction_standing_route(faction: str) -> str:
 
 
 def faction_contact_lines(world: World, faction: str) -> list[str]:
-    info = FACTION_MEMBERSHIPS[faction]
-    lines = [f"{info['contact']}: {info['label']}.",
-             f"Standing: {world.save.pilot.reputation.get(faction, 0)}. {faction_membership_status(world, faction)}.",
-             f"Perk: {info['perk']}.",
-             faction_standing_route(faction),
-             f"Joining requires {info['threshold']} standing and grants {info['grant']:,}cr once. No entry fee.",
-             f"Perk suspended at {FACTION_PERK_SUSPEND_AT} standing or below; automatically restored above it. Membership stays, with no second grant.",
-             "Dual membership is allowed. Each faction judges its own standing independently. Membership does not clear notoriety or fines.",
-             info["intro"], f"[S] Story: {FACTION_STORIES[faction]['title']}."]
-    if blocker := faction_join_blocker(world, faction): lines.append(blocker)
-    else: lines.append("[J] Join after final confirmation.")
-    return lines
+    """A faction's contact as a sheet, like a contract's (issue #39).
 
+    Ten sentences said where the pilot stands, how standing is earned, what
+    joining takes and gives, and when the perk lapses; the one thing a pilot
+    came to learn -- how far they are from joining -- was a bare number in the
+    second. STANDING now answers that with a gauge and a mark; how standing is
+    earned, what joining gives and what the perk does are one row each; the
+    rules every faction shares are a footnote.
+    """
+    p = pal()
+    info = FACTION_MEMBERSHIPS[faction]
+    standing = world.save.pilot.reputation.get(faction, 0)
+    member = getattr(world.save.pilot, info["field"])
+    lines = [f"{p.ink}{BOLD}{info['contact']}{RESET} {p.deep}{glyph('dot')}{RESET} {p.slate}{info['label']}{RESET}",
+             f"{p.slate}{info['intro']}{RESET}"]
+    if member:
+        active = faction_perk_active(world, faction)
+        status = ("member, perk active", "good") if active else ("member, perk suspended", "bad")
+        progress = f"{standing}; the perk lapses at {FACTION_PERK_SUSPEND_AT} or below"
+        progress_tone = "good" if active else "bad"
+    else:
+        status = ("not joined", None)
+        short = info["threshold"] - standing
+        progress = (f"{gauge(max(0, standing), info['threshold'], 8, tone='good')} {standing} of {info['threshold']}"
+                    + (f", {short} to go" if short > 0 else ", enough to join"))
+        progress_tone = "good" if short <= 0 else "info"
+    earning = faction_standing_route(faction).removeprefix("Earning standing: ").rstrip(".")
+    lines.append(section("STANDING"))
+    lines += _sheet_rows([("STANDING", progress, progress_tone), ("STATUS", status[0], status[1])])
+    # Rows that only inform, apart from the judged ones: a long value here
+    # would push the marks above out to the far edge.
+    lines.append(section("MEMBERSHIP"))
+    lines += _sheet_rows([("EARN", earning, None),
+                          ("JOIN", f"needs {info['threshold']} standing; pays {p.gold}+{info['grant']:,}cr{p.ink} once, no fee", None),
+                          ("PERK", info["perk"], None),
+                          ("LAPSES", f"at {FACTION_PERK_SUSPEND_AT} standing or below; returns above it", None)])
+    lines.append(section("NEXT"))
+    blocker = faction_join_blocker(world, faction)
+    lines.append(blocker if blocker else "[J] Join after final confirmation.")
+    lines.append(f"[S] Story: {FACTION_STORIES[faction]['title']}.")
+    lines.append(f"{p.slate}Dual membership is allowed; each faction judges its own standing. A lapsed perk "
+                 f"keeps the membership, with no second grant. Membership does not clear notoriety or fines.{RESET}")
+    return lines
 
 
 def concord_commission_available(world: World) -> bool:

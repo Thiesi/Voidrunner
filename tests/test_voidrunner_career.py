@@ -1953,7 +1953,11 @@ def test_faction_contact_pages_preserve_all_terms_without_writes(monkeypatch, te
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): vr._screen_faction_contact(vr.Palette(False), world, faction)
-    assert " ".join(" ".join(bodies).split()) == " ".join(" ".join(vr.faction_contact_lines(world, faction)).split())
+    shown = " ".join(" ".join(bodies).split())
+    # Section labels ride in the frame's rules, which `page_text` leaves out.
+    missing = [word for line in vr.faction_contact_lines(world, faction) if not line.startswith(vr.SECTION_MARK)
+               for word in vr._ANSI_RE.sub("", line).split() if word not in shown]
+    assert not missing, missing
 
 
 @pytest.mark.parametrize("key", ["P", "W"])
