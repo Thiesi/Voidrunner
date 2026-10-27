@@ -1216,17 +1216,18 @@ def test_contract_notes_appear_only_when_they_apply():
     world = _world_with_seed(42)
     dest = sorted(world.here.connections)[0]; world.by_id[dest].discovered = True
     delivery = vr.Mission(1, "delivery", "Deliver", 300, 0, dest, commodity="food", quantity=2)
-    text = " ".join(vr.mission_details(world, delivery))
-    assert "not total profit" in text and "cargo already aboard" not in text
-    assert "crew wages" not in text and "Survey scanning" not in text and "Remote danger" not in text
+    text = plain(" ".join(vr.mission_details(world, delivery)))
+    assert "exclude repairs, detours, combat and price changes." in text and "cargo already aboard" not in text
+    assert "current wages" not in text and "scanned from afar" not in text and "uncharted" not in text
     _set_cargo(world, {"food": 1})
-    assert "as is cargo already aboard" in " ".join(vr.mission_details(world, delivery))
+    assert "and cargo already aboard." in plain(" ".join(vr.mission_details(world, delivery)))
     world.save.ship.has_gunner = True
-    assert "Budget keeps current crew wages" in " ".join(vr.mission_details(world, delivery))
+    assert "and current wages, with refuelling stops" in plain(" ".join(vr.mission_details(world, delivery)))
     far = next(s.id for s in world.galaxy if not s.discovered and s.id != dest)
     scan = vr.Mission(2, "scan", "Survey", 250, 0, far)
-    text = " ".join(vr.mission_details(world, scan))
-    assert "Survey scanning may avoid travel, at half pay (125cr)." in text and "Remote danger remains unknown until charted." in text
+    text = plain(" ".join(vr.mission_details(world, scan)))
+    # Half pay for a survey scanned from afar is in MONEY; an uncharted target is a `?` in CHECKS.
+    assert "scanned from afar: +125cr" in text and "DANGER uncharted ?" in " ".join(text.split())
 
 
 def test_offer_page_one_points_to_accept_without_offering_it(monkeypatch, terminal):

@@ -5718,7 +5718,23 @@ CREW_LETTERS = choice_letters("Q")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
+#: The console is 79 columns on any terminal up to `WIDE_LAYOUT_FROM`. Wider, it
+#: grows -- to `WIDE_PANEL_MAX` at most, the most a line of prose reads well at --
+#: and always leaves the canopy `WIDE_WINDOW_MIN` columns of window beside it, so
+#: the picture keeps a real window rather than a strip (issue #39). Below that
+#: width a wider console would only squeeze the picture: a 120-column caller
+#: keeps the 79-column console and the window it has now.
+WIDE_LAYOUT_FROM, WIDE_PANEL_MAX, WIDE_WINDOW_MIN = 130, 112, 30
+
+
+def wide_layout() -> bool:
+    """Whether the console is wider than the classic 79 columns (issue #39)."""
+    return _OUTPUT_WIDTH >= WIDE_LAYOUT_FROM
+
+
 def _box_inner_width() -> int:
+    if wide_layout():
+        return min(WIDE_PANEL_MAX, _OUTPUT_WIDTH - WIDE_WINDOW_MIN) - 2
     return max(1, min(77, _OUTPUT_WIDTH - 2))
 
 
@@ -8703,7 +8719,6 @@ _CANOPY_SKIES = {
     "transit": ((6, 5, 22), (18, 12, 52), (104, 72, 214), (90, 120, 230)),
 }
 QUADRANT_GLYPHS = " ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█"
-CANOPY_PANEL_WIDTH = 79  # the console: `_box_outer_width()` on any terminal wide enough
 # The largest terminal the canopy is composed for. It is a picture made pixel by
 # pixel, like the scenes; the host accepts terminals up to 500x200, where one
 # would take seconds to compose and hundreds of kilobytes to send.
@@ -8982,13 +8997,13 @@ def canopy_key(scene: dict, width: int | None = None, height: int | None = None)
 
 def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
     """The whole canopy for a `width` x `height` terminal. The console covers
-    the top left, `CANOPY_PANEL_WIDTH` across and as many rows as its page
+    the top left, `_box_outer_width()` across and as many rows as its page
     has, so what the window shows is placed where the window is: beside the
     console on a wide terminal, along the bottom of a narrower one. Never on
     the console's own height, which changes from page to page -- one picture
     serves every page of a place, so paging redraws none of it."""
     across = canopy_across()
-    panel_w = min(width, CANOPY_PANEL_WIDTH)
+    panel_w = min(width, _box_outer_width())
     key = canopy_key(scene, width, height)
     if key in _CANOPY_CACHE:
         return _CANOPY_CACHE[key]
@@ -12968,17 +12983,115 @@ def mission_bearing(world: World, mission: Mission) -> str:
     return f"{location}: {len(path)} jump(s), next bearing ({first.x},{first.y})"
 
 
+#: A data sheet's row marks (issue #39): fine, a problem, worth knowing, unknown.
+SHEET_MARKS = {"good": "info", "bad": "danger", "info": "note"}
+
+
+def sheet_mark(tone: str) -> str:
+    """The mark at the end of a CHECKS row, in its tone's color; `?` is unknown."""
+    p = pal()
+    if tone == "unknown":
+        return f"{p.slate}?{RESET}"
+    role = STATUS_TONES[tone][1]
+    return f"{getattr(p, role)}{glyph(SHEET_MARKS[tone])}{RESET}"
+
+
+def sheet_columns(columns: list[tuple[str, list[str]]], width: int | None = None, gap: int = 4) -> list[str]:
+    """Columns of a data sheet side by side, or stacked when they do not fit.
+
+    Each column is (heading, rows) of already-styled rows. Side by side, every
+    column starts on the same display column on every row; a narrow terminal
+    gets the same columns one under the other, headings and all, so nothing is
+    dropped to make it fit (issue #39).
+    """
+    p = pal()
+    width = _page_content_width() if width is None else width
+    widths = [max([_visible_width(heading)] + [_visible_width(row) for row in rows]) for heading, rows in columns]
+    if sum(widths) + gap * (len(columns) - 1) > width:
+        stacked = []
+        for heading, rows in columns:
+            stacked += [f"{p.slate}{BOLD}{heading}{RESET}"] + rows
+        return stacked
+    height = max(len(rows) for _, rows in columns)
+    out = [(" " * gap).join(_pad(f"{p.slate}{BOLD}{heading}{RESET}", w) for (heading, _), w in zip(columns, widths)).rstrip()]
+    for index in range(height):
+        cells = [_pad(rows[index] if index < len(rows) else "", w) for (_, rows), w in zip(columns, widths)]
+        out.append((" " * gap).join(cells).rstrip())
+    return out
+
+
+def _sheet_rows(entries: list[tuple[str, str, str]]) -> list[str]:
+    """CHECKS rows: a label, a value and a mark, each in its own column."""
+    p = pal()
+    label_w = max(_visible_width(label) for label, _, _ in entries)
+    value_w = max(_visible_width(value) for _, value, _ in entries)
+    return [f"{p.slate}{_pad(label, label_w)}{RESET}  {_pad(f'{p.ink}{value}{RESET}', value_w)}  {sheet_mark(tone)}"
+            for label, value, tone in entries]
+
+
+def _money_rows(entries: list[tuple[str, int | None, str]]) -> list[str]:
+    """MONEY rows: what each item costs or pays, the amounts right-aligned.
+
+    An entry without an amount is a note under the sums (standing, say)."""
+    p = pal()
+    sums = [(label, amount, tone) for label, amount, tone in entries if amount is not None]
+    label_w = max(_visible_width(label) for label, _, _ in sums)
+    amounts = [f"{amount:+,}cr" if amount else "0cr" for _, amount, _ in sums]
+    amount_w = max(_visible_width(text) for text in amounts)
+    rows = []
+    for (label, amount, tone), text in zip(sums, amounts):
+        net = label == "NET"
+        color = getattr(p, STATUS_TONES[tone][1]) if tone in STATUS_TONES and amount else p.ink
+        rows.append(f"{p.slate}{BOLD if net else ''}{_pad(label, label_w)}{RESET}  "
+                    f"{BOLD if net else ''}{color}{_pad(text, amount_w, 'right')}{RESET}")
+    rows += [f"{p.slate}{label}{RESET}" for label, amount, _ in entries if amount is None]
+    return rows
+
+
+def contract_route_rows(world: World, path: list[int], limit: int = 8) -> list[str]:
+    """One row per leg of the shortest route: where, the fuel it burns, its danger.
+
+    An uncharted stop stays unnamed; the destination is named, as the contract
+    itself already names it."""
+    p = pal()
+    rows, previous = [], world.save.current_system
+    for number, sid in enumerate(path, 1):
+        system = world.by_id[sid]
+        burn = fuel_cost_for_jump(world.by_id[previous], system, world.save.ship)
+        previous = sid
+        if number > limit:
+            continue
+        name = _mission_plain(system.name) if system.discovered or number == len(path) else "uncharted"
+        danger = (f"{p.tone(danger_tone(system.danger))}danger {system.danger}{RESET}" if system.discovered
+                  else f"{p.slate}danger ?{RESET}")
+        rows.append(f"{p.slate}{number}.{RESET} {p.ink}{_pad(name, 16)}{RESET} {p.slate}{burn} fuel{RESET}  {danger}")
+    if len(path) > limit:
+        rows.append(f"{p.slate}... {len(path) - limit} more{RESET}")
+    return rows or [f"{p.slate}at this station{RESET}"]
+
+
 def mission_details(world: World, mission: Mission) -> list[str]:
-    """Read-only terms and explicit estimates; never reveal remote market state."""
+    """The contract as a data sheet; never reveal remote market state.
+
+    It was fourteen sentences a pilot had to read through to find the one
+    number that decides it (issue #39). Now the terms that decide it are two
+    rows on top; CHECKS says, one row each, whether cargo, hold, fuel, deadline,
+    danger and cash are fine, with a mark that tells at a glance; MONEY adds the
+    payout and the costs down to a NET; a wide console adds the route leg by leg.
+    What only some contracts need is said under NOTES, and what every estimate
+    leaves out is one footnote.
+    """
     p = pal()
     path = mission_route(world, mission)
     reward = mission_reward_for(world.save, mission.kind, mission.reward)
     target = world.by_id[mission.target_system]
     kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
     risk, tone = MISSION_RISK.get(mission.kind, ("CONTRACT", "info"))
+    what = (f"{mission.quantity} {COMMODITIES[mission.commodity]['label']} {glyph('arrow')} "
+            if mission.kind == "delivery" and mission.commodity else "")
     # The terms first, as terms: what it is, what it pays, and how far away the
     # job is, on two rows the caller can read without reading a paragraph.
-    lines = [f"{chip(kind, None)} {p.ink}{_mission_plain(target.name)}{RESET}  {badge(risk, tone)}"
+    lines = [f"{chip(kind, None)} {p.ink}{what}{_mission_plain(target.name)}{RESET}  {badge(risk, tone)}"
              f"   {p.gold}+{reward:,}cr{RESET}"]
     terms = [f"{p.slate}route{RESET} " + f" {p.deep}{glyph('arrow')}{RESET} ".join(
         f"{p.ink}{_mission_plain(world.by_id[sid].name) if world.by_id[sid].discovered else '?'}{RESET}"
@@ -12992,88 +13105,117 @@ def mission_details(world: World, mission: Mission) -> list[str]:
     else:
         terms.append(f"{p.slate}no deadline{RESET}")
     lines.append("   ".join(terms))
-    lines.append(section("TERMS"))
-    lines += [mission.description, f"Destination: {mission_bearing(world, mission)}",
-              f"Target danger: {target.danger}" if target.discovered else "Target danger: uncharted"]
-    ahead = preceding_bounties(world, mission)
-    if ahead:
-        lines.append(f"Queued bounties: {ahead} earlier contract(s) at this target resolve first. Budget includes re-entry after each, assuming they remain active and you win.")
-    if mission.kind == "bounty" and path and path[-1] == world.save.current_system:
-        lines.append("Retry: leave this system and jump back to re-engage the bounty; budget includes both jumps.")
-    if mission.deadline_turn is None:
-        lines.append("Deadline: none. Jumps advance the day.")
-    else:
-        remaining = mission.deadline_turn - world.save.turn
-        lines.append(f"Deadline: day {mission.deadline_turn} inclusive; today {world.save.turn}, {max(0, remaining)} jump(s) left.")
-        if remaining < 0:
-            lines.append("EXPIRED: this contract cannot pay.")
-        elif len(path) > remaining and mission.kind != "scan":
-            lines.append("WARNING: the shortest route misses the deadline.")
-    lines.append(f"Gross payout: {reward:,} cr. Credits available: {world.save.pilot.credits:,} cr.")
-    if mission.kind in CONCORD_STANDING_CONTRACTS:
-        lines.append(f"Completion also pays +{CONCORD_STANDING_PER_CONTRACT} Concord standing.")
-    if mission.kind in ("bounty", "escort") and world.save.pilot.has_concord_commission:
-        lines.append("The quoted commission bonus uses current standing; actual payout includes 25% only if Concord standing is above -50 when paid.")
-    procurement = 0
-    if mission.kind == "delivery":
-        quantity = mission.quantity or 0
-        have, promised = contract_cargo_aboard(world, mission)
-        missing = max(0, quantity - have)
-        price = price_for(world, world.save.current_system, mission.commodity)
-        procurement = missing * price
-        free = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
-        aboard = f"{have} aboard" + (f" ({promised} more promised to other contracts)" if promised else "")
-        lines.extend([
-            f"Cargo: deliver {quantity} {COMMODITIES[mission.commodity]['label']}; {aboard}, buy {missing} more.",
-            f"Procurement at this station: {missing} x {price} = {procurement:,} cr; prices can move after purchases.",
-            f"Hold: need {missing} free units; {free} available. Delivery consumes the cargo.",
-        ])
-        if missing > free:
-            lines.append("WARNING: make cargo space or upgrade before procuring the full load.")
-    elif mission.kind == "scan":
-        if target.discovered:
-            lines.append("BLOCKED SURVEY: target already charted. Revisiting cannot complete it; abandon an active contract to free its slot.")
-        else:
-            lines.append("Survey: newly chart this target by arriving or discovering it with your scanner. No cargo required.")
-            lines.append("Area surveys require a scanner and cost 2 fuel; they chart all new contacts within 2 + scanner tier + navigator bonus hops without advancing the day.")
-            lines.append("Accepting or tracking the bearing does not chart the system.")
-    elif mission.kind == "bounty":
-        lines.append(f"Combat: intercept a tier {mission.pirate_tier} raider at the target. Escape leaves the bounty active; destruction fails it.")
-        lines.append("At interception, [V] verifies identity for one fuel before engaging; [W] withdraws. A mistaken-identity kill adds notoriety and harms Concord standing; a confirmed mismatch can be closed without a payout.")
-    elif mission.kind == "escort":
-        lines.append(f"Combat: one tier {mission.pirate_tier} raider fight on EVERY jump while active, including detours.")
-        lines.append("Other escort contracts add their own fights. Escape or destruction fails this convoy.")
-        lines.append("Payment follows a won convoy fight on arrival at the target; no cargo space is needed.")
-    fuel = 0
-    max_leg = 0
+
+    # --- the figures every check and sum below is made of ------------------
+    fuel = max_leg = 0
     previous = world.save.current_system
     for sid in path:
         leg = fuel_cost_for_jump(world.by_id[previous], world.by_id[sid], world.save.ship)
-        max_leg = max(max_leg, leg)
-        fuel += leg
-        previous = sid
-    fuel_cash = max(0, fuel - world.save.ship.fuel) * 6
+        max_leg, fuel, previous = max(max_leg, leg), fuel + leg, sid
+    aboard_fuel = world.save.ship.fuel
+    fuel_cash = max(0, fuel - aboard_fuel) * 6
     wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
     wages = wage * len(path)
-    outlay = procurement + fuel_cash + wages
-    held = mission.kind == "delivery" and world.save.cargo.get(mission.commodity, 0) > 0
-    lines.extend([
-        f"Shortest-route budget: {fuel} fuel ({world.save.ship.fuel} aboard), {fuel_cash} cr top-ups"
-        + (f"; wages {wage} cr/jump, {wages} cr total." if wage else "."),
-        f"Estimated remaining cash outlay: {outlay:,} cr; payout less this outlay: {reward - outlay:+,} cr.",
-        "Estimate is not total profit: repairs, detours, combat and price changes are excluded"
-        + (", as is cargo already aboard." if held else "."),
-    ])
+    checks: list[tuple[str, str, str]] = []
+    money: list[tuple[str, int | None, str]] = [("Payout", reward, "good")]
+    procurement = 0
+    held = False
+    if mission.kind == "delivery":
+        quantity = mission.quantity or 0
+        have, promised = contract_cargo_aboard(world, mission)
+        held = have > 0
+        missing = max(0, quantity - have)
+        label = COMMODITIES[mission.commodity]["label"]
+        price = price_for(world, world.save.current_system, mission.commodity)
+        procurement = missing * price
+        free = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
+        prohibited = not COMMODITIES[mission.commodity]["legal"] and world.here.economy != "Haven"
+        stock = market_depth_quote(world, world.here.id, mission.commodity)["stock"]
+        aboard = f"{have} aboard" + (f", {promised} promised elsewhere" if promised else "")
+        if not missing:
+            checks.append(("CARGO", f"{quantity} {label} aboard", "good"))
+        elif prohibited:
+            checks.append(("CARGO", f"buy {missing} at a Haven; {aboard}", "bad"))
+        else:
+            checks.append(("CARGO", f"buy {missing} here; {aboard}", "good" if stock >= missing else "bad"))
+            if stock < missing:
+                checks.append(("STOCK", f"only {stock} here", "bad"))
+        checks.append(("HOLD", f"needs {missing}, {free} free", "good" if missing <= free else "bad"))
+        if procurement:
+            money.append((f"Cargo {missing} x {price}", -procurement, "bad"))
+    if path:
+        if max_leg > fuel_capacity(world.save.ship):
+            checks.append(("FUEL", f"a jump needs {max_leg}, tank holds {fuel_capacity(world.save.ship)}", "bad"))
+        else:
+            checks.append(("FUEL", f"needs {fuel}, {aboard_fuel} aboard", "good" if fuel <= aboard_fuel else "info"))
+        money.append(("Fuel top-ups", -fuel_cash, "bad"))
     if wage:
-        lines.append("Budget keeps current crew wages and assumes refuelling stops.")
+        money.append((f"Wages {len(path)} x {wage}", -wages, "bad"))
+    if mission.deadline_turn is None:
+        checks.append(("DEADLINE", "none", "good"))
+    else:
+        remaining = mission.deadline_turn - world.save.turn
+        if remaining < 0:
+            checks.append(("DEADLINE", "expired; cannot pay", "bad"))
+        elif len(path) > remaining and mission.kind != "scan":
+            checks.append(("DEADLINE", f"{plural(len(path), 'jump')}, {plural(max(0, remaining), 'day')}: late", "bad"))
+        else:
+            checks.append(("DEADLINE", f"{plural(len(path), 'jump')} in {plural(max(0, remaining), 'day')}", "good"))
+    if target.discovered:
+        checks.append(("DANGER", f"danger {target.danger}",
+                       {"good": "good", "caution": "info", "danger": "bad"}[danger_tone(target.danger)]))
+    else:
+        checks.append(("DANGER", "uncharted", "unknown"))
+    if mission.kind == "scan" and target.discovered:
+        checks.append(("SURVEY", "target already charted", "bad"))
+    outlay = procurement + fuel_cash + wages
+    if outlay:
+        short = outlay - world.save.pilot.credits
+        checks.append(("CASH", f"{outlay:,}cr of {world.save.pilot.credits:,}cr" + (f", {short:,} short" if short > 0 else ""),
+                       "bad" if short > 0 else "good"))
+    money.append(("NET", reward - outlay, "good" if reward - outlay > 0 else "bad"))
+    if mission.kind in CONCORD_STANDING_CONTRACTS:
+        money.append((f"also +{CONCORD_STANDING_PER_CONTRACT} Concord standing", None, "info"))
     if mission.kind == "scan" and not target.discovered:
-        lines.append(f"Survey scanning may avoid travel, at half pay ({remote_survey_payout(reward):,}cr).")
-    if any(not world.by_id[sid].discovered for sid in path):
-        lines.append("Remote danger remains unknown until charted.")
-    if max_leg > fuel_capacity(world.save.ship):
-        lines.append("WARNING: a shortest-route jump exceeds tank capacity; upgrade or find another route.")
-    if outlay > world.save.pilot.credits:
-        lines.append("WARNING: current credits do not cover the estimated remaining outlay.")
+        money.append((f"scanned from afar: +{remote_survey_payout(reward):,}cr", None, "info"))
+    columns = [("CHECKS", _sheet_rows(checks)), ("MONEY", _money_rows(money))]
+    if wide_layout() and path:
+        columns.append(("ROUTE", contract_route_rows(world, path)))
+    lines.append(section("TERMS"))
+    lines += sheet_columns(columns)
+
+    # --- what only some contracts need to say -----------------------------
+    notes = [mission.description]
+    ahead = preceding_bounties(world, mission)
+    if ahead:
+        notes.append(f"Queued bounties: {ahead} earlier contract(s) at this target resolve first. Budget includes re-entry after each, assuming they remain active and you win.")
+    if mission.kind == "bounty" and path and path[-1] == world.save.current_system:
+        notes.append("Retry: leave this system and jump back to re-engage the bounty; budget includes both jumps.")
+    if mission.kind in ("bounty", "escort") and world.save.pilot.has_concord_commission:
+        notes.append("The quoted commission bonus uses current standing; actual payout includes 25% only if Concord standing is above -50 when paid.")
+    if mission.kind == "delivery" and mission.commodity:
+        notes.append("Delivery consumes the cargo; prices here can move after purchases.")
+    elif mission.kind == "scan":
+        if target.discovered:
+            notes.append("BLOCKED SURVEY: revisiting cannot complete it; abandon an active contract to free its slot.")
+        else:
+            notes.append("Survey: chart this target by arriving or discovering it with your scanner. No cargo required.")
+            notes.append("Area surveys require a scanner and cost 2 fuel; they chart all new contacts within 2 + scanner tier + navigator bonus hops without advancing the day.")
+            notes.append("Accepting or tracking the bearing does not chart the system.")
+    elif mission.kind == "bounty":
+        notes.append(f"Combat: intercept a tier {mission.pirate_tier} raider at the target. Escape leaves the bounty active; destruction fails it.")
+        notes.append("At interception, [V] verifies identity for one fuel before engaging; [W] withdraws. A mistaken-identity kill adds notoriety and harms Concord standing; a confirmed mismatch can be closed without a payout.")
+    elif mission.kind == "escort":
+        notes.append(f"Combat: one tier {mission.pirate_tier} raider fight on EVERY jump while active, including detours.")
+        notes.append("Other escort contracts add their own fights. Escape or destruction fails this convoy.")
+        notes.append("Payment follows a won convoy fight on arrival at the target; no cargo space is needed.")
+    if notes:
+        lines.append(section("NOTES"))
+        lines += notes
+    lines.append(f"{p.slate}Estimates use the shortest route"
+                 + (f" and current wages, with refuelling stops" if wage else "")
+                 + "; they exclude repairs, detours, combat and price changes"
+                 + (", and cargo already aboard." if held else ".") + RESET)
     # Sanitize the rows built out of save data; never a completed styled row,
     # whose own untrusted segments were sanitized before they were styled.
     return [line if (ANSI_ESCAPE_RE.search(line) or line.startswith(SECTION_MARK))

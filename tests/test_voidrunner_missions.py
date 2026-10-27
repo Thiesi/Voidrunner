@@ -703,13 +703,13 @@ def test_contract_terms_show_kind_obligations_and_cost_limits(kind):
     world, mission = _mission_details_world(kind)
     world.save.ship.has_navigator = True
     _set_cargo(world, {"food": 1})
-    lines = " ".join(vr.mission_details(world, mission))
-    assert "inclusive" in lines and "Target danger: uncharted" in lines
-    assert "Gross payout" in lines and "not total profit" in lines
-    assert "repairs" in lines and "wages" in lines
+    lines = " ".join(plain(" ".join(vr.mission_details(world, mission))).split())
+    assert "due day 10" in lines and "DANGER uncharted ?" in lines
+    assert f"Payout +{vr.mission_reward_for(world.save, mission.kind, mission.reward):,}cr" in lines and "NET" in lines
+    assert "repairs" in lines and "current wages" in lines
     if kind == "delivery":
         price = vr.price_for(world, 0, "food")
-        assert f"2 x {price} = {2 * price:,} cr" in lines
+        assert f"Cargo 2 x {price} -{2 * price:,}cr" in lines and "buy 2 here; 1 aboard" in lines
         assert "Delivery consumes the cargo" in lines
     elif kind == "scan":
         assert "scanner" in lines and "does not chart" in lines
@@ -835,11 +835,11 @@ def test_bounty_retry_requires_reentry_and_budgets_two_jumps():
     world.save.ship.fuel = 0
     route = vr.mission_route(world, mission)
     assert len(route) == 2 and route[-1] == mission.target_system
-    lines = " ".join(vr.mission_details(world, mission))
+    lines = " ".join(plain(" ".join(vr.mission_details(world, mission))).split())
     assert "jump back" in lines and "both jumps" in lines
-    assert "shortest route misses the deadline" in lines
+    assert "DEADLINE 2 jumps, 1 day: late ▲" in lines
     assert "2 jump(s)" in vr.mission_bearing(world, mission)
-    assert "wages 10 cr/jump, 20 cr total" in lines
+    assert "Wages 2 x 10 -20cr" in lines
 
 
 @pytest.mark.parametrize("kind", ["bounty", "escort"])

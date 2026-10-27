@@ -105,7 +105,7 @@ def test_turning_a_page_gives_back_only_the_rows_the_last_page_covered(canopy):
     _written(lambda: vr.out_line("N"))
     third = _written(lambda: vr.draw_page(vr.pal(), "Guide", [f"row {n}" for n in range(12)], 0, 2))
     assert "\x1b[2J" not in third
-    assert all(column == vr.CANOPY_PANEL_WIDTH + 1 for row, column in
+    assert all(column == vr._box_outer_width() + 1 for row, column in
                ((int(m[1]), int(m[2])) for m in CUP.finditer(third)) if row != 1)
 
 
@@ -217,9 +217,9 @@ def test_a_wide_canopy_puts_its_picture_in_the_window_not_under_the_glass(canopy
     cells = vr.canopy_cells(vr.canopy_scene(world), 120, 36)
     # Under the console every cell is sky: one color, no block, no art.
     for row in cells[:30]:
-        for ch, fg, bg in row[:vr.CANOPY_PANEL_WIDTH]:
+        for ch, fg, bg in row[:vr._box_outer_width()]:
             assert ch in " ·•+", ch
-    assert any(ch not in " ·•+" for row in cells for ch, _, _ in row[vr.CANOPY_PANEL_WIDTH + 1:])
+    assert any(ch not in " ·•+" for row in cells for ch, _, _ in row[vr._box_outer_width() + 1:])
 
 
 def test_one_canopy_serves_every_page_of_a_place(canopy):
@@ -372,7 +372,7 @@ def test_a_pickers_long_rows_stay_on_the_console_glass(canopy, monkeypatch):
     rows = [plain(row) for row in written.split("\r\n")[1:]]
     listed = [row for row in rows if row.strip() and "Select" not in row]
     assert any(row.startswith("[1] Deliver") for row in listed)
-    assert all(len(row.rstrip()) <= vr.CANOPY_PANEL_WIDTH for row in listed)
+    assert all(len(row.rstrip()) <= vr._box_outer_width() for row in listed)
     assert "reward 4,200cr" in " ".join(listed)
     # The picker cleared the screen, so the page after it draws a fresh sky.
     assert "\x1b[2J" in _written(lambda: vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1))

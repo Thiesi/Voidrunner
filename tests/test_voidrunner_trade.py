@@ -3278,7 +3278,7 @@ def test_contract_pages_do_not_count_cargo_another_contract_is_owed():
     assert vr.contract_cargo_aboard(world, offer) == (0, 10)
     assert vr.contract_cargo_aboard(world, world.save.active_missions[0]) == (10, 0)
     details = plain(" ".join(vr.mission_details(world, offer)))
-    assert "deliver 8 Food; 0 aboard (10 more promised to other contracts), buy 8 more." in " ".join(details.split())
+    assert "CARGO buy 8 here; 0 aboard, 10 promised elsewhere" in " ".join(details.split())
     route = plain(" ".join(vr.mission_navigation_lines(world, offer, active=False)))
     assert "0 aboard (10 more promised to other contracts), 8 missing." in " ".join(route.split())
 
