@@ -83,6 +83,7 @@ import math
 import os
 import random
 import re
+import shutil
 import socket
 import sys
 import tempfile
@@ -15788,6 +15789,51 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
                 return RecoveryResult(restored, 0)
 
 
+@contextlib.contextmanager
+def _standalone_console(info: dict):
+    """A local terminal, played without a BBS: one key at a time, at its real size.
+
+    A BBS hands the door each key as it is typed. A local console holds a line
+    until Enter and then sends it, Enter included, which the game reads as
+    keys: "P" then Enter bought the default and every later purchase cancelled
+    itself. So a standalone run on a real terminal turns line input and echo
+    off for the session, and restores them however it ends; Ctrl-C still works.
+    Anything that is not a terminal -- a pipe, a test -- is left as it is.
+    """
+    if not sys.stdin.isatty():
+        yield
+        return
+    size = shutil.get_terminal_size((80, 24))
+    info.update(terminal_width=size.columns, terminal_height=size.lines)
+    if os.environ.get("COLORTERM") in ("truecolor", "24bit") or os.environ.get("WT_SESSION"):
+        info["color_depth"] = "truecolor"
+    if os.name == "nt":
+        import ctypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        handles = [kernel.GetStdHandle(-10), kernel.GetStdHandle(-11)]
+        saved = [ctypes.c_uint32() for _ in handles]
+        for handle, mode in zip(handles, saved):
+            kernel.GetConsoleMode(handle, ctypes.byref(mode))
+        # Input: no line buffering or echo (0x2, 0x4), keys as VT sequences (0x200).
+        # Output: VT processing (0x4), so an older console draws the colors too.
+        kernel.SetConsoleMode(handles[0], (saved[0].value & ~0x6) | 0x200)
+        kernel.SetConsoleMode(handles[1], saved[1].value | 0x4)
+        try:
+            yield
+        finally:
+            for handle, mode in zip(handles, saved):
+                kernel.SetConsoleMode(handle, mode.value)
+    else:
+        import termios
+        import tty
+        saved = termios.tcgetattr(sys.stdin.fileno())
+        tty.setcbreak(sys.stdin.fileno())
+        try:
+            yield
+        finally:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, saved)
+
+
 def main(drop_file: str | None = None) -> int:
     global _OUTPUT_STYLE, _DEFAULT_ENCODING, _CLASSIC_DROP_FILE, _SOCKET_TRANSPORT
     global _INPUT_READER, _INPUT_STREAM, _SESSION_CLOCK
@@ -15811,7 +15857,9 @@ def main(drop_file: str | None = None) -> int:
                 return 1
         started = True
         _SESSION_CLOCK = _session_clock(info, session_started)
-        return _run_game(info)
+        standalone = drop_file is None and not os.environ.get("NETBBS_DOOR_INFO")
+        with _standalone_console(info) if standalone else contextlib.nullcontext():
+            return _run_game(info)
     except _SessionExpired:
         _SESSION_CLOCK = None
         with contextlib.suppress(_CarrierLost):

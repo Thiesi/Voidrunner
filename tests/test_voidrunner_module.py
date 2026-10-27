@@ -29,3 +29,51 @@ def test_paginate_keeps_groups_whole_splits_oversized_ones_and_never_repeats_a_l
     assert ([[plain(row) for row in rows] for rows, _ in split]
             == [["[A] one", "    two"], ["[A] three"]])
     assert [choices for _, choices in split] == [{"A": 7}, {"A": 7}]
+
+
+class _FakeTerminal:
+    def isatty(self):
+        return True
+
+    def fileno(self):
+        return 0
+
+
+def test_a_standalone_console_reads_keys_one_at_a_time_and_restores_itself(monkeypatch):
+    import os
+    import shutil
+    calls = []
+    monkeypatch.setattr(vr.sys, "stdin", _FakeTerminal())
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback: os.terminal_size((140, 40)))
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    if os.name == "nt":
+        import ctypes
+        class Kernel:
+            def GetStdHandle(self, which): return which
+            def GetConsoleMode(self, handle, mode): mode._obj.value = 0x1F7 if handle == -10 else 0x3; return 1
+            def SetConsoleMode(self, handle, mode): calls.append((handle, mode)); return 1
+        monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: Kernel())
+    else:
+        import termios
+        import tty
+        monkeypatch.setattr(termios, "tcgetattr", lambda fd: ["saved"])
+        monkeypatch.setattr(termios, "tcsetattr", lambda fd, when, attrs: calls.append(("restore", attrs)))
+        monkeypatch.setattr(tty, "setcbreak", lambda fd: calls.append(("cbreak", fd)))
+    info = {"terminal_width": 80, "terminal_height": 24, "color_depth": "256"}
+    with vr._standalone_console(info):
+        assert info == {"terminal_width": 140, "terminal_height": 40, "color_depth": "truecolor"}
+        during = list(calls)
+    if os.name == "nt":
+        # Line input and echo off, VT input on; VT output on.
+        assert during == [(-10, (0x1F7 & ~0x6) | 0x200), (-11, 0x3 | 0x4)]
+        assert calls[2:] == [(-10, 0x1F7), (-11, 0x3)]
+    else:
+        assert during == [("cbreak", 0)] and calls[1:] == [("restore", ["saved"])]
+
+
+def test_a_piped_standalone_run_is_left_as_it_is(monkeypatch):
+    info = {"terminal_width": 80}
+    monkeypatch.setattr(vr.sys, "stdin", type("Pipe", (), {"isatty": lambda self: False})())
+    with vr._standalone_console(info):
+        pass
+    assert info == {"terminal_width": 80}
