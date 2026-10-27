@@ -2190,7 +2190,11 @@ def test_faction_case_pages_preserve_full_terms_without_writes(monkeypatch, term
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): assert vr.screen_faction_story(vr.Palette(False), world, faction) is None
-    assert " ".join(" ".join(bodies).split()) == " ".join(" ".join(vr.faction_story_lines(world, faction)).split())
+    shown = " ".join(" ".join(bodies).split())
+    # Section labels ride in the frame's rules, which `page_text` leaves out.
+    missing = [word for line in vr.faction_story_lines(world, faction) if not line.startswith(vr.SECTION_MARK)
+               for word in vr._ANSI_RE.sub("", line).split() if word not in shown]
+    assert not missing, missing
 
 
 @pytest.mark.parametrize("faction", vr.FACTIONS)
@@ -2935,11 +2939,10 @@ raise SystemExit(code)
 def test_faction_case_ending_selectors_only_appear_when_choice_is_available(faction,stage):
     import copy
     world=_faction_case_world(faction,stage);before=copy.deepcopy(world.save.to_dict());rng=world.event_rng.getstate()
-    lines=vr.faction_story_lines(world,faction)
+    text=" ".join(vr._ANSI_RE.sub("",line) for line in vr.faction_story_lines(world,faction))
     for choice,key in [("hardline","H"),("aid","A")]:
         label=vr.FACTION_STORIES[faction][choice]["label"]
-        row=next(line for line in lines if label+":" in line)
-        assert row.startswith(f"[{key}] ")==(stage=="evidence")
+        assert label in text and (f"[{key}] {label}" in text)==(stage=="evidence")
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 

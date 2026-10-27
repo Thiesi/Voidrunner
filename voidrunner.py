@@ -4076,41 +4076,74 @@ def faction_story_action(world: World, faction: str, action: str) -> str:
     return result
 
 
-def faction_story_ending_lines(world: World, faction: str, choice: str, *, selectable: bool = True) -> list[str]:
+def faction_story_ending_column(world: World, faction: str, choice: str, *, selectable: bool = True) -> list[str]:
+    """One ending of a case as a column: what it is called, pays, asks and moves."""
+    p = pal()
     ending = FACTION_STORIES[faction][choice]
     target = faction_story_target(world, faction, choice)
-    if target is None: return ["Hardline unavailable: no Haven exists for the enforcement handover. The public beacon remains available."]
+    if target is None:
+        return [f"{p.wrong}Hardline unavailable:{RESET}", f"{p.slate}no Haven exists for the{RESET}",
+                f"{p.slate}enforcement handover.{RESET}"]
     destination = world.by_id[target]
     commodity, quantity = ending["commodity"], ending["quantity"]
-    cargo = (f"Deliver {quantity} {COMMODITIES[commodity]['label']}; {world.save.cargo.get(commodity, 0)} aboard. Consumes goods, including cargo promised to other contracts." if commodity else "Deliver the evidence; no cargo consumed.")
-    selector = ("[H] " if choice == "hardline" else "[A] ") if selectable else ""
-    lines = [f"{selector}{ending['label']}: {ending['reward']:,}cr gross.",
-             f"Destination: {destination.name} ({destination.x},{destination.y}). {cargo}",
-             f"At current standing: {faction_standing_terms(world, ending['standing'])}. Standing stays within -100..100."]
+    selector = f"{p.gold}{BOLD}[{'H' if choice == 'hardline' else 'A'}]{RESET} " if selectable else ""
+    column = [f"{selector}{p.ink}{BOLD}{ending['label']}{RESET}",
+              f"{p.gold}+{ending['reward']:,}cr{RESET} {p.slate}gross{RESET}",
+              f"{p.slate}at{RESET} {p.ink}{_mission_plain(destination.name)}{RESET} {p.slate}({destination.x},{destination.y}){RESET}"]
+    if commodity:
+        column.append(f"{p.ink}{quantity} {COMMODITIES[commodity]['label']}{RESET} "
+                      f"{p.slate}({world.save.cargo.get(commodity, 0)} aboard){RESET}")
+    else:
+        column.append(f"{p.slate}the evidence; no cargo{RESET}")
+    for term in faction_standing_terms(world, ending["standing"]).split("; "):
+        delta = term.rsplit(" ", 1)[1]
+        tone = "good" if delta.startswith("+") and delta != "+0" else "danger" if delta.startswith("-") else "info"
+        column.append(f"{p.tone(tone)}{term}{RESET}")
     if commodity is not None and not COMMODITIES[commodity]["legal"]:
-        lines.append("Contraband: procure at a Haven; intermediate non-Haven arrivals can trigger customs.")
-    return lines
+        column.append(f"{p.wrong}contraband: buy at a Haven{RESET}")
+    return column
 
 
 def faction_story_lines(world: World, faction: str) -> list[str]:
+    """A faction's case as a sheet, like the Archive's (issue #39).
+
+    Its two endings were paragraphs read one after the other, though choosing
+    between them is the whole point of the screen. They now stand side by
+    side, each a column of what it pays, where it ends, what it hands over and
+    how it moves standing, under a case of labelled rows and its next step.
+    """
+    p = pal()
     info, story = FACTION_STORIES[faction], world.save.faction_stories.get(faction)
-    lines = [f"{FACTION_LABEL[faction]}: {info['title']}."]
-    if story is not None and story["stage"] == "complete":
+    stage = story["stage"] if story is not None else None
+    lines = [f"{p.ink}{BOLD}{info['title']}{RESET} {p.deep}{glyph('dot')}{RESET} {p.slate}{FACTION_LABEL[faction]}{RESET}"]
+    if stage == "complete":
         return lines + [info[story["choice"]]["closing"], "Case complete. Reward and recognition cannot be claimed again."]
-    lines += [info["intro"] if story is None or story["stage"] == "accepted" else info["evidence"],
-              "Optional: no membership, entry fee, deadline or contract-slot requirement. Ordinary travel fuel, wages and cargo costs apply."]
-    if story is not None and story["stage"] == "committed":
-        lines += ["Chosen course is final; [C] Complete at its destination."] + faction_story_ending_lines(world, faction, story["choice"], selectable=False)
-        if blocker := faction_story_completion_blocker(world, faction): lines.append(blocker)
+    lines.append(info["intro"] if stage in (None, "accepted") else info["evidence"])
+    target = world.by_id[faction_story_target(world, faction)]
+    stages = {None: "open", "accepted": "accepted; evidence not yet found", "evidence": "evidence in hand; choose an ending",
+              "committed": "course chosen; final"}
+    lines.append(section("CASE"))
+    lines += _sheet_rows([("STAGE", stages[stage], None),
+                          ("EVIDENCE", f"{WORKSHOPS[info['workshop']]['name']} at {target.name} ({target.x},{target.y})", None),
+                          ("COSTS", "no membership, fee, deadline or contract slot", None)])
+    if stage == "committed":
+        lines.append(section("CHOSEN COURSE"))
+        lines += faction_story_ending_column(world, faction, story["choice"], selectable=False)
+        next_step = ["[C] Complete at its destination."]
+        if blocker := faction_story_completion_blocker(world, faction):
+            next_step.append(blocker)
     else:
-        lines.append("After investigating, choose one ending; the choice is final.")
-        for choice in ("hardline", "aid"):
-            lines += faction_story_ending_lines(world, faction, choice,
-                                                selectable=story is not None and story["stage"] == "evidence")
-        target = world.by_id[faction_story_target(world, faction)]
-        lines.append(f"Evidence: {WORKSHOPS[info['workshop']]['name']} at {target.name} ({target.x},{target.y}).")
-        lines.append("[A] Accept the case." if story is None else "[I] Investigate at the workshop." if story["stage"] == "accepted" else "Choose an available ending with the action bar.")
-    lines.append("Case rewards pay once, without a commission bonus; one completed mission and a career highlight. Subtract procurement and travel from gross pay.")
+        selectable = stage == "evidence"
+        lines.append(section("THE CHOICE, FINAL ONCE MADE"))
+        lines += sheet_columns([("HARDLINE", faction_story_ending_column(world, faction, "hardline", selectable=selectable)),
+                                ("AID", faction_story_ending_column(world, faction, "aid", selectable=selectable))])
+        next_step = ["[A] Accept the case." if stage is None else "[I] Investigate at the workshop." if stage == "accepted"
+                     else "Choose an available ending with the action bar."]
+    lines.append(section("NEXT"))
+    lines += next_step
+    lines.append(f"{p.slate}Ordinary travel fuel, wages and cargo costs apply; an ending hands over cargo even if "
+                 f"promised to contracts. Case rewards pay once, without a commission bonus, and count as one "
+                 f"completed mission and a career highlight. Standing stays within -100..100.{RESET}")
     return lines
 
 
