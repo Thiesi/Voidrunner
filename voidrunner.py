@@ -11512,17 +11512,38 @@ def _trade_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
 
 
 def remembered_market_lines(world: World) -> list[str]:
-    lines = ["Last observed prices, not live remote data. Jumps advance the day; prices can change."]
-    for sid, quotes in sorted(world.save.market_memory.items(), key=lambda item: world.by_id[item[0]].name):
-        system = world.by_id[sid]
-        lines.append(f"{system.name} - {system.economy}.")
-        for commodity, quote in quotes.items():
-            buy = f"{quote['buy']}cr" if quote["buy"] is not None else "prohibited"
-            lines.append(f"{COMMODITIES[commodity]['label']}: buy {buy}, sell {quote['sell']}cr. Day {quote['day']} ({world.save.turn - quote['day']} days old).")
-            if "stock" in quote:
-                lines.append(f"Observed stock {quote['stock']}; station buying demand {quote['demand']}. Quantities may replenish or change.")
+    """The ship's price memory as a table per station, nearest first (issue #39).
+
+    It was a sentence per remembered quote -- "Food: buy 19cr, sell 17cr. Day 3
+    (2 days old)." and another for its stock -- so comparing one good across
+    stations meant reading every one. Each station is now a section headed by
+    how far it is, and its quotes a table whose columns line up with the market.
+    """
+    p = pal()
+    lines = [f"{p.slate}Last observed prices, not live remote data. Jumps advance the day; prices can change.{RESET}"]
     if not world.save.market_memory:
         lines.append("No market observations yet. Older discoveries have no recorded quotes.")
+        return lines
+    hops = bfs_hops(world.by_id, world.here.id)
+    for sid, quotes in sorted(world.save.market_memory.items(),
+                              key=lambda item: (hops.get(item[0], 999), world.by_id[item[0]].name)):
+        system = world.by_id[sid]
+        jumps = hops.get(sid)
+        where = "here" if sid == world.here.id else (plural(jumps, "jump") if jumps is not None else "unreachable")
+        lines.append(section(f"{_mission_plain(system.name)} · {system.economy} · {where}"))
+        rows, styles = [], []
+        for commodity, quote in quotes.items():
+            age = world.save.turn - quote["day"]
+            rows.append([COMMODITIES[commodity]["label"],
+                         f"{p.wrong}prohibited{RESET}" if quote["buy"] is None else f"{quote['buy']}",
+                         f"{quote['sell']}",
+                         f"{quote['stock']}" if "stock" in quote else f"{p.deep}?{RESET}",
+                         f"{quote['demand']}" if "demand" in quote else f"{p.deep}?{RESET}",
+                         "today" if age <= 0 else f"{age}d ago"])
+            styles.append(["value", "value", "value", "label", "label", "label"])
+        lines += table(["COMMODITY", "BUY", "SELL", "STOCK", "DEMAND", "SEEN"], rows, "lrrrrr",
+                       styles=styles, optional=(3, 4))
+    lines.append(f"{p.slate}Stock and demand were observed then; they replenish or change with time.{RESET}")
     return lines
 
 
@@ -11779,7 +11800,7 @@ def screen_trade_route(p: Palette, world: World, *, initial: dict | None = None)
 
 def screen_remembered_markets(p: Palette, world: World) -> None:
     footer = "[N] Next [P] Prev [B] Back: "
-    pages = _trade_pages(remembered_market_lines(world), "Market Memory", footer)
+    pages = _service_pages(remembered_market_lines(world), "Market Memory", footer)
     page = 0
     while True:
         draw_page(p, "Market Memory", pages[page], page, len(pages))
@@ -11839,38 +11860,56 @@ def trade_opportunities(world: World) -> list[dict]:
 
 
 def economy_opportunity_lines(world: World, candidates: list[dict]) -> list[str]:
-    lines = ["PUBLIC ECONOMY BULLETIN"]
+    """The bulletin and the ranked trade leads, a paragraph each (issue #39).
+
+    Every lead and every station was a run of plain sentences butted against
+    the next. Each is now its own paragraph, a blank row apart, with the
+    figure that matters in its color: a margin green or red, a risk red.
+    """
+    p = pal()
+    lines = [section("PUBLIC ECONOMY BULLETIN")]
     event = world.save.active_event
     if event is None:
-        lines.append("No active disruption reported. Ordinary price differences still create trade leads.")
+        lines.append(f"{p.slate}No active disruption reported. Ordinary price differences still create trade leads.{RESET}")
     else:
-        lines.append(_mission_plain(f"{event['description']}. {plural(event['turns_remaining'], 'jump')} of event time remain."))
+        boom = event["direction"] == "boom"
+        lines.append(f"{p.tone('good' if boom else 'caution')}{BOLD}{_mission_plain(event['description'])}{RESET}"
+                     f"{p.slate}. {plural(event['turns_remaining'], 'jump')} of event time remain.{RESET}")
         commodity = COMMODITIES[event["commodity"]]["label"]
-        lines.append(f"Lead: {'bring' if event['direction'] == 'boom' else 'investigate buying'} {commodity}. Prices and availability still need checking.")
+        lines.append(f"{p.slate}Lead:{RESET} {p.ink}{'bring' if boom else 'investigate buying'} {commodity}{RESET}"
+                     f"{p.slate}. Prices and availability still need checking.{RESET}")
         if not COMMODITIES[event["commodity"]]["legal"]:
-            lines.append("ILLEGAL CARGO: customs can confiscate this commodity outside Havens.")
+            lines.append(f"{p.wrong}ILLEGAL CARGO:{RESET} customs can confiscate this commodity outside Havens.")
         for sid in economy_event_system_ids(world, event):
             station = world.by_id[sid]
             path = bfs_path(world.by_id, world.here.id, sid)
-            threat = str(station.danger) if station.discovered else "unknown"
+            threat = (f"{p.tone(danger_tone(station.danger))}danger {station.danger}{RESET}" if station.discovered
+                      else f"{p.slate}danger unknown{RESET}")
             timing = "event ends by arrival if uninterrupted" if len(path) >= event["turns_remaining"] else "reachable before event ends if uninterrupted"
-            lines.append(f"{station.name} ({station.x},{station.y}), {plural(len(path), 'jump')}; danger {threat}; {timing}.")
+            lines.append("")
+            lines.append(f"{p.ink}{BOLD}{_mission_plain(station.name)}{RESET} {p.slate}({station.x},{station.y}), "
+                         f"{plural(len(path), 'jump')};{RESET} {threat}{p.slate}; {timing}.{RESET}")
             if path:
                 first = world.by_id[path[0]]
-                bearing = first.name if first.discovered else f"uncharted connection at ({first.x},{first.y})"
-                lines.append(f"First bearing: {bearing}. Public news does not chart its destinations.")
-    lines += ["TRADE CANDIDATES - remembered prices, outbound margin only; return travel is excluded.",
-              "Ranked by estimated margin per jump. Quotes can be stale; encounters, repairs and market changes can erase a margin."]
+                bearing = _mission_plain(first.name) if first.discovered else f"uncharted connection at ({first.x},{first.y})"
+                lines.append(f"{p.slate}First bearing:{RESET} {p.ink}{bearing}{RESET}{p.slate}. Public news does not chart its destinations.{RESET}")
+    lines += [section("TRADE CANDIDATES"),
+              f"{p.slate}Remembered prices, outbound margin only; return travel is excluded. Ranked by estimated "
+              f"margin per jump. Quotes can be stale; encounters, repairs and market changes can erase a margin.{RESET}"]
     if not candidates:
         lines.append("No positive quoted candidate fits current stock, hold space, cash, observed demand and delivery commitments. Visit markets or use the route draft for other plans.")
     for index, quote in enumerate(candidates, 1):
         station = world.by_id[quote["destination"]]
         cargo = COMMODITIES[quote["commodity"]]
         capacity = "capacity unobserved" if quote["observed_demand"] is None else f"observed demand {quote['observed_demand']}"
-        lines.append(f"[{index}] {quote['quantity']} {cargo['label']} to {station.name}: {quote['margin']:+,}cr estimate, {plural(len(quote['legs']), 'jump')}.")
-        lines.append(f"Buy {quote['procurement']}cr; additional fuel {quote['fuel_cash']}cr; wages {quote['wages']}cr. Quote day {quote['observed_day']}; {capacity}.")
+        margin = f"{p.tone('good' if quote['margin'] > 0 else 'danger')}{BOLD}{quote['margin']:+,}cr{RESET}"
+        lines.append("")
+        lines.append(f"{key_label(str(index), '')}{p.ink}{quote['quantity']} {cargo['label']} {glyph('arrow')} "
+                     f"{_mission_plain(station.name)}{RESET}  {margin} {p.slate}estimate, {plural(len(quote['legs']), 'jump')}{RESET}")
+        lines.append(f"{p.slate}Buy {p.ink}{quote['procurement']}cr{p.slate}; additional fuel {p.ink}{quote['fuel_cash']}cr"
+                     f"{p.slate}; wages {p.ink}{quote['wages']}cr{p.slate}. Quote day {quote['observed_day']}; {capacity}.{RESET}")
         if not cargo["legal"]:
-            lines.append("ILLEGAL CARGO: customs risk; quoted margin excludes confiscation and fines.")
+            lines.append(f"{p.wrong}ILLEGAL CARGO:{RESET} customs risk; quoted margin excludes confiscation and fines.")
     return lines
 
 

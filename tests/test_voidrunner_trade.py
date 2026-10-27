@@ -1019,7 +1019,7 @@ def test_regional_economy_bulletin_names_targets_without_charting_or_revealing_o
     world.save.active_event = dict(economy=anchor.economy, commodity="food", direction="boom", turns_remaining=1,
         description="Regional shortage", system_ids=[anchor.id])
     before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
-    text = " ".join(vr.economy_opportunity_lines(world, []))
+    text = plain(" ".join(vr.economy_opportunity_lines(world, [])))
     assert anchor.name in text and "danger unknown" in text and "event ends by arrival" in text
     assert "Lead: bring Food" in text and not world.save.market_memory
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
