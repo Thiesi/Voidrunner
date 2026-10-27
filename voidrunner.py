@@ -9487,7 +9487,7 @@ def due_here_alert_rows(world: World) -> list[str]:
         if (mission.kind != "delivery" or mission.target_system != world.here.id or not mission.quantity
                 or mission_expired(world, mission)):
             continue
-        have, _ = contract_cargo_aboard(world, mission)
+        have, promised = contract_cargo_aboard(world, mission)
         short = mission.quantity - have
         if short <= 0:
             continue
@@ -9496,8 +9496,11 @@ def due_here_alert_rows(world: World) -> list[str]:
             source = "not sold here"
         else:
             source = f"stock {market_depth_quote(world, world.here.id, mission.commodity)['stock']}"
+        # Cargo an earlier contract claims is aboard but not this one's: say
+        # so, or "12 short" with ten in the hold reads as a miscount.
+        held = f" ({promised} held for earlier contracts)" if promised else ""
         rows.append(alert("caution", f"Contract #{mission.id} due HERE",
-                          f"{have}/{mission.quantity} {label} aboard, {short} short; {source}",
+                          f"{have}/{mission.quantity} {label} aboard{held}, {short} short; {source}",
                           key_label("M", "market")))
     return rows
 
