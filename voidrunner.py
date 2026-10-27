@@ -14074,15 +14074,30 @@ def career_ending_lines(fresh: SaveData) -> tuple[list[str], list[str]]:
     leading = [f"{badge(info['label'].upper(), 'brand')}  {p.slate}career{RESET} {p.ink}#{dossier['number']}{RESET} "
                f"{p.slate}of{RESET} {p.plasma}{BOLD}{_mission_plain(fresh.pilot.handle)}{RESET}",
                info["closing"]]
-    details = [section("THE CAREER"),
-               f"{plural(dossier['days'], 'day')}, {show_date(dossier['started']) or 'an unrecorded start'} to {show_date(dossier['ended'])}; "
-               f"retired a {RANKS[dossier['rank']][1]} in a {dossier['ship']}.",
-               f"Final credits {dossier['credits']:,}cr; market margin {dossier['market_margin']:+,}cr.",
-               f"{dossier['charted']}/{GALAXY_SYSTEM_COUNT} systems charted; "
-               f"{dossier['kills']} {'victory' if dossier['kills'] == 1 else 'victories'}; "
-               f"{plural(dossier['missions'], 'contract')} completed, {dossier['failed']} failed, {dossier['expired']} expired."]
+    # The career as labelled rows, its figures picked out from their labels,
+    # and what it was remembered for split the same way (issue #39): "First
+    # kill" is the label, "destroyed the Void Jackal" the thing to read.
+    details = [section("THE CAREER")]
+    details += _sheet_rows([
+        ("SPAN", f"{plural(dossier['days'], 'day')}, {show_date(dossier['started']) or 'an unrecorded start'} "
+                 f"to {show_date(dossier['ended'])}", None),
+        ("RETIRED", f"a {RANKS[dossier['rank']][1]} in a {dossier['ship']}", None),
+        ("CREDITS", f"{p.gold}{dossier['credits']:,}cr{p.ink} final; market margin "
+                    f"{p.tone('good' if dossier['market_margin'] > 0 else 'danger' if dossier['market_margin'] < 0 else 'info')}"
+                    f"{dossier['market_margin']:+,}cr", None),
+        ("CHARTED", f"{dossier['charted']}/{GALAXY_SYSTEM_COUNT} systems", None),
+        ("COMBAT", f"{dossier['kills']} {'victory' if dossier['kills'] == 1 else 'victories'}", None),
+        ("CONTRACTS", f"{plural(dossier['missions'], 'contract')} completed, {dossier['failed']} failed, "
+                      f"{dossier['expired']} expired", None)])
     # The last few things the career was remembered for; the dossier keeps them all.
-    details += ["* " + _mission_plain(entry) for entry in dossier["highlights"][-3:]]
+    remembered = []
+    for entry in dossier["highlights"][-3:]:
+        entry = _mission_plain(entry)
+        label, colon, value = entry.partition(": ")
+        remembered.append(f"{p.deep}{glyph('dot')}{RESET} " + (f"{p.slate}{label}:{RESET} {p.ink}{BOLD}{value}{RESET}"
+                                                              if colon else f"{p.ink}{BOLD}{entry}{RESET}"))
+    if remembered:
+        details += [section("REMEMBERED FOR")] + remembered
     start = f"A fresh galaxy, a Shuttle and {fresh.pilot.credits:,}cr"
     if info["tier"] is not None:
         start += f", with {UPGRADES[info['tier']]['label']} tier 1 from this ending"
