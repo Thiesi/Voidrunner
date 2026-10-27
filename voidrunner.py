@@ -4477,6 +4477,20 @@ def career_rank(pilot: Pilot) -> str:
     return RANKS[career_rank_index(pilot)][1]
 
 
+def career_crew_row(world: World) -> str | None:
+    """The crew by name, service and what they cost a jump; None with no crew."""
+    p = pal()
+    ship = world.save.ship
+    hired = [role for role in CREW_ROLES if getattr(ship, f"has_{role}")]
+    if not hired:
+        return None
+    wages = sum(CREW_ROLES[role]["wage"] for role in hired)
+    names = f" {p.deep}{glyph('dot')}{RESET} ".join(
+        f"{p.ink}{_mission_plain(crew_name(world, role))}{RESET} {p.slate}{CREW_ROLES[role]['label']}, "
+        f"{CREW_SERVICE_LEVELS[crew_level(ship, role)][1]}{RESET}" for role in hired)
+    return f"{names}  {p.slate}wages{RESET} {p.ink}{wages}cr/jump{RESET}"
+
+
 def career_rank_terms(pilot: Pilot) -> list[str]:
     index = career_rank_index(pilot)
     lines = ["Rank is permanent for this career; spending and losses do not demote you."]
@@ -4506,7 +4520,13 @@ def career_accomplishments(save: SaveData) -> dict[str, int]:
             "missions": save.pilot.missions_completed, "failed": save.pilot.missions_failed, "expired": save.pilot.missions_expired}
 
 
-def career_path_lines(save: SaveData) -> list[str]:
+CAREER_PATH_NOTE = ("Paths are independent: trade counts market margin, exploring counts systems charted, "
+                    "combat counts victories. Market margin excludes deliveries, unknown-cost receipts and other "
+                    "income, and is before operating costs. A final stage earns its career conclusion and "
+                    "starting equipment; [R] Finale shows the terms.")
+
+
+def career_path_lines(save: SaveData, *, notes: bool = True) -> list[str]:
     progress = career_accomplishments(save)
     stages = {"trader": ((5000,20000,50000), ("Beginning","Broker","Guild Merchant","Founder")),
               "explorer": ((12,30,GALAXY_SYSTEM_COUNT), ("Local","Scout","Pathfinder","Cartographer")),
@@ -4525,18 +4545,22 @@ def career_path_lines(save: SaveData) -> list[str]:
         ceiling = marks[reached] if reached < len(marks) else marks[-1]
         done = reached >= len(marks)
         value = f"{progress[key]:+,}cr" if key == "trader" else f"{progress[key]}"
-        rows.append([f"{key.title()} ({labels[key]}):",
+        # Every stage of the path, the ones reached bright: the sentence that
+        # listed all nine marks is now this column (issue #39 playtest).
+        ladder = f" {p.slate}/{RESET} ".join(
+            f"{p.ink if progress[key] >= mark else p.slate}{mark:,}{RESET}" for mark in marks)
+        rows.append([key.title(), labels[key],
                      gauge(1 if done else progress[key] - floor, 1 if done else max(1, ceiling - floor),
                            cells, tone="brand" if done else None),
                      value,
                      badge("final", "good") if done
-                     else f"{p.slate}of{RESET} {p.ink}{ceiling:,}{RESET}"])
-        styles.append(["label", "value", "value", "value"])
-    lines = table(["", "", "", ""], rows, "llrl", styles=styles, repeat_header=False)[1:]
-    lines += ["Progress is market margin, systems charted and combat victories.",
-              "Stages: trader 5,000 / 20,000 / 50,000cr, explorer 12 / 30 / all systems, combat 5 / 20 / 50 victories.",
-              "Market margin excludes deliveries, unknown-cost receipts and other income. It is before operating costs, not total career profit.",
-              "Paths are independent. Reach a final stage for its career conclusion and starting equipment; [R] Finale shows the terms."]
+                     else f"{p.slate}of{RESET} {p.ink}{ceiling:,}{RESET}",
+                     ladder + (f"{p.slate}cr{RESET}" if key == "trader" else "")])
+        styles.append(["label", "value", "value", "value", "value", "value"])
+    lines = table(["PATH", "STAGE", "", "NOW", "NEXT", "STAGES"], rows, "lllrll", styles=styles,
+                  optional=(5,))
+    if notes:
+        lines.append(f"{p.slate}{CAREER_PATH_NOTE}{RESET}")
     return lines
 
 
@@ -14125,9 +14149,10 @@ def accolade_lines(save: SaveData, rarity: tuple[dict[str, int], int] | None = N
 def pilot_record_lines(world: World, view: str = "O") -> list[str]:
     """Complete retained records, without display truncation or state changes."""
     pilot, ship = world.save.pilot, world.save.ship
+    counts = {"C": len(world.save.active_missions), "H": len(pilot.highlights) + len(pilot.log)}
     lines = [f"{pal().slate}Views{RESET}  " + "  ".join(
-        key_label(key, label) for key, label in
-        (("O", "Pilot"), ("C", "Jobs"), ("H", "Log"), ("D", "Dossiers")))]
+        key_label(key, label) + (f" {pal().slate}{counts[key]}{RESET}" if key in counts else "")
+        for key, label in (("O", "Pilot"), ("C", "Jobs"), ("H", "Log"), ("D", "Dossiers"), ("R", "Finale")))]
     if view == "C":
         lines.append(f"Active Contracts & Missions: {len(world.save.active_missions)}. Full terms, tracking and routes: station [B] Mission Board.")
         for mission in world.save.active_missions:
@@ -14161,7 +14186,8 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
         previous = RANKS[earned][0]
         lines.append(f"{p.slate}next rank{RESET} "
                      f"{gauge(max(0, pilot.credits - previous), max(1, following[0] - previous), cells, tone='brand')} "
-                     f"{p.ink}{max(0, following[0] - pilot.credits):,}cr{RESET} {p.slate}to {following[1]}{RESET}")
+                     f"{p.ink}{max(0, following[0] - pilot.credits):,}cr{RESET} {p.slate}to {following[1]} "
+                     f"({following[0]:,}cr){RESET}")
     event = world.save.active_event
     if event:
         lines.append(alert("caution", "Economy event",
@@ -14169,6 +14195,8 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
                            f"({event['turns_remaining']} day(s) left)"))
     lines.append(section("SHIP"))
     lines += ship_gauge_rows(world)
+    if (crew_row := career_crew_row(world)) is not None:
+        lines.append(crew_row)
     lines.append(section("STANDING"))
     standing_rows = []
     for faction in FACTIONS:
@@ -14192,12 +14220,8 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
                    # The word repeats the number and its tone; the membership
                    # state is the only thing on the row nothing else says.
                    optional=(4, 3), repeat_header=False)[1:]
-    lines.append(f"{p.slate}Membership perks suspend at {p.ink}-50{p.slate} standing or below.{RESET}")
-    lines.append(section("CAREER"))
+    lines.append(section("RECORD"))
     discovered = sum(system.discovered for system in world.galaxy)
-    crew = [f"{crew_name(world, role)} ({info['label']}, {CREW_SERVICE_LEVELS[crew_level(ship, role)][1]})"
-            for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
-    wages = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}"))
     lines.append(f"{p.slate}charted{RESET} {gauge(discovered, len(world.galaxy), cells, tone='info')} "
                  f"{p.ink}{discovered}/{len(world.galaxy)}{RESET} "
                  f"{p.slate}({round(discovered / len(world.galaxy) * 100)}%){RESET}")
@@ -14206,13 +14230,16 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
                             chip("failed", str(pilot.missions_failed)),
                             chip("expired", str(pilot.missions_expired)),
                             chip("retirements", str(pilot.retirements))]))
-    lines.append(f"{p.slate}Crew{RESET} "
-                 + (f"{p.ink}" + ", ".join(crew) + RESET if crew else f"{p.ink}none{RESET}")
-                 + f"  {p.slate}wages{RESET} {p.ink}{wages}cr/jump{RESET}")
-    lines += career_rank_terms(pilot)
-    lines.append(f"[C] Jobs: {len(world.save.active_missions)} active. [H] Log: {len(pilot.highlights)} highlights, {len(pilot.log)} log entries.")
-    lines.append("[R] Finale shows endings and New Game+ terms. [D] Dossiers shows archived careers.")
-    lines += career_path_lines(world.save)
+    lines.append(section("PATHS"))
+    lines += career_path_lines(world.save, notes=False)
+    # What the screen's figures mean, said once and dim (issue #39 playtest):
+    # it was six sentences between and under the readings, two of them the
+    # next-rank target the header already shows and the keys the views row lists.
+    rank_note = ("Rank is permanent for this career; spending and losses do not demote you."
+                 if following is not None else "Top rank retained; retirement stays available after spending.")
+    lines.append(section("NOTES"))
+    lines += [f"{p.slate}{rank_note} Membership perks suspend at -50 standing or below.{RESET}",
+              f"{p.slate}{CAREER_PATH_NOTE}{RESET}"]
     return lines
 
 

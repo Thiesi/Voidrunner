@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from .support import plain, plain_bytes, page_source, page_title, plain as plainly, _Sys, _VOIDRUNNER_PATH, _add_cargo, _box_rows, _door_stopped_at, _escort_world, _finale_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_text, vr
+from .support import once_per_heading, plain, plain_bytes, page_source, page_title, plain as plainly, _Sys, _VOIDRUNNER_PATH, _add_cargo, _box_rows, _door_stopped_at, _escort_world, _finale_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_text, vr
 
 
 def test_retire_pilot_increments_retirements_and_grants_cumulative_bonus():
@@ -2445,7 +2445,7 @@ def test_career_rank_full_terms_fit_record_pages_without_mutation(monkeypatch, t
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):vr.screen_status(vr.Palette(False),world)
     text=" ".join(" ".join(bodies).split())
-    assert "Rank is permanent for this career" in text and "75,000cr balance" in text
+    assert "Rank is permanent for this career" in text and "(75,000cr)" in text
     assert world.save.to_dict()==before
 
 
@@ -2618,7 +2618,8 @@ def test_career_finale_complete_terms_fit_every_page_without_writes(monkeypatch,
         bodies.append(page_text(body.split("[1-4] Choose")[0])); return "B" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):assert vr.screen_career_finale(vr.Palette(False),world) is None
-    assert " ".join(" ".join(bodies).split())==page_source(vr.career_finale_lines(world.save,finale))
+    lines=vr.career_finale_lines(world.save,finale)
+    assert once_per_heading(" ".join(" ".join(bodies).split()),lines)==page_source(lines)
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
@@ -2666,7 +2667,8 @@ def test_career_finale_path_titles_match_recorded_accomplishment(path,value,labe
     if path=="trader":world.save.trading_ledger.sales_revenue=value
     elif path=="explorer":world.save.discovered=list(range(value))
     else:world.save.pilot.kills=value
-    assert f"{path.title()} ({label}):" in " ".join(vr.career_path_lines(world.save))
+    row=next(plain(line) for line in vr.career_path_lines(world.save) if plain(line).strip().startswith(path.title()))
+    assert row.split()[1:1+len(label.split())]==label.split()
 
 
 @pytest.mark.parametrize("paid,bonus",[(0,1),(5,2),(15,3),(30,4)])
@@ -3367,3 +3369,18 @@ def test_recorded_dates_are_shown_the_way_the_node_shows_dates(calendar):
                "kills": 0, "missions": 0, "failed": 0, "expired": 0, "highlights": []}
     save.retired_careers = [dossier]
     assert "05.01.2026 to 27.10.2026" in " ".join(vr.career_dossier_lines(save))
+
+
+def test_a_long_result_on_a_tiny_record_page_does_not_hang_the_paginator(monkeypatch, terminal):
+    # A pending result left a 40x12 page room for a section rule and a table's
+    # headings only; the paginator carried the two from page to page forever.
+    import threading
+    world = _finale_world()
+    terminal(40, 12)
+    keys = iter("BQ"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    vr.set_status("Retirement cancelled; current career retained.")
+    def browse():
+        with contextlib.redirect_stdout(io.StringIO()): vr.screen_status(vr.Palette(False), world)
+    worker = threading.Thread(target=browse, daemon=True)
+    worker.start(); worker.join(30)
+    assert not worker.is_alive()
