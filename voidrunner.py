@@ -12513,9 +12513,12 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
     else:
         lines = [_box_top(p)]
         rows = wrap_styled(style_body_line(header), _page_content_width()) + list(rows)
+    # What each screen row was made from, so an in-place drain can find its rows.
+    sources: list[str | None] = [None]
     for row in rows:
         if row.startswith(SECTION_MARK):
             lines.append(_box_section(p, row[1:]))
+            sources.append(None)
             continue
         # The last place a body row can still be colorless. Screens that build
         # their own rows -- the contract board, the star map, a screen that
@@ -12523,7 +12526,8 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
         # `wrapped_group`, and a rule that held for most pages and not the rest
         # is how the color was lost one slice at a time to begin with.
         row = style_body_line(row.replace(STICKY_MARK, "").replace(MEMBER_MARK, ""))
-        lines.append(f"{p.hull}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.hull}│{RESET}")
+        lines.append(_box_body_row(p, row, inner))
+        sources.append(row)
     if status is not None and not _status_fits_border(status, inner):
         overflow = _status_overflow_rows(p)
         # A screen that measured its pages without `_page_frame_rows` has no
@@ -12570,9 +12574,65 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
             pace = 0.0
         out_line(line)
     if canopy:
+        if _PENDING_DRAIN is not None:
+            _drain_in_place(p, sources, inner, tint, len(lines))
         # Until the action bar is down this page covers its own rows; the bar
         # (`out_prompt`) extends the claim to the strip and the key echoed on it.
         _CANOPY_SHOWN = (canopy_key(scene), len(lines), len(lines), _OUT_COUNT)
+
+
+def _box_body_row(p: Palette, row: str, inner: int) -> str:
+    """One body row inside the console's frame, as `draw_page` draws it."""
+    return f"{p.hull}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.hull}│{RESET}"
+
+
+#: A drain the next canopy page performs in place (issue #39): `render(*values)`
+#: gives the rows to animate, from `start` to `end` readings.
+_PENDING_DRAIN: dict | None = None
+
+
+def drain_in_place_next(render, start: tuple, end: tuple) -> None:
+    """Have the next page drawn on the canopy walk these rows from `start` to `end`."""
+    global _PENDING_DRAIN
+    _PENDING_DRAIN = {"render": render, "start": start, "end": end} if start != end else None
+
+
+def _drain_in_place(p: Palette, sources: list[str | None], inner: int, tint, drawn: int) -> None:
+    """Walk a page's own bars from their old readings to the new ones, where they are.
+
+    `drain_gauge` predates the canopy: it animates a bar on a fresh row under the
+    page, moving only with carriage returns, which every terminal a BBS meets
+    can do. On the canopy the console is fixed and the page is drawn from the
+    top left, so the bars can move in the console itself: each step rewrites
+    just their rows by absolute position, and the cursor goes back to where the
+    action bar expects it. Any key ends it at the final reading, as before.
+    """
+    global _PENDING_DRAIN
+    drain, _PENDING_DRAIN = _PENDING_DRAIN, None
+    shown = [None if source is None else _ANSI_RE.sub("", source) for source in sources]
+    targets = []
+    for row in drain["render"](*drain["end"]):
+        want = _ANSI_RE.sub("", style_body_line(row))
+        if want not in shown:
+            return  # the bars are not on this page: nothing to walk
+        targets.append(shown.index(want))
+    if motion_interrupted():
+        return
+
+    def paint(values) -> None:
+        rows = drain["render"](*values)
+        out("".join(f"{ESC}[{index + 1};1H" + glass(_box_body_row(p, style_body_line(row), inner), tint)
+                    for index, row in zip(targets, rows)))
+
+    start, end = drain["start"], drain["end"]
+    for step in range(COMBAT_DRAIN_STEPS + 1):
+        paint(tuple(round(a + (b - a) * step / COMBAT_DRAIN_STEPS) for a, b in zip(start, end)))
+        if step < COMBAT_DRAIN_STEPS and not motion_pause(0.05):
+            break
+    paint(end)
+    # `drawn` counts every row the page put down, its bottom border and any
+    # status rows included: the action bar goes on the row after the last.
+    out(f"{ESC}[{drawn + 1};1H")
 
 
 def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, page: int, *, pages: list[list[str]] | None = None) -> tuple[str, int, int]:
@@ -15494,6 +15554,24 @@ def screen_notoriety_patrol(p: Palette, world: World) -> None:
     _screen_combat_session(p, world, patrol, patrol=True)
 
 
+def combat_contact_rows(world: World, pirate: Pirate, pirate_hp: int, hull_hp: int) -> list[str]:
+    """The two hulls in a fight, as bars on one scale, for any two readings.
+
+    The combat page draws them at the readings after an exchange; the canopy's
+    in-place drain draws them at every reading on the way there, which is why
+    both go through here (issue #39)."""
+    ship = world.save.ship
+    cells = _gauge_cells()
+    condition = hull_condition(dataclasses.replace(ship, hull_hp=max(0, hull_hp)))
+    contact = [[_mission_plain(pirate.name), gauge(pirate_hp, pirate.hp_max, cells, tone="danger"),
+                f"{pirate_hp}/{pirate.hp_max}", f"tier {pirate.tier}"],
+               ["Your hull", gauge(hull_hp, hull_hp_max(ship), cells),
+                f"{hull_hp}/{hull_hp_max(ship)}", condition]]
+    return table(["", "", "", ""], contact, "llrl",
+                 styles=[["label", "value", "value", "label"] for _ in contact],
+                 optional=(3,), repeat_header=False)[1:]
+
+
 def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, patrol: bool, tactics: dict, details: bool = False, warrant: dict | None = None, hull_before: int | None = None) -> list[str]:
     """Read-only combat terms; no random draw or persisted presentation state."""
     ship, pilot = world.save.ship, world.save.pilot
@@ -15515,13 +15593,7 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     # The two hulls in the fight, one above the other, on the same scale of
     # cells: which bar is longer *is* who is winning, and it used to be two
     # sentences with the numbers buried in the middle of them.
-    contact = [[_mission_plain(pirate.name), gauge(pirate.hp, pirate.hp_max, cells, tone="danger"),
-                f"{pirate.hp}/{pirate.hp_max}", f"tier {pirate.tier}"],
-               ["Your hull", gauge(ship.hull_hp, hull_hp_max(ship), cells),
-                f"{ship.hull_hp}/{hull_hp_max(ship)}", hull_condition(ship)]]
-    lines += table(["", "", "", ""], contact, "llrl",
-                   styles=[["label", "value", "value", "label"] for _ in contact],
-                   optional=(3,), repeat_header=False)[1:]
+    lines += combat_contact_rows(world, pirate, pirate.hp, ship.hull_hp)
     # Fuel and hold are the stakes of an escape and a dump, not readings that
     # move in a fight: one row of chips rather than two more gauges, which is
     # the row that let every option onto the first page at 80x24 (#28).
@@ -15805,10 +15877,20 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             outcome = "destroyed"
         combat.update(pirate=dataclasses.asdict(pirate), outcome=outcome, lines=lines)
         world.commit()
-        drain_gauge(_mission_plain(pirate.name), opened_at[0], max(0, pirate.hp), pirate.hp_max, tone="danger")
-        drain_gauge("Your hull", opened_at[1],
-                    lethal if lethal is not None else max(0, ship.hull_hp), hull_hp_max(ship))
+        closed_at = (max(0, pirate.hp), lethal if lethal is not None else max(0, ship.hull_hp))
         page = 0
+        if canopy_active():
+            # The next combat page drains its own bars; a fight that just ended
+            # draws that page once more, so its last exchange is seen there too.
+            drain_in_place_next(lambda enemy, hull: combat_contact_rows(world, pirate, enemy, hull), opened_at, closed_at)
+            if outcome is not None:
+                shown = combat_display_lines(world, pirate, lines, patrol=patrol, details=details, tactics=tactics,
+                                             warrant=warrant, hull_before=hull_before)
+                pages = _service_pages(shown, f"Combat {world.save.pilot.credits:,}cr", combat_action_bar(""))
+                draw_page(p, f"Combat {world.save.pilot.credits:,}cr", pages[0], 0, len(pages))
+        else:
+            drain_gauge(_mission_plain(pirate.name), opened_at[0], closed_at[0], pirate.hp_max, tone="danger")
+            drain_gauge("Your hull", opened_at[1], closed_at[1], hull_hp_max(ship))
         if outcome is not None:
             play_combat_outcome_scene(world, pirate, outcome, action, patrol=patrol, loot=loot)
             report_hop(world, lines)

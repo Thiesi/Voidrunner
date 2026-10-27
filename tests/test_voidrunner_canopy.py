@@ -421,3 +421,46 @@ def test_the_commission_picks_the_callsign_out_in_gold(canopy, monkeypatch):
         greeting = written[:written.index("COMMISSION")]
         # Gold for the callsign, then back to the page's prose, not the box's muted.
         assert f"{p.gold}Nib{p.text}" in greeting
+
+
+def test_combat_bars_drain_in_place_on_their_own_rows_and_hand_the_cursor_back(monkeypatch):
+    world = _world_with_seed(42)
+    pirate = vr.Pirate(name="Void Jackal", tier=1, hp=20, hp_max=20)
+    render = lambda enemy, hull: vr.combat_contact_rows(world, pirate, enemy, hull)
+    # What draw_page records: header, then the body rows; the bottom border is not a source.
+    sources = [None, "intro", None] + [vr.style_body_line(row) for row in render(4, 50)] + ["after"]
+    monkeypatch.setattr(vr, "motion_interrupted", lambda: False)
+    monkeypatch.setattr(vr, "motion_pause", lambda seconds: True)
+    vr.drain_in_place_next(render, (20, 60), (4, 50))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._drain_in_place(vr.Palette(False), sources, vr._box_inner_width(), vr.CANOPY_ALERT_GLASS, len(sources) + 1)
+    said = output.getvalue()
+    # The two bar rows are screen rows 4 and 5 (header, intro, section, bars); the
+    # cursor ends below the page's last row, where the action bar is written.
+    assert said.count("\x1b[4;1H") == vr.COMBAT_DRAIN_STEPS + 2 and said.count("\x1b[5;1H") == vr.COMBAT_DRAIN_STEPS + 2
+    assert said.endswith("\x1b[8;1H") and vr._PENDING_DRAIN is None
+    last = vr._ANSI_RE.sub("", said.rsplit("\x1b[4;1H", 1)[1])
+    assert "4/20" in last and "50/" in last
+
+
+def test_a_drain_whose_bars_are_not_on_the_page_draws_nothing(monkeypatch):
+    world = _world_with_seed(42)
+    monkeypatch.setattr(vr, "motion_interrupted", lambda: False)
+    vr.drain_in_place_next(lambda a, b: [f"bar {a} {b}"], (1, 1), (0, 0))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._drain_in_place(vr.Palette(False), [None, "something else"], vr._box_inner_width(), vr.CANOPY_GLASS, 3)
+    assert output.getvalue() == "" and vr._PENDING_DRAIN is None
+
+
+def test_a_canopy_page_hands_its_true_height_to_the_drain(monkeypatch, canopy):
+    world = _world_with_seed(42)
+    canopy(80, 24, world=world)
+    seen = []
+    monkeypatch.setattr(vr, "_drain_in_place", lambda p, sources, inner, tint, drawn: seen.append((len(sources), drawn)))
+    vr.drain_in_place_next(lambda a, b: ["x"], (1, 1), (0, 0))
+    vr.set_status("A result long enough that it cannot ride in the bottom border and must take rows of its own above it.", "good")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.draw_page(vr.Palette(False), "Combat 1,200cr", ["one", "two"], 0, 1)
+    rows = [row for row in vr._ANSI_RE.sub("", output.getvalue()).split("\r\n") if row.strip()]
+    # Header, two rows, the status's own rows and the bottom border: all of them drawn.
+    assert seen and seen[0][1] > seen[0][0] and seen[0][1] == len(rows)
