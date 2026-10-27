@@ -1957,3 +1957,16 @@ def test_a_result_is_not_repainted_after_a_sub_screen(monkeypatch, detour):
     # and the yard it returns to does not bring it back.
     assert "Refueled 5 units" in borders[0] and "Refueled 5 units" in borders[1]
     assert not any("Refueled" in border for border in borders[2:]) and vr._STATUS is None
+
+
+def test_a_long_result_reserves_rows_only_on_the_screen_that_shows_it(terminal):
+    # Thiesi/NetBBS#1593 review: a long refusal pending from the market made the
+    # commodity page it opened reserve the result's rows, then drop the result.
+    terminal(40, 12)
+    lines = [f"row {n}" for n in range(30)]
+    plain_capacity = vr.page_capacity(lines, "Food Exchange", "[B] Back: ")
+    vr.set_status("Station can buy 4 units; demand replenishes 6/day. Come back after the next jump.", "bad")
+    _drawn("Market: 1,200cr")
+    assert vr._STATUS["screen"] == "Market" and vr._page_frame_rows("Market: 1,200cr") > 1
+    assert vr.page_capacity(lines, "Food Exchange", "[B] Back: ") == plain_capacity
+    assert vr._page_frame_rows("Food Exchange") == 1

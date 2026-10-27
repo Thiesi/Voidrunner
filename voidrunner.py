@@ -5878,11 +5878,17 @@ def _page_content_width() -> int:
     return max(1, _box_inner_width() - 3)
 
 
-def _page_frame_rows() -> int:
+def _page_frame_rows(title: str | None = None) -> int:
     """Rows the frame costs a page. The title moves into the top border, so
     only the bottom border is new -- and the rows of a status too long to ride
-    in it (issue #38)."""
-    return 1 + len(_status_overflow_rows(pal()))
+    in it (issue #38).
+
+    Given the page's title, only a status that page will show is counted: a
+    long result still pending from the screen just left is dropped when this
+    one draws, and reserving its rows cost blank rows and a page count that
+    overstated the screen (Thiesi/NetBBS#1593 review)."""
+    status = _STATUS if title is None else _status_shown_on(title)
+    return 1 + len(_status_overflow_rows(pal(), status))
 
 
 # ---------------------------------------------------------------------------
@@ -5960,13 +5966,20 @@ def _status_fits_border(status: dict, inner: int) -> bool:
     return 4 + _visible_width(status["text"]) + 1 + clock <= inner
 
 
-def _status_overflow_rows(p: "Palette") -> list[str]:
+def _status_shown_on(title: str) -> dict | None:
+    """The status a page with this title would show, without claiming it."""
+    if _STATUS is None or _STATUS["screen"] not in (None, _status_screen(title)):
+        return None
+    return _STATUS
+
+
+def _status_overflow_rows(p: "Palette", status: dict | None) -> list[str]:
     """Body rows for a status too long for the border; none when it fits."""
-    if _STATUS is None or _status_fits_border(_STATUS, _box_inner_width()):
+    if status is None or _status_fits_border(status, _box_inner_width()):
         return []
-    role = STATUS_TONES.get(_STATUS["tone"], STATUS_TONES["info"])[1]
-    rows = _wrap_output(_STATUS["text"], max(1, _page_content_width() - 2)).split("\r\n")
-    return [f"{_status_mark(p, _STATUS) if number == 0 else ' '} {getattr(p, role)}{row}{RESET}"
+    role = STATUS_TONES.get(status["tone"], STATUS_TONES["info"])[1]
+    rows = _wrap_output(status["text"], max(1, _page_content_width() - 2)).split("\r\n")
+    return [f"{_status_mark(p, status) if number == 0 else ' '} {getattr(p, role)}{row}{RESET}"
             for number, row in enumerate(rows)]
 
 
@@ -11417,7 +11430,7 @@ def page_capacity(lines: list[str], title: str, footer: str) -> int:
     # wrapped rows when it does not; the action bar stays outside the box.
     header_rows = _page_header_rows(f"{title} {max_pages}/{max_pages}")
     overhead = (len(_wrap_output(footer, bar_width).split("\r\n"))
-                + header_rows + _page_frame_rows() + 3)
+                + header_rows + _page_frame_rows(title) + 3)
     return max(1, _OUTPUT_HEIGHT - overhead)
 
 
@@ -12529,7 +12542,7 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
         lines.append(_box_body_row(p, row, inner))
         sources.append(row)
     if status is not None and not _status_fits_border(status, inner):
-        overflow = _status_overflow_rows(p)
+        overflow = _status_overflow_rows(p, status)
         # A screen that measured its pages without `_page_frame_rows` has no
         # rows to spare: there the status is cut to the border, not scrolled.
         if len(lines) + len(overflow) + 2 <= _OUTPUT_HEIGHT:
@@ -13624,7 +13637,7 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
 def screen_pilot_guide(p: Palette, world: World) -> None:
     page = 0
     while True:
-        pages = _mission_text_pages(pilot_guide_lines(world), overhead=5 + _page_frame_rows())
+        pages = _mission_text_pages(pilot_guide_lines(world), overhead=5 + _page_frame_rows("Pilot Guide"))
         page = min(page, len(pages) - 1)
         offer = opening_assignment_offer(world)
         draw_page(p, "Pilot Guide", pages[page], page, len(pages))
@@ -13820,7 +13833,7 @@ def screen_mission_details(p: Palette, world: World, mission: Mission, *, active
         title = f"Contract #{mission.id} {max_pages}/{max_pages}"
         footer = "[R] Route [N] Next [P] Prev [B] Back: "
         pointer_rows = len(_wrap_output(f"[A] on the last page ({max_pages}; [N] Next).", max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
-        overhead = max(7, 1 + 1 + _page_frame_rows()
+        overhead = max(7, 1 + 1 + _page_frame_rows(f"Contract #{mission.id}")
                        + len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
                        + (2 if active else pointer_rows))
         pages = _mission_text_pages(lines, overhead=overhead)
@@ -13918,7 +13931,7 @@ def screen_missions(p: Palette, world: World) -> None:
         width = _page_content_width()
         max_pages = max(1, sum(len(rows) for _, _, rows in wrapped))
         overhead = 1 + 1
-        overhead += _page_frame_rows()
+        overhead += _page_frame_rows("Contracts")
         overhead += sum(len(_wrap_output(line, width).split("\r\n")) for line in summary)
         overhead += len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
         capacity = max(1, _OUTPUT_HEIGHT - overhead)
@@ -15995,7 +16008,7 @@ def screen_outdated_career(p: Palette, error: OutdatedSave) -> bool:
              "Beginning a new career takes the slot: the refused career is kept as a recovery "
              "copy, the same place a rollback puts the career it replaces."]
     title, lines = lines[0], lines[1:]
-    pages = _mission_text_pages(lines, overhead=4 + _page_header_rows(f"{title} 9/9") + _page_frame_rows())
+    pages = _mission_text_pages(lines, overhead=4 + _page_header_rows(f"{title} 9/9") + _page_frame_rows(title))
     page = 0
     while True:
         draw_page(p, title, pages[page], page, len(pages))
@@ -16051,7 +16064,7 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
             lines += ["Automatic restoration is unavailable: " + preservation_problem,
                       "Please contact your SysOp for manual recovery."]
     title, lines = lines[0], lines[1:]
-    pages = _mission_text_pages(lines, overhead=4 + _page_header_rows(f"{title} 9/9") + _page_frame_rows())
+    pages = _mission_text_pages(lines, overhead=4 + _page_header_rows(f"{title} 9/9") + _page_frame_rows(title))
     page = 0
     while True:
         draw_page(p, title, pages[page], page, len(pages))
