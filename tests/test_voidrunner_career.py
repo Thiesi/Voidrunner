@@ -1025,7 +1025,12 @@ def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, te
         plain=vr._ANSI_RE.sub("",frame)
         body=plain[re.search(r"Archive.*?\d+/\d+",plain,re.S).end():]
         bodies.append(page_text(without_action_bar(body)))
-    assert " ".join(" ".join(bodies).split())==" ".join(" ".join(vr.archive_lines(world)).split())
+    shown = " ".join(" ".join(bodies).split())
+    # The choice is two columns; every cell of each row is on the page.
+    # Section labels ride in the frame's rules, which `page_text` leaves out.
+    missing = [word for line in vr.archive_lines(world) if not line.startswith(vr.SECTION_MARK)
+               for word in vr._ANSI_RE.sub("", line).split() if word not in shown]
+    assert not missing, missing
 
 
 @pytest.mark.parametrize("commands,site", [(b"N", False), (b"N?><BQ", False), (b"NRBBQ", True), (b"L", True), (b"L><BQ", True)])
@@ -1558,7 +1563,8 @@ def test_archive_preview_and_result_report_effective_standing(ending, concord, b
     concord_gain = min(100, concord + 5) - concord if ending == "P" else max(-100, concord - 2) - concord
     blackwake_gain = min(100, blackwake + 5) - blackwake
     terms = f"Concord {concord_gain:+d}" if ending == "P" else f"Blackwake {blackwake_gain:+d}; Concord {concord_gain:+d}"
-    assert terms in " ".join(vr.archive_lines(world))
+    shown = plain(" ".join(vr.archive_lines(world)))
+    assert all(part in shown for part in terms.split("; "))
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
     assert terms in " ".join(vr.archive_action(world, ending))
     assert world.save.pilot.reputation[vr.FACTION_CONCORD] - concord == concord_gain
@@ -2323,8 +2329,8 @@ def test_archive_terms_disclose_only_remaining_landmark_salvage(stage, investiga
     world = _archive_world(stage, investigated=investigated)
     before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
     terms = " ".join(vr.archive_lines(world))
-    expected = "Landmark salvage already claimed; transcribing the record pays no additional salvage." if investigated else "Unclaimed landmark salvage: +3,000cr once when investigating."
-    assert expected in terms
+    expected = "claimed; transcribing pays no more" if investigated else "+3,000cr once, when investigating"
+    assert expected in plain(terms)
     assert "Unclaimed landmark salvage remains yours" not in terms
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
     if stage == "idle": vr.archive_action(world, "A")

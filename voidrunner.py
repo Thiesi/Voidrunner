@@ -9918,7 +9918,25 @@ def archive_action(world: World, action: str) -> list[str]:
             "Kest Rel: The sealed copy is safe with me. Mara keeps only your account of the journey."]
 
 
+def archive_choice_columns(world: World) -> list[str]:
+    """The choice on return, as the comparison it is: two columns side by side.
+
+    Read out of one sentence, "public pays 500cr; Concord +5. Private pays
+    1,500cr; Blackwake +5; Concord -2" made the pilot hold one offer in mind
+    while reading the other (issue #39).
+    """
+    p = pal()
+    def column(pays: int, standing: str) -> list[str]:
+        return [f"{p.gold}+{pays:,}cr{RESET}"] + [
+            f"{p.tone('good' if delta.startswith('+') and delta != '+0' else 'danger' if delta.startswith('-') else 'info')}"
+            f"{faction} {delta}{RESET}" for faction, delta in (part.split(" ") for part in standing.split("; "))]
+    return sheet_columns([("PUBLIC EDITION (Mara)", column(500, archive_standing_terms(world, True))),
+                          ("PRIVATE SALE (Kest Rel)", column(1500, archive_standing_terms(world, False)))])
+
+
 def archive_lines(world: World) -> list[str]:
+    """The assignment as labelled rows, and its one choice as two columns (issue #39)."""
+    p = pal()
     flags = world.save.flags
     target = world.by_id[world.landmark["system_id"]]
     lines = ["Mara Venn, Freeport's archive keeper, collects the histories that shipping ledgers leave out."]
@@ -9926,21 +9944,33 @@ def archive_lines(world: World) -> list[str]:
         lines += (["Mara remembers your public edition. Families have begun adding names to the archive."] if flags.get("archive_v1_public") else
                   ["Kest Rel holds the sealed record. Mara preserves your travel account, but the source remains private."])
         return lines + ["Assignment complete. Rewards cannot be claimed again."]
-    lines += ["Optional assignment: no deadline, deposit or contract-slot cost. Ordinary fuel, wages and travel risks apply.",
-              f"At current standing: public preservation pays 500cr; {archive_standing_terms(world, True)}. Private sale pays 1,500cr; {archive_standing_terms(world, False)}. Standing stays within -100 to 100."]
-    if not flags.get("archive_v1_recovered"):
-        lines.append("Landmark salvage already claimed; transcribing the record pays no additional salvage." if flags.get("landmark_investigated") else
-                     f"Unclaimed landmark salvage: +{world.landmark['reward_credits']:,}cr once when investigating.")
+    site = f"{world.landmark['label']} near {target.name} ({target.x},{target.y})"
     if not flags.get("archive_v1_started"):
-        lines += [f"Site: {world.landmark['label']} near {target.name} ({target.x},{target.y}). Visiting the site is required; scanning it is not enough.",
-                  "[A] Accept at Freeport." if world.here.id == 0 else "Meet Mara at Freeport to accept. [R] Route there."]
+        stage, step = ("open", None), ("[A] Accept at Freeport." if world.here.id == 0 else "Meet Mara at Freeport to accept. [R] Route there.")
     elif not flags.get("archive_v1_recovered"):
-        lines += [f"Recover the record at {target.name} ({target.x},{target.y}).",
-                  "[I] Recover record here." if world.here.id == target.id else "[R] Route to the site; accepting its bearing does not chart it."]
+        stage, step = ("accepted", None), ("[I] Recover record here." if world.here.id == target.id else
+                                              f"Recover the record at {target.name}. [R] Route to the site; accepting its bearing does not chart it.")
     else:
+        stage, step = ("record aboard", None), ("[P] Publish / [S] Sell privately." if world.here.id == 0 else
+                                                  "[R] Return to Freeport with the record.")
+    salvage = (("claimed; transcribing pays no more", None) if flags.get("landmark_investigated") else
+               (f"+{world.landmark['reward_credits']:,}cr once, when investigating", None))
+    rows = [("STAGE", stage[0], stage[1]), ("SITE", site, None),
+            ("COSTS", "no deadline, deposit or contract slot", None)]
+    if not flags.get("archive_v1_recovered"):
+        rows.append(("SALVAGE", salvage[0], salvage[1]))
+    lines.append(section("ASSIGNMENT"))
+    lines += _sheet_rows(rows)
+    lines.append(section("CHOICE ON RETURN TO FREEPORT"))
+    lines += archive_choice_columns(world)
+    if flags.get("archive_v1_recovered"):
+        lines.append(section("RECORD"))
         lines += ARCHIVE_RECORDS[world.landmark["label"]]
-        lines += ["Mara offers a public edition; broker Kest Rel offers a private sale. Choose once on return to Freeport.",
-                  "[P] Publish / [S] Sell privately." if world.here.id == 0 else "[R] Return to Freeport with the record."]
+    lines.append(section("NEXT"))
+    lines.append(step)
+    if not flags.get("archive_v1_started"):
+        lines.append("Visiting the site is required; scanning it is not enough.")
+    lines.append(f"{p.slate}Ordinary fuel, wages and travel risks apply. Standing stays within -100 to 100.{RESET}")
     return lines
 
 
@@ -12987,9 +13017,12 @@ def mission_bearing(world: World, mission: Mission) -> str:
 SHEET_MARKS = {"good": "info", "bad": "danger", "info": "note"}
 
 
-def sheet_mark(tone: str) -> str:
-    """The mark at the end of a CHECKS row, in its tone's color; `?` is unknown."""
+def sheet_mark(tone: str | None) -> str:
+    """The mark at the end of a CHECKS row, in its tone's color; `?` is unknown,
+    and a row that only informs has none."""
     p = pal()
+    if tone is None:
+        return ""
     if tone == "unknown":
         return f"{p.slate}?{RESET}"
     role = STATUS_TONES[tone][1]
@@ -13025,7 +13058,7 @@ def _sheet_rows(entries: list[tuple[str, str, str]]) -> list[str]:
     p = pal()
     label_w = max(_visible_width(label) for label, _, _ in entries)
     value_w = max(_visible_width(value) for _, value, _ in entries)
-    return [f"{p.slate}{_pad(label, label_w)}{RESET}  {_pad(f'{p.ink}{value}{RESET}', value_w)}  {sheet_mark(tone)}"
+    return [f"{p.slate}{_pad(label, label_w)}{RESET}  {_pad(f'{p.ink}{value}{RESET}', value_w)}  {sheet_mark(tone)}".rstrip()
             for label, value, tone in entries]
 
 
