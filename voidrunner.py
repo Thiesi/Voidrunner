@@ -12612,33 +12612,35 @@ def screen_shipyard(p: Palette, world: World) -> None:
 
 
 def crew_roster_lines(world: World) -> list[str]:
-    """One card per specialist: who they are, how far they have come, what they
-    cost. The head rows are measured together so the whole roster lines up, and
-    each card's own detail sits indented under its own head row."""
+    """The roster as the Yard shows upgrades: one table row per specialist.
+
+    It was a five-row card per specialist, prices, effect, progress, task and
+    personality stacked, so comparing three hires meant reading fifteen rows
+    (issue #39). Now SPECIALISTS compares who, what rank and what it costs, a
+    table row each, with what they do on the row under it: an effect runs to
+    sixty columns, which no row has room for beside the rest, and a price is
+    kept with what it buys. The rest follows in short sections, one row per
+    specialist, so each reads down a column rather than across a card.
+    """
     p = pal()
-    heads, styles, meta = [], [], []
-    for index, (role, info) in enumerate(CREW_ROLES.items()):
+    roles = list(CREW_ROLES.items())
+    rows, styles, effects, service, tasks, people = [], [], [], [], [], []
+    name_w = max(len(CREW_CANDIDATES[role][crew_identity(world, role)][0]) for role, _ in roles)
+    for index, (role, info) in enumerate(roles):
         hired = getattr(world.save.ship, f"has_{role}")
         level = crew_level(world.save.ship, role)
         name, personality = CREW_CANDIDATES[role][crew_identity(world, role)]
         pips = (f"{p.mint}{glyph('crew_on') * (level + 1)}{RESET}"
                 f"{p.deep}{glyph('crew_off') * (len(CREW_SERVICE_LEVELS) - level - 1)}{RESET}")
-        heads.append([
-            key_label(CREW_LETTERS[index], info["label"], tone="value" if hired else "label"),
-            badge("HIRED", "good") if hired else badge("for hire", "label"),
-            name, pips, CREW_SERVICE_LEVELS[level][1],
-        ])
-        styles.append(["value", "value", "value", "value", "label"])
-        price = (f"{p.gold}{info['wage']}cr/jump{RESET}" if hired
-                 else f"{p.gold}{info['hire_cost']}cr{RESET} {p.slate}+{RESET} {p.gold}{info['wage']}cr/jump{RESET}")
-        meta.append((index, role, hired, level, name, personality, price))
-    # Nothing on a specialist's head row is droppable: who they are, how far
-    # they have come and whether they are aboard are all the row is for. At
-    # forty columns it stacks instead, which keeps every one of them.
-    _, records = table_records(["", "", "", "", ""], heads, "lllll", styles=styles)
-    lines: list[str] = []
-    for record, (index, role, hired, level, name, personality, price) in zip(records, meta):
-        card = list(record)
+        row = [key_label(CREW_LETTERS[index], info["label"], tone="value" if hired else "label"),
+               name,
+               badge("HIRED", "good") if hired else badge("for hire", "label"),
+               f"{pips} {p.slate}{CREW_SERVICE_LEVELS[level][1]}{RESET}",
+               f"{p.deep}{glyph('flat')}{RESET}" if hired else f"{p.gold}{info['hire_cost']:,}cr{RESET}",
+               f"{p.gold}{info['wage']}cr/jump{RESET}"]
+        rows.append(row)
+        styles.append(["value"] * len(row))
+        effects.append(f"{p.slate}{crew_effect(role, level)}{RESET}")
         paid = world.save.ship.crew_records.get(role, {}).get("paid_jumps", 0)
         if level + 1 < len(CREW_SERVICE_LEVELS):
             target = CREW_SERVICE_LEVELS[level + 1]
@@ -12646,13 +12648,7 @@ def crew_roster_lines(world: World) -> list[str]:
                         f"{p.slate}paid jumps to {target[1]}{RESET}")
         else:
             progress = badge("service mastery reached", "good")
-        card.append(f"  {price}  {p.deep}{glyph('dot')}{RESET}  {p.slate}{crew_effect(role, level)}{RESET}")
-        card.append(f"  {progress}")
-        # The terms are one entry and the person is another: at the 40x12 floor
-        # a whole card is taller than a page, and what a caller has to be able
-        # to read in one place is the name, the price and what it buys.
-        lines.append("\n".join(card))
-        card = [f"  {p.slate}{_mission_plain(personality)}{RESET}"]
+        service.append(f"{p.ink}{_pad(name, name_w)}{RESET}  {progress}")
         task = crew_assignment_record(world, role)
         if task is not None:
             state, tone = task["state"], "good"
@@ -12661,9 +12657,23 @@ def crew_roster_lines(world: World) -> list[str]:
             tone = "good" if hired else "label"
         else:
             state, tone = "unlocks after hiring and five paid jumps", "label"
-        card.append(f"  {key_label(str(index + 1), 'Task')} "
-                    f"{p.ink}{CREW_ASSIGNMENTS[role]['title']}{RESET}  {badge(state, tone)}")
-        lines.append("\n".join(card))
+        tasks.append((key_label(str(index + 1), CREW_ASSIGNMENTS[role]['title']), badge(state, tone)))
+        people.append(f"{p.ink}{name}{RESET}  {p.slate}{_mission_plain(personality)}{RESET}")
+    lines = [section("SPECIALISTS")]
+    # Nothing on a specialist's row is droppable: at forty columns the table
+    # stacks instead, which keeps every one of them. Each record carries its
+    # effect, so the paginator keeps a price on the page with what it buys.
+    heading, records = table_records(["ROLE", "NAME", "STATUS", "RANK", "HIRE", "WAGE"], rows, "llllrr", styles=styles)
+    if "\n" not in heading:
+        # Stacked at forty columns, the heading is two rows that name columns
+        # no longer there, and would leave the first page for itself.
+        lines.append(sticky(heading))
+    for record, effect in zip(records, effects):
+        lines.append(table_member("\n".join(record + [f"    {effect}"])))
+    lines += [section("SERVICE")] + service
+    task_w = max(_visible_width(title) for title, _ in tasks)
+    lines += [section("TASKS")] + [f"{_pad(title, task_w)}  {state}" for title, state in tasks]
+    lines += [section("PEOPLE")] + people
     lines.append(f"{p.slate}Specialists earn wages on every jump, including detours. "
                  f"Promotions follow {p.ink}5{p.slate}, {p.ink}15{p.slate} and {p.ink}30{p.slate} paid jumps; "
                  f"rehiring keeps recorded experience. Engine promotions affect the following jump's fuel.{RESET}")

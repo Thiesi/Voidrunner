@@ -1549,7 +1549,7 @@ def test_crew_first_page_starts_with_available_specialist(monkeypatch, terminal,
     assert "[A] Gunner" in text and "for hire" in text
     if width >= 40:
         assert vr.crew_name(world, "gunner") in text
-        assert "800cr + 15cr/jump" in text and "+3 combat damage per hit" in text
+        assert "800cr" in text and "15cr/jump" in text and "+3 combat damage per hit" in text
     if "Promotions" in text: assert text.index("Gunner: Available") < text.index("Promotions")
 
 
