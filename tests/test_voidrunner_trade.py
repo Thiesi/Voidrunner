@@ -3221,3 +3221,83 @@ def test_price_memory_never_quotes_this_station_or_more_than_a_handful():
         quote["sell"] = 10_000
     hints = vr.market_memory_hints(world, vr.LEGAL_COMMODITIES)
     assert len(hints) == vr.MARKET_HINT_ROWS and all(sid == destination for *_, sid, _ in hints)
+
+
+# --- The ship's computer, part two (issue #41) ------------------------------
+
+def _alerts(world):
+    return [plain(row) for row in vr.deck_alert_rows(world)]
+
+
+def test_docking_short_of_a_deliverys_cargo_says_so_on_the_deck():
+    world = _world_with_seed(42)
+    _deliveries(world, ("food", 10, 0, 30), ("textiles", 2, 0, 30), ("medicine", 3, world.here.connections[0], 30))
+    _set_cargo(world, {"food": 7, "textiles": 2})
+    stock = vr.market_depth_quote(world, 0, "food")["stock"]
+    due = [row for row in _alerts(world) if "due HERE" in row]
+    # Food is three short; textiles are complete; medicine is due elsewhere.
+    assert len(due) == 1 and "Contract #1 due HERE" in due[0]
+    assert f"7/10 Food aboard, 3 short; stock {stock}" in due[0] and "[M] market" in due[0]
+
+
+def test_an_expired_delivery_is_not_due_anywhere():
+    world = _world_with_seed(42)
+    world.save.turn = 5
+    _deliveries(world, ("food", 10, 0, 4))
+    assert not any("due HERE" in row for row in _alerts(world))
+
+
+def test_a_ready_futures_order_says_where_it_waits():
+    world = _world_with_seed(42)
+    there = world.here.connections[0]
+    world.save.active_futures = [
+        vr.FuturesContract(id=3, commodity="food", quantity=18, locked_price=400, settle_turn=0,
+                           origin_system=there, principal=360, reserved=18),
+        vr.FuturesContract(id=4, commodity="food", quantity=6, locked_price=130, settle_turn=9,
+                           origin_system=there, principal=120, reserved=6)]
+    rows = [row for row in _alerts(world) if "Futures" in row]
+    assert len(rows) == 1 and "Futures #3 ready" in rows[0] and "HERE" not in rows[0]
+    assert f"18 Food at {vr._mission_plain(world.by_id[there].name)}, 1 jump" in rows[0] and "[C] chart" in rows[0]
+
+
+def test_a_ready_futures_order_here_says_the_hold_is_too_full():
+    world = _world_with_seed(42)
+    _set_cargo(world, {"machinery": vr.cargo_capacity(world.save.ship) - 6})
+    world.save.active_futures = [vr.FuturesContract(id=3, commodity="food", quantity=18, locked_price=400, settle_turn=0,
+                                                    origin_system=0, principal=360, reserved=18)]
+    rows = [row for row in _alerts(world) if "Futures" in row]
+    assert len(rows) == 1 and "Futures #3 ready HERE" in rows[0] and "18 Food needs 18 hold, 6 free" in rows[0]
+
+
+def test_contract_pages_do_not_count_cargo_another_contract_is_owed():
+    world = _world_with_seed(42)
+    target = world.here.connections[0]
+    _deliveries(world, ("food", 10, target, 30))
+    _set_cargo(world, {"food": 10})
+    offer = vr.Mission(9, "delivery", "Deliver 8 Food", 200, 0, target, commodity="food", quantity=8, deadline_turn=30)
+    assert vr.contract_cargo_aboard(world, offer) == (0, 10)
+    assert vr.contract_cargo_aboard(world, world.save.active_missions[0]) == (10, 0)
+    details = plain(" ".join(vr.mission_details(world, offer)))
+    assert "deliver 8 Food; 0 aboard (10 more promised to other contracts), buy 8 more." in " ".join(details.split())
+    route = plain(" ".join(vr.mission_navigation_lines(world, offer, active=False)))
+    assert "0 aboard (10 more promised to other contracts), 8 missing." in " ".join(route.split())
+
+
+def test_selling_promised_cargo_says_whose_and_asks_first(monkeypatch):
+    world = _world_with_seed(42)
+    target = world.here.connections[0]
+    _deliveries(world, ("food", 4, target, 30))
+    _set_cargo(world, {"food": 6})
+    before = world.save.to_dict()
+    _keys(monkeypatch, "S", "5", "\r", "N")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr._trade_commodity(vr.Palette(False), world, "food") is None
+    text = " ".join(plain(output.getvalue()).split())
+    place = vr._mission_plain(world.by_id[target].name)
+    assert f"have 6: 4 for {place} deliveries, 2 spare" in text
+    assert f"Sell 5? 3 of them are promised to deliveries for {place}" in text and world.save.to_dict() == before
+    # Spare cargo sells without the question.
+    _keys(monkeypatch, "S", "2", "\r")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert "Sold 2x Food" in vr._trade_commodity(vr.Palette(False), world, "food")
+    assert "promised to deliveries" not in output.getvalue() and world.save.cargo["food"] == 4

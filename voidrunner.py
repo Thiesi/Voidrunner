@@ -9448,6 +9448,7 @@ def deck_alert_rows(world: World) -> list[str]:
     if event:
         rows.append(alert("caution", event["description"],
                           f"{plural(event['turns_remaining'], 'day')} left", key_label("T", "ledger")))
+    rows += due_here_alert_rows(world)
     mission = tracked_mission(world)
     if mission is not None:
         kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
@@ -9463,18 +9464,70 @@ def deck_alert_rows(world: World) -> list[str]:
     # up -- except a futures order that has come due. That is the one thing on it
     # a caller had to act on, so it belongs here rather than on a screen wiped
     # before it can be read.
-    ready = sum(1 for order in world.save.active_futures
-                if world.save.turn >= order.settle_turn)
-    if ready:
-        rows.append(alert("caution", "Futures mature",
-                          f"{plural(ready, 'order')} ready to settle",
-                          key_label("M", "market")))
+    rows += futures_alert_rows(world)
     if world.save.flags.get("archive_v1_started") and not archive_finished(world):
         rows.append(alert("note", "Archive", archive_objective(world), key_label("N", "contacts")))
     if wage and pilot.credits >= wage:
         rows.append(alert("good", "Crew paid", f"{wage}cr per jump", key_label("K", "roster")))
     for line in crew_assignment_recap(world) + faction_story_recap(world):
         rows.append(alert("note", line))
+    return rows
+
+
+def due_here_alert_rows(world: World) -> list[str]:
+    """A delivery due at this station that the hold cannot complete yet.
+
+    Docking with too little cargo completed nothing and said nothing: the pilot
+    had to open the board, the contract and the market to find out why
+    (issue #41). The row says how short the hold is and whether this market
+    can make up the difference.
+    """
+    rows = []
+    for mission in world.save.active_missions:
+        if (mission.kind != "delivery" or mission.target_system != world.here.id or not mission.quantity
+                or mission_expired(world, mission)):
+            continue
+        have, _ = contract_cargo_aboard(world, mission)
+        short = mission.quantity - have
+        if short <= 0:
+            continue
+        label = COMMODITIES[mission.commodity]["label"]
+        if not COMMODITIES[mission.commodity]["legal"] and world.here.economy != "Haven":
+            source = "not sold here"
+        else:
+            source = f"stock {market_depth_quote(world, world.here.id, mission.commodity)['stock']}"
+        rows.append(alert("caution", f"Contract #{mission.id} due HERE",
+                          f"{have}/{mission.quantity} {label} aboard, {short} short; {source}",
+                          key_label("M", "market")))
+    return rows
+
+
+def futures_alert_rows(world: World) -> list[str]:
+    """Each matured futures order: where it waits, and why one here has not loaded.
+
+    One count of "orders ready to settle" pointed at the market even when the
+    goods sat at another station. An order here settles on its own as the ship
+    docks, so one still waiting here means the hold is too full for it, which
+    is the one thing the pilot has to fix (issue #41).
+    """
+    rows = []
+    hops = None
+    free = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
+    for order in world.save.active_futures:
+        if world.save.turn < order.settle_turn:
+            continue
+        goods = f"{order.quantity} {COMMODITIES[order.commodity]['label']}"
+        if order.origin_system == world.here.id:
+            rows.append(alert("caution", f"Futures #{order.id} ready HERE",
+                              f"{goods} needs {order.quantity} hold, {max(0, free)} free",
+                              key_label("M", "market")))
+        else:
+            hops = bfs_hops(world.by_id, world.here.id) if hops is None else hops
+            jumps = hops.get(order.origin_system)
+            where = _mission_plain(world.by_id[order.origin_system].name) + (
+                f", {plural(jumps, 'jump')}" if jumps else "")
+            rows.append(alert("note", f"Futures #{order.id} ready", f"{goods} at {where}",
+                              key_label("C", "chart")))
     return rows
 
 
@@ -10879,6 +10932,22 @@ def mission_cargo_needs(world: World) -> dict[str, tuple[int, list[str]]]:
             if total > world.save.cargo.get(commodity, 0)}
 
 
+def contract_cargo_aboard(world: World, mission: Mission) -> tuple[int, int]:
+    """(usable, promised): the cargo aboard this contract can count on, and how
+    much of the rest the other live deliveries of the same goods already claim.
+
+    A contract's page used to count the whole hold as its own, so a second Ore
+    offer read "10 aboard, buy 0" while those ten were promised to the first
+    (issue #41).
+    """
+    held = world.save.cargo.get(mission.commodity, 0)
+    promised = sum(other.quantity or 0 for other in world.save.active_missions
+                   if other is not mission and other.id != mission.id and other.kind == "delivery"
+                   and other.commodity == mission.commodity
+                   and not (other.deadline_turn is not None and other.deadline_turn < world.save.turn))
+    return max(0, held - promised), min(held, promised)
+
+
 def spare_cargo(world: World, commodity: str) -> int:
     """Units aboard that no live delivery is waiting for: the ones free to sell."""
     return max(0, world.save.cargo.get(commodity, 0) - contract_cargo(world).get(commodity, (0, []))[0])
@@ -11823,9 +11892,21 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
         if max_qty <= 0:
             result = f"Station demand is exhausted; replenishes {depth['demand_rate']}/day."
             return set_status(result, "bad")
-        out_prompt(f"{p.muted}Quantity (have {have}, station buys {max_qty}; Enter or Esc cancels): {RESET}")
+        spare = spare_cargo(world, commodity)
+        promised = have - spare
+        if promised:
+            places = ", ".join(contract_cargo(world)[commodity][1])
+            holding = f"have {have}: {promised} for {places} deliveries, {spare} spare"
+        else:
+            holding = f"have {have}"
+        out_prompt(f"{p.muted}Quantity ({holding}; station buys {max_qty}; Enter or Esc cancels): {RESET}")
         qty = read_quantity(max_qty)
         if qty <= 0:
+            return
+        # Selling into a promise is allowed -- the pilot may mean to rebuy -- but
+        # never without being told which contracts it leaves short (issue #41).
+        if qty > spare and not confirm(f"Sell {qty}? {qty - spare} of them are promised to deliveries for "
+                                       f"{places}, which cannot complete without them.", p):
             return
         result = trade_cargo(world, commodity, qty, buying=False)
         world.commit()
@@ -12927,13 +13008,14 @@ def mission_details(world: World, mission: Mission) -> list[str]:
     procurement = 0
     if mission.kind == "delivery":
         quantity = mission.quantity or 0
-        have = world.save.cargo.get(mission.commodity, 0)
+        have, promised = contract_cargo_aboard(world, mission)
         missing = max(0, quantity - have)
         price = price_for(world, world.save.current_system, mission.commodity)
         procurement = missing * price
         free = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
+        aboard = f"{have} aboard" + (f" ({promised} more promised to other contracts)" if promised else "")
         lines.extend([
-            f"Cargo: deliver {quantity} {COMMODITIES[mission.commodity]['label']}; {have} aboard, buy {missing} more.",
+            f"Cargo: deliver {quantity} {COMMODITIES[mission.commodity]['label']}; {aboard}, buy {missing} more.",
             f"Procurement at this station: {missing} x {price} = {procurement:,} cr; prices can move after purchases.",
             f"Hold: need {missing} free units; {free} available. Delivery consumes the cargo.",
         ])
@@ -13206,9 +13288,10 @@ def mission_navigation_lines(world: World, mission: Mission, *, active: bool) ->
     if not path:
         lines.append("At the destination. No jump is needed for this objective.")
     if mission.kind == "delivery":
-        have = world.save.cargo.get(mission.commodity, 0)
+        have, promised = contract_cargo_aboard(world, mission)
         missing = max(0, mission.quantity - have)
-        lines.append(f"Delivery: {mission.quantity} {COMMODITIES[mission.commodity]['label']} required; {have} aboard, {missing} missing.")
+        aboard = f"{have} aboard" + (f" ({promised} more promised to other contracts)" if promised else "")
+        lines.append(f"Delivery: {mission.quantity} {COMMODITIES[mission.commodity]['label']} required; {aboard}, {missing} missing.")
         if missing:
             if not COMMODITIES[mission.commodity]["legal"] and world.here.economy != "Haven":
                 lines.append("This station prohibits buying the missing contraband; procure it at a Haven. Travel budget excludes procurement.")

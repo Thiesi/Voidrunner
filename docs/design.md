@@ -1418,6 +1418,20 @@ best first. Cargo a delivery is waiting for is never offered for sale. Each row
 gives the station, its jump count and the quote's age. Nothing is derived beyond
 quotes the pilot saw docked, and nothing is stored.
 
+The ship's computer also keeps track of what the pilot has promised (issue #41):
+- **Contract cargo:** a contract's pages count only the cargo aboard that other
+  live deliveries of the same goods do not already claim, and they say how much
+  is promised elsewhere. Its procurement and hold checks follow from that.
+- **Due here:** the deck alerts when a delivery is due at this station and the
+  hold is short, with the shortfall and this market's stock.
+- **Futures:** each matured futures order gets its own alert. An order at another
+  station gives its station and jump count. An order waiting here, which can only
+  mean the hold is too full to load it, gives the hold it needs and the space
+  free.
+- **Selling promised cargo:** the sell prompt splits the cargo aboard into
+  promised and spare. Selling into a promise asks first, naming the
+  destinations left short.
+
 Quantity prompts say what Return does. Refuelling takes the most that fits and
 is affordable, a repair offer accepts on Return, and a purchase buys what the
 contracts still need, capped by hold, credits and stock. Without such a need,
