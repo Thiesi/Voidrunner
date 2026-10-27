@@ -239,7 +239,7 @@ def test_service_retained_upgrade_result_is_durable_without_menu_exit(tmp_path):
     world._checkpoint=lambda current:vr.persist(current,tmp_path,77); world.checkpoint()
     cost=vr.UPGRADES["cargo"]["cost"](world.save.ship.cargo_tier)
     before=world.save.pilot.credits
-    with _door_stopped_at(tmp_path,b"YAY",b"Result: Cargo Bay Expansion upgraded"):
+    with _door_stopped_at(tmp_path,b"YAY",b"Cargo Bay Expansion upgraded"):
         saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
         assert saved.ship.cargo_tier==1 and saved.pilot.credits==before-cost
 
@@ -290,7 +290,9 @@ def test_market_retains_trade_result_through_cancelled_quantity(monkeypatch):
     monkeypatch.setattr(vr,"read_key",lambda:next(commands))
     monkeypatch.setattr(vr,"read_line_raw",lambda **kw:next(quantities))
     with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_market(vr.Palette(False),world)
-    assert plain(output.getvalue()).count("Result: Bought 1x Food")==2
+    # Said once on the market it returned to; the exchange page opened next and
+    # cancelled is another screen, so the result is not news on the way back (#38).
+    assert plain(output.getvalue()).count("Bought 1x Food")==1
     assert world.save.cargo=={"food":1} and len(saved)==1
     assert f"Market: {world.save.pilot.credits:,}cr" in plain(output.getvalue())
 
@@ -323,7 +325,7 @@ def test_market_retained_trade_result_is_durable_before_disconnect(tmp_path,acti
     if action=="sell":_set_cargo(world, {"food":2})
     world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
     command=b"MAP1\r" if action=="buy" else b"MAS1\r"
-    marker=b"Result: Bought 1x Food" if action=="buy" else b"Result: Sold 1x Food"
+    marker=b"Bought 1x Food" if action=="buy" else b"Sold 1x Food"
     with _door_stopped_at(tmp_path,command,marker):
         saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
         assert saved.cargo=={"food":1}
@@ -506,7 +508,7 @@ def test_real_responsive_chart_back_eof_and_rejected_jump_preserve_career(tmp_pa
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=60)
     assert result.returncode==0 and not result.stderr and b"Navigation: Fuel" in result.stdout
-    if b"A" in commands: assert b"Result: Not enough fuel" in plain_bytes(result.stdout)
+    if b"A" in commands: assert b"Not enough fuel" in plain_bytes(result.stdout)
     assert (tmp_path/"77.json").read_bytes()==original
 
 
@@ -631,7 +633,7 @@ def test_service_actions_retain_result_and_updated_credit_heading(monkeypatch,ac
     with contextlib.redirect_stdout(io.StringIO()) as output:
         (vr.screen_crew if action=="crew" else vr.screen_shipyard)(vr.Palette(False),world)
     plain=vr._ANSI_RE.sub("",output.getvalue())
-    assert "Result:" in plain and f"{world.save.pilot.credits:,}cr" in plain.split("Result:")[0]
+    assert "╰─ " in plain and f"{world.save.pilot.credits:,}cr" in plain.split("╰─ ")[-2]
     assert len(saved)==(0 if action=="rejected" else 1)
     if saved: assert saved[-1]==world.save.pilot.credits
 
@@ -671,7 +673,7 @@ def test_navigation_chart_keeps_danger_and_fuel_distinct_with_retained_rejection
     # Danger is five pips in its own tone now, so the two destinations differ
     # by how many are lit rather than by a digit buried in a sentence (#493).
     assert "○○○○○" in plain and "●●●○○" in plain and "LOW FUEL" in plain
-    assert "Result: Not enough fuel" in plain and world.save.turn==0
+    assert "Not enough fuel" in plain and world.save.turn==0
 
 
 def test_screen_title_renders_full_splash_with_tagline_and_exact_box_width():
@@ -1303,7 +1305,7 @@ def test_chart_continuations_are_indented_and_still_selectable(monkeypatch, term
     # Long enough that the departures table has to stack its columns, which is
     # what makes the row a continuation at all (issue #493).
     world.by_id[sorted(world.here.connections)[0]].name = "Xanthe Deep Survey Anchorage Station"
-    pages = vr._chart_pages(world, "Navigation", "[B] Back: ", None)
+    pages = vr._chart_pages(world, "Navigation", "[B] Back: ")
     rows = [plain(row) for page in pages for row in page[0]]
     keyed = [row for row in rows if row.startswith("[") and row[1] in vr.CHART_CONNECTION_LETTERS]
     assert len(keyed) == len(world.here.connections)  # one key per destination, however many rows it wraps to
@@ -1817,3 +1819,141 @@ def test_journey_resumed_names_the_pilot_in_the_screens_accent(monkeypatch):
     assert f"{p.hull}{destination.name}" in drawn and f"{p.ink}7" in drawn
     destination.discovered = False
     assert f"{p.text}an uncharted system" in "".join(vr.journey_resumed_lines(world))
+
+
+# --- The status line (issue #38) --------------------------------------------
+
+def _drawn(title, rows=("row",), page=0, count=1):
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.draw_page(vr.Palette(False), title, list(rows), page, count)
+    return plain(output.getvalue()).splitlines()
+
+
+def test_a_result_rides_in_the_bottom_border_and_costs_no_row(terminal):
+    terminal(80, 24)
+    plain_rows = _drawn("Engineering Yard: 1,200cr")
+    vr.set_status("Refueled 5 units for 30cr.", "good")
+    rows = _drawn("Engineering Yard: 1,170cr")
+    assert len(rows) == len(plain_rows) and rows[-1].startswith("╰─ ● Refueled 5 units for 30cr. ─")
+    assert rows[-1].endswith("╯") and vr._visible_width(rows[-1]) == vr._visible_width(plain_rows[-1])
+    assert vr._page_frame_rows() == 1
+
+
+@pytest.mark.parametrize("tone,mark", [("good", "●"), ("bad", "▲"), ("info", "◆")])
+def test_a_results_mark_says_whether_it_was_done_or_refused(terminal, tone, mark):
+    terminal(80, 24)
+    vr.set_status("Something happened.", tone)
+    assert f"╰─ {mark} Something happened." in _drawn("Market: 1,200cr")[-1]
+
+
+def test_a_result_stays_on_its_screen_and_goes_when_another_is_drawn(terminal):
+    terminal(80, 24)
+    vr.set_status("Accepted: Deliver 7 Food.", "good")
+    # The first screen drawn after the action claims it: here, the board it returned to.
+    assert "Accepted" in _drawn("Contract Board")[-1]
+    assert "Accepted" in _drawn("Contract Board", page=1, count=2)[-1]
+    assert "Accepted" not in _drawn("Command Deck: 1,200cr")[-1]
+    assert vr._STATUS is None and "Accepted" not in _drawn("Contract Board")[-1]
+
+
+def test_a_result_handed_up_keeps_its_tone_and_shows_on_the_caller(terminal):
+    terminal(80, 24)
+    vr.set_status("Futures contract: 1x Food.", "good")
+    assert "Futures contract" in _drawn("Futures Exchange: 1,180cr")[-1]
+    # The exchange returns it to the market, which says it again, still green.
+    vr.set_status("Futures contract: 1x Food.")
+    assert vr._STATUS["tone"] == "good" and _drawn("Market: 1,180cr")[-1].startswith("╰─ ● Futures contract")
+
+
+def test_signing_a_futures_order_is_reported_on_the_market_it_returns_to(monkeypatch):
+    world = _world_with_seed(42)
+    keys = iter(["X", "1", "S", "Y", "B", "B"])
+    frames, output = [], io.StringIO()
+    def key():
+        frames.append(plain(output.getvalue())); output.seek(0); output.truncate(0)
+        return next(keys)
+    monkeypatch.setattr(vr, "read_key", key)
+    with contextlib.redirect_stdout(output):
+        vr.screen_market(vr.Palette(False), world)
+    assert world.save.active_futures
+    # The order's terms are too long for the border: they take the rows above it.
+    market = [frame for frame in frames if "Market: " in frame][-1]
+    assert "│  ● Futures contract: 1x Food" in market
+
+
+def test_a_long_result_takes_reserved_rows_above_the_border(terminal):
+    terminal(80, 24)
+    vr.set_status("Not enough fuel for the next leg (4 needed, 1 aboard). Refuel at the yard. " * 2, "bad")
+    reserved = vr._page_frame_rows()
+    assert reserved > 1
+    rows = _drawn("Contract #1")
+    assert rows[-1] == rows[-1][:1] + "─" * (len(rows[-1]) - 2) + "╯"
+    body = rows[-reserved:-1]
+    assert body[0].strip("│ ").startswith("▲ Not enough fuel") and all(len(row) == len(rows[-1]) for row in body)
+
+
+def test_a_full_page_cuts_a_long_result_into_the_border_rather_than_scroll(terminal):
+    terminal(80, 12)
+    vr.set_status("Station can buy 4 units; demand replenishes 6/day. Come back tomorrow for the rest of it.", "bad")
+    rows = _drawn("Market: 1,200cr", rows=[f"row {n}" for n in range(9)])
+    assert len(rows) == 11 and rows[-1].startswith("╰─ ▲ Station can buy") and "...─" in rows[-1].replace(" ", "")
+
+
+def test_the_session_clock_shares_the_border_with_the_result(monkeypatch, terminal):
+    import time
+    terminal(80, 24)
+    monkeypatch.setattr(vr, "_SESSION_CLOCK", vr._SessionClock(1_800, time.monotonic()))
+    vr.set_status("Bought 7x Food for 133cr.", "good")
+    border = _drawn("Market: 1,067cr")[-1]
+    assert border.startswith("╰─ ● Bought 7x Food for 133cr. ─") and re.search(r"─ Time \d\d:\d\d ─╯$", border)
+
+
+def test_accepting_a_contract_returns_to_the_board_without_a_keypress(monkeypatch):
+    world, mission = _mission_details_world()
+    keys = iter(["N"] * 8 + ["A"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_mission_details(vr.Palette(False), world, mission, active=False)
+    assert world.save.active_missions and "Press any key" not in output.getvalue()
+    assert vr._STATUS["text"] == "Accepted: Complete and unabridged contract objective" and vr._STATUS["tone"] == "good"
+
+
+def test_tracking_a_contract_says_which_and_keeps_the_details_open(monkeypatch):
+    world, mission = _mission_details_world()
+    vr.accept_mission(world, mission)
+    keys = iter(["T", "B"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_mission_details(vr.Palette(False), world, mission, active=True)
+    text = plain(output.getvalue())
+    border = [row for row in text.splitlines() if row.startswith("╰")][-1]
+    assert "Press any key" not in text and border.startswith("╰─ ● Tracking contract #1.")
+
+
+def test_the_futures_picker_leads_with_the_result_it_has_no_border_for(monkeypatch):
+    world = _world_with_seed(42)
+    vr.set_status("Futures contract: 1x Food.", "good")
+    monkeypatch.setattr(vr, "read_key", lambda: "B")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._pick_trade_field("Futures Exchange: 1,200cr", [("food", "Order Food")], notice=["Fees apply."])
+    rows = plain(output.getvalue()).splitlines()
+    assert rows[1].strip() == "● Futures contract: 1x Food." and rows[2].strip() == "Fees apply."
+
+
+@pytest.mark.parametrize("detour", ["K", "S"])
+def test_a_result_is_not_repainted_after_a_sub_screen(monkeypatch, detour):
+    world = _world_with_seed(42)
+    world.save.ship.fuel -= 5
+    frames, output = [], io.StringIO()
+    keys = iter(["R", "\r", "?", detour, "B", "B"])
+    def key():
+        frames.append(plain(output.getvalue())); output.seek(0); output.truncate(0)
+        return next(keys)
+    monkeypatch.setattr(vr, "read_key", key)
+    with contextlib.redirect_stdout(output):
+        vr.screen_shipyard(vr.Palette(False), world)
+    borders = [[row for row in frame.splitlines() if row.startswith("╰")][-1] for frame in frames[2:]]
+    # The yard says it, keeps saying it through a redraw, the detour drops it,
+    # and the yard it returns to does not bring it back.
+    assert "Refueled 5 units" in borders[0] and "Refueled 5 units" in borders[1]
+    assert not any("Refueled" in border for border in borders[2:]) and vr._STATUS is None

@@ -832,8 +832,8 @@ def test_market_depth_exhausted_pool_reports_reason_without_quantity_prompt(monk
     keys = iter(commands); monkeypatch.setattr(vr, "read_command", lambda: next(keys))
     monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: pytest.fail("Exhausted pool prompted for quantity"))
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf): vr._trade_commodity(vr.Palette(False), world, "food")
-    text = " ".join(plain(buf.getvalue()).split())
+    with contextlib.redirect_stdout(buf): said = vr._trade_commodity(vr.Palette(False), world, "food")
+    text = " ".join(plain(buf.getvalue()).split()) + " " + said
     assert "Stock 0 (+3/day)" in text and "station buys 0 (+6/day)" in text
     assert "station stock" in text if buying else "demand is exhausted" in text
 
@@ -1722,7 +1722,7 @@ def test_retained_futures_result_is_saved_before_disconnect(tmp_path,action):
     if action=="cancel":vr.buy_futures_contract(world,"food",2,5)
     world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
     command=b"MX1SY" if action=="sign" else b"MXN4XY"
-    marker=b"Result: Futures contract:" if action=="sign" else b"Result: Order cancelled:"
+    marker=b"Futures contract:" if action=="sign" else b"Order cancelled:"
     with _door_stopped_at(tmp_path,command,marker):
         saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
         assert bool(saved.active_futures)==(action=="sign")
@@ -2886,7 +2886,8 @@ def test_chart_departure_confirms_cost_and_danger_as_the_last_keystroke(monkeypa
     danger = f"danger {world.by_id[dest].danger}" if discovered else "danger unknown"
     assert f"Depart for {name}? {cost} fuel, {danger}, one day passes. [Y/N, Esc=No]" in plain
     if answer == "Y": assert selected == dest
-    else: assert selected is None and "Departure cancelled; still docked." in plain
+    # The refusal is the status line, in the bottom border rather than the body.
+    else: assert selected is None and "Departure cancelled; still docked." in vr._ANSI_RE.sub("", output.getvalue())
     assert world.save.to_dict() == before
 
 

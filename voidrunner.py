@@ -5800,8 +5800,109 @@ def _page_content_width() -> int:
 
 def _page_frame_rows() -> int:
     """Rows the frame costs a page. The title moves into the top border, so
-    only the bottom border is new."""
-    return 1
+    only the bottom border is new -- and the rows of a status too long to ride
+    in it (issue #38)."""
+    return 1 + len(_status_overflow_rows(pal()))
+
+
+# ---------------------------------------------------------------------------
+# The status line (issue #38).
+#
+# An action's result used to be printed under the action bar and held there by
+# "Press any key to continue..." -- the next redraw would have wiped it. Now the
+# result is kept here and the next page draws it in its own bottom border, where
+# it costs no row; a result too long for the border takes body rows above it,
+# which `_page_frame_rows` reserves. It stays while the screen that first shows
+# it is redrawn or paged, and goes once another screen is drawn: a result is
+# news about the screen it was said on, or about the one it returned to.
+# Session state only: nothing here is saved.
+# ---------------------------------------------------------------------------
+
+_STATUS: dict | None = None
+
+#: Tone -> (glyph name, palette role). A result is done, refused, or just said.
+STATUS_TONES = {"good": ("info", "correct"), "bad": ("danger", "wrong"), "info": ("note", "slate")}
+
+
+def set_status(text: str, tone: str | None = None) -> str:
+    """Keep `text` for the next page drawn, and return it.
+
+    Without a tone, the tone a caller already gave the same text is kept: a
+    screen handed a result by the screen it called does not repaint it grey.
+    The claim is always reset, so that caller's own page shows it next.
+    """
+    global _STATUS
+    text = " ".join(_mission_plain(text).split())
+    same = _STATUS is not None and _STATUS["text"] == text
+    if tone is None:
+        tone = _STATUS["tone"] if same else "info"
+    if tone not in STATUS_TONES:
+        raise ValueError(f"Unknown status tone: {tone}")
+    _STATUS = {"text": text, "tone": tone, "screen": None}
+    return text
+
+
+def clear_status() -> None:
+    global _STATUS
+    _STATUS = None
+
+
+def _status_screen(title: str) -> str:
+    """A screen's identity for the status: its title without the credits in it."""
+    return re.sub(r"\s*[\d,]+cr$", "", title.split(":")[0]).strip()
+
+
+def _claim_status(title: str) -> dict | None:
+    """The status this page shows: the first screen drawn claims it, another drops it."""
+    global _STATUS
+    if _STATUS is None:
+        return None
+    screen = _status_screen(title)
+    if _STATUS["screen"] is None:
+        _STATUS["screen"] = screen
+    elif _STATUS["screen"] != screen:
+        _STATUS = None
+    return _STATUS
+
+
+def _status_mark(p: "Palette", status: dict) -> str:
+    name, role = STATUS_TONES.get(status["tone"], STATUS_TONES["info"])
+    return f"{getattr(p, role)}{glyph(name)}"
+
+
+def _clock_label(inner: int) -> str | None:
+    return None if _SESSION_CLOCK is None else _fit_text(_SESSION_CLOCK.label(), inner - 4)
+
+
+def _status_fits_border(status: dict, inner: int) -> bool:
+    label = _clock_label(inner)
+    clock = len(label) + 4 if label else 1
+    return 4 + _visible_width(status["text"]) + 1 + clock <= inner
+
+
+def _status_overflow_rows(p: "Palette") -> list[str]:
+    """Body rows for a status too long for the border; none when it fits."""
+    if _STATUS is None or _status_fits_border(_STATUS, _box_inner_width()):
+        return []
+    role = STATUS_TONES.get(_STATUS["tone"], STATUS_TONES["info"])[1]
+    rows = _wrap_output(_STATUS["text"], max(1, _page_content_width() - 2)).split("\r\n")
+    return [f"{_status_mark(p, _STATUS) if number == 0 else ' '} {getattr(p, role)}{row}{RESET}"
+            for number, row in enumerate(rows)]
+
+
+def _box_bottom_status(p: "Palette", inner: int, status: dict | None) -> str:
+    """The bottom border, carrying the status when it fits and the session clock."""
+    label = _clock_label(inner)
+    tail = ""
+    if label is not None:
+        tone = p.gold if _SESSION_CLOCK.deadline - time.monotonic() <= 180 else p.slate
+        tail = f" {tone}{label}{p.hull} ─"
+    head = ""
+    if status is not None and _status_fits_border(status, inner):
+        role = STATUS_TONES.get(status["tone"], STATUS_TONES["info"])[1]
+        head = f"─ {_status_mark(p, status)} {getattr(p, role)}{status['text']}{p.hull} "
+    fill = inner - _visible_width(head) - _visible_width(tail)
+    return f"{p.hull}╰{head}{'─' * max(0, fill)}{tail}╯{RESET}"
 
 
 def _box_title(p: "Palette", text: str, width: int | None = None, border_color: str | None = None) -> str:
@@ -9455,8 +9556,8 @@ def screen_station_menu(p: Palette, world: World) -> str:
         world.checkpoint()
         if towed:
             play_scene(lambda w, h: _TowScene(w, h, hull=world.save.ship.hull_class, seed=_scene_seed(world, "tow")))
-        out_line(f"{p.wrong}{rescued}{RESET}")
-        pause(p)
+        # The deck that follows lists it with the journey's other results.
+        report_hop(world, [rescued])
     if career_rank_index(world.save.pilot) > world.save.pilot.highest_rank_seen:
         world.checkpoint()  # a rank earned since the last tick is noticed and saved here
     if world.pending_promotions:
@@ -9650,7 +9751,7 @@ def screen_dump_contraband(p: Palette, world: World) -> None:
         return
     result = dump_all_contraband(world)
     world.commit()
-    out_line(f"{p.muted}{result}{RESET}")
+    set_status(result, "info")
 
 
 ARCHIVE_RECORDS = {
@@ -10928,7 +11029,7 @@ def screen_market(p: Palette, world: World) -> None:
     while True:
         goods = LEGAL_COMMODITIES + [c for c in CONTRABAND_COMMODITIES if world.here.economy == "Haven" or world.save.cargo.get(c, 0) > 0]
         lines = market_catalog_lines(world, goods)
-        if result: lines.insert(0, "Result: " + result)
+        if result: set_status(result); result = None  # handed over once (#42 review)
         footer = f"[<] Prev [>] Next [{letter_span(MARKET_LETTERS[:len(goods)])}] Trade [X] Futures [B] Back: "
         key, page, count = _draw_service_page(p, f"Market: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return
@@ -10948,7 +11049,7 @@ def screen_market(p: Palette, world: World) -> None:
 
 
 def screen_futures(p: Palette, world: World, goods: list[str]) -> str | None:
-    result, page_state = None, {}
+    result, said, page_state = None, None, {}
     while True:
         options = []
         for commodity in goods:
@@ -10960,9 +11061,9 @@ def screen_futures(p: Palette, world: World, goods: list[str]) -> str | None:
             options.append((("order", contract), f"#{contract.id}: {contract.quantity} {COMMODITIES[contract.commodity]['label']}, {status}; {place}"))
         notice = ["Wholesale orders reserve station stock at signing; station pickup, 8% nonrefundable fee rounded up per unit.",
                   f"Outstanding orders: {len(world.save.active_futures)}/{MAX_FUTURES_CONTRACTS}"]
-        if result: notice.insert(0, "Result: " + result)
+        if result: set_status(result); said, result = result, None  # handed over once; `said` goes back up (#42 review)
         selected = _pick_trade_field(f"Futures Exchange: {world.save.pilot.credits:,}cr", options, max_choices=4, notice=notice, page_state=page_state)
-        if selected is None: return result
+        if selected is None: return said
         kind, item = selected
         response = _screen_buy_futures(p, world, item) if kind == "goods" else _screen_futures_order(p, world, item)
         if response is not None: result, page_state = response, {}
@@ -10978,7 +11079,7 @@ def _screen_futures_order(p: Palette, world: World, contract: FuturesContract) -
                  "Collected on arrival/station entry when the full order fits; otherwise it waits.",
                  f"{contract.reserved} units reserved from that station's stock; cancelling returns them.",
                  f"[X] Cancel: refund {contract.principal}cr, forfeit {fee}cr fee."]
-        if result: lines.insert(0, "Result: " + result)
+        if result: set_status(result); result = None  # handed over once (#42 review)
         footer = "[<>] Page [X] Cancel [B] Back: "
         key, page, count = _draw_service_page(p, f"Order #{contract.id}: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return None
@@ -11006,7 +11107,7 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
                  f"Station stock {depth['stock']} (+{depth['stock_rate']}/day): {max(0, depth['stock'] - quantity)} left after this order."
                  if quantity <= depth["stock"] else f"Station stock {depth['stock']} (+{depth['stock_rate']}/day): not enough for this order.",
                  "Full cargo space needed only at pickup. Cancellation refunds goods principal only; full holds leave orders waiting."]
-        if result: lines.insert(0, "Result: " + result)
+        if result: set_status(result); result = None  # handed over once (#42 review)
         footer = "[<>] Page [U] Units [T] Term [S] Sign [B] Back: "
         key, page, count = _draw_service_page(p, f"Order {COMMODITIES[commodity]['label']}: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return None
@@ -11030,8 +11131,7 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
                     result, page = str(exc), 0
                     continue
                 world.commit()
-                out_line(f"{p.correct}{message}{RESET}")
-                return message
+                return set_status(message, "good")
             result, page = "Signing cancelled; order draft retained.", 0
 
 
@@ -11332,6 +11432,10 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choi
     # than a wide terminal: wrapped to the terminal, a long label ran off the
     # glass onto the sky beside it (#33).
     reach = _box_outer_width() if canopy_active() else _OUTPUT_WIDTH
+    # This list has no bottom border to carry the status line (issue #38), so a
+    # result leads its notice instead, measured into the budget with the rest.
+    if (status := _claim_status(title)) is not None:
+        notice = [f"{glyph(STATUS_TONES.get(status['tone'], STATUS_TONES['info'])[0])} {status['text']}"] + list(notice or [])
     notice_rows = [row for line in notice or [] for row in _wrap_output(_mission_plain(line), max(1, reach - 1)).split("\r\n")]
     wrapped_options = [(value, _mission_plain(label), _wrap_output(_mission_plain(label), max(1, reach - 5)).split("\r\n"))
                        for value, label in options]
@@ -11692,15 +11796,13 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
     if action == "P":
         if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
             result = "Station authorities prohibit the open purchase of contraband."
-            out_line(f"{p.wrong}{result}{RESET}")
-            return result
+            return set_status(result, "bad")
         room = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
         affordable = world.save.pilot.credits // buy if buy else room
         max_qty = max(0, min(room, affordable, depth["stock"]))
         if max_qty <= 0:
             result = "No room, credits or station stock."
-            out_line(f"{p.wrong}{result}{RESET}")
-            return result
+            return set_status(result, "bad")
         # Return buys what the contracts still need, never a speculative
         # hold-full: a slip of the finger should not spend the career.
         need = min(max_qty, mission_cargo_needs(world).get(commodity, (0, []))[0])
@@ -11711,29 +11813,23 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
             return
         result = trade_cargo(world, commodity, qty, buying=True)
         world.commit()
-        out_line(f"{p.correct}{result}{RESET}")
-        out_line(f"Credits remaining: {world.save.pilot.credits:,}cr. Cost recorded in [T] Trading Ledger.")
-        return result
+        return set_status(result, "good")
     elif action == "S":
         have = world.save.cargo.get(commodity, 0)
         if have <= 0:
             result = "You have none to sell."
-            out_line(f"{p.wrong}{result}{RESET}")
-            return result
+            return set_status(result, "bad")
         max_qty = min(have, depth["demand"])
         if max_qty <= 0:
             result = f"Station demand is exhausted; replenishes {depth['demand_rate']}/day."
-            out_line(f"{p.wrong}{result}{RESET}")
-            return result
+            return set_status(result, "bad")
         out_prompt(f"{p.muted}Quantity (have {have}, station buys {max_qty}; Enter or Esc cancels): {RESET}")
         qty = read_quantity(max_qty)
         if qty <= 0:
             return
         result = trade_cargo(world, commodity, qty, buying=False)
         world.commit()
-        out_line(f"{p.correct}{result}{RESET}")
-        out_line(f"Credits now: {world.save.pilot.credits:,}cr. Margin recorded in [T] Trading Ledger.")
-        return result
+        return set_status(result, "good")
 
 
 
@@ -11814,13 +11910,14 @@ def workshop_lines(world: World, key: str) -> list[str]:
 
 
 def screen_workshop(p: Palette, world: World, key: str) -> str | None:
-    page, result = 0, None
+    page, result, said = 0, None, None
     while True:
         available = workshop_blocker(world, key) is None
         footer = ("[I] Install " if available else "") + "[R] Route [B] Back [<>] Page: "
-        lines = (["Result: " + result] if result else []) + workshop_lines(world, key)
+        if result: set_status(result); said, result = result, None  # handed over once; `said` goes back up (#42 review)
+        lines = workshop_lines(world, key)
         action, page, count = _draw_service_page(p, f"Workshop {world.save.pilot.credits:,}cr", lines, footer, page)
-        if action in ("B", "Q"): return result
+        if action in ("B", "Q"): return said
         if (moved := page_step(action, page, count)) is not None:
             page = moved
             continue
@@ -11835,16 +11932,17 @@ def screen_workshop(p: Palette, world: World, key: str) -> str | None:
 
 
 def screen_specialists(p: Palette, world: World) -> str | None:
-    page, result = 0, None
+    page, result, said = 0, None, None
     while True:
         stations = specialist_stations(world)
-        lines = (["Result: " + result] if result else []) + ["Named workshops trade specialist installation for supplied materials and credits. Select a workshop for exact terms and a route."]
+        if result: set_status(result); said, result = result, None  # handed over once; `said` goes back up (#42 review)
+        lines = ["Named workshops trade specialist installation for supplied materials and credits. Select a workshop for exact terms and a route."]
         for index, (key, shop) in enumerate(WORKSHOPS.items(), 1):
             station = world.by_id[stations[key]]
             lines.append(f"[{index}] {shop['name']}: {shop['owner']}, {UPGRADES[key]['label']}. {station.name}, {station.station_name}.")
         lines.append("Public bearings do not chart stations or reveal their market prices. Standard services remain available at every yard.")
         action, page, count = _draw_service_page(p, "Specialist Workshops", lines, "[1-3] View [B] Back [<>] Page: ", page)
-        if action in ("B", "Q"): return result
+        if action in ("B", "Q"): return said
         if (moved := page_step(action, page, count)) is not None:
             page = moved
             continue
@@ -12139,6 +12237,7 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
         clear_screen()
     header = _page_header(title, page, count)
     inner = _box_inner_width()
+    status = _claim_status(title)
     if _header_fits_border(header):
         lines = [_box_header(p, title, f"{page + 1}/{count}", alert=red_alert())]
     else:
@@ -12155,14 +12254,20 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
         # is how the color was lost one slice at a time to begin with.
         row = style_body_line(row.replace(STICKY_MARK, "").replace(MEMBER_MARK, ""))
         lines.append(f"{p.hull}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.hull}│{RESET}")
-    if _SESSION_CLOCK is None:
-        lines.append(_box_bottom(p, border_color=p.hull))
-    else:
-        # Keep the allowance visible on every page, including 40x12 terminals;
-        # a body-row badge could be paginated off the opening deck entirely.
-        label = _fit_text(_SESSION_CLOCK.label(), inner - 4)
-        tone = p.gold if _SESSION_CLOCK.deadline - time.monotonic() <= 180 else p.slate
-        lines.append(f"{p.hull}╰{'─' * (inner - len(label) - 3)} {tone}{label}{p.hull} ─╯{RESET}")
+    if status is not None and not _status_fits_border(status, inner):
+        overflow = _status_overflow_rows(p)
+        # A screen that measured its pages without `_page_frame_rows` has no
+        # rows to spare: there the status is cut to the border, not scrolled.
+        if len(lines) + len(overflow) + 2 <= _OUTPUT_HEIGHT:
+            lines += [f"{p.hull}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.hull}│{RESET}" for row in overflow]
+            status = None
+        else:
+            label = _clock_label(inner)
+            room = inner - 6 - (len(label) + 3 if label else 1)
+            status = dict(status, text=_fit_text(status["text"], max(1, room - 3)) + "...")
+    # The session allowance stays visible on every page, including 40x12
+    # terminals; a body-row badge could be paginated off the opening deck.
+    lines.append(_box_bottom_status(p, inner, status))
     _CANOPY_STRIP_WIDTH = _box_outer_width() if canopy else None
     if canopy:
         if keep:
@@ -12348,7 +12453,7 @@ def screen_shipyard(p: Palette, world: World) -> None:
     footer = "[<] Prev [>] Next [R] Refuel [P] Repair [K] Crew [S] Specialists [V] Ship [B] Back: "
     while True:
         lines = shipyard_lines(world)
-        if result: lines.insert(0, "Result: " + result)
+        if result: set_status(result); result = None  # handed over once (#42 review)
         action, page, count = _draw_service_page(p, f"Engineering Yard: {world.save.pilot.credits:,}cr", lines, footer, page)
         if action in ("B", "Q"): return
         if (moved := page_step(action, page, count)) is not None:
@@ -12548,7 +12653,7 @@ def screen_crew(p: Palette, world: World) -> None:
     footer = f"[<>] Page [1-3] Task [{letter_span(CREW_LETTERS[:len(CREW_ROLES)])}] Crew [B] Back: "
     while True:
         lines = crew_roster_lines(world)
-        if result: lines.insert(0, "Result: " + result)
+        if result: set_status(result); result = None  # handed over once (#42 review)
         key, page, count = _draw_service_page(p, f"Crew Roster: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return
         if (moved := page_step(key, page, count)) is not None:
@@ -12596,14 +12701,11 @@ def _toggle_crew(p: Palette, world: World, role: str) -> str | None:
         message = dismiss_crew(world, role)
     else:
         if world.save.pilot.credits < info["hire_cost"]:
-            message = f"Need {info['hire_cost']}cr to hire a {info['label']}."
-            out_line(f"{p.wrong}{message}{RESET}")
-            return message
+            return set_status(f"Need {info['hire_cost']}cr to hire a {info['label']}.", "bad")
         if not confirm(f"Hire {name} as {info['label']} for {info['hire_cost']}cr (+{info['wage']}cr/jump ongoing wage)?", p): return
         message = hire_crew(world, role)
     world.commit()
-    out_line(f"{p.correct}{message}{RESET}")
-    return message
+    return set_status(message, "good")
 
 
 def _buy_upgrade(p: Palette, world: World, key: str) -> str | None:
@@ -12611,32 +12713,27 @@ def _buy_upgrade(p: Palette, world: World, key: str) -> str | None:
     u = UPGRADES[key]
     tier = getattr(ship, f"{key}_tier")
     if tier >= u["max_tier"]:
-        out_line(f"{p.wrong}Already maxed.{RESET}")
-        return "Already maxed."
+        return set_status("Already maxed.", "bad")
     cost = u["cost"](tier)
     if world.save.pilot.credits < cost:
-        out_line(f"{p.wrong}Not enough credits ({cost}cr needed).{RESET}")
-        return f"Not enough credits ({cost}cr needed)."
+        return set_status(f"Not enough credits ({cost}cr needed).", "bad")
     if not confirm(f"Buy {u['label']} tier {tier + 1} for {cost}cr?", p):
         return
     world.save.pilot.credits -= cost
     setattr(ship, f"{key}_tier", tier + 1)
     world.commit()
-    out_line(f"{p.correct}{u['label']} upgraded to tier {tier + 1}.{RESET}")
-    return f"{u['label']} upgraded to tier {tier + 1} for {cost}cr."
+    return set_status(f"{u['label']} upgraded to tier {tier + 1} for {cost}cr.", "good")
 
 
 def _refuel(p: Palette, world: World) -> str | None:
     ship = world.save.ship
     room = fuel_capacity(ship) - ship.fuel
     if room <= 0:
-        out_line(f"{p.muted}Tanks are already full.{RESET}")
-        return "Tanks are already full."
+        return set_status("Tanks are already full.", "info")
     affordable = world.save.pilot.credits // 6
     max_qty = max(0, min(room, affordable))
     if max_qty <= 0:
-        out_line(f"{p.wrong}Not enough credits to buy fuel (6cr/unit).{RESET}")
-        return "Not enough credits to buy fuel (6cr/unit)."
+        return set_status("Not enough credits to buy fuel (6cr/unit).", "bad")
     out_prompt(f"{p.muted}Fuel to buy (6cr/unit; Enter buys {max_qty} for {max_qty * 6}cr, Esc cancels): {RESET}")
     qty = read_quantity(max_qty, max_qty, max_len=4)
     if qty <= 0:
@@ -12646,23 +12743,20 @@ def _refuel(p: Palette, world: World) -> str | None:
     _ledger(world).fuel_spend += cost
     ship.fuel += qty
     world.commit()
-    out_line(f"{p.correct}Refueled {qty} units for {cost}cr.{RESET}")
-    return f"Refueled {qty} units for {cost}cr."
+    return set_status(f"Refueled {qty} units for {cost}cr.", "good")
 
 
 def _repair(p: Palette, world: World) -> str | None:
     ship = world.save.ship
     missing = hull_hp_max(ship) - ship.hull_hp
     if missing <= 0:
-        out_line(f"{p.muted}Hull is already at full integrity.{RESET}")
-        return "Hull is already at full integrity."
+        return set_status("Hull is already at full integrity.", "info")
     unit = repair_cost_per_hp(ship)
     cost = missing * unit
     if world.save.pilot.credits < cost:
         affordable_hp = world.save.pilot.credits // unit
         if affordable_hp <= 0:
-            out_line(f"{p.wrong}Can't afford any repairs right now.{RESET}")
-            return "Cannot afford repairs right now."
+            return set_status("Cannot afford repairs right now.", "bad")
         missing = affordable_hp
         cost = missing * unit
     if not confirm(f"Repair {missing} hull for {cost}cr?", p, enter=True):
@@ -12670,8 +12764,7 @@ def _repair(p: Palette, world: World) -> str | None:
     world.save.pilot.credits -= cost
     ship.hull_hp += missing
     world.commit()
-    out_line(f"{p.correct}Hull repaired to {ship.hull_hp}/{hull_hp_max(ship)}.{RESET}")
-    return f"Hull repaired to {ship.hull_hp}/{hull_hp_max(ship)} for {cost}cr."
+    return set_status(f"Hull repaired to {ship.hull_hp}/{hull_hp_max(ship)} for {cost}cr.", "good")
 
 
 def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -> str | None:
@@ -13050,8 +13143,7 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
             try:
                 accept_opening_assignment(world, offer)
             except MissionError as exc:
-                out_line(str(exc))
-                pause(p)
+                set_status(str(exc), "bad")
                 return False
             world.commit()
             report_hop(world, [f"First Flight accepted and tracked. Next: {_opening_next_step(world, offer)}"])
@@ -13258,24 +13350,21 @@ def screen_mission_details(p: Palette, world: World, mission: Mission, *, active
                 if not active and key == "A" and page == len(pages) - 1:
                     accept_mission(world, mission)
                     world.commit()
-                    out_line(f"{p.correct}Accepted: {_mission_plain(mission.description)}{RESET}")
-                    pause(p)
+                    set_status(f"Accepted: {_mission_plain(mission.description)}", "good")
                     return
                 if active and key == "T":
                     track_mission(world, None if world.save.tracked_mission_id == mission.id else mission.id)
                     world.commit()
-                    out_line("Tracking updated.")
-                    pause(p)
+                    set_status(f"Tracking contract #{mission.id}." if world.save.tracked_mission_id == mission.id
+                               else f"Contract #{mission.id} no longer tracked.", "good")
                 elif active and key == "D":
                     if confirm("Abandon this contract? Forfeit its reward; keep cargo, no fee.", p):
                         message = abandon_mission(world, mission.id)
                         world.commit()
-                        out_line(_mission_plain(message))
-                        pause(p)
+                        set_status(message, "info")
                         return
             except MissionError as exc:
-                out_line(f"{p.wrong}{exc}{RESET}")
-                pause(p)
+                set_status(str(exc), "bad")
 
 
 MISSION_RISK = {"delivery": ("HAUL", "good"), "scan": ("SURVEY", "info"),
@@ -13661,7 +13750,7 @@ def screen_status(p: Palette, world: World, save_dir: Path | None = None) -> Non
                 lines = accolade_lines(world.save, accolade_rarity(save_dir) if save_dir is not None else None)
             else:
                 lines = pilot_record_lines(world, view)
-            if result: lines.insert(0, "Result: " + result)
+            if result: set_status(result); result = None  # handed over once (#42 review)
             cache[view] = _service_pages(lines, title, footer)
         key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[view])
         if key == RESIZE_KEY: cache, page = {}, 0  # the cached pages were cut for the old terminal
@@ -13823,7 +13912,7 @@ def danger_dots(level: int, *, known: bool = True) -> str:
     return f"{tone}{glyph('crew_on') * level}{RESET}{p.deep}{glyph('crew_off') * (5 - level)}{RESET}"
 
 
-def chart_entries(world: World, result: str | None = None) -> list[tuple[int | None, str]]:
+def chart_entries(world: World) -> list[tuple[int | None, str]]:
     """The chart as a departures table, one selectable row per connection.
 
     The rows are built to the width the key prefix leaves over, because
@@ -13833,8 +13922,6 @@ def chart_entries(world: World, result: str | None = None) -> list[tuple[int | N
     p = pal()
     here = world.here
     entries: list[tuple[int | None, str]] = []
-    if result:
-        entries.append((None, "Result: " + _mission_plain(result)))
     entries.append((None, f"{p.hull}{BOLD}{here.name.upper()}{RESET} {p.slate}({here.x},{here.y}){RESET}  "
                           f"{p.slate}{sector_for(here)}{RESET}  "
                           + "  ".join([chip("day", str(world.save.turn)),
@@ -13898,13 +13985,13 @@ def keyed_rows(key: str, rows: list[str]) -> list[str]:
     return [prefix + rows[0]] + [pad + row for row in rows[1:]]
 
 
-def _chart_pages(world: World, title: str, footer: str, result: str | None):
+def _chart_pages(world: World, title: str, footer: str):
     """Paged against the bar the caller will see (issue #412 review)."""
-    return _paginate_against_shown_footer(lambda bar: _chart_pages_for(world, title, bar, result), footer)
+    return _paginate_against_shown_footer(lambda bar: _chart_pages_for(world, title, bar), footer)
 
 
-def _chart_pages_for(world: World, title: str, footer: str, result: str | None):
-    entries = chart_entries(world, result)
+def _chart_pages_for(world: World, title: str, footer: str):
+    entries = chart_entries(world)
     # Budget conservatively with one key prefix per wrapped continuation row.
     # A selectable row is wrapped narrower by the `[K] ` prefix `keyed_rows`
     # will put in front of it; an unkeyed one -- the heading, the status band --
@@ -13949,8 +14036,9 @@ def screen_chart(p: Palette, world: World) -> int | None:
     page, result = 0, None
     footer = "[<] Prev [>] Next [B] Back: "
     while True:
+        if result: set_status(result); result = None  # handed over once (#42 review)
         title = f"Navigation: Fuel {world.save.ship.fuel}/{fuel_capacity(world.save.ship)}"
-        pages = _chart_pages(world, title, footer, result)
+        pages = _chart_pages(world, title, footer)
         page = min(page, len(pages) - 1)
         draw_page(p, title, pages[page][0], page, len(pages))
         out_prompt(single_page_footer(footer, len(pages))); key = read_command_at_prompt(); out_line(key)

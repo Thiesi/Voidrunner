@@ -469,7 +469,7 @@ def test_a_chart_entry_that_spans_pages_carries_its_letter_on_each(monkeypatch, 
     terminal(40, 12)
     world = _world_with_seed(42)
     world.checkpoint()
-    pages = vr._chart_pages(world, "Navigation", "[G] Route planner [B] Back: ", None)
+    pages = vr._chart_pages(world, "Navigation", "[G] Route planner [B] Back: ")
     for rows, choices in pages:
         shown = {match[0] for row in rows for match in re.findall(r"^\[([A-Z])\] ", plain(row))}
         assert set(choices) <= shown, (choices, rows)  # every offered letter is visible here

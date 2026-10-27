@@ -164,9 +164,20 @@ become menu commands or confirmations. Partial sequences survive transport gaps;
 a lone Escape is harmless and does not block indefinitely. CRLF submits a field
 once. Callsign editing supports combining accents and wide characters, bounds
 both character count and display columns, and normalizes submitted text to NFC.
-Quantity fields accept ASCII decimal digits. Unsupported keys do not dismiss
-result acknowledgement pauses. Responsive layouts and broader retained-result
-presentation remain separate work in #310.
+Quantity fields accept ASCII decimal digits.
+
+An action's result is a status line (issue #38), not a printed line held by
+"Press any key". The next page drawn carries it in its own bottom border, after a
+mark for its tone: done, refused, or just said. There it costs no row, and it
+shares the border with the session clock. A result too long for the border takes
+body rows above it, which page budgets reserve through the frame's row count; a
+page measured without that reserve cuts the result into the border instead of
+scrolling. The status stays while the screen that first shows it is redrawn or
+paged, and goes once another screen is drawn, so an accepted contract is reported
+on the board it returns to. Lists without a border, such as the futures picker,
+lead their notice with it. The status is session state and is never saved. Only
+fatal errors, a resumed journey's own page, and failed recovery still wait for a
+key, because nothing follows them that could show a result.
 
 DOOR32 comm type 2 selects the inherited socket as the terminal transport on
 Windows and POSIX. Telnet control sequences are discarded before the shared key
@@ -380,7 +391,7 @@ Keep each label, price and benefit together when the entry fits a fresh page.
 Credits appear in the page heading; fuel, hull, hire costs, ongoing wages and refit
 terms remain available in full. Direct action letters keep their meanings across
 pages, with previous/next punctuation keys and Back always present. Completed or
-rejected actions retain their result at the start of the refreshed screen. Back,
+rejected actions report their result in the refreshed screen's status line. Back,
 paging and cancelled action prompts do not checkpoint or spend. Confirmation is
 only behind a chosen purchase/dismissal action, and existing durable action
 checkpoints still precede success acknowledgement.
