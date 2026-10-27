@@ -290,7 +290,9 @@ def test_market_retains_trade_result_through_cancelled_quantity(monkeypatch):
     monkeypatch.setattr(vr,"read_key",lambda:next(commands))
     monkeypatch.setattr(vr,"read_line_raw",lambda **kw:next(quantities))
     with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_market(vr.Palette(False),world)
-    assert plain(output.getvalue()).count("Bought 1x Food")==2
+    # Said once on the market it returned to; the exchange page opened next and
+    # cancelled is another screen, so the result is not news on the way back (#38).
+    assert plain(output.getvalue()).count("Bought 1x Food")==1
     assert world.save.cargo=={"food":1} and len(saved)==1
     assert f"Market: {world.save.pilot.credits:,}cr" in plain(output.getvalue())
 
@@ -1919,3 +1921,22 @@ def test_the_futures_picker_leads_with_the_result_it_has_no_border_for(monkeypat
         vr._pick_trade_field("Futures Exchange: 1,200cr", [("food", "Order Food")], notice=["Fees apply."])
     rows = plain(output.getvalue()).splitlines()
     assert rows[1].strip() == "● Futures contract: 1x Food." and rows[2].strip() == "Fees apply."
+
+
+@pytest.mark.parametrize("detour", ["K", "S"])
+def test_a_result_is_not_repainted_after_a_sub_screen(monkeypatch, detour):
+    world = _world_with_seed(42)
+    world.save.ship.fuel -= 5
+    frames, output = [], io.StringIO()
+    keys = iter(["R", "\r", "?", detour, "B", "B"])
+    def key():
+        frames.append(plain(output.getvalue())); output.seek(0); output.truncate(0)
+        return next(keys)
+    monkeypatch.setattr(vr, "read_key", key)
+    with contextlib.redirect_stdout(output):
+        vr.screen_shipyard(vr.Palette(False), world)
+    borders = [[row for row in frame.splitlines() if row.startswith("╰")][-1] for frame in frames[2:]]
+    # The yard says it, keeps saying it through a redraw, the detour drops it,
+    # and the yard it returns to does not bring it back.
+    assert "Refueled 5 units" in borders[0] and "Refueled 5 units" in borders[1]
+    assert not any("Refueled" in border for border in borders[2:]) and vr._STATUS is None

@@ -5835,6 +5835,8 @@ def set_status(text: str, tone: str | None = None) -> str:
     same = _STATUS is not None and _STATUS["text"] == text
     if tone is None:
         tone = _STATUS["tone"] if same else "info"
+    if tone not in STATUS_TONES:
+        raise ValueError(f"Unknown status tone: {tone}")
     _STATUS = {"text": text, "tone": tone, "screen": _STATUS["screen"] if same else None}
     return text
 
@@ -11026,7 +11028,7 @@ def screen_market(p: Palette, world: World) -> None:
     while True:
         goods = LEGAL_COMMODITIES + [c for c in CONTRABAND_COMMODITIES if world.here.economy == "Haven" or world.save.cargo.get(c, 0) > 0]
         lines = market_catalog_lines(world, goods)
-        if result: set_status(result)
+        if result: set_status(result); result = None  # handed over once (#42 review)
         footer = f"[<] Prev [>] Next [{letter_span(MARKET_LETTERS[:len(goods)])}] Trade [X] Futures [B] Back: "
         key, page, count = _draw_service_page(p, f"Market: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return
@@ -11046,7 +11048,7 @@ def screen_market(p: Palette, world: World) -> None:
 
 
 def screen_futures(p: Palette, world: World, goods: list[str]) -> str | None:
-    result, page_state = None, {}
+    result, said, page_state = None, None, {}
     while True:
         options = []
         for commodity in goods:
@@ -11058,9 +11060,9 @@ def screen_futures(p: Palette, world: World, goods: list[str]) -> str | None:
             options.append((("order", contract), f"#{contract.id}: {contract.quantity} {COMMODITIES[contract.commodity]['label']}, {status}; {place}"))
         notice = ["Wholesale orders reserve station stock at signing; station pickup, 8% nonrefundable fee rounded up per unit.",
                   f"Outstanding orders: {len(world.save.active_futures)}/{MAX_FUTURES_CONTRACTS}"]
-        if result: set_status(result)
+        if result: set_status(result); said, result = result, None  # handed over once; `said` goes back up (#42 review)
         selected = _pick_trade_field(f"Futures Exchange: {world.save.pilot.credits:,}cr", options, max_choices=4, notice=notice, page_state=page_state)
-        if selected is None: return result
+        if selected is None: return said
         kind, item = selected
         response = _screen_buy_futures(p, world, item) if kind == "goods" else _screen_futures_order(p, world, item)
         if response is not None: result, page_state = response, {}
@@ -11076,7 +11078,7 @@ def _screen_futures_order(p: Palette, world: World, contract: FuturesContract) -
                  "Collected on arrival/station entry when the full order fits; otherwise it waits.",
                  f"{contract.reserved} units reserved from that station's stock; cancelling returns them.",
                  f"[X] Cancel: refund {contract.principal}cr, forfeit {fee}cr fee."]
-        if result: set_status(result)
+        if result: set_status(result); result = None  # handed over once (#42 review)
         footer = "[<>] Page [X] Cancel [B] Back: "
         key, page, count = _draw_service_page(p, f"Order #{contract.id}: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return None
@@ -11104,7 +11106,7 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
                  f"Station stock {depth['stock']} (+{depth['stock_rate']}/day): {max(0, depth['stock'] - quantity)} left after this order."
                  if quantity <= depth["stock"] else f"Station stock {depth['stock']} (+{depth['stock_rate']}/day): not enough for this order.",
                  "Full cargo space needed only at pickup. Cancellation refunds goods principal only; full holds leave orders waiting."]
-        if result: set_status(result)
+        if result: set_status(result); result = None  # handed over once (#42 review)
         footer = "[<>] Page [U] Units [T] Term [S] Sign [B] Back: "
         key, page, count = _draw_service_page(p, f"Order {COMMODITIES[commodity]['label']}: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return None
@@ -11907,14 +11909,14 @@ def workshop_lines(world: World, key: str) -> list[str]:
 
 
 def screen_workshop(p: Palette, world: World, key: str) -> str | None:
-    page, result = 0, None
+    page, result, said = 0, None, None
     while True:
         available = workshop_blocker(world, key) is None
         footer = ("[I] Install " if available else "") + "[R] Route [B] Back [<>] Page: "
-        if result: set_status(result)
+        if result: set_status(result); said, result = result, None  # handed over once; `said` goes back up (#42 review)
         lines = workshop_lines(world, key)
         action, page, count = _draw_service_page(p, f"Workshop {world.save.pilot.credits:,}cr", lines, footer, page)
-        if action in ("B", "Q"): return result
+        if action in ("B", "Q"): return said
         if (moved := page_step(action, page, count)) is not None:
             page = moved
             continue
@@ -11929,17 +11931,17 @@ def screen_workshop(p: Palette, world: World, key: str) -> str | None:
 
 
 def screen_specialists(p: Palette, world: World) -> str | None:
-    page, result = 0, None
+    page, result, said = 0, None, None
     while True:
         stations = specialist_stations(world)
-        if result: set_status(result)
+        if result: set_status(result); said, result = result, None  # handed over once; `said` goes back up (#42 review)
         lines = ["Named workshops trade specialist installation for supplied materials and credits. Select a workshop for exact terms and a route."]
         for index, (key, shop) in enumerate(WORKSHOPS.items(), 1):
             station = world.by_id[stations[key]]
             lines.append(f"[{index}] {shop['name']}: {shop['owner']}, {UPGRADES[key]['label']}. {station.name}, {station.station_name}.")
         lines.append("Public bearings do not chart stations or reveal their market prices. Standard services remain available at every yard.")
         action, page, count = _draw_service_page(p, "Specialist Workshops", lines, "[1-3] View [B] Back [<>] Page: ", page)
-        if action in ("B", "Q"): return result
+        if action in ("B", "Q"): return said
         if (moved := page_step(action, page, count)) is not None:
             page = moved
             continue
@@ -12450,7 +12452,7 @@ def screen_shipyard(p: Palette, world: World) -> None:
     footer = "[<] Prev [>] Next [R] Refuel [P] Repair [K] Crew [S] Specialists [V] Ship [B] Back: "
     while True:
         lines = shipyard_lines(world)
-        if result: set_status(result)
+        if result: set_status(result); result = None  # handed over once (#42 review)
         action, page, count = _draw_service_page(p, f"Engineering Yard: {world.save.pilot.credits:,}cr", lines, footer, page)
         if action in ("B", "Q"): return
         if (moved := page_step(action, page, count)) is not None:
@@ -12650,7 +12652,7 @@ def screen_crew(p: Palette, world: World) -> None:
     footer = f"[<>] Page [1-3] Task [{letter_span(CREW_LETTERS[:len(CREW_ROLES)])}] Crew [B] Back: "
     while True:
         lines = crew_roster_lines(world)
-        if result: set_status(result)
+        if result: set_status(result); result = None  # handed over once (#42 review)
         key, page, count = _draw_service_page(p, f"Crew Roster: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return
         if (moved := page_step(key, page, count)) is not None:
@@ -13747,7 +13749,7 @@ def screen_status(p: Palette, world: World, save_dir: Path | None = None) -> Non
                 lines = accolade_lines(world.save, accolade_rarity(save_dir) if save_dir is not None else None)
             else:
                 lines = pilot_record_lines(world, view)
-            if result: set_status(result)
+            if result: set_status(result); result = None  # handed over once (#42 review)
             cache[view] = _service_pages(lines, title, footer)
         key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[view])
         if key == RESIZE_KEY: cache, page = {}, 0  # the cached pages were cut for the old terminal
@@ -13919,8 +13921,6 @@ def chart_entries(world: World, result: str | None = None) -> list[tuple[int | N
     p = pal()
     here = world.here
     entries: list[tuple[int | None, str]] = []
-    if result:
-        set_status(result)
     entries.append((None, f"{p.hull}{BOLD}{here.name.upper()}{RESET} {p.slate}({here.x},{here.y}){RESET}  "
                           f"{p.slate}{sector_for(here)}{RESET}  "
                           + "  ".join([chip("day", str(world.save.turn)),
@@ -14035,6 +14035,7 @@ def screen_chart(p: Palette, world: World) -> int | None:
     page, result = 0, None
     footer = "[<] Prev [>] Next [B] Back: "
     while True:
+        if result: set_status(result); result = None  # handed over once (#42 review)
         title = f"Navigation: Fuel {world.save.ship.fuel}/{fuel_capacity(world.save.ship)}"
         pages = _chart_pages(world, title, footer, result)
         page = min(page, len(pages) - 1)
