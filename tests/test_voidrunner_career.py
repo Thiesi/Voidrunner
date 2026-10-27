@@ -2358,7 +2358,7 @@ def test_career_rank_checkpoint_retains_reward_before_next_spend(tmp_path, thres
     assert vr.check_rank_up(world) is None
 
 
-@pytest.mark.parametrize("commands,marker", [(b"MAS1\rAP1\r",b"Result: Bought 1x Food"), (b"MAS1\r",b"Result: Sold 1x Food")])
+@pytest.mark.parametrize("commands,marker", [(b"MAS1\rAP1\r",b"Bought 1x Food"), (b"MAS1\r",b"Sold 1x Food")])
 def test_career_rank_real_nested_market_peak_survives_kill(tmp_path, commands, marker):
     world = _world_with_seed(42); world.save.pilot.credits = 4999; _set_cargo(world, {"food":1})
     world._checkpoint=lambda w:vr.persist(w,tmp_path,77); world.checkpoint()
@@ -2404,7 +2404,7 @@ def test_career_rank_save_failure_stops_reward_before_ack(monkeypatch):
     world=_world_with_seed(42); world.save.pilot.credits=4999; _set_cargo(world, {"food":1})
     output=io.StringIO(); keys=iter("AS"); monkeypatch.setattr(vr,"read_key",lambda:next(keys)); monkeypatch.setattr(vr,"read_line_raw",lambda **kw:"1")
     def fail(current):
-        assert current.save.pilot.highest_rank_seen==1 and "Result: Sold" not in output.getvalue()
+        assert current.save.pilot.highest_rank_seen==1 and "Sold 1x" not in output.getvalue()
         raise vr.SaveError()
     world._checkpoint=fail
     with contextlib.redirect_stdout(output),pytest.raises(vr.SaveError): vr.screen_market(vr.Palette(False),world)

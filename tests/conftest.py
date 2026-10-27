@@ -20,7 +20,11 @@ def _no_door_splash(monkeypatch):
     The scenes' own tests take this back off too."""
     monkeypatch.setenv("DOOR_SPLASH", "0")
     monkeypatch.setenv("DOOR_SCENES", "0")
+    # The status line is session state (issue #38): one test's result must not
+    # be drawn in the next test's border.
+    vr.clear_status()
     yield
+    vr.clear_status()
 
 
 @pytest.fixture

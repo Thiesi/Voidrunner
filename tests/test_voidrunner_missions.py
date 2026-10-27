@@ -772,7 +772,7 @@ def test_real_tracking_action_survives_termination_and_is_visible_on_return(tmp_
     world.checkpoint()
     vr.persist(world, tmp_path, 77)
     choice = len(vr.posted_mission_offers(world)) + 1
-    with _door_stopped_at(tmp_path, f"B{choice}T".encode(), b"Tracking updated."):
+    with _door_stopped_at(tmp_path, f"B{choice}T".encode(), b"Tracking contract #"):
         save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert save.tracked_mission_id == mission.id
     with _door_stopped_at(tmp_path, b"", b"Tracked") as output:
