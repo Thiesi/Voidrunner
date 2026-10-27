@@ -1988,3 +1988,18 @@ def test_a_deck_result_shows_its_label_apart_from_what_it_says():
     assert plain(row) == "Result: Achievement unlocked: First Light -- Make 10 jumps."
     assert f"{p.slate}Achievement unlocked:" in row and f"{vr.BOLD}First Light" in row
     assert plain(vr.result_row("First Flight accepted and tracked.")) == "Result: First Flight accepted and tracked."
+
+
+def test_a_page_too_short_for_its_headings_and_a_row_still_paginates():
+    # Carried headings that fill a page were handed to the next page, and the
+    # next, forever: a section and a table heading on two-row pages (#39).
+    import threading
+    groups = [["intro"], [vr.SECTION_MARK + "A"], [vr.STICKY_MARK + "H"],
+              [vr.MEMBER_MARK + "r1"], [vr.MEMBER_MARK + "r2"]]
+    pages = []
+    worker = threading.Thread(target=lambda: pages.append(vr.paginate(groups, 2)), daemon=True)
+    worker.start(); worker.join(10)
+    assert not worker.is_alive() and pages
+    rows = [plain(row) for page in pages[0] for row in page]
+    assert "r1" in " ".join(rows) and "r2" in " ".join(rows)
+

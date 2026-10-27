@@ -11516,6 +11516,14 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
         while remaining:
             current, choices = pages[-1]
             room = room_on(len(pages) - 1) - len(current)
+            # A page that holds nothing but headings carried to it cannot shed
+            # them onto another page: that one would be carried them in turn,
+            # forever. It happened where a long result left a 40x12 page room
+            # for a section rule and a table's headings and no row under them.
+            # The oldest heading gives way instead, until one row fits.
+            while room <= 0 and current and all(row[:1] in (SECTION_MARK, STICKY_MARK) for row in current):
+                current.pop(0)
+                room = room_on(len(pages) - 1) - len(current)
             if room <= 0:
                 open_page()
                 continue
