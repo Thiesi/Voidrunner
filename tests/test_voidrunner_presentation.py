@@ -1305,7 +1305,7 @@ def test_chart_continuations_are_indented_and_still_selectable(monkeypatch, term
     # Long enough that the departures table has to stack its columns, which is
     # what makes the row a continuation at all (issue #493).
     world.by_id[sorted(world.here.connections)[0]].name = "Xanthe Deep Survey Anchorage Station"
-    pages = vr._chart_pages(world, "Navigation", "[B] Back: ", None)
+    pages = vr._chart_pages(world, "Navigation", "[B] Back: ")
     rows = [plain(row) for page in pages for row in page[0]]
     keyed = [row for row in rows if row.startswith("[") and row[1] in vr.CHART_CONNECTION_LETTERS]
     assert len(keyed) == len(world.here.connections)  # one key per destination, however many rows it wraps to
@@ -1856,12 +1856,29 @@ def test_a_result_stays_on_its_screen_and_goes_when_another_is_drawn(terminal):
     assert vr._STATUS is None and "Accepted" not in _drawn("Contract Board")[-1]
 
 
-def test_a_screen_loop_re_reporting_its_result_keeps_the_tone_and_the_claim(terminal):
+def test_a_result_handed_up_keeps_its_tone_and_shows_on_the_caller(terminal):
     terminal(80, 24)
-    vr.set_status("Hull repaired to 60/60 for 4cr.", "good")
-    _drawn("Engineering Yard: 1,196cr")
-    vr.set_status("Hull repaired to 60/60 for 4cr.")
-    assert vr._STATUS["tone"] == "good" and vr._STATUS["screen"] == "Engineering Yard"
+    vr.set_status("Futures contract: 1x Food.", "good")
+    assert "Futures contract" in _drawn("Futures Exchange: 1,180cr")[-1]
+    # The exchange returns it to the market, which says it again, still green.
+    vr.set_status("Futures contract: 1x Food.")
+    assert vr._STATUS["tone"] == "good" and _drawn("Market: 1,180cr")[-1].startswith("╰─ ● Futures contract")
+
+
+def test_signing_a_futures_order_is_reported_on_the_market_it_returns_to(monkeypatch):
+    world = _world_with_seed(42)
+    keys = iter(["X", "1", "S", "Y", "B", "B"])
+    frames, output = [], io.StringIO()
+    def key():
+        frames.append(plain(output.getvalue())); output.seek(0); output.truncate(0)
+        return next(keys)
+    monkeypatch.setattr(vr, "read_key", key)
+    with contextlib.redirect_stdout(output):
+        vr.screen_market(vr.Palette(False), world)
+    assert world.save.active_futures
+    # The order's terms are too long for the border: they take the rows above it.
+    market = [frame for frame in frames if "Market: " in frame][-1]
+    assert "│  ● Futures contract: 1x Food" in market
 
 
 def test_a_long_result_takes_reserved_rows_above_the_border(terminal):

@@ -5828,7 +5828,8 @@ def set_status(text: str, tone: str | None = None) -> str:
     """Keep `text` for the next page drawn, and return it.
 
     Without a tone, the tone a caller already gave the same text is kept: a
-    screen loop that re-reports what its action said does not repaint it grey.
+    screen handed a result by the screen it called does not repaint it grey.
+    The claim is always reset, so that caller's own page shows it next.
     """
     global _STATUS
     text = " ".join(_mission_plain(text).split())
@@ -5837,7 +5838,7 @@ def set_status(text: str, tone: str | None = None) -> str:
         tone = _STATUS["tone"] if same else "info"
     if tone not in STATUS_TONES:
         raise ValueError(f"Unknown status tone: {tone}")
-    _STATUS = {"text": text, "tone": tone, "screen": _STATUS["screen"] if same else None}
+    _STATUS = {"text": text, "tone": tone, "screen": None}
     return text
 
 
@@ -13911,7 +13912,7 @@ def danger_dots(level: int, *, known: bool = True) -> str:
     return f"{tone}{glyph('crew_on') * level}{RESET}{p.deep}{glyph('crew_off') * (5 - level)}{RESET}"
 
 
-def chart_entries(world: World, result: str | None = None) -> list[tuple[int | None, str]]:
+def chart_entries(world: World) -> list[tuple[int | None, str]]:
     """The chart as a departures table, one selectable row per connection.
 
     The rows are built to the width the key prefix leaves over, because
@@ -13984,13 +13985,13 @@ def keyed_rows(key: str, rows: list[str]) -> list[str]:
     return [prefix + rows[0]] + [pad + row for row in rows[1:]]
 
 
-def _chart_pages(world: World, title: str, footer: str, result: str | None):
+def _chart_pages(world: World, title: str, footer: str):
     """Paged against the bar the caller will see (issue #412 review)."""
-    return _paginate_against_shown_footer(lambda bar: _chart_pages_for(world, title, bar, result), footer)
+    return _paginate_against_shown_footer(lambda bar: _chart_pages_for(world, title, bar), footer)
 
 
-def _chart_pages_for(world: World, title: str, footer: str, result: str | None):
-    entries = chart_entries(world, result)
+def _chart_pages_for(world: World, title: str, footer: str):
+    entries = chart_entries(world)
     # Budget conservatively with one key prefix per wrapped continuation row.
     # A selectable row is wrapped narrower by the `[K] ` prefix `keyed_rows`
     # will put in front of it; an unkeyed one -- the heading, the status band --
@@ -14037,7 +14038,7 @@ def screen_chart(p: Palette, world: World) -> int | None:
     while True:
         if result: set_status(result); result = None  # handed over once (#42 review)
         title = f"Navigation: Fuel {world.save.ship.fuel}/{fuel_capacity(world.save.ship)}"
-        pages = _chart_pages(world, title, footer, result)
+        pages = _chart_pages(world, title, footer)
         page = min(page, len(pages) - 1)
         draw_page(p, title, pages[page][0], page, len(pages))
         out_prompt(single_page_footer(footer, len(pages))); key = read_command_at_prompt(); out_line(key)
