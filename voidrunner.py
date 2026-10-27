@@ -1407,11 +1407,12 @@ def read_quantity(limit: int, default: int = 0, *, max_len: int = 5) -> int:
     return min(int(raw), limit) if raw.isascii() and raw.isdigit() else 0
 
 
-def confirm(prompt: str, p: Palette, *, enter: bool | None = None) -> bool:
+def confirm(prompt: str, p: Palette, *, enter: bool = False) -> bool:
     """Yes/No as the last keystroke before an irreversible action; Escape is No (issue #413).
 
     `enter=True` lets Return accept, for an offer the pilot nearly always takes,
-    such as a repair to the most they can afford (issue #36).
+    such as a repair to the most they can afford (issue #36). Otherwise Return
+    does nothing: an irreversible action wants a deliberate Y.
     """
     out_prompt(f"{p.muted}{prompt} [Y/N, {'Enter=Yes, ' if enter else ''}Esc=No] {RESET}")
     while True:
@@ -1419,9 +1420,9 @@ def confirm(prompt: str, p: Palette, *, enter: bool | None = None) -> bool:
         if key == ESCAPE_KEY:
             out_line("N")
             return False
-        if enter is not None and key in ("\r", "\n"):
-            out_line("Y" if enter else "N")
-            return enter
+        if enter and key in ("\r", "\n"):
+            out_line("Y")
+            return True
         key = key.upper() if len(key) == 1 and key.isascii() else IGNORED_KEY
         if key == "Y":
             out_line("Y")
@@ -10748,13 +10749,10 @@ def price_scale(quote: int, ladder: list[int], tone: str, cells: int = 7) -> str
             f"{p.deep}{glyph('bar_track') * (cells - 1 - at)}{RESET}")
 
 
-def mission_cargo_needs(world: World) -> dict[str, tuple[int, list[str]]]:
-    """What the open delivery contracts still need bought, per commodity.
+def contract_cargo(world: World) -> dict[str, tuple[int, list[str]]]:
+    """The units every live delivery asks for, per commodity, with where they go.
 
-    The units every live delivery asks for, less what is already aboard, with
-    the destinations that ask: the market answers "how much do I need?"
-    instead of the pilot adding it up from the contract pages (issue #37).
-    An expired contract cannot pay, so it needs nothing.
+    An expired contract cannot pay, so it asks for nothing.
     """
     wanted: dict[str, tuple[int, list[str]]] = {}
     for mission in world.save.active_missions:
@@ -10765,8 +10763,24 @@ def mission_cargo_needs(world: World) -> dict[str, tuple[int, list[str]]]:
         total, places = wanted.get(mission.commodity, (0, []))
         place = _mission_plain(world.by_id[mission.target_system].name)
         wanted[mission.commodity] = (total + mission.quantity, places + ([place] if place not in places else []))
+    return wanted
+
+
+def mission_cargo_needs(world: World) -> dict[str, tuple[int, list[str]]]:
+    """What the open delivery contracts still need bought, per commodity.
+
+    `contract_cargo` less what is already aboard: the market answers "how much
+    do I need?" instead of the pilot adding it up from the contract pages
+    (issue #37).
+    """
     return {commodity: (total - world.save.cargo.get(commodity, 0), places)
-            for commodity, (total, places) in wanted.items() if total > world.save.cargo.get(commodity, 0)}
+            for commodity, (total, places) in contract_cargo(world).items()
+            if total > world.save.cargo.get(commodity, 0)}
+
+
+def spare_cargo(world: World, commodity: str) -> int:
+    """Units aboard that no live delivery is waiting for: the ones free to sell."""
+    return max(0, world.save.cargo.get(commodity, 0) - contract_cargo(world).get(commodity, (0, []))[0])
 
 
 #: Rows of remembered better prices the market shows; more is a ledger, not a hint.
@@ -10777,15 +10791,16 @@ def market_memory_hints(world: World, goods: list[str]) -> list[tuple[str, str, 
     """The better prices the ship remembers elsewhere, the most useful first.
 
     Each row is (commodity, what, unit, system id, day seen), at most one per
-    commodity:
-    - cargo aboard: a better remembered sale than this station's;
-    - otherwise: a remembered sale above this station's buy price, a trade;
-    - otherwise, for what the contracts need: a cheaper remembered purchase.
-    Only quotes the pilot saw docked count; remote prices are never invented.
+    commodity, in three groups, each best first:
+    - spare cargo aboard: a better remembered sale than this station's;
+    - what the contracts still need: a cheaper remembered purchase;
+    - anything else: a remembered sale above this station's buy price, a trade.
+    Cargo a delivery is waiting for is not offered for sale elsewhere. Only
+    quotes the pilot saw docked count; remote prices are never invented.
     """
     here = world.here.id
     needs = mission_cargo_needs(world)
-    held_rows, trade_rows = [], []
+    held_rows, cost_rows, trade_rows = [], [], []
     for commodity in goods:
         buy = price_for(world, here, commodity)
         sell = round(buy * SELL_SPREAD)
@@ -10795,17 +10810,17 @@ def market_memory_hints(world: World, goods: list[str]) -> list[tuple[str, str, 
         if not seen:
             continue
         sid, best = max(seen, key=lambda item: (item[1]["sell"], item[1]["day"]))
-        if world.save.cargo.get(commodity, 0):
+        if spare_cargo(world, commodity):
             if best["sell"] > sell:
                 held_rows.append((best["sell"] - sell, (commodity, "sells", best["sell"], sid, best["day"])))
-        elif not prohibited and best["sell"] > buy:
-            trade_rows.append((best["sell"] - buy, (commodity, "sells", best["sell"], sid, best["day"])))
         elif commodity in needs:
             cheaper = [(sid, quote) for sid, quote in seen if quote["buy"] is not None and quote["buy"] < buy]
             if cheaper:
                 sid, low = min(cheaper, key=lambda item: (item[1]["buy"], -item[1]["day"]))
-                trade_rows.append((buy - low["buy"], (commodity, "costs", low["buy"], sid, low["day"])))
-    ranked = sorted(held_rows, key=lambda row: -row[0]) + sorted(trade_rows, key=lambda row: -row[0])
+                cost_rows.append((buy - low["buy"], (commodity, "costs", low["buy"], sid, low["day"])))
+        elif not prohibited and best["sell"] > buy:
+            trade_rows.append((best["sell"] - buy, (commodity, "sells", best["sell"], sid, best["day"])))
+    ranked = [row for group in (held_rows, cost_rows, trade_rows) for row in sorted(group, key=lambda row: -row[0])]
     return [row for _, row in ranked[:MARKET_HINT_ROWS]]
 
 
@@ -10819,7 +10834,7 @@ def market_memory_lines(world: World, goods: list[str]) -> list[str]:
     rows, styles = [], []
     for commodity, what, unit, sid, day in hints:
         buy = price_for(world, world.here.id, commodity)
-        here = f"sell {round(buy * SELL_SPREAD)}" if what == "sells" and world.save.cargo.get(commodity, 0) else f"buy {buy}"
+        here = f"sell {round(buy * SELL_SPREAD)}" if what == "sells" and spare_cargo(world, commodity) else f"buy {buy}"
         jumps = hops.get(sid)
         place = _mission_plain(world.by_id[sid].name) + (f", {jumps} jump{'s' if jumps != 1 else ''}" if jumps else "")
         age = world.save.turn - day
@@ -10883,14 +10898,14 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
             flag,
         ])
         styles.append(["value", "value", "value", "label", "label", "value", "value", "value", "value"])
-    headers, aligns, optional = ["COMMODITY", "BUY", "SELL", "STOCK", "DEMAND", "HELD", "NEED", "SPREAD", ""], "lrrrrrrll", (3, 4, 7, 6)
+    headers, aligns, optional = ["COMMODITY", "BUY", "SELL", "STOCK", "DEMAND", "HELD", "NEED", "SPREAD", ""], "lrrrrrrll", (6, 3, 4, 7)
     if not needs:
         # No contract needs cargo: no empty column taking a narrow screen's room.
         headers, aligns, optional = headers[:6] + headers[7:], aligns[:6] + aligns[7:], (3, 4, 6)
         rows, styles = [row[:6] + row[7:] for row in rows], [row[:6] + row[7:] for row in styles]
     lines += table(headers,
-                   # Drop order, first first: the depth figures have a screen of
-                   # their own, the spread is a nicety, and the NEED column is
+                   # Drop order, last first: the spread is a nicety, the depth
+                   # figures have a screen of their own, and the NEED column is
                    # repeated under the table; the price, the hold and an
                    # ILLEGAL flag never go.
                    rows, aligns, styles=styles, optional=optional)

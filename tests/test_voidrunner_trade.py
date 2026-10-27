@@ -3140,6 +3140,18 @@ def test_the_market_counts_what_the_contracts_still_need():
     assert "NEED" in text.splitlines()[1] and "Contracts need: Food 6" in text
 
 
+def test_a_narrow_market_drops_the_spread_and_depth_before_the_need(monkeypatch):
+    world = _world_with_seed(42)
+    _deliveries(world, ("food", 7, world.here.connections[0], 30))
+    widths = {}
+    for width in range(30, 80):
+        monkeypatch.setattr(vr, "_page_content_width", lambda width=width: width)
+        heading = plain(vr.market_catalog_lines(world, vr.LEGAL_COMMODITIES)[1]).split()
+        widths[width] = heading
+    kept = [heading for heading in widths.values() if "NEED" in heading]
+    assert any("SPREAD" not in heading and "STOCK" not in heading and "DEMAND" not in heading for heading in kept)
+
+
 def test_the_market_hides_the_need_column_when_nothing_is_needed():
     world = _world_with_seed(42)
     assert "NEED" not in plain("\n".join(vr.market_catalog_lines(world, vr.LEGAL_COMMODITIES)))
@@ -3181,8 +3193,25 @@ def test_price_memory_finds_a_trade_and_a_cheaper_source_for_contracts():
     world.save.market_memory[destination]["medicine"]["buy"] = here["medicine"] - 4
     _deliveries(world, ("medicine", 2, destination, 30))
     hints = vr.market_memory_hints(world, vr.LEGAL_COMMODITIES)
+    # What the contracts need comes before a speculative trade, whatever the margins.
     assert [(c, what, unit) for c, what, unit, _, _ in hints] == [
-        ("food", "sells", here["food"] + 9), ("medicine", "costs", here["medicine"] - 4)]
+        ("medicine", "costs", here["medicine"] - 4), ("food", "sells", here["food"] + 9)]
+
+
+def test_price_memory_never_offers_cargo_a_delivery_is_waiting_for():
+    world, destination = _world_with_market_memory()
+    here = vr.price_for(world, 0, "medicine")
+    world.save.market_memory[destination]["medicine"].update(sell=here * 3, buy=here - 4)
+    _set_cargo(world, {"medicine": 2})
+    _deliveries(world, ("medicine", 5, destination, 30))
+    # Two aboard are spoken for and three more are needed: a cheaper source, not a sale.
+    assert [(c, what) for c, what, *_ in vr.market_memory_hints(world, ["medicine"])] == [("medicine", "costs")]
+    _set_cargo(world, {"medicine": 5})
+    # All five are spoken for: what remains is a trade on fresh cargo, quoted at this buy price.
+    assert "buy " + str(here) in plain("\n".join(vr.market_memory_lines(world, ["medicine"])))
+    _set_cargo(world, {"medicine": 7})
+    assert [(c, what) for c, what, *_ in vr.market_memory_hints(world, ["medicine"])] == [("medicine", "sells")]
+    assert vr.spare_cargo(world, "medicine") == 2
 
 
 def test_price_memory_never_quotes_this_station_or_more_than_a_handful():

@@ -1401,8 +1401,9 @@ pilot (issues #36, #37). A NEED column, shown only while a contract needs cargo,
 counts what live deliveries still require after the cargo aboard; a line under
 the table names their destinations. Expired contracts need nothing. A PRICE
 MEMORY table lists up to five remembered quotes from other stations, one per
-commodity: a better sale for cargo aboard first, then a sale above this
-station's buy price, then a cheaper purchase of what a contract needs. Each row
+commodity: a better sale for spare cargo aboard first, then a cheaper purchase
+of what a contract needs, then a sale above this station's buy price, each group
+best first. Cargo a delivery is waiting for is never offered for sale. Each row
 gives the station, its jump count and the quote's age. Nothing is derived beyond
 quotes the pilot saw docked, and nothing is stored.
 
