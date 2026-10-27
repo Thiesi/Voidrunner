@@ -13613,43 +13613,70 @@ def mission_navigation_lines(world: World, mission: Mission, *, active: bool) ->
 
 
 def navigation_budget_lines(world: World, path: list[int], *, public_target: int | None = None) -> list[str]:
-    """Pure budget for a chosen path; never observes or charts intermediate systems."""
+    """Pure budget for a chosen path, as a sheet; never observes or charts intermediate systems.
+
+    It was a paragraph of totals and a sentence per leg (issue #39). CHECKS now
+    says whether fuel and cash will carry the route, MONEY what it costs, and
+    LEGS is a table a pilot reads down: where each jump lands, what it burns,
+    how dangerous it is and where to refuel first.
+    """
+    p = pal()
     wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
     tank = world.save.ship.fuel
     total_fuel = 0
     previous = world.here
-    legs = []
+    rows, styles = [], []
     feasible = True
+    stops = 0
     for index, sid in enumerate(path, 1):
         station = world.by_id[sid]
         burn = fuel_cost_for_jump(previous, station, world.save.ship)
         total_fuel += burn
+        refuel = ""
         if burn > fuel_capacity(world.save.ship):
             feasible = False
-            legs.append(f"Leg {index} exceeds tank capacity: {burn} fuel needed; upgrade or find a different route.")
+            refuel = f"{p.wrong}needs {burn}, over tank{RESET}"
         elif tank < burn:
-            name = previous.name if previous.discovered or previous.id == public_target else f"uncharted station ({previous.x},{previous.y})"
-            legs.append(f"Before leg {index}, refuel {burn - tank} units at {name} for {(burn - tank) * 6}cr. Refuelling is manual.")
+            name = previous.name if previous.discovered or previous.id == public_target else f"uncharted ({previous.x},{previous.y})"
+            refuel = f"{p.gold}+{burn - tank} at {_mission_plain(name)}, {(burn - tank) * 6}cr{RESET}"
+            stops += 1
             tank = burn
         name = station.name if station.discovered or sid == public_target else f"Uncharted ({station.x},{station.y})"
-        danger = str(station.danger) if station.discovered else "unknown"
-        legs.append(f"Leg {index}: {name}; {burn} fuel, {wage}cr wages; danger {danger}.")
+        danger = (f"{p.tone(danger_tone(station.danger))}{station.danger}{RESET}" if station.discovered
+                  else f"{p.slate}?{RESET}")
+        rows.append([f"{index}", _mission_plain(name), f"{burn}", danger, refuel or f"{p.deep}{glyph('flat')}{RESET}"])
+        styles.append(["label", "value", "value", "value", "value"])
         tank = max(0, tank - burn)
         previous = station
     fuel_cash = max(0, total_fuel - world.save.ship.fuel) * 6
-    cash = fuel_cash + wage * len(path)
-    lines = [f"Route: {len(path)} jumps, {total_fuel} fuel; {world.save.ship.fuel} aboard.",
-              f"Additional fuel cash {fuel_cash}cr; wages {wage * len(path)}cr; travel cash {cash}cr of {world.save.pilot.credits:,}cr available.",
-              f"Arrival day {world.save.turn + len(path)} if uninterrupted; today {world.save.turn}."]
-    if cash > world.save.pilot.credits:
-        lines.append("CASH WARNING: the full travel budget is not covered; crew may leave if wages cannot be paid.")
+    wages = wage * len(path)
+    cash = fuel_cash + wages
+    checks = []
     if not feasible:
-        lines.append("INFEASIBLE on the current shortest route; do not rely on its fuel budget.")
-    lines += legs
+        checks.append(("FUEL", "a jump is over tank capacity; route infeasible", "bad"))
+    else:
+        checks.append(("FUEL", f"needs {total_fuel}, {world.save.ship.fuel} aboard"
+                       + (f"; {plural(stops, 'refuel stop')}" if stops else ""),
+                       "good" if total_fuel <= world.save.ship.fuel else "info"))
+    checks.append(("CASH", f"{cash:,}cr of {world.save.pilot.credits:,}cr"
+                   + ("; crew may leave unpaid" if cash > world.save.pilot.credits else ""),
+                   "bad" if cash > world.save.pilot.credits else "good"))
+    checks.append(("ARRIVAL", f"day {world.save.turn + len(path)}, today {world.save.turn}", None))
+    money = [("Fuel top-ups", -fuel_cash, "bad")]
+    if wage:
+        money.append((f"Wages {len(path)} x {wage}", -wages, "bad"))
+    money.append(("TRAVEL", -cash, "bad"))
+    lines = [section("BUDGET")]
+    lines += sheet_columns([("CHECKS", _sheet_rows(checks)), ("MONEY", _money_rows(money))])
+    if path:
+        lines.append(section("LEGS"))
+        lines += table(["#", "LANDS AT", "FUEL", "DANGER", "REFUEL FIRST"], rows, "rlrrl", styles=styles)
     if world.save.ship.has_engineer and crew_level(world.save.ship, "engineer") < 3:
         lines.append("Fuel budget uses current crew skill; a promotion can reduce later jumps' fuel cost.")
-    lines.append("Budget assumes retained crew and 6cr/unit refuelling. Cargo, repairs, encounters, detours and other income/spending are excluded.")
-    return [_mission_plain(line) for line in lines]
+    lines.append(f"{p.slate}Budget assumes retained crew and 6cr/unit refuelling, which is manual. Cargo, repairs, "
+                 f"encounters, detours and other income/spending are excluded.{RESET}")
+    return [line if (ANSI_ESCAPE_RE.search(line) or line.startswith((SECTION_MARK, STICKY_MARK, MEMBER_MARK)))
+            else _mission_plain(line) for line in lines]
 
 
 def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, active: bool) -> None:
@@ -14632,20 +14659,30 @@ def map_legend(p: "Palette") -> str:
 
 
 def map_list_lines(world: World, path: list[int], public_target: int | None) -> list[str]:
+    """Charted space as a table per sector: where each station is, what it trades,
+    how dangerous and how far (issue #39)."""
+    p = pal()
     ids = map_system_ids(world, path, public_target)
     hops = bfs_hops(world.by_id, world.here.id)
-    lines = ["Exact positions; @ here, ! objective, X route end, * plotted route."]
+    lines = [f"{p.slate}Exact positions; @ here, ! objective, X route end, * plotted route.{RESET}"]
     if not any(s.discovered for s in world.galaxy):
         lines.append("Nothing charted yet; current and supplied bearings only.")
     for sector in SECTOR_NAMES:
         stations = sorted((world.by_id[sid] for sid in ids if sector_for(world.by_id[sid]) == sector), key=lambda s: (s.x, s.y, s.id))
         if not stations: continue
-        lines.append("Sector: " + sector)
+        lines.append(section(sector))
+        rows, styles = [], []
         for station in stations:
             markers = ("@" if station.id == world.here.id else "") + ("!" if station.id == map_goal(world, public_target) else "") + ("*" if station.id in path else "") + ("X" if path and station.id == path[-1] else "")
-            details = f"{station.economy}, danger {station.danger}" if station.discovered else "uncharted; danger unknown"
-            distance = "here" if station.id == world.here.id else f"{hops[station.id]} jumps"
-            lines.append(f"{markers or 'o'} {map_label(world, station.id, public_target)}: {details}; {distance}.")
+            if station.discovered:
+                economy, danger = station.economy, f"{p.tone(danger_tone(station.danger))}{station.danger}{RESET}"
+            else:
+                economy, danger = f"{p.slate}uncharted{RESET}", f"{p.slate}?{RESET}"
+            distance = "here" if station.id == world.here.id else plural(hops[station.id], "jump")
+            rows.append([f"{p.gold}{markers}{RESET}" if markers else f"{p.deep}o{RESET}",
+                         map_label(world, station.id, public_target), economy, danger, distance])
+            styles.append(["value", "value", "label", "value", "label"])
+        lines += table(["", "STATION", "ECONOMY", "DANGER", "DISTANCE"], rows, "lllrr", styles=styles)
     return lines
 
 
@@ -14775,11 +14812,16 @@ def prepare_route_jump(world: World, destination: int) -> int:
     return path[0]
 
 
-def route_mission_implications(world: World, path: list[int]) -> list[str]:
-    lines = []
-    if not world.save.active_missions:
-        return ["No active contract deadlines."]
-    lines.append("Contract timing assumes successful travel, unchanged bounty queues and ready delivery cargo. Earlier failures, expiry and scanner use can change it.")
+def route_contract_estimates(world: World, path: list[int]) -> list[dict]:
+    """When each active contract would resolve if the pilot flies `path` then onward.
+
+    One dict per contract, in active order: `mission`; `day`, the estimated
+    objective day, or None for a survey of a target already charted; `late`,
+    past its deadline by then; and `ready`, whether a delivery's cargo is
+    aboard once earlier resolutions have taken theirs. The route planner draws
+    these as a table (issue #39); keeping them data is what lets a test check
+    the meaning rather than the wording.
+    """
     end = path[-1] if path else world.here.id
     estimates = []
     arrivals_by_target = {}
@@ -14821,18 +14863,40 @@ def route_mission_implications(world: World, path: list[int]) -> list[str]:
         ready[index] = available >= mission.quantity
         if ready[index] and (mission.deadline_turn is None or day <= mission.deadline_turn):
             remaining[mission.commodity] = available - mission.quantity
-    lines.append("Cargo is allocated by estimated arrival, then active-contract order. Late contracts consume none; missing cargo leaves completion day unknown.")
-    for index, (mission, day) in enumerate(estimates):
+    return [{"mission": mission, "day": day,
+             "late": day is not None and mission.deadline_turn is not None and day > mission.deadline_turn,
+             "ready": ready.get(index, True)} for index, (mission, day) in enumerate(estimates)]
+
+
+def route_mission_implications(world: World, path: list[int]) -> list[str]:
+    """The active contracts' timing on a route, one table row each (issue #39)."""
+    if not world.save.active_missions:
+        return ["No active contract deadlines."]
+    p = pal()
+    rows, styles = [], []
+    for estimate in route_contract_estimates(world, path):
+        mission, day = estimate["mission"], estimate["day"]
+        kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
+        due = "none" if mission.deadline_turn is None else f"day {mission.deadline_turn}"
         if day is None:
-            lines.append(f"Contract #{mission.id}: BLOCKED SURVEY - target already charted; no completion day. Revisiting cannot complete it. Abandon it from contract details to free the slot.")
-            continue
-        timing = "no deadline" if mission.deadline_turn is None else f"deadline {mission.deadline_turn} inclusive; " + ("travel within deadline" if day <= mission.deadline_turn else "TRAVEL ESTIMATE LATE")
-        suffix = ""
-        label = "objective day"
-        if mission.kind == "delivery" and not ready[index]:
-            label = "arrival day"
-            suffix = " Missing delivery cargo after earlier allocations; procurement required, completion day unknown."
-        lines.append(f"Contract #{mission.id}: {label} {day} by this route then onward; {timing}.{suffix}")
+            status = f"{sheet_mark('bad')} {p.wrong}BLOCKED SURVEY: target already charted{RESET}"
+            arrives = f"{p.deep}{glyph('flat')}{RESET}"
+        else:
+            arrives = f"day {day}"
+            if estimate["late"]:
+                status = f"{sheet_mark('bad')} {p.wrong}late{RESET}"
+            elif mission.kind == "delivery" and not estimate["ready"]:
+                status = f"{sheet_mark('info')} {p.ink}cargo still to buy{RESET}"
+            else:
+                status = f"{sheet_mark('good')} {p.ink}on time{RESET}"
+        rows.append([f"#{mission.id}", kind, arrives, due, status])
+        styles.append(["value", "label", "value", "label", "value"])
+    lines = [section("CONTRACTS ON THIS ROUTE")]
+    lines += table(["", "KIND", "ARRIVES", "DUE", "STATUS"], rows, "lllll", styles=styles)
+    lines.append(f"{p.slate}Arrival days assume successful travel by this route then onward, unchanged bounty "
+                 f"queues and ready delivery cargo. Earlier failures, expiry and scanner use can change them.{RESET}")
+    lines.append(f"{p.slate}Cargo is allocated by estimated arrival, then active-contract order; late contracts consume none. "
+                 f"A blocked survey cannot complete; abandon it from contract details to free the slot.{RESET}")
     return lines
 
 
@@ -14841,15 +14905,17 @@ def navigation_route_lines(world: World, destination: int | None) -> list[str]:
         return ["Choose a charted destination to preview its route.",
                 "Destination selection is read-only. Jump next flies one leg; Back leaves the plan.",
                 "For an uncharted contract target, use Route in its details or the tracked chart."]
+    p = pal()
     target = world.by_id[destination]
     path = bfs_path(world.by_id, world.here.id, destination)
-    lines = [f"Destination: {target.name} ({target.x},{target.y}). Shortest route by jumps.",
-             "Jump next flies one leg. Review after each outcome, change destination, or Back to refuel."]
+    lines = [f"{p.ink}{BOLD}{_mission_plain(world.here.name)} {glyph('arrow')} {_mission_plain(target.name)}{RESET} "
+             f"{p.slate}({target.x},{target.y}) {glyph('dot')} {plural(len(path), 'jump')}, the shortest route{RESET}",
+             f"{p.slate}[J] flies one leg. Review after each outcome, change destination, or Back to refuel.{RESET}"]
     if not path:
         lines.append("Arrived at the selected destination.")
     escorts = sum(m.kind == "escort" and not mission_expired(world, m) for m in world.save.active_missions)
     if escorts:
-        lines.append(f"Active escorts: {escorts} fight(s) on EVERY jump, including detours.")
+        lines.append(f"{p.wrong}Active escorts:{RESET} {escorts} fight(s) on EVERY jump, including detours.")
     lines += navigation_budget_lines(world, path)
     lines += route_mission_implications(world, path)
     return lines

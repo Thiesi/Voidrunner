@@ -857,7 +857,7 @@ def test_general_route_pages_are_read_only_and_hide_unknown_details(monkeypatch,
     assert all(len(frame.splitlines()) <= height for frame in frames)
     assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
     text = page_text(frames)
-    assert target.name in text and "Contract #1" in text
+    assert target.name in text and "#1" in text
     for sid in path[:-1]: assert world.by_id[sid].name not in text
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
 
@@ -874,7 +874,7 @@ def test_general_route_opens_on_a_destination_and_cancel_preserves_the_preview(m
     keys = iter("DB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_auto_route(vr.Palette(False), world)
     text = plain(output.getvalue())
-    assert text.count("Destination: " + world.by_id[chosen].name) == 2
+    assert text.count(f"→ {world.by_id[chosen].name}") == 2
     assert all(world.by_id[sid].discovered for sid, label in choices_seen)
     assert world.save.turn == 0
 
@@ -919,7 +919,7 @@ def test_real_general_route_back_and_eof_preserve_career(tmp_path, commands):
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
         env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=60)
     assert result.returncode == 0 and not result.stderr and b"Route Planner" in result.stdout
-    if b"D1" in commands: assert b"Destination:" in result.stdout
+    if b"D1" in commands: assert b"the shortest route" in result.stdout
     assert b"Charted Destination" in result.stdout  # the planner picks before it plans (#415)
     assert (tmp_path / "77.json").read_bytes() == original
 
@@ -1044,7 +1044,7 @@ def test_general_route_fuel_topups_do_not_require_whole_route_in_tank():
     world.save.ship.fuel = vr.fuel_cost_for_jump(world.here, world.by_id[path[0]], world.save.ship)
     assert vr.prepare_route_jump(world, target.id) == path[0]
     text = " ".join(vr.navigation_route_lines(world, target.id))
-    assert "Refuelling is manual" in text and "Additional fuel cash" in text
+    assert "which is manual" in plain(text) and "Fuel top-ups" in plain(text)
 
 
 def test_large_legacy_bounty_route_uses_bounded_contract_passes(monkeypatch):
@@ -1068,9 +1068,8 @@ def test_large_legacy_bounty_route_uses_bounded_contract_passes(monkeypatch):
         calls.append(args[1:])
         return original(*args)
     monkeypatch.setattr(vr,"bfs_path",path)
-    lines=vr.route_mission_implications(world,[target])
-    assert len(lines)==20_002
-    assert "Contract #20000: objective day 39999" in lines[-1]
+    estimates=vr.route_contract_estimates(world,[target])
+    assert len(estimates)==20_000 and estimates[-1]["day"]==39999
     assert len(calls)==1
 
 
@@ -1091,10 +1090,9 @@ def test_route_bounty_counts_preserve_target_order_and_skip_expired_jobs(route):
         needed=vr.preceding_bounties(world,mission)+1
         onward=vr.bfs_path(world.by_id,end,mission.target_system)
         jumps=arrivals[needed-1] if len(arrivals)>=needed else len(path)+len(onward)+2*(needed-len(arrivals)-bool(onward))
-        expected.append(f"Contract #{mission.id}: objective day {world.save.turn+jumps} ")
+        expected.append(world.save.turn+jumps)
     before=world.save.to_dict()
-    lines=vr.route_mission_implications(world,path)[2:]
-    assert all(line.startswith(prefix) for line,prefix in zip(lines,expected))
+    assert [estimate["day"] for estimate in vr.route_contract_estimates(world,path)]==expected
     assert world.save.to_dict()==before
 
 
@@ -1106,10 +1104,12 @@ def test_general_route_deadlines_include_enroute_objectives_and_bounty_queue():
         vr.Mission(1, "delivery", "Enroute delivery", 500, 0, first, commodity="food", quantity=3, deadline_turn=1),
         vr.Mission(2, "bounty", "First bounty", 500, 0, first, pirate_tier=1),
         vr.Mission(3, "bounty", "Queued bounty", 500, 0, first, pirate_tier=1, deadline_turn=1)]
-    lines = vr.route_mission_implications(world, path)
-    assert "arrival day 1" in lines[2] and "within deadline" in lines[2] and "Missing delivery cargo" in lines[2]
-    assert "objective day 1" in lines[3]
-    assert "TRAVEL ESTIMATE LATE" in lines[4]
+    delivery, first_bounty, queued = vr.route_contract_estimates(world, path)
+    assert delivery["day"] == 1 and not delivery["late"] and not delivery["ready"]
+    assert first_bounty["day"] == 1 and not first_bounty["late"]
+    assert queued["late"]
+    text = plain(" ".join(vr.route_mission_implications(world, path)))
+    assert "cargo still to buy" in text and "late" in text
 
 
 @pytest.mark.parametrize("destination", ["target","elsewhere","current"])
@@ -1119,12 +1119,12 @@ def test_charted_survey_has_no_promised_completion_or_contract_departure(destina
     world.by_id[mission.target_system].discovered=True
     target=mission.target_system if destination=="target" else (0 if destination=="current" else next(s.id for s in world.galaxy if s.id not in (0,mission.target_system)))
     before=copy.deepcopy(world.save.to_dict());rng=world.event_rng.getstate()
-    text=" ".join(vr.route_mission_implications(world,vr.bfs_path(world.by_id,0,target)))
-    assert "BLOCKED SURVEY" in text and "no completion day" in text
-    assert "objective day" not in text and "within deadline" not in text
+    path=vr.bfs_path(world.by_id,0,target)
+    assert [estimate["day"] for estimate in vr.route_contract_estimates(world,path)]==[None]
+    assert "BLOCKED SURVEY" in plain(" ".join(vr.route_mission_implications(world,path)))
     assert "survey blocked" in vr.mission_bearing(world,mission)
     assert "BLOCKED SURVEY" in " ".join(vr.mission_details(world,mission))
-    assert "BLOCKED SURVEY" in " ".join(vr.mission_navigation_lines(world,mission,active=True))
+    assert "BLOCKED SURVEY" in plain(" ".join(vr.mission_navigation_lines(world,mission,active=True)))
     with pytest.raises(vr.MissionError,match="already charted"): vr.prepare_mission_jump(world,mission.id)
     keys=iter("JB");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
     monkeypatch.setattr(world,"checkpoint",lambda:pytest.fail("Blocked survey saved"))
@@ -1143,7 +1143,7 @@ def test_failed_discovery_leaves_survey_blocked_after_save_reload_and_revisit(tm
     with contextlib.redirect_stdout(io.StringIO()): vr.screen_travel(vr.Palette(False),world,target)
     loaded,_,_=vr.load_or_create_save(tmp_path,77,"Tester");resumed=vr.World(loaded)
     assert resumed.by_id[target].discovered and resumed.save.active_missions and resumed.here.id==0
-    assert "BLOCKED SURVEY" in " ".join(vr.route_mission_implications(resumed,[target]))
+    assert vr.route_contract_estimates(resumed,[target])[0]["day"] is None
     credits=resumed.save.pilot.credits
     monkeypatch.setattr(vr,"_resolve_random_travel_encounter",lambda *args:None)
     with contextlib.redirect_stdout(io.StringIO()): vr.screen_travel(vr.Palette(False),resumed,target)
@@ -1153,8 +1153,7 @@ def test_failed_discovery_leaves_survey_blocked_after_save_reload_and_revisit(tm
 def test_uncharted_survey_estimate_uses_the_first_new_discovery_on_route():
     world,mission=_mission_details_world("scan");vr.accept_mission(world,mission)
     path=vr.bfs_path(world.by_id,0,mission.target_system)
-    text=" ".join(vr.route_mission_implications(world,path))
-    assert f"objective day {len(path)}" in text and "BLOCKED" not in text
+    assert [estimate["day"] for estimate in vr.route_contract_estimates(world,path)]==[len(path)]
 
 
 @pytest.mark.parametrize("order", ["same_arrival", "reverse_arrivals", "expired_first", "short_first"])
@@ -1171,14 +1170,12 @@ def test_general_route_delivery_estimates_allocate_cargo_in_resolution_order(ord
     if order == "short_first": a.quantity=4
     world.save.active_missions=[a,b]; _set_cargo(world, {"food":3})
     before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate()
-    lines=vr.route_mission_implications(world,path)
-    rows={mission.id:next(line for line in lines if line.startswith(f"Contract #{mission.id}:")) for mission in (a,b)}
+    rows={estimate["mission"].id:estimate for estimate in vr.route_contract_estimates(world,path)}
     missing = 2 if order == "same_arrival" else 1
     if order == "expired_first":
-        assert "TRAVEL ESTIMATE LATE" in rows[1] and "Missing delivery cargo" not in rows[2]
+        assert rows[1]["late"] and rows[2]["ready"]
     else:
-        assert "Missing delivery cargo" in rows[missing] and "completion day unknown" in rows[missing]
-        assert "Missing delivery cargo" not in rows[3-missing]
+        assert not rows[missing]["ready"] and rows[3-missing]["ready"]
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 

@@ -232,7 +232,7 @@ def test_spatial_map_hides_uncharted_information_except_contract_target():
     path = vr.mission_route(world, mission)
     for sid in path: world.by_id[sid].discovered = False
     text = " ".join(vr.map_list_lines(world, path, mission.target_system))
-    assert world.by_id[mission.target_system].name in text and "danger unknown" in text
+    assert world.by_id[mission.target_system].name in text and "uncharted" in plain(text)
     for station in world.galaxy:
         if not station.discovered and station.id != mission.target_system: assert station.name not in text
     detail = " ".join(vr.map_inspection_lines(world, mission.target_system, path, mission.target_system))

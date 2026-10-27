@@ -2318,8 +2318,10 @@ def test_general_route_map_keeps_independent_tracked_objective_and_route_end(mon
     monkeypatch.setattr(vr, "map_list_lines", capture)
     keys = iter("VOBB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()): vr.screen_auto_route(vr.Palette(False), world, destination=destination)
-    objective = [line for line in lists if world.by_id[target].name in line]
-    endpoint = [line for line in lists if world.by_id[destination].name in line]
+    # Table rows carry the paginator's marks and colors; the markers lead the row.
+    rows = [vr._ANSI_RE.sub("", line).lstrip(vr.STICKY_MARK + vr.MEMBER_MARK) for line in lists]
+    objective = [row for row in rows if world.by_id[target].name in row]
+    endpoint = [row for row in rows if world.by_id[destination].name in row]
     assert len(objective) == 1 and objective[0].startswith("! ")
     assert len(endpoint) == 1 and "X" in endpoint[0].split()[0] and "!" not in endpoint[0].split()[0]
     grid = "".join(vr.spatial_map_grid(world, path, public_target=destination, sector=None, columns=119, rows=36))

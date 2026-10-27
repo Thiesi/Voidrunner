@@ -39,7 +39,7 @@ def test_mission_navigation_pages_preserve_chart_and_career(monkeypatch, termina
     assert all(len(frame.splitlines()) <= height for frame in frames)
     assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
     text=page_text(frames)
-    assert world.by_id[mission.target_system].name in text and "danger unknown" in text
+    assert world.by_id[mission.target_system].name in text and "DANGER" in text and "?" in text
     for sid in vr.mission_route(world,mission)[:-1]: assert world.by_id[sid].name not in text
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
     assert not world.by_id[mission.target_system].discovered
@@ -112,9 +112,9 @@ def test_mission_navigation_budget_includes_bounty_reentry_and_manual_refuelling
     world,mission=_mission_details_world("bounty"); vr.accept_mission(world,mission)
     world.save.current_system=mission.target_system; world.save.ship.fuel=0; world.save.ship.has_gunner=True
     world.save.turn=mission.deadline_turn-1
-    lines=vr.mission_navigation_lines(world,mission,active=True); text=" ".join(lines)
-    assert "Route: 2 jumps" in text and "wages 30cr" in text
-    assert "Refuelling is manual" in text and "MISSES deadline" in text
+    lines=vr.mission_navigation_lines(world,mission,active=True); text=" ".join(plain(" ".join(lines)).split())
+    assert "Wages 2 x 15 -30cr" in text and "needs 2, 0 aboard" in text
+    assert "refuelling, which is manual" in text and "MISSES deadline" in text
     assert "leave/re-enter" in text
 
 
@@ -131,7 +131,8 @@ def test_mission_navigation_procurement_and_posted_escort_obligations():
 
 def test_mission_navigation_large_legacy_queue_budgets_actual_page_number_width(monkeypatch, terminal):
     world,mission=_mission_details_world("bounty")
-    world.save.active_missions=[vr.Mission(i,"bounty","Legacy bounty",500,0,mission.target_system,pirate_tier=1) for i in range(1,1002)]
+    # Enough contracts for four-digit page numbers now that each is one table row.
+    world.save.active_missions=[vr.Mission(i,"bounty","Legacy bounty",500,0,mission.target_system,pirate_tier=1) for i in range(1,6002)]
     mission=world.save.active_missions[-1]
     terminal(40, 12)
     title=f"Contract Route #{mission.id}"; footer="[J] Jump next [N] Next [P] Prev [B] Back: "
