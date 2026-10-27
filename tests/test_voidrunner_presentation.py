@@ -1207,7 +1207,7 @@ def test_combat_lines_name_the_escort_at_stake_only_during_escort_fights():
     assert "fails the escort contract" not in plain
     world, mission = _escort_world("escaped"); world.save.pilot.credits = 10_000
     _set_cargo(world, {"food": 1})  # Dump is only offered with something to dump (#414)
-    lines = vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate))
+    lines = [vr._mission_plain(row) for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate))]
     evade = next(row for row in lines if row.startswith("[E]")); dump = next(row for row in lines if row.startswith("[D]"))
     bribe = next(row for row in lines if row.startswith("[P]"))
     assert evade.endswith("Escaping fails the escort contract.") and dump.endswith("Escaping fails the escort contract.")
@@ -1970,3 +1970,21 @@ def test_a_long_result_reserves_rows_only_on_the_screen_that_shows_it(terminal):
     assert vr._STATUS["screen"] == "Market" and vr._page_frame_rows("Market: 1,200cr") > 1
     assert vr.page_capacity(lines, "Food Exchange", "[B] Back: ") == plain_capacity
     assert vr._page_frame_rows("Food Exchange") == 1
+
+
+def test_a_contract_route_keeps_its_sections_and_table_headings_styled():
+    # Its last step stripped every row to plain text, rules and headings too (#39).
+    world, mission = _mission_details_world("delivery")
+    lines = vr.mission_navigation_lines(world, mission, active=False)
+    sections = [row[1:] for row in lines if row.startswith(vr.SECTION_MARK)]
+    assert sections[:3] == ["CONTRACT", "BUDGET", "LEGS"] and sections[-1] == "NOTES"
+    heading = next(row for row in lines if "LANDS AT" in row)
+    assert vr._ANSI_RE.search(heading)
+
+
+def test_a_deck_result_shows_its_label_apart_from_what_it_says():
+    p = vr.pal()
+    row = vr.result_row("Achievement unlocked: First Light -- Make 10 jumps.")
+    assert plain(row) == "Result: Achievement unlocked: First Light -- Make 10 jumps."
+    assert f"{p.slate}Achievement unlocked:" in row and f"{vr.BOLD}First Light" in row
+    assert plain(vr.result_row("First Flight accepted and tracked.")) == "Result: First Flight accepted and tracked."

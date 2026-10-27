@@ -8562,6 +8562,23 @@ class _FinaleScene(_Scene):
         self.caption(stage, t, 0.66, self.title, _SPLASH_GOLD, self.detail)
 
 
+def result_row(message: str) -> str:
+    """One result on the deck: its label dim, what it says bright (issue #39 playtest).
+
+    "Result: Achievement unlocked: First Light -- Make 10 jumps." was one color
+    end to end. A message that opens with a short label ("Departure:",
+    "Achievement unlocked:") keeps the label in the labels' color, and what
+    follows a " -- " is the explanation of the bold part before it.
+    """
+    p = pal()
+    head, sep, rest = message.partition(": ")
+    if not (sep and rest and len(head) <= 24):
+        head, rest = "", message
+    name, dash, why = rest.partition(" -- ")
+    body = f"{p.ink}{BOLD}{name}{RESET} {p.slate}-- {why}{RESET}" if dash else f"{p.ink}{rest}{RESET}"
+    return f"{p.slate}Result:{RESET} " + (f"{p.slate}{head}:{RESET} " if head else "") + body
+
+
 def accolade_announcements(earned: list) -> list[str]:
     """The deck's rows for what a moment earned: each one by name when there
     are a few, a single count when a returning career catches up on many."""
@@ -9735,7 +9752,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
     while True:
         lines = station_deck_lines(world, expanded=expanded)
         if notes or completed:
-            lines[0:0] = notes + ["Result: " + message for message in completed]
+            lines[0:0] = notes + [result_row(message) for message in completed]
         footer = "[<] Prev [>] Next [X] Compact [Q] Exit: " if expanded else "[<] Prev [>] Next [X] Expand [Q] Exit: "
         choice, page, count = _draw_service_page(p, f"Command Deck: {world.save.pilot.credits:,}cr", lines, footer, page)
         if (moved := page_step(choice, page, count)) is not None: page = moved
@@ -13675,46 +13692,67 @@ def prepare_mission_jump(world: World, mission_id: int) -> int:
 
 
 def mission_navigation_lines(world: World, mission: Mission, *, active: bool) -> list[str]:
+    """A contract's route as a sheet: the contract, the budget, the legs, then notes.
+
+    It was seven sentences ahead of the budget, and its last step stripped every
+    row to plain text -- the section rules and the table's headings with it, so
+    the whole screen read in one color (issue #39 playtest). What decides the
+    next jump -- target, deadline, cargo, fights on the way -- is now CONTRACT
+    rows with a mark each; what only explains the screen is NOTES, last and dim.
+    """
+    p = pal()
     path = mission_route(world, mission)
     target = world.by_id[mission.target_system]
-    lines = [f"{mission.description}", f"Target: {target.name} ({target.x},{target.y}).",
-             "Contract bearings do not chart destinations. Uncharted danger remains unknown."]
-    live = active and any(m.id == mission.id for m in world.save.active_missions) and not mission_expired(world, mission)
+    lines = [f"{p.ink}{BOLD}{_mission_plain(mission.description)}{RESET}"]
     if mission.kind == "scan" and target.discovered:
-        lines.append("BLOCKED SURVEY: target already charted. Revisiting cannot complete it; no completion day. An active contract can be abandoned from its details to free the slot.")
-        return [_mission_plain(line) for line in lines]
-    if live:
-        lines.append("Jump next tracks this contract and flies one leg. Review the next step after each outcome.")
-    else:
-        lines.append("Read-only route: accept this contract first, or return to the board if it is no longer active.")
-    if not path:
-        lines.append("At the destination. No jump is needed for this objective.")
+        lines.append(f"{p.wrong}BLOCKED SURVEY: target already charted. Revisiting cannot complete it; no completion day.{RESET}")
+        lines.append(f"{p.slate}An active contract can be abandoned from its details to free the slot.{RESET}")
+        return lines
+    live = active and any(m.id == mission.id for m in world.save.active_missions) and not mission_expired(world, mission)
+    checks = [("TARGET", f"{_mission_plain(target.name)} ({target.x},{target.y})"
+               + ("" if path else ", you are here"), None)]
+    if mission.deadline_turn is not None:
+        arrival = world.save.turn + len(path)
+        late = arrival > mission.deadline_turn
+        checks.append(("DEADLINE", f"day {mission.deadline_turn}, arrive day {arrival}"
+                       + ("; MISSES deadline by travel" if late else ""), "bad" if late else "good"))
+    warnings, notes = [], []
     if mission.kind == "delivery":
         have, promised = contract_cargo_aboard(world, mission)
         missing = max(0, mission.quantity - have)
         aboard = f"{have} aboard" + (f" ({promised} more promised to other contracts)" if promised else "")
-        lines.append(f"Delivery: {mission.quantity} {COMMODITIES[mission.commodity]['label']} required; {aboard}, {missing} missing.")
+        checks.append(("CARGO", f"{mission.quantity} {COMMODITIES[mission.commodity]['label']}: {aboard}, {missing} missing",
+                       "bad" if missing else "good"))
         if missing:
             if not COMMODITIES[mission.commodity]["legal"] and world.here.economy != "Haven":
-                lines.append("This station prohibits buying the missing contraband; procure it at a Haven. Travel budget excludes procurement.")
+                warnings.append("This station prohibits buying the missing contraband; procure it at a Haven.")
             else:
                 stock = market_depth_quote(world, world.here.id, mission.commodity)["stock"]
-                lines.append(f"Procure the missing cargo before delivery; this station has {stock} units in spot stock. Travel budget excludes procurement.")
+                warnings.append(f"Procure the missing cargo before delivery; this station has {stock} units in spot stock.")
+            notes.append("Travel budget excludes procurement.")
     if mission.kind == "bounty":
         ahead = preceding_bounties(world, mission)
-        lines.append(f"Bounty route includes {ahead} earlier target contract(s) and any required leave/re-enter legs. Escape can require another attempt.")
+        checks.append(("BOUNTY", f"{plural(ahead, 'earlier target contract')} first", "info" if ahead else None))
+        notes.append("The bounty route includes any required leave/re-enter legs. Escape can require another attempt.")
     escorts = sum(m.kind == "escort" and not mission_expired(world, m) for m in world.save.active_missions)
     if escorts:
-        lines.append(f"Active escorts: {escorts} fight(s) on every jump, including detours.")
+        checks.append(("ESCORTS", f"{plural(escorts, 'fight')} on every jump, including detours", "info"))
     if mission.kind == "escort" and not active:
-        lines.append("Accepting this escort adds a fight on EVERY jump, including detours, until completion or failure.")
-    if mission.kind == "scan":
-        lines.append("Survey: arrival or scanner discovery can complete the objective; viewing this route cannot.")
+        warnings.append("Accepting this escort adds a fight on EVERY jump, including detours, until completion or failure.")
+    lines.append(section("CONTRACT"))
+    lines += _sheet_rows(checks)
+    lines += [f"{p.gold}{warning}{RESET}" for warning in warnings]
     lines += navigation_budget_lines(world, path, public_target=target.id)
-    if mission.deadline_turn is not None:
-        timing = "within deadline" if world.save.turn + len(path) <= mission.deadline_turn else "MISSES deadline by travel"
-        lines.append(f"Deadline day {mission.deadline_turn} inclusive: {timing}.")
-    return [_mission_plain(line) for line in lines]
+    if live:
+        notes.insert(0, "[J] Jump next tracks this contract and flies one leg; review the next step after each outcome.")
+    else:
+        notes.insert(0, "Read-only route: accept this contract first, or return to the board if it is no longer active.")
+    if mission.kind == "scan":
+        notes.append("Survey: arrival or scanner discovery can complete the objective; viewing this route cannot.")
+    notes.append("Contract bearings do not chart destinations. Uncharted danger remains unknown.")
+    lines.append(section("NOTES"))
+    lines += [f"{p.slate}{note}{RESET}" for note in notes]
+    return lines
 
 
 def navigation_budget_lines(world: World, path: list[int], *, public_target: int | None = None) -> list[str]:
@@ -13784,8 +13822,21 @@ def navigation_budget_lines(world: World, path: list[int], *, public_target: int
             else _mission_plain(line) for line in lines]
 
 
+def last_hop_lines(world: World, result: str) -> list[str]:
+    """What the last jump said, kept on the route screen it was flown from.
+
+    A hop prints its departure, encounters and arrival as it happens, and the
+    route screen drawn after it covered them before they could be read; only
+    the deck showed them again, and a route of several jumps never passes the
+    deck (issue #39 playtest). The route screens now open with them.
+    """
+    p = pal()
+    return ([section("LAST HOP"), f"{p.ink}{result}{RESET}"]
+            + [f"{p.gold}{line}{RESET}" for line in world.hop_report])
+
+
 def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, active: bool) -> None:
-    page, result, pages = 0, None, None
+    page, result, pages, flown = 0, None, None, False
     while True:
         if pages is None:
             live = active and any(m.id == mission.id for m in world.save.active_missions) and not mission_expired(world, mission)
@@ -13793,7 +13844,7 @@ def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, act
             lines = ([mission.description, "Contract is no longer active. Return to the board or career log."]
                      if active and not live else mission_navigation_lines(world, mission, active=active))
             if result:
-                lines.insert(0, result)
+                lines[0:0] = last_hop_lines(world, result) if flown else [result]
             pages = _trade_pages(lines, f"Contract Route #{mission.id}", footer)
         page = min(page, len(pages) - 1)
         draw_page(p, f"Contract Route #{mission.id}", pages[page], page, len(pages))
@@ -13810,16 +13861,17 @@ def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, act
             try:
                 destination = prepare_mission_jump(world, mission.id)
             except MissionError as exc:
-                result, page, pages = str(exc), 0, None
+                result, flown, page, pages = str(exc), False, 0, None
                 continue
             world.commit()
             screen_travel(p, world, destination)
             world.commit()
-            result = f"Last hop: arrived at {world.here.name}. Review the route before another jump."
+            flown = True
+            result = f"Arrived at {world.here.name}. Review the route before another jump."
             if world.save.current_system != destination:
                 result = f"Travel diverted to {world.here.name}; the route has been recalculated."
             if not any(m.id == mission.id for m in world.save.active_missions):
-                result += " Contract is no longer active; check the retained travel result and career log."
+                result += " Contract is no longer active; the hop's report below and the career log say why."
             page, pages = 0, None
 
 
@@ -14654,7 +14706,7 @@ def _do_scan(p: Palette, world: World) -> str | None:
     page, result, report = 0, None, []
     while True:
         can_scan = world.save.ship.scanner_tier > 0 and world.save.ship.fuel >= 2 and bool(survey_candidates(world))
-        lines = ([f"Result: {result}"] + report if result else []) + survey_terms(world)
+        lines = ([result_row(result)] + report if result else []) + survey_terms(world)
         action, page, count = _draw_service_page(p, f"Survey {world.save.pilot.credits:,}cr", lines,
             "[S] Survey [B] Back [<>] Page: " if can_scan else "[B] Back [<>] Page: ", page)
         if action in ("B", "Q"): return result
@@ -15043,7 +15095,7 @@ def navigation_route_lines(world: World, destination: int | None) -> list[str]:
 
 def screen_auto_route(p: Palette, world: World, *, destination: int | None = None) -> None:
     """Screen-first route planner; each deliberate command flies one ordinary hop."""
-    page, result, pages = 0, None, None
+    page, result, pages, flown = 0, None, None, False
     if destination is None:
         # Nothing to plan without a destination: open the picker at once; Back leaves.
         choices = sorted(((station.id, station.name) for station in world.galaxy
@@ -15057,7 +15109,7 @@ def screen_auto_route(p: Palette, world: World, *, destination: int | None = Non
             footer = ("[J] Jump next " if path else "") + "[D] Destination [V] Map [N] Next [P] Prev [B] Back: "
             lines = navigation_route_lines(world, destination)
             if result:
-                lines.insert(0, result)
+                lines[0:0] = last_hop_lines(world, result) if flown else [result]
             pages = _trade_pages(lines, "Route Planner", footer)
         page = min(page, len(pages) - 1)
         draw_page(p, "Route Planner", pages[page], page, len(pages))
@@ -15080,11 +15132,12 @@ def screen_auto_route(p: Palette, world: World, *, destination: int | None = Non
             try:
                 hop = prepare_route_jump(world, destination)
             except MissionError as exc:
-                result, page, pages = str(exc), 0, None
+                result, flown, page, pages = str(exc), False, 0, None
                 continue
             screen_travel(p, world, hop)
             world.commit()
-            result = f"Last hop: arrived at {world.here.name}. Review before another jump."
+            flown = True
+            result = f"Arrived at {world.here.name}. Review before another jump."
             if world.here.id != hop:
                 result = f"Travel diverted to {world.here.name}; route recalculated."
             page, pages = 0, None
@@ -15366,15 +15419,16 @@ def bounty_identification_lines(world: World, warrant: dict) -> list[str]:
         status = ("Identity confirmed; no mistaken-identity penalty." if warrant["matches"] else
                   f"Identity mismatch confirmed. Firing pays the bounty; the wrong-ID penalty is +{NOTORIETY_PER_WRONG_BOUNTY_KILL} notoriety and Concord -3, in addition to combat rewards.")
     else:
-        status = (f"Identity unverified: {WRONG_BOUNTY_KILL_CHANCE:.0%} of posted matches are incorrect. "
-                  f"Wrong-ID penalty: +{NOTORIETY_PER_WRONG_BOUNTY_KILL} notoriety and Concord -3, in addition to combat rewards.")
+        status = (f"Identity unverified: {harm(f'{WRONG_BOUNTY_KILL_CHANCE:.0%}')} of posted matches are incorrect. "
+                  f"Wrong-ID penalty: {harm(f'+{NOTORIETY_PER_WRONG_BOUNTY_KILL} notoriety and Concord -3')}, in addition to combat rewards.")
     lines = [status]
     if not warrant["engaged"]:
         if not warrant["checked"]:
-            lines.append("[V] Verify before engaging: costs one fuel." if world.save.ship.fuel else "Verification unavailable: requires one fuel.")
+            lines.append(f"{key_label('V', 'Verify')} before engaging: costs {cost('one fuel')}." if world.save.ship.fuel
+                         else "Verification unavailable: requires one fuel.")
         elif not warrant["matches"]:
-            lines.append("[R] Close incorrect warrant: no fight, payout or mission credit.")
-        lines.append("[W] Withdraw before engaging: keep the contract and continue your journey.")
+            lines.append(f"{key_label('R', 'Report')}: close the incorrect warrant; no fight, payout or mission credit.")
+        lines.append(f"{key_label('W', 'Withdraw')} before engaging: keep the contract and continue your journey.")
     else: lines.append("Engaged: identification and free withdrawal are closed.")
     return lines
 
@@ -15585,6 +15639,28 @@ def combat_contact_rows(world: World, pirate: Pirate, pirate_hp: int, hull_hp: i
                  optional=(3,), repeat_header=False)[1:]
 
 
+def odds(chance: float) -> str:
+    """A chance as a bold figure in the color of how good it is (issue #39 playtest).
+
+    The combat options read as one paragraph of slate and white, and the four
+    numbers that decide a fight -- the odds of each option, the damage coming,
+    what a bribe costs -- sat in it at the same weight as "draws enemy fire"."""
+    p = pal()
+    color = p.mint if chance >= 0.6 else p.amber if chance >= 0.3 else p.alarm
+    return f"{BOLD}{color}{chance:.0%}{RESET}"
+
+
+def harm(text: str) -> str:
+    """Damage or a penalty coming the pilot's way, as `odds` draws a chance."""
+    return f"{BOLD}{pal().alarm}{text}{RESET}"
+
+
+def cost(text: str) -> str:
+    """What an option charges, as `odds` draws a chance: bold value, since gold
+    is the hotkeys' alone (`key_label`)."""
+    return f"{BOLD}{pal().ink}{text}{RESET}"
+
+
 def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, patrol: bool, tactics: dict, details: bool = False, warrant: dict | None = None, hull_before: int | None = None) -> list[str]:
     """Read-only combat terms; no random draw or persisted presentation state."""
     ship, pilot = world.save.ship, world.save.pilot
@@ -15618,12 +15694,12 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     # "Ravage" read as a second contact or a ship class (#648).
     lines.append(f"{p.ink}{_mission_plain(pirate.name)}{RESET} {p.slate}flies {tactics['profile']}; intent{RESET} "
                  f"{badge(intent.upper(), 'danger')}  "
-                 f"{p.slate}incoming{RESET} {p.ink}{span(low, high)}{RESET} "
+                 f"{p.slate}incoming{RESET} {harm(span(low, high))} "
                  f"{p.slate}if it survives or you fail to disengage{RESET}")
     if tactics["brace_ready"]:
         low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, tactics, braced=True, cover=squadron_cover(world)) for roll in (4, 9))
-        lines.append(f"{key_label('G', 'Guard')}{p.slate}: your shot at 55%, incoming{RESET} "
-                     f"{p.ink}{span(low, high)}{RESET}{p.slate}. Fire recharges Guard.{RESET}")
+        lines.append(f"{key_label('G', 'Guard')}{p.slate}: your shot at{RESET} {odds(0.55)}{p.slate}, incoming{RESET} "
+                     f"{harm(span(low, high))}{p.slate}. Fire recharges Guard.{RESET}")
     else: lines.append("Guard recharging: fire once before using G again.")
     if not patrol and outclassed(world, pirate, tactics):
         # One row, said where the decision is made: the numbers above already
@@ -15645,27 +15721,29 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         chance = combat_evade_chance(world, pirate, dumped_cargo=True, tactics=tactics, cargo_units=max(0, used - units))
         what = (f"jettison half the hold ({units} of {used} units, chosen at random) for the raider to take"
                 if outclassed(world, pirate, tactics) else "jettison one unit of a random held commodity to try to break contact")
-        dump_row = f"[D] Dump: {what}; about {chance:.0%} success; failure draws fire." + escort_at_stake
+        dump_row = f"{key_label('D', 'Dump')}: {what}; about {odds(chance)} success; failure draws fire." + escort_at_stake
     # Against a raider that outclasses the hull, Dump is the answer the alert row
     # points at, so it leads the options: listed fourth, it fell onto the second
     # page at 80x24 while the row that names it stayed on the first (the gallery's
     # "Combat, outclassed" panel is where that was seen).
     dump_leads = dump_row is not None and outclassed(world, pirate, tactics)
     lines += [section("OPTIONS")] + ([dump_row] if dump_leads else []) + [
-        "[F] Fire: one shot; a surviving enemy returns fire.",
-        f"[E] Evade: about {combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics, patrol=patrol):.0%} success; failure draws enemy fire.{escort_at_stake}",
+        f"{key_label('F', 'Fire')}: one shot; a surviving enemy returns fire.",
+        f"{key_label('E', 'Evade')}: about {odds(combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics, patrol=patrol))} success; failure draws enemy fire.{escort_at_stake}",
     ]
     if patrol:
-        cost = notoriety_fine_cost(pilot.notoriety)
-        lines.append((f"[S] Surrender: pay {cost}cr, clear notoriety, Concord +2 and escape. " if pilot.credits >= cost else f"Surrender requires {cost}cr. ") +
-                     ("Available." if pilot.credits >= cost else "UNAFFORDABLE; surrender unavailable."))
+        fine = notoriety_fine_cost(pilot.notoriety)
+        lines.append((f"{key_label('S', 'Surrender')}: pay {cost(f'{fine}cr')}, clear notoriety, Concord +2 and escape. "
+                      if pilot.credits >= fine else f"Surrender requires {cost(f'{fine}cr')}. ") +
+                     ("Available." if pilot.credits >= fine else harm("UNAFFORDABLE") + "; surrender unavailable."))
     else:
         if dump_row is not None and not dump_leads:
             lines.append(dump_row)
-        cost = bribe_cost(pirate)
-        lines.append((f"[P] Pay bribe: " if pilot.credits >= cost else "Pay bribe unavailable: ") +
-                     f"{cost}cr only if accepted (about {bribe_chance(world, pirate):.0%}); "
-                     "Blackwake +2 if accepted; refusal draws enemy fire. " + ("Available." if pilot.credits >= cost else "UNAFFORDABLE; bribe unavailable.")
+        bribe = bribe_cost(pirate)
+        lines.append((f"{key_label('P', 'Pay bribe')}: " if pilot.credits >= bribe else "Pay bribe unavailable: ") +
+                     f"{cost(f'{bribe}cr')} only if accepted (about {odds(bribe_chance(world, pirate))}); "
+                     "Blackwake +2 if accepted; refusal draws enemy fire."
+                     + ("" if pilot.credits >= bribe else " " + harm("UNAFFORDABLE") + "; bribe unavailable.")
                      + (" An accepted bribe fails the escort contract." if escort_at_stake else ""))
     if warrant is not None:
         # After the options it qualifies: as the page's opening paragraph it

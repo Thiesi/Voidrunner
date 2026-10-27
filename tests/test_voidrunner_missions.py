@@ -84,7 +84,7 @@ def test_mission_navigation_tracks_before_one_hop_and_recalculates_after_it(monk
     assert calls==[first] and world.save.turn==1
     if outcome=="divert": assert "Travel diverted" in output.getvalue()
     elif outcome=="fail": assert "no longer active" in output.getvalue() and world.save.tracked_mission_id is None
-    else: assert "Last hop: arrived" in plain(output.getvalue()) and world.save.tracked_mission_id==mission.id
+    else: assert "Arrived at" in plain(output.getvalue()) and world.save.tracked_mission_id==mission.id
 
 
 def test_mission_navigation_save_failure_stops_before_departure(monkeypatch):
@@ -175,7 +175,7 @@ def test_real_mission_navigation_completes_delivery_once_before_retained_result(
         world.sync_discovered()
     world._checkpoint=lambda current:vr.persist(current,tmp_path,77); world.checkpoint()
     credits=world.save.pilot.credits
-    with _door_stopped_at(tmp_path,commands,b"Last hop: arrived"):
+    with _door_stopped_at(tmp_path,commands,b"Arrived at"):
         saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
         assert saved.current_system==destination and saved.turn==1 and saved.pending_travel is None
         assert saved.pilot.credits==credits+500 and not saved.active_missions and not saved.cargo

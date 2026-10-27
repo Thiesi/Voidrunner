@@ -833,7 +833,24 @@ def test_general_route_flies_only_one_leg_until_another_command(monkeypatch, out
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_auto_route(vr.Palette(False), world, destination=target.id)
     assert calls == [expected]
-    assert ("Last hop: arrived" if outcome == "arrive" else "Travel diverted") in plain(output.getvalue())
+    assert ("Arrived at" if outcome == "arrive" else "Travel diverted") in plain(output.getvalue())
+
+
+def test_a_route_screen_keeps_what_the_jump_it_flew_said(monkeypatch):
+    # The departure report printed during the hop was covered by the route
+    # screen drawn after it, and a multi-jump route never passes the deck (#39).
+    world = _world_with_seed(106)
+    target = next(s for s in world.galaxy if len(vr.bfs_path(world.by_id, 0, s.id)) >= 2)
+    target.discovered = True
+    def travel(p, current, hop):
+        current.save.current_system = hop
+        current.hop_report = ["Departure: 2 fuel units burned, 19 left.", "New system charted: Zenith Deep."]
+    monkeypatch.setattr(vr, "screen_travel", travel)
+    keys = iter("JB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_auto_route(vr.Palette(False), world, destination=target.id)
+    text = plain(output.getvalue())
+    assert "LAST HOP" in text and "Departure: 2 fuel units burned" in text and "New system charted: Zenith Deep." in text
 
 
 @pytest.mark.parametrize("width,height", [(40,12), (80,24)])

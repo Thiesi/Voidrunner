@@ -2682,7 +2682,7 @@ def test_dump_preview_matches_actual_post_disposal_escape_boundary(monkeypatch, 
     world = _world_with_seed(42); _set_cargo(world, {"food": 1})
     pirate = vr.Pirate(name, 0, 50, 50)
     # The actual new fight uses this opponent's initial intent, including Harry.
-    line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate)) if row.startswith("[D]"))
+    line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate)) if plain(row).startswith("[D]"))
     monkeypatch.setattr(vr, "read_key", lambda: "D")
     monkeypatch.setattr(world.event_rng, "random", lambda: roll)
     with contextlib.redirect_stdout(io.StringIO()): assert vr.screen_combat(vr.Palette(False), world, pirate) == "escaped"
@@ -3283,7 +3283,7 @@ def test_contract_pages_do_not_count_cargo_another_contract_is_owed():
     details = plain(" ".join(vr.mission_details(world, offer)))
     assert "CARGO buy 8 here; 0 aboard, 10 promised elsewhere" in " ".join(details.split())
     route = plain(" ".join(vr.mission_navigation_lines(world, offer, active=False)))
-    assert "0 aboard (10 more promised to other contracts), 8 missing." in " ".join(route.split())
+    assert "8 Food: 0 aboard (10 more promised to other contracts), 8 missing" in " ".join(route.split())
 
 
 def test_selling_promised_cargo_says_whose_and_asks_first(monkeypatch):
