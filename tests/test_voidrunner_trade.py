@@ -143,7 +143,7 @@ def test_trade_route_quote_uses_stale_sale_data_and_exact_fuel_wage_budget(monke
     assert quote["fuel_cash"] == quote["fuel"] * 6
     assert quote["cash_needed"] == quote["cargo_cost"] + quote["fuel_cash"] + quote["wages"]
     assert quote["margin"] == quote["receipts"] - quote["cash_needed"]
-    assert "SHORT" in " ".join(vr.trade_route_lines(world, destination, "food", 3, False))
+    assert " short" in plain(" ".join(vr.trade_route_lines(world, destination, "food", 3, False)))
     assert world.save.to_dict() == before
 
 
@@ -209,13 +209,13 @@ def test_trade_route_hides_uncharted_intermediate_names_and_rejects_oversized_le
     for sid in path[:-1]:
         world.by_id[sid].discovered = False
     lines = " ".join(vr.trade_route_lines(world, destination, "food", 1, False))
-    assert "Uncharted system" in lines and "danger unknown" in lines
+    assert "Uncharted system" in lines and "?" in plain(lines)
     assert all(world.by_id[sid].name not in lines for sid in path[:-1])
     monkeypatch.setattr(vr, "fuel_capacity", lambda ship: 0)
     quote = vr.trade_route_quote(world, destination, "food", 1)
     assert not quote["feasible"]
     lines = " ".join(vr.trade_route_lines(world, destination, "food", 1, False))
-    assert "INFEASIBLE" in lines and "Estimated margin" not in lines
+    assert "infeasible" in plain(lines) and "NET unavailable" in plain(lines)
 
 
 @pytest.mark.parametrize("fault", ["unknown_quote", "same_station", "quantity", "boolean", "space", "missing_hold", "pending", "illegal"])
@@ -353,7 +353,8 @@ def test_trade_route_editing_fields_and_cancelling_is_read_only(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_trade_route(vr.Palette(False), world)
     said = plain(output.getvalue())
-    assert "x2" in said
+    import re
+    assert re.search(r"\b2 [A-Z][A-Za-z ]* → ", said)
     assert "existing hold cargo" in said and "buy new cargo here" in said
     assert world.save.to_dict() == before
 
@@ -800,7 +801,7 @@ def test_market_depth_route_refuses_unavailable_procurement_and_labels_sale_limi
     quote = vr.trade_route_quote(world, destination, "food", 3, use_hold=True)
     assert quote["margin"] is None and quote["demand_shortfall"]
     text = " ".join(vr.trade_route_lines(world, destination, "food", 3, True))
-    assert "DEMAND WARNING" in text and "may replenish" in text
+    assert "exceeds the observed buying demand" in plain(text) and "may replenish" in text
     assert world.event_rng.getstate() == rng and world.save.market_depth == {0: {"food": {"day": 0, "stock": 0, "demand": 96}}}
 
 

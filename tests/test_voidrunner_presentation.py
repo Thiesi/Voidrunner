@@ -1422,7 +1422,7 @@ def test_ledger_route_draft_starts_from_the_best_lead(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_trade_route(vr.Palette(False), world)
     plain = page_text(output.getvalue())
-    assert f"{vr.COMMODITIES[leads[0]['commodity']]['label']} x{leads[0]['quantity']}" in plain
+    assert f"{leads[0]['quantity']} {vr.COMMODITIES[leads[0]['commodity']]['label']} →" in plain
     assert "Food x1" not in plain or leads[0]["commodity"] == "food" and leads[0]["quantity"] == 1
     keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:

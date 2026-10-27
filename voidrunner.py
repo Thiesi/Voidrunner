@@ -11581,10 +11581,19 @@ def remembered_market_lines(world: World) -> list[str]:
 
 
 def trade_route_lines(world: World, destination: int | None, commodity: str, quantity: int, use_hold: bool) -> list[str]:
-    name = world.by_id[destination].name if destination is not None else "not selected"
-    lines = [f"Destination: {name}. Cargo: {COMMODITIES[commodity]['label']} x{quantity}.",
-             f"Source: {'existing hold cargo' if use_hold else 'buy new cargo here'}. Credits: {world.save.pilot.credits:,}cr.",
-             "Use [E] Edit draft to change the route. Back makes no changes; this estimate never buys cargo or launches a route."]
+    """A trade run's estimate as a sheet, like a contract's (issue #39).
+
+    Fifteen sentences of receipts, costs, fuel, wages, demand and warnings
+    become CHECKS -- is the quote fresh, will they buy it all, will fuel and cash
+    carry it, does a contract want this cargo -- and MONEY from receipts to the
+    margin, then the legs as the route planner's table.
+    """
+    p = pal()
+    label = COMMODITIES[commodity]["label"]
+    name = _mission_plain(world.by_id[destination].name) if destination is not None else "not selected"
+    lines = [f"{p.ink}{BOLD}{quantity} {label} {glyph('arrow')} {name}{RESET} "
+             f"{p.slate}{glyph('dot')} {'from the hold' if use_hold else 'bought here'}{RESET}",
+             f"{p.slate}[E] edits the draft. Back makes no changes; this estimate never buys cargo or launches a route.{RESET}"]
     if destination is None:
         return lines + ["No other station has remembered prices yet. Visit another station or receive a trader's market report first."]
     try:
@@ -11592,45 +11601,68 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
     except TradeError as exc:
         return lines + [str(exc)]
     age = world.save.turn - quote["observed_day"]
-    lines.extend([
-        f"Destination sell quote: {quote['unit_sale']}cr/unit, observed day {quote['observed_day']} ({age} days old).",
-        f"Sale receipts if the full load arrives and the station buys it: {quote['receipts']:,}cr.",
-        f"Cargo acquisition cost: {quote['cargo_cost']:,}cr.",
-        f"Buy now: {quote['procurement']:,}cr. Credits after buying: {world.save.pilot.credits - quote['procurement']:,}cr.",
-        f"Fuel: {quote['fuel']} units, replacement value {quote['fuel'] * 6}cr. Additional fuel cash: {quote['fuel_cash']}cr with your current tank.",
-        f"Crew wages: {quote['wages']}cr for {plural(len(quote['legs']), 'jump')}. Arrival day {world.save.turn + len(quote['legs'])} if uninterrupted.",
-        f"Cash needed before sale: {quote['cash_needed']:,}cr. Budget {'covered' if quote['cash_needed'] <= world.save.pilot.credits else 'SHORT by ' + str(quote['cash_needed'] - world.save.pilot.credits) + 'cr'}.",
-    ])
+    credits = world.save.pilot.credits
+    checks = [("QUOTE", f"{quote['unit_sale']}cr/unit, seen " + ("today" if age <= 0 else f"{age}d ago"),
+               "good" if age <= 3 else "info")]
     if quote["observed_demand"] is None:
-        lines.append("Destination buying demand was not observed; confirm capacity before relying on the full sale.")
+        checks.append(("DEMAND", "not observed", "unknown"))
+    elif quote["demand_shortfall"]:
+        checks.append(("DEMAND", f"only {quote['observed_demand']} observed", "bad"))
     else:
-        lines.append(f"Observed destination buying demand: {quote['observed_demand']} units on day {quote['observed_day']}; may replenish or change.")
-    if quote["demand_shortfall"]:
-        lines.append("DEMAND WARNING: this load exceeds observed buying demand. Reduce quantity or obtain a newer observation.")
+        checks.append(("DEMAND", f"{quote['observed_demand']} observed", "good"))
+    max_leg = max((burn for _, burn in quote["legs"]), default=0)
     if not quote["feasible"]:
-        lines.append("INFEASIBLE: a route leg exceeds your tank capacity. Upgrade or plan a different route.")
-    elif quote["margin"] is not None:
-        lines.append(f"Estimated margin after cargo, replacement fuel and wages: {quote['margin']:+,}cr.")
+        checks.append(("FUEL", f"infeasible: a jump needs {max_leg}", "bad"))
     else:
-        lines.append("Total margin unavailable: unknown cargo costs, delivery commitments or observed buying demand affect this load.")
+        checks.append(("FUEL", f"needs {quote['fuel']}, {world.save.ship.fuel} aboard",
+                       "good" if quote["fuel"] <= world.save.ship.fuel else "info"))
+    short = quote["cash_needed"] - credits
+    checks.append(("CASH", f"{quote['cash_needed']:,}cr of {credits:,}cr" + (f", {short:,} short" if short > 0 else ""),
+                   "bad" if short > 0 else "good"))
+    checks.append(("ARRIVAL", f"day {world.save.turn + len(quote['legs'])}, today {world.save.turn}", None))
     if quote["conflicts"]:
-        lines.append("DELIVERY CONFLICT: these contracts may consume this commodity on the route: " + "; ".join(quote["conflicts"]) + ".")
-    lines.append("ROUTE - shortest by jumps; fuel top-ups at stations are budgeted at 6cr/unit.")
-    tank = world.save.ship.fuel
-    previous = world.here
-    for sid, burn in quote["legs"]:
+        checks.append(("CONTRACTS", "may take this cargo", "bad"))
+    money = [("Receipts", quote["receipts"], "good"),
+             (f"Cargo ({'hold basis' if use_hold else f'{quantity} bought'})", -quote["cargo_cost"], "bad"),
+             ("Fuel replacement", -quote["fuel"] * 6, "bad")]
+    if quote["wages"]:
+        money.append(("Wages", -quote["wages"], "bad"))
+    if quote["margin"] is not None and quote["feasible"]:
+        money.append(("NET", quote["margin"], "good" if quote["margin"] > 0 else "bad"))
+    else:
+        money.append(("NET unavailable", None, "info"))
+    if not use_hold:
+        money.append((f"leaves {credits - quote['procurement']:,}cr after buying", None, "info"))
+    lines.append(section("ESTIMATE"))
+    lines += sheet_columns([("CHECKS", _sheet_rows(checks)), ("MONEY", _money_rows(money))])
+    if quote["demand_shortfall"]:
+        lines.append(f"{p.wrong}This load exceeds the observed buying demand;{RESET} reduce the quantity or observe again. "
+                     "Demand may replenish or change.")
+    if quote["conflicts"]:
+        lines.append(f"{p.wrong}Delivery conflict:{RESET} these contracts may consume this cargo on the route: "
+                     + "; ".join(quote["conflicts"]) + ".")
+    rows, styles = [], []
+    tank, previous = world.save.ship.fuel, world.here
+    for number, (sid, burn) in enumerate(quote["legs"], 1):
         system = world.by_id[sid]
-        if tank < burn and burn <= fuel_capacity(world.save.ship):
-            station = previous.name if previous.discovered else "the uncharted intermediate station"
-            lines.append(f"Refuel {burn - tank} units at {station} before the next leg.")
+        refuel = f"{p.deep}{glyph('flat')}{RESET}"
+        if burn > fuel_capacity(world.save.ship):
+            refuel = f"{p.wrong}BLOCKED by tank capacity{RESET}"
+        elif tank < burn:
+            station = _mission_plain(previous.name) if previous.discovered else "the uncharted stop"
+            refuel = f"{p.gold}+{burn - tank} at {station}{RESET}"
             tank = burn
-        label = system.name if system.discovered else "Uncharted system"
-        danger = str(system.danger) if system.discovered else "unknown"
-        blocked = " BLOCKED by tank capacity." if burn > fuel_capacity(world.save.ship) else ""
-        lines.append(f"Jump: {label}; {burn} fuel; danger {danger}.{blocked}")
+        danger = (f"{p.tone(danger_tone(system.danger))}{system.danger}{RESET}" if system.discovered
+                  else f"{p.slate}?{RESET}")
+        rows.append([f"{number}", _mission_plain(system.name) if system.discovered else "Uncharted system",
+                     f"{burn}", danger, refuel])
+        styles.append(["label", "value", "value", "value", "value"])
         tank = max(0, tank - burn)
         previous = system
-    lines.append("Estimate assumes the remembered sale price, sufficient station buying demand and intact cargo. Market changes, encounters, repairs, fines, detours and other income/spending are excluded.")
+    lines.append(section("LEGS"))
+    lines += table(["#", "LANDS AT", "FUEL", "DANGER", "REFUEL FIRST"], rows, "rlrrl", styles=styles)
+    lines.append(f"{p.slate}Shortest route; top-ups at 6cr/unit. Assumes the remembered price, enough buying demand "
+                 f"and intact cargo; market changes, encounters, repairs, fines and detours are excluded.{RESET}")
     return lines
 
 
