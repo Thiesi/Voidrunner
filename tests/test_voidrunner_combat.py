@@ -711,7 +711,7 @@ def test_derelict_reward_and_opponent_match_destination_terms(monkeypatch, dange
     pirates = []
     monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: pirates.append(pirate) or "escaped")
     before = world.save.pilot.credits
-    text = " ".join(vr.derelict_terms(world))
+    text = plain(" ".join(vr.derelict_terms(world)))
     assert f"danger {danger}/5" in text and f"60-{100 + danger * 120}cr" in text
     with contextlib.redirect_stdout(io.StringIO()): vr._encounter_derelict(vr.Palette(False), world)
     if ambush: assert pirates[0].tier == min(4, danger + 1)

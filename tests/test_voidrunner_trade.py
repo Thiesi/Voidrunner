@@ -2631,7 +2631,7 @@ def test_survey_terms_before_and_after_scanning_fit_and_browsing_is_read_only(mo
             assert len(frame.splitlines()) <= height
             assert all(vr._visible_width(row) <= width for row in frame.splitlines())
             assert world.save.to_dict() == saved and world.event_rng.getstate() == rng
-            if len(frames) == 1 and not surveyed and fuel == 2: assert "Tank empties" in page_text(frame)
+            if len(frames) == 1 and not surveyed and fuel == 2: assert "the tank empties" in page_text(frame)
             page, count = map(int, re.search(r"Survey.*?(\d+)/(\d+)", frame, re.S).groups())
             if page == count: return "B"
             return ">"

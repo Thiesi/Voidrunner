@@ -12977,24 +12977,47 @@ def complete_crew_assignment(world: World, role: str) -> str:
 
 
 def crew_assignment_lines(world: World, role: str) -> list[str]:
+    """A crew task as a sheet: who asks, what for, how far along (issue #39).
+
+    Eight sentences read the objective, the reward, where to deliver and what
+    blocks it at the same weight as the terms every task shares. The request is
+    now the page's opening, TASK says where it stands one row each, and the
+    shared terms are a dim footnote."""
+    p = pal()
     info, task = CREW_ASSIGNMENTS[role], crew_assignment_record(world, role)
-    lines = [f"{crew_name(world, role)}: {info['title']}."]
+    lines = [f"{p.ink}{BOLD}{_mission_plain(crew_name(world, role))}{RESET} {p.deep}{glyph('dot')}{RESET} "
+             f"{p.slate}{info['title']}{RESET}"]
     if task is not None and task["state"] == "complete":
-        return lines + [info["closing"], "Assignment complete. Rewards cannot be claimed again."]
+        return lines + [info["closing"], f"{p.mint}Assignment complete.{RESET} {p.slate}Rewards cannot be claimed again.{RESET}"]
+    lines.append(info["request"])
     target = world.by_id[crew_assignment_destination(world, role)]
     have, need = crew_assignment_progress(world, role)
-    objective = (f"New combat recordings: {have}/{need}. Defeat one opponent after acceptance." if role == "gunner" else
-                 f"Machinery aboard: {have}/{need}. Handover consumes {need} units, including goods promised to other contracts." if role == "engineer" else
-                 f"New chart entries: {have}/{need}. Chart {need} new systems after acceptance." if need else
-                 "Your atlas is complete; deliver it for archival review.")
-    lines += [f"Reward: {info['reward']}cr and one completed mission, once.",
-              objective, f"Deliver to {WORKSHOPS[info['workshop']]['name']} at {target.name} ({target.x},{target.y}).",
-              info["request"],
-              "Optional: no deposit, deadline or contract-slot cost. Ordinary travel fuel, wages and risks apply.",
-              "Requires this specialist hired with five paid jumps. Dismissal keeps progress; rehiring costs the usual fee. Work while they are away still counts."]
-    if role == "engineer": lines.append("The reward is gross: subtract material acquisition, travel and wage costs. The delivery ledger records material costs.")
+    objective = (f"{have}/{need} new combat recordings" if role == "gunner" else
+                 f"{have}/{need} Machinery aboard" if role == "engineer" else
+                 f"{have}/{need} new chart entries" if need else "atlas complete")
+    jumps = bfs_hops(world.by_id, world.here.id).get(target.id)
+    where = "here" if jumps == 0 else plural(jumps, "jump") if jumps is not None else "unreachable"
     blocker = crew_assignment_blocker(world, role, completing=task is not None)
-    lines.append(blocker or ("[C] Complete here." if task is not None else "[A] Accept assignment."))
+    # An accepted task that is not ready yet is in progress, not wrong.
+    status = ((blocker.rstrip("."), "info" if task is not None else "bad") if blocker else
+              ("ready to hand over here", "good") if task is not None else ("open; accept it to start", None))
+    lines.append(section("TASK"))
+    lines += _sheet_rows([
+        ("OBJECTIVE", objective, "good" if have >= need else "info"),
+        ("REWARD", f"{info['reward']}cr and one completed mission, once", None),
+        ("DELIVER TO", f"{WORKSHOPS[info['workshop']]['name']} at {_mission_plain(target.name)} ({target.x},{target.y}), {where}", None),
+        ("STATUS", status[0], status[1]),
+    ])
+    notes = {"gunner": "Defeat one opponent after acceptance.",
+             "engineer": f"Handover consumes {need} units, including goods promised to other contracts. "
+                         "The reward is gross: subtract material acquisition, travel and wage costs. "
+                         "The delivery ledger records material costs.",
+             "navigator": f"Chart {need} new systems after acceptance." if need else
+                          "Your atlas is complete; deliver it for archival review."}[role]
+    lines += [f"{p.slate}{notes}{RESET}",
+              f"{p.slate}Optional: no deposit, deadline or contract-slot cost. Ordinary travel fuel, wages and risks apply. "
+              f"Requires this specialist hired with five paid jumps. Dismissal keeps progress; rehiring costs the usual fee. "
+              f"Work while they are away still counts.{RESET}"]
     return lines
 
 
@@ -14670,22 +14693,33 @@ def survey_candidates(world: World) -> list[int]:
 
 
 def survey_terms(world: World) -> list[str]:
+    """The survey as CHECKS: what it costs, how far it reaches, what it finds (issue #39)."""
+    p = pal()
     candidates = set(survey_candidates(world))
-    fuel = world.save.ship.fuel
-    radius = 2 + world.save.ship.scanner_tier + navigator_bonus(world.save.ship)
-    label = "[S] Survey" if candidates and fuel >= 2 and world.save.ship.scanner_tier > 0 else "Survey"
-    lines = [f"{label}: 2 fuel; {fuel} aboard." + (" Tank empties." if fuel == 2 else "")]
-    lines += [f"Range: {radius} connection hops; {len(candidates)} new contacts.",
-              "Chart all contacts in range, including station, economy and danger. No day or wages pass.",
-              f"Navigator bonus: +{navigator_bonus(world.save.ship)} connection hops. Surveying creates no remote price quotes."]
+    ship = world.save.ship
+    fuel = ship.fuel
+    bonus = navigator_bonus(ship)
+    radius = 2 + ship.scanner_tier + bonus
+    lines = []
+    if ship.scanner_tier == 0:
+        lines.append(alert("danger", "NO SCANNER", "surveying unavailable"))
+    elif fuel < 2:
+        lines.append(alert("danger", "LOW FUEL", "surveying unavailable"))
+    elif not candidates:
+        lines.append(f"{p.ink}Area already charted: no new contacts; no charge.{RESET}")
+    checks = [("COST", f"2 fuel, {fuel} aboard" + ("; the tank empties" if fuel == 2 else ""),
+               "bad" if fuel < 2 else "info" if fuel == 2 else "good"),
+              ("RANGE", f"{radius} connection hops" + (f" (navigator +{bonus})" if bonus else ""), None),
+              ("CONTACTS", f"{len(candidates)} new", "good" if candidates else None)]
     contracts = [m for m in world.save.active_missions if m.kind == "scan" and m.target_system in candidates and not mission_expired(world, m)]
-    if contracts: lines.append(f"Active surveys in range: {len(contracts)}; scanner payout "
-                               f"{sum(remote_survey_payout(m.reward) for m in contracts):,}cr, half of "
-                               f"{sum(m.reward for m in contracts):,}cr on arrival.")
-    if world.save.ship.scanner_tier == 0: lines.insert(0, "Scanner required; surveying unavailable.")
-    elif fuel < 2: lines.insert(0, "Insufficient fuel: surveying unavailable.")
-    elif not candidates: lines.insert(0, "Area already charted: no new contacts; no charge.")
-    lines.append("[B] Back: leave without surveying.")
+    if contracts:
+        checks.append(("CONTRACTS", f"{len(contracts)} in range; scanner payout "
+                       f"{sum(remote_survey_payout(m.reward) for m in contracts):,}cr, half of "
+                       f"{sum(m.reward for m in contracts):,}cr on arrival", "good"))
+    lines.append(section("SURVEY"))
+    lines += _sheet_rows(checks)
+    lines.append(f"{p.slate}Charts every contact in range: station, economy and danger. No day or wages pass; "
+                 f"surveying creates no remote price quotes.{RESET}")
     return lines
 
 
@@ -15249,27 +15283,41 @@ def exploration_choice(p: Palette, world: World, title: str, lines: list[str], a
 
 
 def derelict_terms(world: World) -> list[str]:
+    """A derelict's choice, its figures standing out like combat's (issue #39).
+
+    Five sentences put the odds, the payout and the ambush at one weight; the
+    options are now one row each, with what decides them in color."""
+    p = pal()
     danger = encounter_danger(world)
+    ship = world.save.ship
     return [
-        "[S] Salvage: board the hulk; 70% salvage, 30% ambush.",
-        f"Drifting hulk. Sector danger {danger}/5; fuel {world.save.ship.fuel}/{fuel_capacity(world.save.ship)}.",
-        f"Salvage recovers 60-{100 + max(0, danger) * 120}cr.",
-        f"Ambush: one tier {span(max(0, danger - 1), min(4, danger + 1))} opponent; ordinary combat choices and losses apply.",
-        "Boarding costs no fuel. [I] Ignore: no reward or penalty; continue your journey.",
+        f"{p.ink}{BOLD}Drifting hulk{RESET} {p.deep}{glyph('dot')}{RESET} {p.slate}sector danger{RESET} "
+        f"{p.tone(danger_tone(danger))}{danger}/5{RESET}",
+        section("OPTIONS"),
+        f"{key_label('S', 'Salvage')}: {odds(0.70)} recovers {gain(f'60-{100 + max(0, danger) * 120}cr')}; "
+        f"{harm('30%')} ambush by one tier {span(max(0, danger - 1), min(4, danger + 1))} opponent.",
+        f"{key_label('I', 'Ignore')}: no reward or penalty; continue your journey.",
+        section("NOTES"),
+        f"{p.slate}Boarding costs no fuel; fuel {ship.fuel}/{fuel_capacity(ship)}. "
+        f"An ambush is an ordinary fight: combat choices and losses apply.{RESET}",
     ]
 
 
 def distress_terms(world: World) -> list[str]:
+    """A distress call's choice, its figures standing out like combat's (issue #39)."""
+    p = pal()
     fuel = world.save.ship.fuel
     low, high = min(fuel, 2), min(fuel, 4)
-    cost = span(low, high)
-    lines = [
-        f"[H] Help: spend {cost} fuel.",
-        f"Survivors offer 60-180cr and Concord standing +{min(3, 100 - world.save.pilot.reputation.get(FACTION_CONCORD, 0))} (cap 100). No combat. Current fuel: {fuel}.",
-        f"Fuel after helping: {span(fuel - high, fuel - low)}.",
-        "[I] Ignore: spend nothing, no reputation penalty; continue your journey.",
+    standing = min(3, 100 - world.save.pilot.reputation.get(FACTION_CONCORD, 0))
+    lines = [f"{p.ink}{BOLD}Distress call{RESET} {p.deep}{glyph('dot')}{RESET} {p.slate}no combat{RESET}"]
+    if fuel <= 4:
+        lines.append(alert("danger", "LOW FUEL", "helping can leave the tank empty"))
+    lines += [
+        section("OPTIONS"),
+        f"{key_label('H', 'Help')}: spend {cost(f'{span(low, high)} fuel')}, leaving {span(fuel - high, fuel - low)}; "
+        f"survivors offer {gain('60-180cr')} and {gain(f'Concord standing +{standing}')} (cap 100).",
+        f"{key_label('I', 'Ignore')}: spend nothing, no reputation penalty; continue your journey.",
     ]
-    if fuel <= 4: lines.insert(1, "Risk: tank empty.")
     return lines
 
 
@@ -15661,6 +15709,11 @@ def odds(chance: float) -> str:
 def harm(text: str) -> str:
     """Damage or a penalty coming the pilot's way, as `odds` draws a chance."""
     return f"{BOLD}{pal().alarm}{text}{RESET}"
+
+
+def gain(text: str) -> str:
+    """What an option pays, as `odds` draws a chance."""
+    return f"{BOLD}{pal().mint}{text}{RESET}"
 
 
 def cost(text: str) -> str:

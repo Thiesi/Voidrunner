@@ -1794,7 +1794,7 @@ def test_a_scanner_survey_pays_half_and_arrival_pays_in_full():
     world = _world_with_seed(42); world.save.ship.scanner_tier = 1
     target = vr.survey_candidates(world)[0]
     world.save.active_missions = [vr.Mission(1, "scan", "Survey one", 441, 0, target)]
-    assert "scanner payout 220cr, half of 441cr on arrival" in " ".join(vr.survey_terms(world))
+    assert "scanner payout 220cr, half of 441cr on arrival" in plain(" ".join(vr.survey_terms(world)))
     _, report = vr.perform_survey(world)
     assert world.save.pilot.credits == 1200 + 220
     assert any("+220cr, scanner survey at half pay" in row for row in report)

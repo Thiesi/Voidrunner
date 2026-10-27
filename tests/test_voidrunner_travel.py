@@ -1531,7 +1531,7 @@ def test_distress_cost_preview_matches_each_possible_draw(monkeypatch, fuel):
         costs = iter([draw, 180])
         monkeypatch.setattr(world.event_rng, "randint", lambda low, high: next(costs))
         monkeypatch.setattr(vr, "read_key", lambda: "H")
-        text = " ".join(vr.distress_terms(world))
+        text = plain(" ".join(vr.distress_terms(world)))
         low, high = min(fuel, 2), min(fuel, 4)
         assert f"spend {low if low == high else str(low) + '-' + str(high)} fuel" in text
         assert ("tank empty" in text) == (fuel <= 4)
@@ -1612,7 +1612,7 @@ def test_public_workshop_routes_allow_only_the_listed_bearings_without_charting(
 def test_distress_terms_disclose_actual_capped_standing_gain(monkeypatch, standing):
     world = _world_with_seed(42); world.save.pilot.reputation[vr.FACTION_CONCORD] = standing
     rng = world.event_rng.getstate()
-    terms = " ".join(vr.distress_terms(world))
+    terms = plain(" ".join(vr.distress_terms(world)))
     gain = min(3, 100 - standing)
     assert f"Concord standing +{gain}" in terms
     assert world.event_rng.getstate() == rng
