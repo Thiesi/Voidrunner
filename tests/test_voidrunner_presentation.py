@@ -219,7 +219,7 @@ def test_service_choices_keep_price_and_benefit_with_label_at_40_columns(monkeyp
         assert (f"{cost:,}cr" if screen=="yard" else f"{cost}cr") in matches[0]
 
 
-@pytest.mark.parametrize("commands", [b"Y><QQ",b"Y",b"YK><QQQ",b"YK",b"YANQQ",b"YKANQQQ",b"YR\rQQ",b"YPNQQ"])
+@pytest.mark.parametrize("commands", [b"Y><QQ",b"Y",b"YK><QQQ",b"YK",b"YANQQ",b"YKANQQQ",b"YR\x1bQQ",b"YPNQQ"])
 def test_real_responsive_service_browsing_and_cancellation_preserve_career(tmp_path,commands):
     import json,os,subprocess
     world=_world_with_seed(42); world.save.ship.fuel=20; world.save.ship.hull_hp=50
@@ -1223,7 +1223,7 @@ def test_engineer_discounts_repairs_by_service_level(paid_jumps, expected):
 def test_repair_screen_charges_the_discounted_rate_and_yard_shows_it(monkeypatch):
     world = _world_with_named_crew("engineer", 15)
     world.save.ship.hull_hp = vr.hull_hp_max(world.save.ship) - 10; world.save.pilot.credits = 1_000
-    monkeypatch.setattr(vr, "confirm", lambda prompt, p: "for 20cr" in prompt)
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p, enter=None: "for 20cr" in prompt and enter is True)
     with contextlib.redirect_stdout(io.StringIO()):
         assert "for 20cr" in vr._repair(vr.Palette(False), world)
     assert world.save.pilot.credits == 980 and world.save.ship.hull_hp == vr.hull_hp_max(world.save.ship)

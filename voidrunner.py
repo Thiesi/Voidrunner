@@ -1357,11 +1357,12 @@ def read_command() -> str:
     return key.upper() if len(key) == 1 and key.isascii() else IGNORED_KEY
 
 
-def read_line_raw(max_len: int = 20, allowed=lambda c: "0" <= c <= "9") -> str:
+def read_line_raw(max_len: int = 20, allowed=lambda c: "0" <= c <= "9", *, escaped: str = "") -> str:
     """Edit bounded Unicode text; numeric fields accept ASCII decimal digits.
 
     Both codepoint count and display width are bounded. Backspace removes a
     base character with its combining marks, erasing its actual screen columns.
+    Escape returns `escaped`, empty unless a caller must tell it from Return.
     """
     buf: list[str] = []
     while True:
@@ -1370,7 +1371,7 @@ def read_line_raw(max_len: int = 20, allowed=lambda c: "0" <= c <= "9") -> str:
             # Escape cancels the field (issue #413): erase what was typed and return empty.
             out("\x08 \x08" * sum(_char_width(c) for c in buf))
             out_line()
-            return ""
+            return escaped
         if ch in ("\r", "\n"):
             out_line()
             return unicodedata.normalize("NFC", "".join(buf))
@@ -1391,14 +1392,37 @@ def read_line_raw(max_len: int = 20, allowed=lambda c: "0" <= c <= "9") -> str:
         out(ch)
 
 
-def confirm(prompt: str, p: Palette) -> bool:
-    """Yes/No as the last keystroke before an irreversible action; Escape is No (issue #413)."""
-    out_prompt(f"{p.muted}{prompt} [Y/N, Esc=No] {RESET}")
+def read_quantity(limit: int, default: int = 0, *, max_len: int = 5) -> int:
+    """A quantity up to `limit`; an empty Return takes `default`, Escape is 0.
+
+    The prompt names what Return does: a pilot topping up the tanks wants the
+    full load, and typing the number the prompt already shows was busywork
+    (issue #36).
+    """
+    raw = read_line_raw(max_len=max_len, escaped=ESCAPE_KEY)
+    if raw == ESCAPE_KEY:
+        return 0
+    if raw == "":
+        return max(0, min(default, limit))
+    return min(int(raw), limit) if raw.isascii() and raw.isdigit() else 0
+
+
+def confirm(prompt: str, p: Palette, *, enter: bool = False) -> bool:
+    """Yes/No as the last keystroke before an irreversible action; Escape is No (issue #413).
+
+    `enter=True` lets Return accept, for an offer the pilot nearly always takes,
+    such as a repair to the most they can afford (issue #36). Otherwise Return
+    does nothing: an irreversible action wants a deliberate Y.
+    """
+    out_prompt(f"{p.muted}{prompt} [Y/N, {'Enter=Yes, ' if enter else ''}Esc=No] {RESET}")
     while True:
         key = read_key()
         if key == ESCAPE_KEY:
             out_line("N")
             return False
+        if enter and key in ("\r", "\n"):
+            out_line("Y")
+            return True
         key = key.upper() if len(key) == 1 and key.isascii() else IGNORED_KEY
         if key == "Y":
             out_line("Y")
@@ -10725,6 +10749,103 @@ def price_scale(quote: int, ladder: list[int], tone: str, cells: int = 7) -> str
             f"{p.deep}{glyph('bar_track') * (cells - 1 - at)}{RESET}")
 
 
+def contract_cargo(world: World) -> dict[str, tuple[int, list[str]]]:
+    """The units every live delivery asks for, per commodity, with where they go.
+
+    An expired contract cannot pay, so it asks for nothing.
+    """
+    wanted: dict[str, tuple[int, list[str]]] = {}
+    for mission in world.save.active_missions:
+        if mission.kind != "delivery" or not mission.commodity or not mission.quantity:
+            continue
+        if mission.deadline_turn is not None and mission.deadline_turn < world.save.turn:
+            continue
+        total, places = wanted.get(mission.commodity, (0, []))
+        place = _mission_plain(world.by_id[mission.target_system].name)
+        wanted[mission.commodity] = (total + mission.quantity, places + ([place] if place not in places else []))
+    return wanted
+
+
+def mission_cargo_needs(world: World) -> dict[str, tuple[int, list[str]]]:
+    """What the open delivery contracts still need bought, per commodity.
+
+    `contract_cargo` less what is already aboard: the market answers "how much
+    do I need?" instead of the pilot adding it up from the contract pages
+    (issue #37).
+    """
+    return {commodity: (total - world.save.cargo.get(commodity, 0), places)
+            for commodity, (total, places) in contract_cargo(world).items()
+            if total > world.save.cargo.get(commodity, 0)}
+
+
+def spare_cargo(world: World, commodity: str) -> int:
+    """Units aboard that no live delivery is waiting for: the ones free to sell."""
+    return max(0, world.save.cargo.get(commodity, 0) - contract_cargo(world).get(commodity, (0, []))[0])
+
+
+#: Rows of remembered better prices the market shows; more is a ledger, not a hint.
+MARKET_HINT_ROWS = 5
+
+
+def market_memory_hints(world: World, goods: list[str]) -> list[tuple[str, str, int, int, int]]:
+    """The better prices the ship remembers elsewhere, the most useful first.
+
+    Each row is (commodity, what, unit, system id, day seen), at most one per
+    commodity, in three groups, each best first:
+    - spare cargo aboard: a better remembered sale than this station's;
+    - what the contracts still need: a cheaper remembered purchase;
+    - anything else: a remembered sale above this station's buy price, a trade.
+    Cargo a delivery is waiting for is not offered for sale elsewhere. Only
+    quotes the pilot saw docked count; remote prices are never invented.
+    """
+    here = world.here.id
+    needs = mission_cargo_needs(world)
+    held_rows, cost_rows, trade_rows = [], [], []
+    for commodity in goods:
+        buy = price_for(world, here, commodity)
+        sell = round(buy * SELL_SPREAD)
+        prohibited = not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven"
+        seen = [(sid, quote) for sid, quotes in world.save.market_memory.items()
+                if sid != here and (quote := quotes.get(commodity))]
+        if not seen:
+            continue
+        sid, best = max(seen, key=lambda item: (item[1]["sell"], item[1]["day"]))
+        if spare_cargo(world, commodity):
+            if best["sell"] > sell:
+                held_rows.append((best["sell"] - sell, (commodity, "sells", best["sell"], sid, best["day"])))
+        elif commodity in needs:
+            cheaper = [(sid, quote) for sid, quote in seen if quote["buy"] is not None and quote["buy"] < buy]
+            if cheaper:
+                sid, low = min(cheaper, key=lambda item: (item[1]["buy"], -item[1]["day"]))
+                cost_rows.append((buy - low["buy"], (commodity, "costs", low["buy"], sid, low["day"])))
+        elif not prohibited and best["sell"] > buy:
+            trade_rows.append((best["sell"] - buy, (commodity, "sells", best["sell"], sid, best["day"])))
+    ranked = [row for group in (held_rows, cost_rows, trade_rows) for row in sorted(group, key=lambda row: -row[0])]
+    return [row for _, row in ranked[:MARKET_HINT_ROWS]]
+
+
+def market_memory_lines(world: World, goods: list[str]) -> list[str]:
+    """The remembered-price hints as a small table under the market."""
+    p = pal()
+    hints = market_memory_hints(world, goods)
+    if not hints:
+        return []
+    hops = bfs_hops(world.by_id, world.here.id)
+    rows, styles = [], []
+    for commodity, what, unit, sid, day in hints:
+        buy = price_for(world, world.here.id, commodity)
+        here = f"sell {round(buy * SELL_SPREAD)}" if what == "sells" and spare_cargo(world, commodity) else f"buy {buy}"
+        jumps = hops.get(sid)
+        place = _mission_plain(world.by_id[sid].name) + (f", {jumps} jump{'s' if jumps != 1 else ''}" if jumps else "")
+        age = world.save.turn - day
+        rows.append([COMMODITIES[commodity]["label"], here, f"{p.tone('good')}{what} {unit}{RESET}", place,
+                     "today" if age <= 0 else f"{age}d ago"])
+        styles.append(["value", "label", "value", "value", "label"])
+    return ([section("PRICE MEMORY")]
+            + table(["COMMODITY", "HERE", "BEST KNOWN", "AT", "SEEN"], rows, "lrlll", styles=styles, optional=(4,))
+            + [f"{p.slate}Prices seen when docked; they may have moved since.{RESET}"])
+
+
 def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
     """The market as a table: one row per commodity, columns that line up.
 
@@ -10745,6 +10866,7 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
                               "danger" if event["direction"] == "crash" else "good")
     lines = [head]
     rows, styles = [], []
+    needs = mission_cargo_needs(world)
     for index, commodity in enumerate(goods):
         quote = price_for(world, system.id, commodity)
         depth = market_depth_quote(world, system.id, commodity)
@@ -10771,22 +10893,34 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
             f"{round(quote * SELL_SPREAD)}",
             f"{depth['stock']}", f"{depth['demand']}",
             f"{held}" if held else f"{p.deep}0{RESET}",
+            f"{p.gold}{needs[commodity][0]}{RESET}" if commodity in needs else "",
             f"{price_scale(quote, ladder, tone)} {p.tone(tone)}{word}{RESET}",
             flag,
         ])
-        styles.append(["value", "value", "value", "label", "label", "value", "value", "value"])
-    lines += table(["COMMODITY", "BUY", "SELL", "STOCK", "DEMAND", "HELD", "SPREAD", ""],
+        styles.append(["value", "value", "value", "label", "label", "value", "value", "value", "value"])
+    headers, aligns, optional = ["COMMODITY", "BUY", "SELL", "STOCK", "DEMAND", "HELD", "NEED", "SPREAD", ""], "lrrrrrrll", (6, 3, 4, 7)
+    if not needs:
+        # No contract needs cargo: no empty column taking a narrow screen's room.
+        headers, aligns, optional = headers[:6] + headers[7:], aligns[:6] + aligns[7:], (3, 4, 6)
+        rows, styles = [row[:6] + row[7:] for row in rows], [row[:6] + row[7:] for row in styles]
+    lines += table(headers,
                    # Drop order, last first: the spread is a nicety, the depth
-                   # figures have a screen of their own, and the price, the
-                   # hold and an ILLEGAL flag never go.
-                   rows, "lrrrrrll", styles=styles, optional=(3, 4, 6))
+                   # figures have a screen of their own, and the NEED column is
+                   # repeated under the table; the price, the hold and an
+                   # ILLEGAL flag never go.
+                   rows, aligns, styles=styles, optional=optional)
     lines.append(f"{p.slate}Prices per unit. Only jumps advance days; reopening does not replenish stock.{RESET}")
+    if needs:
+        # Where the NEED column's cargo goes; on a narrow screen, the column itself.
+        lines.append(f"{p.slate}Contracts need:{RESET} " + f"{p.slate} · {RESET}".join(
+            f"{p.ink}{COMMODITIES[c]['label']} {p.gold}{need}{RESET} {p.deep}{glyph('arrow')}{RESET} {p.ink}{', '.join(places)}{RESET}"
+            for c, (need, places) in needs.items()))
     if any(not COMMODITIES[c]["legal"] for c in goods):
         lines.append(f"{p.slate}Blackwake standing: {p.ink}+1{p.slate} per new {p.ink}{CONTRABAND_STANDING_STEP}cr"
                      f"{p.slate} net contraband gain; purchases count against gains.{RESET}")
     if any(not COMMODITIES[c]["legal"] and system.economy != "Haven" for c in goods):
         lines.append(f"{p.slate}A {glyph('flat')} buy price is contraband this station will not sell.{RESET}")
-    return lines
+    return lines + market_memory_lines(world, goods)
 
 
 def screen_market(p: Palette, world: World) -> None:
@@ -11567,10 +11701,12 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
             result = "No room, credits or station stock."
             out_line(f"{p.wrong}{result}{RESET}")
             return result
-        out_prompt(f"{p.muted}Quantity (max {max_qty}; Enter or Esc cancels): {RESET}")
-        raw = read_line_raw(max_len=5)
-        qty = int(raw) if raw.isascii() and raw.isdigit() else 0
-        qty = min(qty, max_qty)
+        # Return buys what the contracts still need, never a speculative
+        # hold-full: a slip of the finger should not spend the career.
+        need = min(max_qty, mission_cargo_needs(world).get(commodity, (0, []))[0])
+        enter = f"Enter buys {need} for contracts, Esc cancels" if need else "Enter or Esc cancels"
+        out_prompt(f"{p.muted}Quantity (max {max_qty}; {enter}): {RESET}")
+        qty = read_quantity(max_qty, need)
         if qty <= 0:
             return
         result = trade_cargo(world, commodity, qty, buying=True)
@@ -11590,9 +11726,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
             out_line(f"{p.wrong}{result}{RESET}")
             return result
         out_prompt(f"{p.muted}Quantity (have {have}, station buys {max_qty}; Enter or Esc cancels): {RESET}")
-        raw = read_line_raw(max_len=5)
-        qty = int(raw) if raw.isascii() and raw.isdigit() else 0
-        qty = min(qty, max_qty)
+        qty = read_quantity(max_qty)
         if qty <= 0:
             return
         result = trade_cargo(world, commodity, qty, buying=False)
@@ -12503,10 +12637,8 @@ def _refuel(p: Palette, world: World) -> str | None:
     if max_qty <= 0:
         out_line(f"{p.wrong}Not enough credits to buy fuel (6cr/unit).{RESET}")
         return "Not enough credits to buy fuel (6cr/unit)."
-    out_prompt(f"{p.muted}Fuel to buy (max {max_qty}, 6cr/unit; Enter or Esc cancels): {RESET}")
-    raw = read_line_raw(max_len=4)
-    qty = int(raw) if raw.isascii() and raw.isdigit() else 0
-    qty = min(qty, max_qty)
+    out_prompt(f"{p.muted}Fuel to buy (6cr/unit; Enter buys {max_qty} for {max_qty * 6}cr, Esc cancels): {RESET}")
+    qty = read_quantity(max_qty, max_qty, max_len=4)
     if qty <= 0:
         return
     cost = qty * 6
@@ -12533,7 +12665,7 @@ def _repair(p: Palette, world: World) -> str | None:
             return "Cannot afford repairs right now."
         missing = affordable_hp
         cost = missing * unit
-    if not confirm(f"Repair {missing} hull for {cost}cr?", p):
+    if not confirm(f"Repair {missing} hull for {cost}cr?", p, enter=True):
         return
     world.save.pilot.credits -= cost
     ship.hull_hp += missing

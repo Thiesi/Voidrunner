@@ -1396,6 +1396,23 @@ legality and excluded return travel remain visible; no live remote prices are
 queried. The board is read-only and paginated. Human play remains necessary to
 validate whether these opportunities encourage satisfying route variety.
 
+The market itself connects the same records to the commodity in front of the
+pilot (issues #36, #37). A NEED column, shown only while a contract needs cargo,
+counts what live deliveries still require after the cargo aboard; a line under
+the table names their destinations. Expired contracts need nothing. A PRICE
+MEMORY table lists up to five remembered quotes from other stations, one per
+commodity: a better sale for spare cargo aboard first, then a cheaper purchase
+of what a contract needs, then a sale above this station's buy price, each group
+best first. Cargo a delivery is waiting for is never offered for sale. Each row
+gives the station, its jump count and the quote's age. Nothing is derived beyond
+quotes the pilot saw docked, and nothing is stored.
+
+Quantity prompts say what Return does. Refuelling takes the most that fits and
+is affordable, a repair offer accepts on Return, and a purchase buys what the
+contracts still need, capped by hold, credits and stock. Without such a need,
+Return still cancels a purchase, so a slip never fills the hold. Escape always
+cancels.
+
 The engineer costs 200 credits to hire and 2 per jump. Fuel savings follow the
 paid-service progression defined above; one-unit jumps cannot benefit, and
 hiring does not refund old hire costs. Because most adjacent jumps cost one unit,

@@ -3067,3 +3067,156 @@ def test_a_hold_route_the_pilot_cannot_afford_to_fly_is_not_an_opportunity():
     assert affordable and all(quote["use_hold"] for quote in affordable)
     world.save.pilot.credits = 0
     assert vr.trade_opportunities(world) == []  # no cash for fuel or wages, so no route
+
+
+# --- The ship's computer connects the dots (issues #36, #37) ----------------
+
+def _keys(monkeypatch, *keys):
+    feed = iter(keys)
+    monkeypatch.setattr(vr, "read_key", lambda: next(feed))
+
+
+def _deliveries(world, *jobs):
+    """Active delivery contracts: (commodity, quantity, target, deadline)."""
+    world.save.active_missions = [vr.Mission(index, "delivery", f"Deliver {quantity} {commodity}", 100, 0, target,
+                                             commodity=commodity, quantity=quantity, deadline_turn=deadline)
+                                  for index, (commodity, quantity, target, deadline) in enumerate(jobs, 1)]
+
+
+def test_return_fills_the_tanks_to_what_fits_and_is_affordable(monkeypatch):
+    world = _world_with_seed(42)
+    world.save.ship.fuel -= 5; world.save.pilot.credits = 1_000
+    _keys(monkeypatch, "\r")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr._refuel(vr.Palette(False), world) == "Refueled 5 units for 30cr."
+    assert "Enter buys 5 for 30cr" in output.getvalue()
+    assert world.save.ship.fuel == vr.fuel_capacity(world.save.ship) and world.save.pilot.credits == 970
+    world.save.ship.fuel -= 5; world.save.pilot.credits = 20
+    _keys(monkeypatch, "\r")
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert vr._refuel(vr.Palette(False), world) == "Refueled 3 units for 18cr."
+
+
+def test_escape_still_cancels_a_refuel_and_typed_numbers_still_count(monkeypatch):
+    world = _world_with_seed(42)
+    world.save.ship.fuel -= 5; before = world.save.to_dict()
+    _keys(monkeypatch, "4", vr.ESCAPE_KEY)
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert vr._refuel(vr.Palette(False), world) is None
+    assert world.save.to_dict() == before
+    _keys(monkeypatch, "2", "\r")
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert vr._refuel(vr.Palette(False), world) == "Refueled 2 units for 12cr."
+
+
+@pytest.mark.parametrize("key,repaired", [("\r", True), ("Y", True), ("N", False), (vr.ESCAPE_KEY, False)])
+def test_return_accepts_the_repair_offer(monkeypatch, key, repaired):
+    world = _world_with_seed(42)
+    world.save.ship.hull_hp -= 10
+    _keys(monkeypatch, key)
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._repair(vr.Palette(False), world)
+    assert "Enter=Yes" in output.getvalue()
+    assert (world.save.ship.hull_hp == vr.hull_hp_max(world.save.ship)) is repaired
+
+
+def test_a_plain_confirm_still_ignores_return(monkeypatch):
+    _keys(monkeypatch, "\r", "N")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr.confirm("Abandon?", vr.Palette(False)) is False
+    assert "Enter" not in output.getvalue()
+
+
+def test_the_market_counts_what_the_contracts_still_need():
+    world = _world_with_seed(42)
+    far, near = world.here.connections[0], world.here.connections[-1]
+    _deliveries(world, ("food", 7, far, 30), ("food", 3, near, None), ("textiles", 2, far, 30), ("medicine", 4, far, -1))
+    _set_cargo(world, {"food": 4, "textiles": 2})
+    needs = vr.mission_cargo_needs(world)
+    # Food: 10 wanted, 4 aboard. Textiles: covered. Medicine: expired, pays nothing.
+    assert set(needs) == {"food"} and needs["food"][0] == 6
+    assert needs["food"][1] == [vr._mission_plain(world.by_id[sid].name) for sid in (far, near)]
+    text = plain("\n".join(vr.market_catalog_lines(world, vr.LEGAL_COMMODITIES)))
+    assert "NEED" in text.splitlines()[1] and "Contracts need: Food 6" in text
+
+
+def test_a_narrow_market_drops_the_spread_and_depth_before_the_need(monkeypatch):
+    world = _world_with_seed(42)
+    _deliveries(world, ("food", 7, world.here.connections[0], 30))
+    widths = {}
+    for width in range(30, 80):
+        monkeypatch.setattr(vr, "_page_content_width", lambda width=width: width)
+        heading = plain(vr.market_catalog_lines(world, vr.LEGAL_COMMODITIES)[1]).split()
+        widths[width] = heading
+    kept = [heading for heading in widths.values() if "NEED" in heading]
+    assert any("SPREAD" not in heading and "STOCK" not in heading and "DEMAND" not in heading for heading in kept)
+
+
+def test_the_market_hides_the_need_column_when_nothing_is_needed():
+    world = _world_with_seed(42)
+    assert "NEED" not in plain("\n".join(vr.market_catalog_lines(world, vr.LEGAL_COMMODITIES)))
+
+
+def test_return_buys_what_the_contracts_need_and_never_a_speculative_hold(monkeypatch):
+    world = _world_with_seed(42)
+    _deliveries(world, ("food", 5, world.here.connections[0], 30))
+    _keys(monkeypatch, "P", "\r")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._trade_commodity(vr.Palette(False), world, "food")
+    assert "Enter buys 5 for contracts" in output.getvalue() and world.save.cargo.get("food") == 5
+    before = world.save.to_dict()
+    _keys(monkeypatch, "P", "\r")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr._trade_commodity(vr.Palette(False), world, "textiles") is None
+    assert "Enter or Esc cancels" in output.getvalue() and world.save.to_dict() == before
+
+
+def test_price_memory_points_to_a_better_sale_for_cargo_aboard():
+    world, destination = _world_with_market_memory()
+    world.save.market_memory[destination]["textiles"].update(sell=999, day=0)
+    world.save.turn = 3
+    _set_cargo(world, {"textiles": 2})
+    hints = vr.market_memory_hints(world, vr.LEGAL_COMMODITIES)
+    assert hints[0] == ("textiles", "sells", 999, destination, 0)
+    text = plain("\n".join(vr.market_catalog_lines(world, vr.LEGAL_COMMODITIES)))
+    assert "PRICE MEMORY" in text and "sells 999" in text and "3d ago" in text
+    assert vr._mission_plain(world.by_id[destination].name) + ", 1 jump" in text
+
+
+def test_price_memory_finds_a_trade_and_a_cheaper_source_for_contracts():
+    world, destination = _world_with_market_memory()
+    here = {c: vr.price_for(world, 0, c) for c in vr.LEGAL_COMMODITIES}
+    for commodity, quote in world.save.market_memory[destination].items():
+        quote.update(sell=1, buy=here[commodity] + 1)  # nothing worth mentioning
+    assert vr.market_memory_hints(world, vr.LEGAL_COMMODITIES) == []
+    world.save.market_memory[destination]["food"]["sell"] = here["food"] + 9
+    world.save.market_memory[destination]["medicine"]["buy"] = here["medicine"] - 4
+    _deliveries(world, ("medicine", 2, destination, 30))
+    hints = vr.market_memory_hints(world, vr.LEGAL_COMMODITIES)
+    # What the contracts need comes before a speculative trade, whatever the margins.
+    assert [(c, what, unit) for c, what, unit, _, _ in hints] == [
+        ("medicine", "costs", here["medicine"] - 4), ("food", "sells", here["food"] + 9)]
+
+
+def test_price_memory_never_offers_cargo_a_delivery_is_waiting_for():
+    world, destination = _world_with_market_memory()
+    here = vr.price_for(world, 0, "medicine")
+    world.save.market_memory[destination]["medicine"].update(sell=here * 3, buy=here - 4)
+    _set_cargo(world, {"medicine": 2})
+    _deliveries(world, ("medicine", 5, destination, 30))
+    # Two aboard are spoken for and three more are needed: a cheaper source, not a sale.
+    assert [(c, what) for c, what, *_ in vr.market_memory_hints(world, ["medicine"])] == [("medicine", "costs")]
+    _set_cargo(world, {"medicine": 5})
+    # All five are spoken for: what remains is a trade on fresh cargo, quoted at this buy price.
+    assert "buy " + str(here) in plain("\n".join(vr.market_memory_lines(world, ["medicine"])))
+    _set_cargo(world, {"medicine": 7})
+    assert [(c, what) for c, what, *_ in vr.market_memory_hints(world, ["medicine"])] == [("medicine", "sells")]
+    assert vr.spare_cargo(world, "medicine") == 2
+
+
+def test_price_memory_never_quotes_this_station_or_more_than_a_handful():
+    world, destination = _world_with_market_memory()
+    for quote in world.save.market_memory[destination].values():
+        quote["sell"] = 10_000
+    hints = vr.market_memory_hints(world, vr.LEGAL_COMMODITIES)
+    assert len(hints) == vr.MARKET_HINT_ROWS and all(sid == destination for *_, sid, _ in hints)
