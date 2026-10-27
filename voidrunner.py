@@ -9518,6 +9518,8 @@ def futures_alert_rows(world: World) -> list[str]:
             continue
         goods = f"{order.quantity} {COMMODITIES[order.commodity]['label']}"
         if order.origin_system == world.here.id:
+            # `settle_futures_contracts` loads a ready order here as the ship
+            # docks unless the hold is too small: that is the only way one waits.
             rows.append(alert("caution", f"Futures #{order.id} ready HERE",
                               f"{goods} needs {order.quantity} hold, {max(0, free)} free",
                               key_label("M", "market")))
@@ -10938,12 +10940,16 @@ def contract_cargo_aboard(world: World, mission: Mission) -> tuple[int, int]:
 
     A contract's page used to count the whole hold as its own, so a second Ore
     offer read "10 aboard, buy 0" while those ten were promised to the first
-    (issue #41).
+    (issue #41). The claims run in the order deliveries are served, which is
+    the order they were accepted (`check_mission_completions`): an accepted
+    contract is owed only what earlier ones leave, and an offer what all of
+    them leave.
     """
     held = world.save.cargo.get(mission.commodity, 0)
-    promised = sum(other.quantity or 0 for other in world.save.active_missions
-                   if other is not mission and other.id != mission.id and other.kind == "delivery"
-                   and other.commodity == mission.commodity
+    active = world.save.active_missions
+    position = next((index for index, other in enumerate(active) if other.id == mission.id), len(active))
+    promised = sum(other.quantity or 0 for other in active[:position]
+                   if other.kind == "delivery" and other.commodity == mission.commodity
                    and not (other.deadline_turn is not None and other.deadline_turn < world.save.turn))
     return max(0, held - promised), min(held, promised)
 
@@ -11893,7 +11899,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
             result = f"Station demand is exhausted; replenishes {depth['demand_rate']}/day."
             return set_status(result, "bad")
         spare = spare_cargo(world, commodity)
-        promised = have - spare
+        promised, places = have - spare, ""
         if promised:
             places = ", ".join(contract_cargo(world)[commodity][1])
             holding = f"have {have}: {promised} for {places} deliveries, {spare} spare"

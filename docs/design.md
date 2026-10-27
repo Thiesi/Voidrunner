@@ -1421,7 +1421,9 @@ quotes the pilot saw docked, and nothing is stored.
 The ship's computer also keeps track of what the pilot has promised (issue #41):
 - **Contract cargo:** a contract's pages count only the cargo aboard that other
   live deliveries of the same goods do not already claim, and they say how much
-  is promised elsewhere. Its procurement and hold checks follow from that.
+  is promised elsewhere. Claims follow the order deliveries are served, which is
+  the order they were accepted, so an offer is owed what every accepted delivery
+  leaves. Its procurement and hold checks follow from that.
 - **Due here:** the deck alerts when a delivery is due at this station and the
   hold is short, with the shortfall and this market's stock.
 - **Futures:** each matured futures order gets its own alert. An order at another
@@ -1430,7 +1432,7 @@ The ship's computer also keeps track of what the pilot has promised (issue #41):
   free.
 - **Selling promised cargo:** the sell prompt splits the cargo aboard into
   promised and spare. Selling into a promise asks first, naming the
-  destinations left short.
+  destinations that cargo is promised to.
 
 Quantity prompts say what Return does. Refuelling takes the most that fits and
 is affordable, a repair offer accepts on Return, and a purchase buys what the

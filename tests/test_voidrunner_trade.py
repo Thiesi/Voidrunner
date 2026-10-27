@@ -3301,3 +3301,24 @@ def test_selling_promised_cargo_says_whose_and_asks_first(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()) as output:
         assert "Sold 2x Food" in vr._trade_commodity(vr.Palette(False), world, "food")
     assert "promised to deliveries" not in output.getvalue() and world.save.cargo["food"] == 4
+
+
+def test_two_deliveries_of_the_same_goods_claim_the_hold_in_the_order_they_are_served():
+    world = _world_with_seed(42)
+    _deliveries(world, ("food", 10, 0, 30), ("food", 10, 0, 30))
+    _set_cargo(world, {"food": 10})
+    first, second = world.save.active_missions
+    # Ten aboard complete the first; the second is the one ten short.
+    assert vr.contract_cargo_aboard(world, first) == (10, 0)
+    assert vr.contract_cargo_aboard(world, second) == (0, 10)
+    due = [row for row in _alerts(world) if "due HERE" in row]
+    assert len(due) == 1 and "Contract #2 due HERE" in due[0] and "0/10 Food aboard, 10 short" in due[0]
+    assert vr.check_mission_completions(world) and [m.id for m in world.save.active_missions] == [2]
+
+
+def test_contraband_due_here_says_this_station_does_not_sell_it():
+    world = _world_with_seed(42)
+    assert world.here.economy != "Haven"
+    _deliveries(world, ("weapons", 3, 0, 30))
+    due = [row for row in _alerts(world) if "due HERE" in row]
+    assert len(due) == 1 and "0/3 Weapons aboard, 3 short; not sold here" in due[0]
