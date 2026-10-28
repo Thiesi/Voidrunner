@@ -529,3 +529,34 @@ def test_no_results_log_without_a_window_beside_the_console(canopy, width):
     vr.set_status("Bought 8 Food for 152cr.", "good")
     vr.set_status("Refueled 9 units for 54cr.", "good")
     assert "RECENT" not in plain(_written(lambda: vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1)))
+
+
+def test_a_long_result_takes_two_rows_and_says_it_was_cut():
+    p = vr.Palette(False)
+    vr.set_status("Sold 3x Machinery for 108cr. Two more are promised to deliveries for Kel and stay aboard until then.", "good")
+    vr.set_status("Refueled.", "good")
+    rows = [plain(row) for row in vr.result_log_rows(p, 24, 9, shown="Refueled.")]
+    assert rows[0] == "RECENT" and len(rows) == 3 and rows[2].rstrip().endswith("...")
+    assert all(vr._visible_width(row) <= 24 for row in rows)
+
+
+def test_a_short_terminal_shows_what_fits_or_nothing(canopy):
+    for number in range(4):
+        vr.set_status(f"Result number {number} was quite long indeed.", "info")
+    p = vr.Palette(False)
+    assert len(vr.result_log_rows(p, 20, 5)) <= 5
+    assert vr.result_log_rows(p, 20, 2) == []  # a heading alone is not a log
+    canopy(132, 15, world=_world_with_seed(42))  # a quarter of 15 rows is no room
+    assert "RECENT" not in plain(_written(lambda: vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1)))
+
+
+def test_new_game_plus_starts_with_an_empty_results_log(monkeypatch):
+    from .support import _finale_world
+    world = _finale_world("legend")
+    vr.set_status("Bought 8 Food for 152cr.", "good")
+    keys = iter(["S", "x"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_career_finale(vr.Palette(False), world)
+    assert not any(entry["text"] == "Bought 8 Food for 152cr." for entry in vr._RESULT_LOG)

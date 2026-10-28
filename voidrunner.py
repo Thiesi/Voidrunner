@@ -5956,6 +5956,8 @@ def set_status(text: str, tone: str | None = None) -> str:
         raise ValueError(f"Unknown status tone: {tone}")
     _STATUS = {"text": text, "tone": tone, "screen": None}
     # A result handed back up by the screen that said it is the same result.
+    # So, by the same test, is the same refusal twice running: the log reads
+    # it once, which is what a glance at it needs.
     if _RESULT_LOG and _RESULT_LOG[0]["text"] == text:
         _RESULT_LOG[0]["tone"] = tone
     else:
@@ -5967,6 +5969,11 @@ def set_status(text: str, tone: str | None = None) -> str:
 def clear_status() -> None:
     global _STATUS
     _STATUS = None
+
+
+def clear_result_log() -> None:
+    """Forget the recent results: a new career has none of the last one's."""
+    _RESULT_LOG.clear()
 
 
 def _status_screen(title: str) -> str:
@@ -6032,7 +6039,9 @@ def result_log_rows(p: "Palette", width: int, budget: int, shown: str | None = N
         role = getattr(p, STATUS_TONES.get(entry["tone"], STATUS_TONES["info"])[1])
         wrapped = _wrap_output(entry["text"], width - 2).split("\r\n")
         if len(wrapped) > 2:
-            wrapped = [wrapped[0], _fit_text(wrapped[1], width - 5) + "..."]
+            # The second row is cut to leave room for the dots; `width - 2`
+            # is what is left beside the mark.
+            wrapped = [wrapped[0], _fit_text(wrapped[1], width - 2 - len("...")) + "..."]
         if len(rows) + len(wrapped) > budget:
             break
         rows += [f"{_status_mark(p, entry) if number == 0 else ' '} {role}{row}{RESET}"
@@ -14589,6 +14598,7 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
         label = CAREER_FINALES[selected]["label"]
         retired_ship = dataclasses.replace(world.save.ship)  # the ship that flew this career, for its portrait
         world.reset(fresh.save)
+        clear_result_log()  # New Game+ begins in this same session (#51 review)
         world.pending_promotions.extend(fresh.pending_promotions)
         world.pending_accolades.extend(fresh.pending_accolades)
         world.commit()
