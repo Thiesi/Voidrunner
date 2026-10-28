@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import io
 import random
+import re
 import sys
 from tests.door_python import DOOR_PYTHON
 import time
@@ -140,7 +141,7 @@ def test_trade_route_quote_uses_stale_sale_data_and_exact_fuel_wage_budget(monke
     assert quote["observed_day"] == 0 and quote["receipts"] == old_sale * 3
     assert quote["cargo_cost"] == 3 * original(world, 0, "food")
     assert quote["wages"] == len(path) * (vr.CREW_ROLES["engineer"]["wage"] + vr.CREW_ROLES["navigator"]["wage"])
-    assert quote["fuel_cash"] == quote["fuel"] * 6
+    assert quote["fuel_cash"] == quote["fuel"] * vr.FUEL_PRICE
     assert quote["cash_needed"] == quote["cargo_cost"] + quote["fuel_cash"] + quote["wages"]
     assert quote["margin"] == quote["receipts"] - quote["cash_needed"]
     assert " short" in plain(" ".join(vr.trade_route_lines(world, destination, "food", 3, False)))
@@ -163,7 +164,7 @@ def test_trade_route_known_hold_uses_actual_basis_not_current_purchase_price():
     vr._acquire_cargo(world, "food", 2, 17)
     quote = vr.trade_route_quote(world, destination, "food", 2, use_hold=True)
     assert quote["cargo_cost"] == 17 and quote["procurement"] == 0
-    assert quote["margin"] == quote["receipts"] - 17 - quote["fuel"] * 6
+    assert quote["margin"] == quote["receipts"] - 17 - quote["fuel"] * vr.FUEL_PRICE
 
 
 @pytest.mark.parametrize("deadline,conflict", [(0, False), (1, True), (None, True)])
@@ -3400,7 +3401,7 @@ def test_the_yard_says_what_the_tracked_route_burns_and_what_to_buy():
     world.save.ship.fuel = 1
     buy = min(vr.fuel_capacity(world.save.ship), sum(burns)) - 1
     text = " ".join(plain(line) for line in vr.shipyard_lines(world))
-    assert f"Tracked #1 3 jumps, {sum(burns)} fuel; tank 1, buy {buy} ({buy * 6}cr)" in text
+    assert f"Tracked #1 3 jumps, {sum(burns)} fuel; tank 1, buy {buy} ({buy * vr.FUEL_PRICE}cr)" in text
     world.save.ship.fuel = vr.fuel_capacity(world.save.ship)
     assert "enough" in vr.tracked_route_fuel_text(world)
 
@@ -3445,3 +3446,27 @@ def test_the_deck_warns_three_days_out_and_folds_a_crowd_of_deadlines_into_one_r
     assert len(rows) == 3 and "Contract #4 expires in 1 day" in rows[0] and "Contract #3 expires in 2 days" in rows[1]
     assert "+1 more contract expiring #1" in rows[2] and "[B] board" in rows[2]
 
+
+
+def test_every_fuel_figure_follows_the_one_fuel_price(monkeypatch):
+    # The price was a bare 6 in a dozen places (#48); a different price must
+    # reach the yard, the refuel prompt, the deck and the route budget alike.
+    monkeypatch.setattr(vr, "FUEL_PRICE", 7)
+    world = _world_with_seed(42)
+    world.save.active_missions = []
+    target = _contract_jumps_away(world, 3, 1, 30)
+    world.save.tracked_mission_id = 1
+    world.save.ship.fuel = 1
+    yard = " ".join(plain(line) for line in vr.shipyard_lines(world))
+    plan = vr.tracked_route_fuel(world)
+    assert "refuel 7cr/unit" in yard and f"buy {plan['buy']} ({plan['buy'] * 7}cr)" in yard
+    budget = " ".join(plain(line) for line in vr.navigation_budget_lines(world, vr.bfs_path(world.by_id, world.here.id, target)))
+    assert "7cr/unit refuelling" in budget and not re.search(r"6cr/unit", budget)
+    guide = " ".join(plain(line) for line in vr.pilot_guide_lines(world))
+    assert "Each fuel unit costs 7 cr." in guide
+    world.save.pilot.credits = 70
+    world.save.ship.fuel = 0
+    _keys(monkeypatch, "\r")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._refuel(vr.Palette(False), world)
+    assert "7cr/unit" in plain(output.getvalue()) and world.save.ship.fuel == 10 and world.save.pilot.credits == 0
