@@ -464,3 +464,31 @@ def test_a_canopy_page_hands_its_true_height_to_the_drain(monkeypatch, canopy):
     rows = [row for row in vr._ANSI_RE.sub("", output.getvalue()).split("\r\n") if row.strip()]
     # Header, two rows, the status's own rows and the bottom border: all of them drawn.
     assert seen and seen[0][1] > seen[0][0] and seen[0][1] == len(rows)
+
+
+@pytest.mark.parametrize("live", [True, False])
+def test_the_screen_is_not_cleared_until_the_new_frame_is_ready(canopy, monkeypatch, live):
+    """The clear went out first and the canopy was computed after it, so a
+    wide terminal sat blank for 0.64s at 132x50 (NetBBS gallery, v1.7.0)."""
+    world = _world_with_seed(42)
+    canopy(132, 50, world=world)
+    if not live:
+        monkeypatch.setattr(vr, "_live_terminal", lambda: False)
+    buffer = io.StringIO()
+    painted, skies = [], []
+    real = vr.canopy_paint
+
+    def paint(*args, **kwargs):
+        painted.append("\x1b[2J" in buffer.getvalue())
+        skies.append(real(*args, **kwargs))
+        return skies[-1]
+    monkeypatch.setattr(vr, "canopy_paint", paint)
+    with contextlib.redirect_stdout(buffer):
+        vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1)
+    text = buffer.getvalue()
+    assert text.count("\x1b[2J") == 1
+    if live:
+        # Composed before the clear, and nothing between the clear and the sky.
+        assert painted == [False] and "\x1b[2J\x1b[H" + skies[0] in text
+    else:
+        assert painted == []
