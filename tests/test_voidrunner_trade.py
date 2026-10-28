@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-from .support import plain, plain_bytes, shows_page, _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _drain_until, _live_voidrunner, _set_cargo, _world_at_food_producer, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
+from .support import plain, plain_bytes, shows_page, _VOIDRUNNER_PATH, _add_cargo, _world_with_named_crew, _door_stopped_at, _drain_until, _live_voidrunner, _set_cargo, _world_at_food_producer, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
 
 
 def _world_with_market_memory():
@@ -3333,3 +3333,99 @@ def test_due_here_says_when_the_cargo_aboard_is_held_for_an_earlier_contract():
     _set_cargo(world, {"food": 10})
     due = [row for row in _alerts(world) if "due HERE" in row]
     assert len(due) == 1 and "0/12 Food aboard (10 held for earlier contracts), 12 short" in due[0]
+
+
+def _contract_jumps_away(world, jumps, mission_id, deadline_in):
+    """An untracked delivery `jumps` away, due `deadline_in` days from today."""
+    hops = vr.bfs_hops(world.by_id, world.here.id)
+    target = min(sid for sid, h in hops.items() if h == jumps)
+    world.save.active_missions.append(vr.Mission(mission_id, "delivery", "Deliver 1 Food", 100, 0, target, commodity="food",
+                                                 quantity=1, deadline_turn=world.save.turn + deadline_in))
+    return target
+
+
+def test_an_untracked_contract_about_to_expire_is_on_the_deck_and_its_departure():
+    world = _world_with_seed(42)
+    world.save.active_missions = []
+    target = _contract_jumps_away(world, 3, 2, 2)
+    rows = [row for row in _alerts(world) if "expires" in row]
+    assert len(rows) == 1 and "Contract #2 expires in 2 days" in rows[0] and "3 jumps away (late)" in rows[0] and "[B] board" in rows[0]
+    first = vr.bfs_path(world.by_id, world.here.id, target)[0]
+    assert plain(vr.departure_deadline_badges(world)[first]) == "#2 2d"
+    chart = " ".join(plain(text) for _, text in vr.chart_entries(world))
+    assert "#2 2d" in chart
+    # Tracked, it is the tracked row's to show; far off, the deck leaves it to the chart.
+    world.save.tracked_mission_id = 2
+    assert not [row for row in _alerts(world) if "expires" in row] and not vr.departure_deadline_badges(world)
+    world.save.tracked_mission_id = None
+    world.save.active_missions[0].deadline_turn = world.save.turn + 9
+    assert not [row for row in _alerts(world) if "expires" in row]
+    assert plain(vr.departure_deadline_badges(world)[first]) == "#2 9d"
+
+
+def test_the_deck_says_where_a_crew_task_stands_and_when_it_can_be_handed_over():
+    world = _world_with_named_crew("engineer", 5)
+    vr.accept_crew_assignment(world, "engineer")
+    world.save.cargo = {"machinery": 1}
+    name = vr._mission_plain(vr.crew_name(world, "engineer"))
+    rows = [row for row in _alerts(world) if "Crew task" in row]
+    assert len(rows) == 1 and f"Crew task: {name}" in rows[0] and "1/3 Machinery aboard" in rows[0]
+    assert "Tuning Fork" in rows[0] and "[K] crew" in rows[0]
+    world.save.cargo = {"machinery": 3}
+    world.save.current_system = vr.crew_assignment_destination(world, "engineer")
+    rows = [row for row in _alerts(world) if "Crew task" in row]
+    assert rows == [f"{plain(vr.glyph('info'))} Crew task ready HERE hand {name} 3 Machinery  [K] crew"]
+
+
+def test_the_market_names_a_crew_task_and_workshop_materials():
+    world = _world_with_named_crew("engineer", 5)
+    world.save.cargo = {"machinery": 1}
+    text = " ".join(plain(line) for line in vr.market_catalog_lines(world, vr.LEGAL_COMMODITIES))
+    assert "Crew task:" not in text and "Workshop upgrades, optional: Refined Metals 2" in text
+    vr.accept_crew_assignment(world, "engineer")
+    text = " ".join(plain(line) for line in vr.market_catalog_lines(world, vr.LEGAL_COMMODITIES))
+    name = vr._mission_plain(vr.crew_name(world, "engineer"))
+    assert f"Crew task: {name} needs 3 Machinery (1 aboard)" in text and "Tuning Fork" in text
+
+
+def test_the_yard_says_what_the_tracked_route_burns_and_what_to_buy():
+    world = _world_with_seed(42)
+    world.save.active_missions = []
+    target = _contract_jumps_away(world, 3, 1, 30)
+    world.save.tracked_mission_id = 1
+    path = vr.bfs_path(world.by_id, world.here.id, target)
+    burns, previous = [], world.here
+    for sid in path:
+        burns.append(vr.fuel_cost_for_jump(previous, world.by_id[sid], world.save.ship)); previous = world.by_id[sid]
+    world.save.ship.fuel = 1
+    buy = min(vr.fuel_capacity(world.save.ship), sum(burns)) - 1
+    text = " ".join(plain(line) for line in vr.shipyard_lines(world))
+    assert f"Tracked #1 3 jumps, {sum(burns)} fuel; tank 1, buy {buy} ({buy * 6}cr)" in text
+    world.save.ship.fuel = vr.fuel_capacity(world.save.ship)
+    assert "enough" in vr.tracked_route_fuel_text(world)
+
+
+def test_a_route_longer_than_a_tank_counts_its_refuel_stops(monkeypatch):
+    world = _world_with_seed(42)
+    world.save.active_missions = []
+    _contract_jumps_away(world, 3, 1, 30)
+    world.save.tracked_mission_id = 1
+    burns = [vr.fuel_cost_for_jump(a, b, world.save.ship) for a, b in zip(
+        [world.here] + [world.by_id[s] for s in vr.mission_route(world, world.save.active_missions[0])],
+        [world.by_id[s] for s in vr.mission_route(world, world.save.active_missions[0])])]
+    monkeypatch.setattr(vr, "fuel_capacity", lambda ship: max(burns))
+    world.save.ship.fuel = 0
+    plan = vr.tracked_route_fuel(world)
+    assert plan["buy"] == max(burns) and plan["stops"] >= 1 and not plan["over"]
+    assert "refuel stop" in vr.tracked_route_fuel_text(world)
+    monkeypatch.setattr(vr, "fuel_capacity", lambda ship: max(burns) - 1)
+    assert "a leg needs more than a full tank" in vr.tracked_route_fuel_text(world)
+
+
+def test_the_deck_counts_yard_upgrades_the_balance_covers():
+    world = _world_with_seed(42)
+    world.save.pilot.credits = 0
+    assert ("Y", "Yard repair/refit") in vr.deck_service_entries(world)
+    world.save.pilot.credits = 10_000_000
+    count = sum(1 for key, u in vr.UPGRADES.items() if getattr(world.save.ship, f"{key}_tier") < u["max_tier"])
+    assert ("Y", f"Yard: {vr.plural(count, 'upgrade')} affordable") in vr.deck_service_entries(world)
