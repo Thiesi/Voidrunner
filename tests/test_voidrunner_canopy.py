@@ -492,3 +492,40 @@ def test_the_screen_is_not_cleared_until_the_new_frame_is_ready(canopy, monkeypa
         assert painted == [False] and "\x1b[2J\x1b[H" + skies[0] in text
     else:
         assert painted == []
+
+
+def test_the_results_log_keeps_the_last_few_newest_first_and_once_each():
+    for number in range(8):
+        vr.set_status(f"Result {number}.", "good")
+    vr.set_status("Result 7.")  # handed back up by the screen that said it
+    assert [entry["text"] for entry in vr._RESULT_LOG] == [f"Result {n}." for n in range(7, 1, -1)]
+    assert vr._RESULT_LOG[0]["tone"] == "good"
+    vr.clear_status()
+    assert vr._RESULT_LOG, "the log outlives the status that fed it"
+
+
+def test_a_wide_console_shows_recent_results_in_its_window_but_not_the_one_in_its_border(canopy):
+    world = _world_with_seed(42)
+    canopy(132, 50, world=world)
+    for text, tone in [("Bought 8 Food for 152cr.", "good"), ("Not enough credits.", "bad"),
+                       ("Departure cancelled; still docked.", "info")]:
+        vr.set_status(text, tone)
+    said = _written(lambda: vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1))
+    left = vr._box_outer_width() + 4
+    # Each window row runs from its cursor address to the next one, or home.
+    window = {int(row): plain(text.split("\x1b[H")[0]) for row, column, text in
+              re.findall(r"\x1b\[(\d+);(\d+)H((?:(?!\x1b\[\d+;\d+H).)*)", said) if int(column) == left}
+    assert "RECENT" in window[vr.RESULT_LOG_TOP + 1]
+    log = " ".join(" ".join(window.values()).split())
+    assert "Not enough credits." in log and "Bought 8 Food for 152cr." in log
+    assert "Departure cancelled" not in log and log.index("Not enough") < log.index("Bought")
+    # It stops above the art: nothing below a quarter of the screen.
+    assert max(window) <= int(50 * vr.RESULT_LOG_DEPTH)
+
+
+@pytest.mark.parametrize("width", [80, 120, 129])
+def test_no_results_log_without_a_window_beside_the_console(canopy, width):
+    canopy(width, 40, world=_world_with_seed(42))
+    vr.set_status("Bought 8 Food for 152cr.", "good")
+    vr.set_status("Refueled 9 units for 54cr.", "good")
+    assert "RECENT" not in plain(_written(lambda: vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1)))

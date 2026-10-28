@@ -22,9 +22,9 @@ def _no_door_splash(monkeypatch):
     monkeypatch.setenv("DOOR_SCENES", "0")
     # The status line is session state (issue #38): one test's result must not
     # be drawn in the next test's border.
-    vr.clear_status()
+    vr.clear_status(); vr._RESULT_LOG.clear()
     yield
-    vr.clear_status()
+    vr.clear_status(); vr._RESULT_LOG.clear()
 
 
 @pytest.fixture
