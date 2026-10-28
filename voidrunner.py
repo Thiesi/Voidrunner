@@ -13837,7 +13837,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         lines.append("First Flight needs an affordable cargo and return-fuel budget while still at Freeport on day zero. The guide remains available anywhere.")
     lines += [
         "1. Buy cargo: [M] Market, choose the commodity's letter, [P] Purchase, enter a quantity. Buying spends credits and needs free hold space. Enter with no quantity cancels.",
-        "2. Keep fuel: [Y] Yard, [R] Refuel. Each fuel unit costs 6 cr. Reserve enough for the outward and return jumps; keep credits for repairs and crew wages too.",
+        f"2. Keep fuel: [Y] Yard, [R] Refuel. Each fuel unit costs {FUEL_PRICE} cr. Reserve enough for the outward and return jumps; keep credits for repairs and crew wages too.",
         "3. Depart: [C] Chart, select the destination's letter, then confirm its fuel cost and danger. A jump advances one day, uses fuel and charges wages. Browsing, trading and upgrades do not advance the day.",
         "4. Deliver a contract by docking with its full cargo. Ordinary trading instead uses [M] Market, commodity letter, [S] Sell. Sales pay less than the local buy quote; distant prices can change.",
         f"5. First upgrade: [Y] Yard, [{YARD_LETTERS[list(UPGRADES).index('cargo')]}] Cargo Bay Expansion adds 8 cargo spaces. [{YARD_LETTERS[list(UPGRADES).index('hull')]}] Hull Reinforcement adds 35 maximum hull. Keep travel money before investing.",

@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import io
 import random
+import re
 import sys
 from tests.door_python import DOOR_PYTHON
 import time
@@ -3460,7 +3461,9 @@ def test_every_fuel_figure_follows_the_one_fuel_price(monkeypatch):
     plan = vr.tracked_route_fuel(world)
     assert "refuel 7cr/unit" in yard and f"buy {plan['buy']} ({plan['buy'] * 7}cr)" in yard
     budget = " ".join(plain(line) for line in vr.navigation_budget_lines(world, vr.bfs_path(world.by_id, world.here.id, target)))
-    assert "7cr/unit refuelling" in budget and "6cr" not in budget
+    assert "7cr/unit refuelling" in budget and not re.search(r"6cr/unit", budget)
+    guide = " ".join(plain(line) for line in vr.pilot_guide_lines(world))
+    assert "Each fuel unit costs 7 cr." in guide
     world.save.pilot.credits = 70
     world.save.ship.fuel = 0
     _keys(monkeypatch, "\r")
