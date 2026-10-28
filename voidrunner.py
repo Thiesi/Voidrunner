@@ -9675,7 +9675,8 @@ def futures_alert_rows(world: World) -> list[str]:
 # tail is what turns a wall of twelve identical entries into a screen a caller
 # can read: it says how many offers are on the board without opening it.
 def affordable_upgrades(world: World) -> int:
-    """Yard upgrades the balance covers now; not "newly", which would need saved state."""
+    """Yard upgrades the balance covers now; not "newly", which would need saved state.
+    Yard prices only: a workshop's cheaper install also wants materials and a visit."""
     ship, credits = world.save.ship, world.save.pilot.credits
     return sum(1 for key, upgrade in UPGRADES.items()
                if getattr(ship, f"{key}_tier") < upgrade["max_tier"]
@@ -13232,7 +13233,8 @@ def tracked_route_fuel(world: World) -> dict | None:
     The refuel prompt offered a full tank while the route's fuel was only on
     the route screens (issue #41). `buy` fills toward the route's total, never
     past the tank; `stops` counts the top-ups still needed on the way when the
-    route burns more than a full tank, and `over` a leg no tank can fly."""
+    route burns more than a full tank, and `over` a leg no tank can fly. Like
+    the route planner, it assumes every station on the way sells fuel."""
     mission = tracked_mission(world)
     if mission is None or (mission.kind == "scan" and world.by_id[mission.target_system].discovered):
         return None
@@ -13414,7 +13416,11 @@ def mission_route(world: World, mission: Mission) -> list[int]:
 
 
 #: An untracked contract this close to its deadline gets a row on the deck.
+#: The chart badges every deadline, however far: there it says which
+#: departure leads toward which contract, not that one is urgent.
 DEADLINE_WARNING_DAYS = 3
+#: Deadline rows the deck shows before folding the rest into one.
+DEADLINE_ALERT_ROWS = 2
 
 
 def contract_deadlines(world: World) -> list[dict]:
@@ -13438,17 +13444,23 @@ def contract_deadlines(world: World) -> list[dict]:
 def deadline_alert_rows(world: World) -> list[str]:
     """Untracked contracts about to expire, with how far away they are."""
     tracked = tracked_mission(world)
+    urgent = [entry for entry in contract_deadlines(world)
+              # the tracked row has its own gauge; one due here has its own row
+              if not (tracked is not None and entry["mission"].id == tracked.id) and entry["route"]
+              and (entry["left"] <= DEADLINE_WARNING_DAYS or entry["late"])]
     rows = []
-    for entry in contract_deadlines(world):
+    for entry in urgent[:DEADLINE_ALERT_ROWS]:
         mission, left = entry["mission"], entry["left"]
-        if (tracked is not None and mission.id == tracked.id) or not entry["route"]:
-            continue  # the tracked row has its own gauge; one due here has its own row
-        if left > DEADLINE_WARNING_DAYS and not entry["late"]:
-            continue
         when = "today" if left == 0 else f"in {plural(left, 'day')}"
         rows.append(alert("danger" if entry["late"] else "caution", f"Contract #{mission.id} expires {when}",
                           f"{plural(len(entry['route']), 'jump')} away" + (" (late)" if entry["late"] else ""),
                           key_label("B", "board")))
+    # Several at once would push the services off a short terminal (#47 review).
+    rest = urgent[DEADLINE_ALERT_ROWS:]
+    if rest:
+        rows.append(alert("danger" if any(entry["late"] for entry in rest) else "caution",
+                          f"+{plural(len(rest), 'more contract')} expiring",
+                          ", ".join(f"#{entry['mission'].id}" for entry in rest), key_label("B", "board")))
     return rows
 
 

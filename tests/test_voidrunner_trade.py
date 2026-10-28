@@ -3429,3 +3429,19 @@ def test_the_deck_counts_yard_upgrades_the_balance_covers():
     world.save.pilot.credits = 10_000_000
     count = sum(1 for key, u in vr.UPGRADES.items() if getattr(world.save.ship, f"{key}_tier") < u["max_tier"])
     assert ("Y", f"Yard: {vr.plural(count, 'upgrade')} affordable") in vr.deck_service_entries(world)
+
+
+def test_the_deck_warns_three_days_out_and_folds_a_crowd_of_deadlines_into_one_row():
+    world = _world_with_seed(42)
+    world.save.active_missions = []
+    _contract_jumps_away(world, 1, 1, 3)
+    _contract_jumps_away(world, 1, 2, 4)
+    rows = [row for row in _alerts(world) if "expir" in row]
+    assert len(rows) == 1 and "Contract #1 expires in 3 days" in rows[0] and "(late)" not in rows[0]
+    # Four days out is the chart's to show, unless the route is longer than that.
+    _contract_jumps_away(world, 3, 3, 2)
+    _contract_jumps_away(world, 2, 4, 1)
+    rows = [row for row in _alerts(world) if "expir" in row]
+    assert len(rows) == 3 and "Contract #4 expires in 1 day" in rows[0] and "Contract #3 expires in 2 days" in rows[1]
+    assert "+1 more contract expiring #1" in rows[2] and "[B] board" in rows[2]
+
