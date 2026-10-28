@@ -1025,7 +1025,12 @@ def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, te
         plain=vr._ANSI_RE.sub("",frame)
         body=plain[re.search(r"Archive.*?\d+/\d+",plain,re.S).end():]
         bodies.append(page_text(without_action_bar(body)))
-    assert " ".join(" ".join(bodies).split())==" ".join(" ".join(vr.archive_lines(world)).split())
+    shown = " ".join(" ".join(bodies).split())
+    # The choice is two columns; every cell of each row is on the page.
+    # Section labels ride in the frame's rules, which `page_text` leaves out.
+    missing = [word for line in vr.archive_lines(world) if not line.startswith(vr.SECTION_MARK)
+               for word in vr._ANSI_RE.sub("", line).split() if word not in shown]
+    assert not missing, missing
 
 
 @pytest.mark.parametrize("commands,site", [(b"N", False), (b"N?><BQ", False), (b"NRBBQ", True), (b"L", True), (b"L><BQ", True)])
@@ -1544,7 +1549,7 @@ def test_crew_first_page_starts_with_available_specialist(monkeypatch, terminal,
     assert "[A] Gunner" in text and "for hire" in text
     if width >= 40:
         assert vr.crew_name(world, "gunner") in text
-        assert "800cr + 15cr/jump" in text and "+3 combat damage per hit" in text
+        assert "800cr" in text and "15cr/jump" in text and "+3 combat damage per hit" in text
     if "Promotions" in text: assert text.index("Gunner: Available") < text.index("Promotions")
 
 
@@ -1558,7 +1563,8 @@ def test_archive_preview_and_result_report_effective_standing(ending, concord, b
     concord_gain = min(100, concord + 5) - concord if ending == "P" else max(-100, concord - 2) - concord
     blackwake_gain = min(100, blackwake + 5) - blackwake
     terms = f"Concord {concord_gain:+d}" if ending == "P" else f"Blackwake {blackwake_gain:+d}; Concord {concord_gain:+d}"
-    assert terms in " ".join(vr.archive_lines(world))
+    shown = plain(" ".join(vr.archive_lines(world)))
+    assert all(part in shown for part in terms.split("; "))
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
     assert terms in " ".join(vr.archive_action(world, ending))
     assert world.save.pilot.reputation[vr.FACTION_CONCORD] - concord == concord_gain
@@ -1947,7 +1953,11 @@ def test_faction_contact_pages_preserve_all_terms_without_writes(monkeypatch, te
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): vr._screen_faction_contact(vr.Palette(False), world, faction)
-    assert " ".join(" ".join(bodies).split()) == " ".join(" ".join(vr.faction_contact_lines(world, faction)).split())
+    shown = " ".join(" ".join(bodies).split())
+    # Section labels ride in the frame's rules, which `page_text` leaves out.
+    missing = [word for line in vr.faction_contact_lines(world, faction) if not line.startswith(vr.SECTION_MARK)
+               for word in vr._ANSI_RE.sub("", line).split() if word not in shown]
+    assert not missing, missing
 
 
 @pytest.mark.parametrize("key", ["P", "W"])
@@ -2180,7 +2190,11 @@ def test_faction_case_pages_preserve_full_terms_without_writes(monkeypatch, term
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): assert vr.screen_faction_story(vr.Palette(False), world, faction) is None
-    assert " ".join(" ".join(bodies).split()) == " ".join(" ".join(vr.faction_story_lines(world, faction)).split())
+    shown = " ".join(" ".join(bodies).split())
+    # Section labels ride in the frame's rules, which `page_text` leaves out.
+    missing = [word for line in vr.faction_story_lines(world, faction) if not line.startswith(vr.SECTION_MARK)
+               for word in vr._ANSI_RE.sub("", line).split() if word not in shown]
+    assert not missing, missing
 
 
 @pytest.mark.parametrize("faction", vr.FACTIONS)
@@ -2304,8 +2318,10 @@ def test_general_route_map_keeps_independent_tracked_objective_and_route_end(mon
     monkeypatch.setattr(vr, "map_list_lines", capture)
     keys = iter("VOBB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()): vr.screen_auto_route(vr.Palette(False), world, destination=destination)
-    objective = [line for line in lists if world.by_id[target].name in line]
-    endpoint = [line for line in lists if world.by_id[destination].name in line]
+    # Table rows carry the paginator's marks and colors; the markers lead the row.
+    rows = [vr._ANSI_RE.sub("", line).lstrip(vr.STICKY_MARK + vr.MEMBER_MARK) for line in lists]
+    objective = [row for row in rows if world.by_id[target].name in row]
+    endpoint = [row for row in rows if world.by_id[destination].name in row]
     assert len(objective) == 1 and objective[0].startswith("! ")
     assert len(endpoint) == 1 and "X" in endpoint[0].split()[0] and "!" not in endpoint[0].split()[0]
     grid = "".join(vr.spatial_map_grid(world, path, public_target=destination, sector=None, columns=119, rows=36))
@@ -2323,8 +2339,8 @@ def test_archive_terms_disclose_only_remaining_landmark_salvage(stage, investiga
     world = _archive_world(stage, investigated=investigated)
     before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
     terms = " ".join(vr.archive_lines(world))
-    expected = "Landmark salvage already claimed; transcribing the record pays no additional salvage." if investigated else "Unclaimed landmark salvage: +3,000cr once when investigating."
-    assert expected in terms
+    expected = "claimed; transcribing pays no more" if investigated else "+3,000cr once, when investigating"
+    assert expected in plain(terms)
     assert "Unclaimed landmark salvage remains yours" not in terms
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
     if stage == "idle": vr.archive_action(world, "A")
@@ -2925,11 +2941,10 @@ raise SystemExit(code)
 def test_faction_case_ending_selectors_only_appear_when_choice_is_available(faction,stage):
     import copy
     world=_faction_case_world(faction,stage);before=copy.deepcopy(world.save.to_dict());rng=world.event_rng.getstate()
-    lines=vr.faction_story_lines(world,faction)
+    text=" ".join(vr._ANSI_RE.sub("",line) for line in vr.faction_story_lines(world,faction))
     for choice,key in [("hardline","H"),("aid","A")]:
         label=vr.FACTION_STORIES[faction][choice]["label"]
-        row=next(line for line in lines if label+":" in line)
-        assert row.startswith(f"[{key}] ")==(stage=="evidence")
+        assert label in text and (f"[{key}] {label}" in text)==(stage=="evidence")
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
@@ -3253,7 +3268,7 @@ def test_the_ending_is_built_from_the_archived_dossier_and_pages_at_the_floor(mo
     single = vr.finish_career(_finale_world("legend").save, "legend")
     single.retired_careers[-1].update(days=1, kills=1, missions=1)
     said = " ".join(plain(row) for row in vr.career_ending_lines(single)[1])
-    assert "1 day," in said and "1 victory;" in said and "1 contract completed" in said
+    assert "1 day," in said and "1 victory" in said and "1 victories" not in said and "1 contract completed" in said
     for width, height in ((80, 24), (40, 12)):
         terminal(width, height)
         pages = vr.portrait_pages(vr.pal(), vr.ship_portrait(world.save.ship, "large"), vr.ship_portrait(world.save.ship, "compact"),

@@ -953,6 +953,25 @@ set the ceiling again -- which is why there is no second layout to leak upward,
 and why a screen that will not fit 40 columns is redesigned rather than given a
 compact variant.
 
+A wide terminal widens that one layout; it does not get a second one (issue
+#39). Up to 129 columns the console is 79 columns wide. From 130 it grows, to
+112 columns at most, the widest a line of prose reads well at, and always
+leaves the canopy 30 columns of window. Below 130, widening would only squeeze
+the picture into a strip, so a 120-column caller keeps the classic console.
+Screens use the room through the same components that fit 40 columns:
+- **Tables** fit optional columns they would otherwise drop.
+- **Data sheets** (`sheet_columns`) put their columns side by side, and stack
+  them on a narrow terminal. Nothing is dropped.
+- **The contract sheet** adds the route, leg by leg, as a third column when
+  there is room. It is the only screen that shows more on a wide console, and
+  the same route is one key away on every other.
+
+The data sheets replace pages of sentences with what a pilot can take in at a
+glance. A row a CHECKS column judges ends in a mark: ● fine, ▲ a problem, ◆
+worth knowing, ? unknown. A row that only informs has no mark. A MONEY column
+adds a payout and its costs down to a NET. The contract page, the Archive and
+the crew roster are built this way.
+
 Door presentation is reviewed by looking at rendered screens.
 `tools/door_gallery.py` drives every screen in a subprocess at 80, 64 and 40
 columns in each display preset and writes an HTML page through

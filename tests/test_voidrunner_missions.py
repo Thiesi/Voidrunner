@@ -39,7 +39,7 @@ def test_mission_navigation_pages_preserve_chart_and_career(monkeypatch, termina
     assert all(len(frame.splitlines()) <= height for frame in frames)
     assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
     text=page_text(frames)
-    assert world.by_id[mission.target_system].name in text and "danger unknown" in text
+    assert world.by_id[mission.target_system].name in text and "DANGER" in text and "?" in text
     for sid in vr.mission_route(world,mission)[:-1]: assert world.by_id[sid].name not in text
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
     assert not world.by_id[mission.target_system].discovered
@@ -84,7 +84,7 @@ def test_mission_navigation_tracks_before_one_hop_and_recalculates_after_it(monk
     assert calls==[first] and world.save.turn==1
     if outcome=="divert": assert "Travel diverted" in output.getvalue()
     elif outcome=="fail": assert "no longer active" in output.getvalue() and world.save.tracked_mission_id is None
-    else: assert "Last hop: arrived" in plain(output.getvalue()) and world.save.tracked_mission_id==mission.id
+    else: assert "Arrived at" in plain(output.getvalue()) and world.save.tracked_mission_id==mission.id
 
 
 def test_mission_navigation_save_failure_stops_before_departure(monkeypatch):
@@ -112,9 +112,9 @@ def test_mission_navigation_budget_includes_bounty_reentry_and_manual_refuelling
     world,mission=_mission_details_world("bounty"); vr.accept_mission(world,mission)
     world.save.current_system=mission.target_system; world.save.ship.fuel=0; world.save.ship.has_gunner=True
     world.save.turn=mission.deadline_turn-1
-    lines=vr.mission_navigation_lines(world,mission,active=True); text=" ".join(lines)
-    assert "Route: 2 jumps" in text and "wages 30cr" in text
-    assert "Refuelling is manual" in text and "MISSES deadline" in text
+    lines=vr.mission_navigation_lines(world,mission,active=True); text=" ".join(plain(" ".join(lines)).split())
+    assert "Wages 2 x 15 -30cr" in text and "needs 2, 0 aboard" in text
+    assert "refuelling, which is manual" in text and "MISSES deadline" in text
     assert "leave/re-enter" in text
 
 
@@ -131,7 +131,8 @@ def test_mission_navigation_procurement_and_posted_escort_obligations():
 
 def test_mission_navigation_large_legacy_queue_budgets_actual_page_number_width(monkeypatch, terminal):
     world,mission=_mission_details_world("bounty")
-    world.save.active_missions=[vr.Mission(i,"bounty","Legacy bounty",500,0,mission.target_system,pirate_tier=1) for i in range(1,1002)]
+    # Enough contracts for four-digit page numbers now that each is one table row.
+    world.save.active_missions=[vr.Mission(i,"bounty","Legacy bounty",500,0,mission.target_system,pirate_tier=1) for i in range(1,6002)]
     mission=world.save.active_missions[-1]
     terminal(40, 12)
     title=f"Contract Route #{mission.id}"; footer="[J] Jump next [N] Next [P] Prev [B] Back: "
@@ -174,7 +175,7 @@ def test_real_mission_navigation_completes_delivery_once_before_retained_result(
         world.sync_discovered()
     world._checkpoint=lambda current:vr.persist(current,tmp_path,77); world.checkpoint()
     credits=world.save.pilot.credits
-    with _door_stopped_at(tmp_path,commands,b"Last hop: arrived"):
+    with _door_stopped_at(tmp_path,commands,b"Arrived at"):
         saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
         assert saved.current_system==destination and saved.turn==1 and saved.pending_travel is None
         assert saved.pilot.credits==credits+500 and not saved.active_missions and not saved.cargo
@@ -703,13 +704,13 @@ def test_contract_terms_show_kind_obligations_and_cost_limits(kind):
     world, mission = _mission_details_world(kind)
     world.save.ship.has_navigator = True
     _set_cargo(world, {"food": 1})
-    lines = " ".join(vr.mission_details(world, mission))
-    assert "inclusive" in lines and "Target danger: uncharted" in lines
-    assert "Gross payout" in lines and "not total profit" in lines
-    assert "repairs" in lines and "wages" in lines
+    lines = " ".join(plain(" ".join(vr.mission_details(world, mission))).split())
+    assert "due day 10" in lines and "DANGER uncharted ?" in lines
+    assert f"Payout +{vr.mission_reward_for(world.save, mission.kind, mission.reward):,}cr" in lines and "NET" in lines
+    assert "repairs" in lines and "current wages" in lines
     if kind == "delivery":
         price = vr.price_for(world, 0, "food")
-        assert f"2 x {price} = {2 * price:,} cr" in lines
+        assert f"Cargo 2 x {price} -{2 * price:,}cr" in lines and "buy 2 here; 1 aboard" in lines
         assert "Delivery consumes the cargo" in lines
     elif kind == "scan":
         assert "scanner" in lines and "does not chart" in lines
@@ -835,11 +836,11 @@ def test_bounty_retry_requires_reentry_and_budgets_two_jumps():
     world.save.ship.fuel = 0
     route = vr.mission_route(world, mission)
     assert len(route) == 2 and route[-1] == mission.target_system
-    lines = " ".join(vr.mission_details(world, mission))
+    lines = " ".join(plain(" ".join(vr.mission_details(world, mission))).split())
     assert "jump back" in lines and "both jumps" in lines
-    assert "shortest route misses the deadline" in lines
+    assert "DEADLINE 2 jumps, 1 day: late ▲" in lines
     assert "2 jump(s)" in vr.mission_bearing(world, mission)
-    assert "wages 10 cr/jump, 20 cr total" in lines
+    assert "Wages 2 x 10 -20cr" in lines
 
 
 @pytest.mark.parametrize("kind", ["bounty", "escort"])

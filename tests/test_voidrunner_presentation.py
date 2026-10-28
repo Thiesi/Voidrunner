@@ -781,7 +781,7 @@ def test_commission_and_cartel_screens_fit_standard_terminal(monkeypatch, termin
         with contextlib.redirect_stdout(output): screen(vr.Palette(False), world)
         assert len(output.getvalue().splitlines()) <= 24
         assert all(vr._visible_width(row) <= 80 for row in output.getvalue().splitlines())
-        assert "Back" in output.getvalue() and "Standing:" in output.getvalue()
+        assert "Back" in output.getvalue() and "STANDING" in vr._ANSI_RE.sub("", output.getvalue())
 
 
 @pytest.mark.parametrize("width,height", [(80, 24), (64, 20), (40, 16)])
@@ -1207,7 +1207,7 @@ def test_combat_lines_name_the_escort_at_stake_only_during_escort_fights():
     assert "fails the escort contract" not in plain
     world, mission = _escort_world("escaped"); world.save.pilot.credits = 10_000
     _set_cargo(world, {"food": 1})  # Dump is only offered with something to dump (#414)
-    lines = vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate))
+    lines = [vr._mission_plain(row) for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate))]
     evade = next(row for row in lines if row.startswith("[E]")); dump = next(row for row in lines if row.startswith("[D]"))
     bribe = next(row for row in lines if row.startswith("[P]"))
     assert evade.endswith("Escaping fails the escort contract.") and dump.endswith("Escaping fails the escort contract.")
@@ -1422,7 +1422,7 @@ def test_ledger_route_draft_starts_from_the_best_lead(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_trade_route(vr.Palette(False), world)
     plain = page_text(output.getvalue())
-    assert f"{vr.COMMODITIES[leads[0]['commodity']]['label']} x{leads[0]['quantity']}" in plain
+    assert f"{leads[0]['quantity']} {vr.COMMODITIES[leads[0]['commodity']]['label']} →" in plain
     assert "Food x1" not in plain or leads[0]["commodity"] == "food" and leads[0]["quantity"] == 1
     keys = iter(["B"]); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -1957,3 +1957,49 @@ def test_a_result_is_not_repainted_after_a_sub_screen(monkeypatch, detour):
     # and the yard it returns to does not bring it back.
     assert "Refueled 5 units" in borders[0] and "Refueled 5 units" in borders[1]
     assert not any("Refueled" in border for border in borders[2:]) and vr._STATUS is None
+
+
+def test_a_long_result_reserves_rows_only_on_the_screen_that_shows_it(terminal):
+    # Thiesi/NetBBS#1593 review: a long refusal pending from the market made the
+    # commodity page it opened reserve the result's rows, then drop the result.
+    terminal(40, 12)
+    lines = [f"row {n}" for n in range(30)]
+    plain_capacity = vr.page_capacity(lines, "Food Exchange", "[B] Back: ")
+    vr.set_status("Station can buy 4 units; demand replenishes 6/day. Come back after the next jump.", "bad")
+    _drawn("Market: 1,200cr")
+    assert vr._STATUS["screen"] == "Market" and vr._page_frame_rows("Market: 1,200cr") > 1
+    assert vr.page_capacity(lines, "Food Exchange", "[B] Back: ") == plain_capacity
+    assert vr._page_frame_rows("Food Exchange") == 1
+
+
+def test_a_contract_route_keeps_its_sections_and_table_headings_styled():
+    # Its last step stripped every row to plain text, rules and headings too (#39).
+    world, mission = _mission_details_world("delivery")
+    lines = vr.mission_navigation_lines(world, mission, active=False)
+    sections = [row[1:] for row in lines if row.startswith(vr.SECTION_MARK)]
+    assert sections[:3] == ["CONTRACT", "BUDGET", "LEGS"] and sections[-1] == "NOTES"
+    heading = next(row for row in lines if "LANDS AT" in row)
+    assert vr._ANSI_RE.search(heading)
+
+
+def test_a_deck_result_shows_its_label_apart_from_what_it_says():
+    p = vr.pal()
+    row = vr.result_row("Achievement unlocked: First Light -- Make 10 jumps.")
+    assert plain(row) == "Result: Achievement unlocked: First Light -- Make 10 jumps."
+    assert f"{p.slate}Achievement unlocked:" in row and f"{vr.BOLD}First Light" in row
+    assert plain(vr.result_row("First Flight accepted and tracked.")) == "Result: First Flight accepted and tracked."
+
+
+def test_a_page_too_short_for_its_headings_and_a_row_still_paginates():
+    # Carried headings that fill a page were handed to the next page, and the
+    # next, forever: a section and a table heading on two-row pages (#39).
+    import threading
+    groups = [["intro"], [vr.SECTION_MARK + "A"], [vr.STICKY_MARK + "H"],
+              [vr.MEMBER_MARK + "r1"], [vr.MEMBER_MARK + "r2"]]
+    pages = []
+    worker = threading.Thread(target=lambda: pages.append(vr.paginate(groups, 2)), daemon=True)
+    worker.start(); worker.join(10)
+    assert not worker.is_alive() and pages
+    rows = [plain(row) for page in pages[0] for row in page]
+    assert "r1" in " ".join(rows) and "r2" in " ".join(rows)
+

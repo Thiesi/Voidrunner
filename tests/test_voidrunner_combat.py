@@ -907,7 +907,7 @@ def test_review_combat_dump_terms_disclose_actual_escape_probability(tier, cargo
     before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
     pirate = vr.Pirate("Raider", tier, 80, 80)
     tactics = vr.new_tactics(pirate)
-    line = next((row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics) if row.startswith("[D]")), None)
+    line = next((row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics) if plain(row).startswith("[D]")), None)
     after = copy.deepcopy(world)
     if not cargo:
         assert line is None  # an empty hold has nothing to dump, so the action is not offered (#414)
@@ -948,7 +948,7 @@ def test_tactical_dump_terms_include_harry_escape_penalty(cargo):
     world = _world_with_seed(42); _set_cargo(world, {"food": cargo})
     pirate = vr.Pirate("Rust Wraith", 2, 50, 50)
     tactics = {"version": 1, "profile": "Skirmisher", "step": 0, "brace_ready": True}
-    line = next((row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics) if row.startswith("[D]")), None)
+    line = next((row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics) if plain(row).startswith("[D]")), None)
     if not cargo:
         assert line is None  # no cargo, no Dump (#414)
         return
@@ -976,7 +976,7 @@ def test_real_exchange_text_starts_on_first_combat_page(monkeypatch, terminal, w
 def test_peaceful_combat_action_discloses_its_standing_gain(patrol):
     world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 1, 50, 50)
     lines = vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True, tactics=vr.new_tactics(pirate))
-    action = next(row for row in lines if row.startswith("[S]" if patrol else "[P]"))
+    action = next(row for row in lines if plain(row).startswith("[S]" if patrol else "[P]"))
     assert ("Concord +2" if patrol else "Blackwake +2") in action
 
 
@@ -1216,17 +1216,18 @@ def test_contract_notes_appear_only_when_they_apply():
     world = _world_with_seed(42)
     dest = sorted(world.here.connections)[0]; world.by_id[dest].discovered = True
     delivery = vr.Mission(1, "delivery", "Deliver", 300, 0, dest, commodity="food", quantity=2)
-    text = " ".join(vr.mission_details(world, delivery))
-    assert "not total profit" in text and "cargo already aboard" not in text
-    assert "crew wages" not in text and "Survey scanning" not in text and "Remote danger" not in text
+    text = plain(" ".join(vr.mission_details(world, delivery)))
+    assert "exclude repairs, detours, combat and price changes." in text and "cargo already aboard" not in text
+    assert "current wages" not in text and "scanned from afar" not in text and "uncharted" not in text
     _set_cargo(world, {"food": 1})
-    assert "as is cargo already aboard" in " ".join(vr.mission_details(world, delivery))
+    assert "and cargo already aboard." in plain(" ".join(vr.mission_details(world, delivery)))
     world.save.ship.has_gunner = True
-    assert "Budget keeps current crew wages" in " ".join(vr.mission_details(world, delivery))
+    assert "and current wages, with refuelling stops" in plain(" ".join(vr.mission_details(world, delivery)))
     far = next(s.id for s in world.galaxy if not s.discovered and s.id != dest)
     scan = vr.Mission(2, "scan", "Survey", 250, 0, far)
-    text = " ".join(vr.mission_details(world, scan))
-    assert "Survey scanning may avoid travel, at half pay (125cr)." in text and "Remote danger remains unknown until charted." in text
+    text = plain(" ".join(vr.mission_details(world, scan)))
+    # Half pay for a survey scanned from afar is in MONEY; an uncharted target is a `?` in CHECKS.
+    assert "scanned from afar: +125cr" in text and "DANGER uncharted ?" in " ".join(text.split())
 
 
 def test_offer_page_one_points_to_accept_without_offering_it(monkeypatch, terminal):
@@ -1305,7 +1306,7 @@ def test_the_panel_says_outclassed_and_prices_the_dump_it_will_actually_make():
     world, pirate, tactics = _shuttle_against(4, cargo=23)
     rows = [plain(row) for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics)]
     assert any("OUTCLASSED" in row and "cargo" in row for row in rows)
-    dump = next(row for row in rows if row.startswith("[D]"))
+    dump = next(row for row in rows if plain(row).startswith("[D]"))
     assert "half the hold (12 of 23 units" in dump and "75%" in dump
     # The alert names the cargo, so the option that spends it leads the list: as
     # the fourth option it fell onto page two at 80x24, away from the alert.

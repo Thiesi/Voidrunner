@@ -143,7 +143,7 @@ def test_trade_route_quote_uses_stale_sale_data_and_exact_fuel_wage_budget(monke
     assert quote["fuel_cash"] == quote["fuel"] * 6
     assert quote["cash_needed"] == quote["cargo_cost"] + quote["fuel_cash"] + quote["wages"]
     assert quote["margin"] == quote["receipts"] - quote["cash_needed"]
-    assert "SHORT" in " ".join(vr.trade_route_lines(world, destination, "food", 3, False))
+    assert " short" in plain(" ".join(vr.trade_route_lines(world, destination, "food", 3, False)))
     assert world.save.to_dict() == before
 
 
@@ -209,13 +209,13 @@ def test_trade_route_hides_uncharted_intermediate_names_and_rejects_oversized_le
     for sid in path[:-1]:
         world.by_id[sid].discovered = False
     lines = " ".join(vr.trade_route_lines(world, destination, "food", 1, False))
-    assert "Uncharted system" in lines and "danger unknown" in lines
+    assert "Uncharted system" in lines and "?" in plain(lines)
     assert all(world.by_id[sid].name not in lines for sid in path[:-1])
     monkeypatch.setattr(vr, "fuel_capacity", lambda ship: 0)
     quote = vr.trade_route_quote(world, destination, "food", 1)
     assert not quote["feasible"]
     lines = " ".join(vr.trade_route_lines(world, destination, "food", 1, False))
-    assert "INFEASIBLE" in lines and "Estimated margin" not in lines
+    assert "infeasible" in plain(lines) and "NET unavailable" in plain(lines)
 
 
 @pytest.mark.parametrize("fault", ["unknown_quote", "same_station", "quantity", "boolean", "space", "missing_hold", "pending", "illegal"])
@@ -353,7 +353,8 @@ def test_trade_route_editing_fields_and_cancelling_is_read_only(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_trade_route(vr.Palette(False), world)
     said = plain(output.getvalue())
-    assert "x2" in said
+    import re
+    assert re.search(r"\b2 [A-Z][A-Za-z ]* → ", said)
     assert "existing hold cargo" in said and "buy new cargo here" in said
     assert world.save.to_dict() == before
 
@@ -800,7 +801,7 @@ def test_market_depth_route_refuses_unavailable_procurement_and_labels_sale_limi
     quote = vr.trade_route_quote(world, destination, "food", 3, use_hold=True)
     assert quote["margin"] is None and quote["demand_shortfall"]
     text = " ".join(vr.trade_route_lines(world, destination, "food", 3, True))
-    assert "DEMAND WARNING" in text and "may replenish" in text
+    assert "exceeds the observed buying demand" in plain(text) and "may replenish" in text
     assert world.event_rng.getstate() == rng and world.save.market_depth == {0: {"food": {"day": 0, "stock": 0, "demand": 96}}}
 
 
@@ -1019,7 +1020,7 @@ def test_regional_economy_bulletin_names_targets_without_charting_or_revealing_o
     world.save.active_event = dict(economy=anchor.economy, commodity="food", direction="boom", turns_remaining=1,
         description="Regional shortage", system_ids=[anchor.id])
     before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
-    text = " ".join(vr.economy_opportunity_lines(world, []))
+    text = plain(" ".join(vr.economy_opportunity_lines(world, [])))
     assert anchor.name in text and "danger unknown" in text and "event ends by arrival" in text
     assert "Lead: bring Food" in text and not world.save.market_memory
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
@@ -2681,7 +2682,7 @@ def test_dump_preview_matches_actual_post_disposal_escape_boundary(monkeypatch, 
     world = _world_with_seed(42); _set_cargo(world, {"food": 1})
     pirate = vr.Pirate(name, 0, 50, 50)
     # The actual new fight uses this opponent's initial intent, including Harry.
-    line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate)) if row.startswith("[D]"))
+    line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate)) if plain(row).startswith("[D]"))
     monkeypatch.setattr(vr, "read_key", lambda: "D")
     monkeypatch.setattr(world.event_rng, "random", lambda: roll)
     with contextlib.redirect_stdout(io.StringIO()): assert vr.screen_combat(vr.Palette(False), world, pirate) == "escaped"
@@ -2734,13 +2735,15 @@ def test_specialist_directory_flies_real_route_then_installs_with_known_material
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     monkeypatch.setattr(world.event_rng, "random", lambda: 0.99)
     world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
-    with contextlib.redirect_stdout(io.StringIO()): result = vr.screen_specialists(vr.Palette(False), world)
+    with contextlib.redirect_stdout(io.StringIO()) as output: result = vr.screen_specialists(vr.Palette(False), world)
     saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert saved.current_system == destination and saved.turn == len(path)
     assert saved.ship.cargo_tier == 1 and saved.pilot.credits == 680 and not saved.cargo
     assert saved.ship.fuel < 24 and saved.pending_travel is None
     assert saved.trading_ledger.workshop_material_cost == 100
     assert "Iona Rusk installed" in result
+    # Done, like a yard upgrade: green on the workshop and on the directory it returns to.
+    assert plain(output.getvalue()).count("● Iona Rusk installed") == 2 and vr._STATUS["tone"] == "good"
 
 
 @pytest.mark.parametrize("role,letter", [("gunner", b"A"), ("engineer", b"C"), ("navigator", b"D")])
@@ -3278,9 +3281,9 @@ def test_contract_pages_do_not_count_cargo_another_contract_is_owed():
     assert vr.contract_cargo_aboard(world, offer) == (0, 10)
     assert vr.contract_cargo_aboard(world, world.save.active_missions[0]) == (10, 0)
     details = plain(" ".join(vr.mission_details(world, offer)))
-    assert "deliver 8 Food; 0 aboard (10 more promised to other contracts), buy 8 more." in " ".join(details.split())
+    assert "CARGO buy 8 here; 0 aboard, 10 promised elsewhere" in " ".join(details.split())
     route = plain(" ".join(vr.mission_navigation_lines(world, offer, active=False)))
-    assert "0 aboard (10 more promised to other contracts), 8 missing." in " ".join(route.split())
+    assert "8 Food: 0 aboard (10 more promised to other contracts), 8 missing" in " ".join(route.split())
 
 
 def test_selling_promised_cargo_says_whose_and_asks_first(monkeypatch):

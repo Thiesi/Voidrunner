@@ -18,7 +18,9 @@ the standard library. It needs Python 3.11 or newer and a terminal of at least
 - **Other BBS software** (Synchronet, Mystic, ENiGMA½, …): accepts DOOR32.SYS
   and DOOR.SYS, with CP437 or UTF-8 terminals and stdio or inherited DOOR32
   sockets; see the SysOp setup below. Host time-limit handling remains planned (#5).
-- **Standalone**, for trying it out: `python3 voidrunner.py`.
+- **Standalone**, for trying it out: `python3 voidrunner.py` in a terminal. It reads keys one
+  at a time and uses the window's size, as a BBS would, and leaves the terminal as it found it.
+  Set `VOIDRUNNER_SAVE_DIR` to keep a test career apart from your others.
 
 ## Saves
 

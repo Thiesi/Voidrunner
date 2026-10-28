@@ -105,7 +105,7 @@ def test_turning_a_page_gives_back_only_the_rows_the_last_page_covered(canopy):
     _written(lambda: vr.out_line("N"))
     third = _written(lambda: vr.draw_page(vr.pal(), "Guide", [f"row {n}" for n in range(12)], 0, 2))
     assert "\x1b[2J" not in third
-    assert all(column == vr.CANOPY_PANEL_WIDTH + 1 for row, column in
+    assert all(column == vr._box_outer_width() + 1 for row, column in
                ((int(m[1]), int(m[2])) for m in CUP.finditer(third)) if row != 1)
 
 
@@ -217,9 +217,9 @@ def test_a_wide_canopy_puts_its_picture_in_the_window_not_under_the_glass(canopy
     cells = vr.canopy_cells(vr.canopy_scene(world), 120, 36)
     # Under the console every cell is sky: one color, no block, no art.
     for row in cells[:30]:
-        for ch, fg, bg in row[:vr.CANOPY_PANEL_WIDTH]:
+        for ch, fg, bg in row[:vr._box_outer_width()]:
             assert ch in " ·•+", ch
-    assert any(ch not in " ·•+" for row in cells for ch, _, _ in row[vr.CANOPY_PANEL_WIDTH + 1:])
+    assert any(ch not in " ·•+" for row in cells for ch, _, _ in row[vr._box_outer_width() + 1:])
 
 
 def test_one_canopy_serves_every_page_of_a_place(canopy):
@@ -372,7 +372,7 @@ def test_a_pickers_long_rows_stay_on_the_console_glass(canopy, monkeypatch):
     rows = [plain(row) for row in written.split("\r\n")[1:]]
     listed = [row for row in rows if row.strip() and "Select" not in row]
     assert any(row.startswith("[1] Deliver") for row in listed)
-    assert all(len(row.rstrip()) <= vr.CANOPY_PANEL_WIDTH for row in listed)
+    assert all(len(row.rstrip()) <= vr._box_outer_width() for row in listed)
     assert "reward 4,200cr" in " ".join(listed)
     # The picker cleared the screen, so the page after it draws a fresh sky.
     assert "\x1b[2J" in _written(lambda: vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1))
@@ -421,3 +421,46 @@ def test_the_commission_picks_the_callsign_out_in_gold(canopy, monkeypatch):
         greeting = written[:written.index("COMMISSION")]
         # Gold for the callsign, then back to the page's prose, not the box's muted.
         assert f"{p.gold}Nib{p.text}" in greeting
+
+
+def test_combat_bars_drain_in_place_on_their_own_rows_and_hand_the_cursor_back(monkeypatch):
+    world = _world_with_seed(42)
+    pirate = vr.Pirate(name="Void Jackal", tier=1, hp=20, hp_max=20)
+    render = lambda enemy, hull: vr.combat_contact_rows(world, pirate, enemy, hull)
+    # What draw_page records: header, then the body rows; the bottom border is not a source.
+    sources = [None, "intro", None] + [vr.style_body_line(row) for row in render(4, 50)] + ["after"]
+    monkeypatch.setattr(vr, "motion_interrupted", lambda: False)
+    monkeypatch.setattr(vr, "motion_pause", lambda seconds: True)
+    vr.drain_in_place_next(render, (20, 60), (4, 50))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._drain_in_place(vr.Palette(False), sources, vr._box_inner_width(), vr.CANOPY_ALERT_GLASS, len(sources) + 1)
+    said = output.getvalue()
+    # The two bar rows are screen rows 4 and 5 (header, intro, section, bars); the
+    # cursor ends below the page's last row, where the action bar is written.
+    assert said.count("\x1b[4;1H") == vr.COMBAT_DRAIN_STEPS + 2 and said.count("\x1b[5;1H") == vr.COMBAT_DRAIN_STEPS + 2
+    assert said.endswith("\x1b[8;1H") and vr._PENDING_DRAIN is None
+    last = vr._ANSI_RE.sub("", said.rsplit("\x1b[4;1H", 1)[1])
+    assert "4/20" in last and "50/" in last
+
+
+def test_a_drain_whose_bars_are_not_on_the_page_draws_nothing(monkeypatch):
+    world = _world_with_seed(42)
+    monkeypatch.setattr(vr, "motion_interrupted", lambda: False)
+    vr.drain_in_place_next(lambda a, b: [f"bar {a} {b}"], (1, 1), (0, 0))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._drain_in_place(vr.Palette(False), [None, "something else"], vr._box_inner_width(), vr.CANOPY_GLASS, 3)
+    assert output.getvalue() == "" and vr._PENDING_DRAIN is None
+
+
+def test_a_canopy_page_hands_its_true_height_to_the_drain(monkeypatch, canopy):
+    world = _world_with_seed(42)
+    canopy(80, 24, world=world)
+    seen = []
+    monkeypatch.setattr(vr, "_drain_in_place", lambda p, sources, inner, tint, drawn: seen.append((len(sources), drawn)))
+    vr.drain_in_place_next(lambda a, b: ["x"], (1, 1), (0, 0))
+    vr.set_status("A result long enough that it cannot ride in the bottom border and must take rows of its own above it.", "good")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.draw_page(vr.Palette(False), "Combat 1,200cr", ["one", "two"], 0, 1)
+    rows = [row for row in vr._ANSI_RE.sub("", output.getvalue()).split("\r\n") if row.strip()]
+    # Header, two rows, the status's own rows and the bottom border: all of them drawn.
+    assert seen and seen[0][1] > seen[0][0] and seen[0][1] == len(rows)
