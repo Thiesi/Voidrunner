@@ -492,3 +492,71 @@ def test_the_screen_is_not_cleared_until_the_new_frame_is_ready(canopy, monkeypa
         assert painted == [False] and "\x1b[2J\x1b[H" + skies[0] in text
     else:
         assert painted == []
+
+
+def test_the_results_log_keeps_the_last_few_newest_first_and_once_each():
+    for number in range(8):
+        vr.set_status(f"Result {number}.", "good")
+    vr.set_status("Result 7.")  # handed back up by the screen that said it
+    assert [entry["text"] for entry in vr._RESULT_LOG] == [f"Result {n}." for n in range(7, 1, -1)]
+    assert vr._RESULT_LOG[0]["tone"] == "good"
+    vr.clear_status()
+    assert vr._RESULT_LOG, "the log outlives the status that fed it"
+
+
+def test_a_wide_console_shows_recent_results_in_its_window_but_not_the_one_in_its_border(canopy):
+    world = _world_with_seed(42)
+    canopy(132, 50, world=world)
+    for text, tone in [("Bought 8 Food for 152cr.", "good"), ("Not enough credits.", "bad"),
+                       ("Departure cancelled; still docked.", "info")]:
+        vr.set_status(text, tone)
+    said = _written(lambda: vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1))
+    left = vr._box_outer_width() + 4
+    # Each window row runs from its cursor address to the next one, or home.
+    window = {int(row): plain(text.split("\x1b[H")[0]) for row, column, text in
+              re.findall(r"\x1b\[(\d+);(\d+)H((?:(?!\x1b\[\d+;\d+H).)*)", said) if int(column) == left}
+    assert "RECENT" in window[vr.RESULT_LOG_TOP + 1]
+    log = " ".join(" ".join(window.values()).split())
+    assert "Not enough credits." in log and "Bought 8 Food for 152cr." in log
+    assert "Departure cancelled" not in log and log.index("Not enough") < log.index("Bought")
+    # It stops above the art: nothing below a quarter of the screen.
+    assert max(window) <= int(50 * vr.RESULT_LOG_DEPTH)
+
+
+@pytest.mark.parametrize("width", [80, 120, 129])
+def test_no_results_log_without_a_window_beside_the_console(canopy, width):
+    canopy(width, 40, world=_world_with_seed(42))
+    vr.set_status("Bought 8 Food for 152cr.", "good")
+    vr.set_status("Refueled 9 units for 54cr.", "good")
+    assert "RECENT" not in plain(_written(lambda: vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1)))
+
+
+def test_a_long_result_takes_two_rows_and_says_it_was_cut():
+    p = vr.Palette(False)
+    vr.set_status("Sold 3x Machinery for 108cr. Two more are promised to deliveries for Kel and stay aboard until then.", "good")
+    vr.set_status("Refueled.", "good")
+    rows = [plain(row) for row in vr.result_log_rows(p, 24, 9, shown="Refueled.")]
+    assert rows[0] == "RECENT" and len(rows) == 3 and rows[2].rstrip().endswith("...")
+    assert all(vr._visible_width(row) <= 24 for row in rows)
+
+
+def test_a_short_terminal_shows_what_fits_or_nothing(canopy):
+    for number in range(4):
+        vr.set_status(f"Result number {number} was quite long indeed.", "info")
+    p = vr.Palette(False)
+    assert len(vr.result_log_rows(p, 20, 5)) <= 5
+    assert vr.result_log_rows(p, 20, 2) == []  # a heading alone is not a log
+    canopy(132, 15, world=_world_with_seed(42))  # a quarter of 15 rows is no room
+    assert "RECENT" not in plain(_written(lambda: vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1)))
+
+
+def test_new_game_plus_starts_with_an_empty_results_log(monkeypatch):
+    from .support import _finale_world
+    world = _finale_world("legend")
+    vr.set_status("Bought 8 Food for 152cr.", "good")
+    keys = iter(["S", "x"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_career_finale(vr.Palette(False), world)
+    assert not any(entry["text"] == "Bought 8 Food for 152cr." for entry in vr._RESULT_LOG)

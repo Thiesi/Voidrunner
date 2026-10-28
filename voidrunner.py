@@ -5933,6 +5933,12 @@ def _page_frame_rows(title: str | None = None) -> int:
 
 _STATUS: dict | None = None
 
+#: The last few results, newest first, for the wide console's window (issue
+#: #46). Session state like the status itself: a resumed career starts empty.
+#: One more is kept than is shown, for the one a page's border is showing.
+RESULT_LOG_ENTRIES = 6
+_RESULT_LOG: list[dict] = []
+
 #: Tone -> (glyph name, palette role). A result is done, refused, or just said.
 STATUS_TONES = {"good": ("info", "correct"), "bad": ("danger", "wrong"), "info": ("note", "slate")}
 
@@ -5952,12 +5958,25 @@ def set_status(text: str, tone: str | None = None) -> str:
     if tone not in STATUS_TONES:
         raise ValueError(f"Unknown status tone: {tone}")
     _STATUS = {"text": text, "tone": tone, "screen": None}
+    # A result handed back up by the screen that said it is the same result.
+    # So, by the same test, is the same refusal twice running: the log reads
+    # it once, which is what a glance at it needs.
+    if _RESULT_LOG and _RESULT_LOG[0]["text"] == text:
+        _RESULT_LOG[0]["tone"] = tone
+    else:
+        _RESULT_LOG.insert(0, {"text": text, "tone": tone})
+        del _RESULT_LOG[RESULT_LOG_ENTRIES:]
     return text
 
 
 def clear_status() -> None:
     global _STATUS
     _STATUS = None
+
+
+def clear_result_log() -> None:
+    """Forget the recent results: a new career has none of the last one's."""
+    _RESULT_LOG.clear()
 
 
 def _status_screen(title: str) -> str:
@@ -6008,6 +6027,48 @@ def _status_overflow_rows(p: "Palette", status: dict | None) -> list[str]:
     rows = _wrap_output(status["text"], max(1, _page_content_width() - 2)).split("\r\n")
     return [f"{_status_mark(p, status) if number == 0 else ' '} {getattr(p, role)}{row}{RESET}"
             for number, row in enumerate(rows)]
+
+
+def result_log_rows(p: "Palette", width: int, budget: int, shown: str | None = None) -> list[str]:
+    """The log as rows `width` wide: a heading, then each result with its
+    mark, newest first, two rows at most each, as many as `budget` holds.
+    `shown` is the result the page itself is showing: the log is what it no
+    longer does, so that one is left out rather than read twice."""
+    entries = _RESULT_LOG[1:] if _RESULT_LOG and _RESULT_LOG[0]["text"] == shown else _RESULT_LOG
+    if not entries or budget < 2 or width < 8:
+        return []
+    rows = [f"{p.slate}{BOLD}RECENT{RESET}"]
+    for entry in entries[:RESULT_LOG_ENTRIES - 1]:
+        role = getattr(p, STATUS_TONES.get(entry["tone"], STATUS_TONES["info"])[1])
+        wrapped = _wrap_output(entry["text"], width - 2).split("\r\n")
+        if len(wrapped) > 2:
+            # The second row is cut to leave room for the dots; `width - 2`
+            # is what is left beside the mark.
+            wrapped = [wrapped[0], _fit_text(wrapped[1], width - 2 - len("...")) + "..."]
+        if len(rows) + len(wrapped) > budget:
+            break
+        rows += [f"{_status_mark(p, entry) if number == 0 else ' '} {role}{row}{RESET}"
+                 for number, row in enumerate(wrapped)]
+    return rows if len(rows) > 1 else []
+
+
+#: The log's rows in the window: under the place's name, above the art. The
+#: art (station, planet, contact) starts about a quarter of the way down.
+RESULT_LOG_TOP, RESULT_LOG_DEPTH = 4, 0.26
+
+
+def result_log_paint(p: "Palette", tint: tuple, shown: str | None = None) -> str:
+    """The log as bytes on its own glass in the canopy's window, beside the
+    console; nothing where there is no window. Ends at home, like the sky."""
+    if not wide_layout():
+        return ""
+    left = _box_outer_width() + 3  # where the window's own labels start
+    width = _OUTPUT_WIDTH - left - 1
+    rows = result_log_rows(p, width - 2, int(_OUTPUT_HEIGHT * RESULT_LOG_DEPTH) - RESULT_LOG_TOP, shown)
+    if not rows:
+        return ""
+    return "".join(f"{ESC}[{RESULT_LOG_TOP + number + 1};{left + 1}H" + glass(_pad(" " + row, width, "left"), tint)
+                   for number, row in enumerate(rows)) + f"{RESET}{ESC}[H"
 
 
 def _box_bottom_status(p: "Palette", inner: int, status: dict | None) -> str:
@@ -12620,6 +12681,7 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
     header = _page_header(title, page, count)
     inner = _box_inner_width()
     status = _claim_status(title)
+    bordered = status["text"] if status is not None else None
     if _header_fits_border(header):
         lines = [_box_header(p, title, f"{page + 1}/{count}", alert=red_alert())]
     else:
@@ -12666,6 +12728,9 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
             clear_screen()
             out(sky)
         tint = CANOPY_ALERT_GLASS if scene["kind"] == "combat" else CANOPY_GLASS
+        # Over the sky, every page: a page turn gives rows back to the sky,
+        # and a new result is news for the log (issue #46).
+        out(result_log_paint(p, tint, bordered))
         lines = [glass(line, tint) for line in lines]
     elif not keep:
         clear_screen()
@@ -14536,6 +14601,7 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
         label = CAREER_FINALES[selected]["label"]
         retired_ship = dataclasses.replace(world.save.ship)  # the ship that flew this career, for its portrait
         world.reset(fresh.save)
+        clear_result_log()  # New Game+ begins in this same session (#51 review)
         world.pending_promotions.extend(fresh.pending_promotions)
         world.pending_accolades.extend(fresh.pending_accolades)
         world.commit()
