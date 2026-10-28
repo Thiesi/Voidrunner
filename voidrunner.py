@@ -12612,8 +12612,8 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
     # this one does not are given back to the sky.
     keep = (canopy and shown is not None and shown[0] == canopy_key(scene)
             and _OUT_COUNT - shown[3] <= CANOPY_ECHO_ALLOWANCE)
-    if not keep:
-        clear_screen()
+    # The clear waits until the frame is built. Sent first, it left the screen
+    # blank while a new canopy was computed: 0.64s at 132x50 (NetBBS gallery).
     header = _page_header(title, page, count)
     inner = _box_inner_width()
     status = _claim_status(title)
@@ -12659,9 +12659,13 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
             out(f"{ESC}[H" + canopy_paint(scene, _box_outer_width(), len(lines),
                                           range(min(len(lines), shown[1]), shown[2])))
         else:
-            out(canopy_paint(scene, _box_outer_width(), len(lines)))
+            sky = canopy_paint(scene, _box_outer_width(), len(lines))
+            clear_screen()
+            out(sky)
         tint = CANOPY_ALERT_GLASS if scene["kind"] == "combat" else CANOPY_GLASS
         lines = [glass(line, tint) for line in lines]
+    elif not keep:
+        clear_screen()
     # A reveal belongs to arriving somewhere, not to every keypress: a screen
     # redrawn unchanged (a key that did nothing, a prompt reprinted) must cost
     # the caller nothing. Paging counts as arriving; pressing `X` twice does not.
