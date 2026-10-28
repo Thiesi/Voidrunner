@@ -123,6 +123,18 @@ def page_source(lines) -> str:
         line for line in lines if not line.startswith(vr.SECTION_MARK))).split())
 
 
+def once_per_heading(text: str, lines) -> str:
+    """`text` read across pages, with each table heading the pages repeated
+    over its rows kept only where the builder put it -- so it compares with
+    `page_source(lines)`."""
+    for heading in {" ".join(plain(line).split()) for line in lines if line.startswith(vr.STICKY_MARK)}:
+        first = text.find(heading)
+        if first >= 0:
+            end = first + len(heading)
+            text = text[:end] + text[end:].replace(" " + heading, "")
+    return text
+
+
 _ANSI_BYTES = re.compile(rb"\x1b\[[0-9;]*[a-zA-Z]")
 
 

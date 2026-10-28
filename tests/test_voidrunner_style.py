@@ -723,17 +723,18 @@ def test_a_neutral_standing_is_a_value_and_its_bar_is_not(monkeypatch):
         assert all(_role_runs(row)[bar] != p.ink for bar in bars), plain(row)
 
 
-def test_an_empty_crew_is_still_a_value(monkeypatch):
-    """`Crew none` had the label and the value in one color: the populated
-    branch was `ink` and the empty one had drifted to the label role, so the
-    row said nothing about which half was which (#532)."""
+def test_the_crew_row_names_people_bright_and_their_roles_dim(monkeypatch):
+    """The crew line had the label and the value in one color once (#532). It
+    is now a row under the ship's gauges only when someone is aboard -- the
+    CREW gauge already says 0/3 -- with each name a value and its role a label."""
     p = _at(monkeypatch)
     world = _world_with_seed(7)
-    rows = vr.pilot_record_lines(world, "O")
-    crew = [row for row in rows if plain(row).strip().startswith("Crew ")]
-    assert crew, [plain(row) for row in rows]
-    assert _role_of(crew[0], "Crew") == p.slate, plain(crew[0])
-    assert _role_of(crew[0], "none") == p.ink, plain(crew[0])
+    assert vr.career_crew_row(world) is None
+    world.save.ship.has_engineer = True
+    row = vr.career_crew_row(world)
+    name = vr.crew_name(world, "engineer")
+    assert _role_of(row, name) == p.ink and _role_of(row, "Engineer, Recruit") == p.slate, plain(row)
+    assert row in vr.pilot_record_lines(world, "O")
 
 
 def test_the_ledger_names_its_groups_instead_of_hyphenating_them(monkeypatch):
