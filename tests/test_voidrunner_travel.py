@@ -670,7 +670,7 @@ def test_not_stranded_when_credits_cover_the_fuel_shortfall():
     world.save.current_system = world.here.connections[0]
     world.save.ship.fuel = 0
     cheapest = _cheapest_jump_cost(world)
-    world.save.pilot.credits = cheapest * 6  # exactly enough to buy the shortfall
+    world.save.pilot.credits = cheapest * vr.FUEL_PRICE  # exactly enough to buy the shortfall
     assert vr.is_stranded(world) is False
 
 
@@ -679,7 +679,7 @@ def test_stranded_when_no_cargo_not_enough_fuel_and_not_enough_credits():
     world.save.current_system = world.here.connections[0]
     world.save.ship.fuel = 0
     cheapest = _cheapest_jump_cost(world)
-    world.save.pilot.credits = cheapest * 6 - 1  # one credit short
+    world.save.pilot.credits = cheapest * vr.FUEL_PRICE - 1  # one credit short
     assert vr.is_stranded(world) is True
 
 
@@ -1371,7 +1371,7 @@ def test_engineer_pays_for_hire_and_wages_on_twenty_medium_jumps():
     world.save.ship.has_engineer = True
     saved = base - vr.fuel_cost_for_jump(Start(), End(), world.save.ship)
     role = vr.CREW_ROLES["engineer"]
-    assert 20 * (saved * 6 - role["wage"]) >= role["hire_cost"]
+    assert 20 * (saved * vr.FUEL_PRICE - role["wage"]) >= role["hire_cost"]
     assert role["wage"] < 6
 
 
