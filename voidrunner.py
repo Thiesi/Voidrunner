@@ -9582,6 +9582,7 @@ def deck_alert_rows(world: World) -> list[str]:
         rows.append(alert("caution", event["description"],
                           f"{plural(event['turns_remaining'], 'day')} left", key_label("T", "ledger")))
     rows += due_here_alert_rows(world)
+    rows += deadline_alert_rows(world)
     mission = tracked_mission(world)
     if mission is not None:
         kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
@@ -9602,7 +9603,8 @@ def deck_alert_rows(world: World) -> list[str]:
         rows.append(alert("note", "Archive", archive_objective(world), key_label("N", "contacts")))
     if wage and pilot.credits >= wage:
         rows.append(alert("good", "Crew paid", f"{wage}cr per jump", key_label("K", "roster")))
-    for line in crew_assignment_recap(world) + faction_story_recap(world):
+    rows += crew_task_alert_rows(world)
+    for line in faction_story_recap(world):
         rows.append(alert("note", line))
     return rows
 
@@ -9672,6 +9674,15 @@ def futures_alert_rows(world: World) -> list[str]:
 # The service menu, as (key, label) with a short "what is in there" tail. The
 # tail is what turns a wall of twelve identical entries into a screen a caller
 # can read: it says how many offers are on the board without opening it.
+def affordable_upgrades(world: World) -> int:
+    """Yard upgrades the balance covers now; not "newly", which would need saved state.
+    Yard prices only: a workshop's cheaper install also wants materials and a visit."""
+    ship, credits = world.save.ship, world.save.pilot.credits
+    return sum(1 for key, upgrade in UPGRADES.items()
+               if getattr(ship, f"{key}_tier") < upgrade["max_tier"]
+               and upgrade["cost"](getattr(ship, f"{key}_tier")) <= credits)
+
+
 def deck_service_entries(world: World) -> list[tuple[str, str]]:
     goods = len(LEGAL_COMMODITIES) + sum(1 for c in CONTRABAND_COMMODITIES
                                          if world.here.economy == "Haven" or world.save.cargo.get(c, 0) > 0)
@@ -9680,7 +9691,9 @@ def deck_service_entries(world: World) -> list[tuple[str, str]]:
     # as a sentence -- subject "Board 4", verb "offers" -- which is how a caller
     # came to ask what the numbers meant (issue #518). The counts agree in
     # number too; `Chart 1 links` was reported from a real screen.
-    entries = [("M", f"Market: {plural(goods, 'good')}"), ("Y", "Yard repair/refit"),
+    upgrades = affordable_upgrades(world)
+    yard = f"Yard: {plural(upgrades, 'upgrade')} affordable" if upgrades else "Yard repair/refit"
+    entries = [("M", f"Market: {plural(goods, 'good')}"), ("Y", yard),
                ("B", f"Board: {plural(offers, 'offer')}"),
                ("C", f"Chart: {plural(len(world.here.connections), 'link')}"),
                ("S", "Status"), ("H", "Hall of Fame"),
@@ -11257,12 +11270,42 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
         lines.append(f"{p.slate}Contracts need:{RESET} " + f"{p.slate} · {RESET}".join(
             f"{p.ink}{COMMODITIES[c]['label']} {p.gold}{need}{RESET} {p.deep}{glyph('arrow')}{RESET} {p.ink}{', '.join(places)}{RESET}"
             for c, (need, places) in needs.items()))
+    lines += market_material_lines(world, goods)
     if any(not COMMODITIES[c]["legal"] for c in goods):
         lines.append(f"{p.slate}Blackwake standing: {p.ink}+1{p.slate} per new {p.ink}{CONTRABAND_STANDING_STEP}cr"
                      f"{p.slate} net contraband gain; purchases count against gains.{RESET}")
     if any(not COMMODITIES[c]["legal"] and system.economy != "Haven" for c in goods):
         lines.append(f"{p.slate}A {glyph('flat')} buy price is contraband this station will not sell.{RESET}")
     return lines + market_memory_lines(world, goods)
+
+
+def market_material_lines(world: World, goods: list[str]) -> list[str]:
+    """Cargo a crew task or a workshop wants, beside the market that sells it.
+
+    Both showed only on their own screens, so a pilot buying Machinery had to
+    remember Oren wanted three (issue #41). A crew task is a promise and reads
+    like the contracts' line; a workshop upgrade is optional, so its materials
+    stay one dim line."""
+    p = pal()
+    lines = []
+    task = crew_assignment_record(world, "engineer")
+    if "machinery" in goods and task is not None and task["state"] == "active":
+        have, need = crew_assignment_progress(world, "engineer")
+        lines.append(f"{p.slate}Crew task:{RESET} {p.ink}{_mission_plain(crew_name(world, 'engineer'))} needs "
+                     f"{p.gold}{need}{p.ink} Machinery{RESET} {p.slate}({have} aboard){RESET} "
+                     f"{p.deep}{glyph('arrow')}{RESET} {p.ink}{WORKSHOPS['engine']['name']}{RESET}")
+    wanted = []
+    for key, shop in WORKSHOPS.items():
+        if shop["commodity"] not in goods:
+            continue
+        try:
+            quote = workshop_quote(world, key)
+        except ValueError:
+            continue  # maxed: nothing left to install
+        wanted.append(f"{COMMODITIES[quote['commodity']]['label']} {quote['quantity']} {glyph('arrow')} {shop['name']}")
+    if wanted:
+        lines.append(f"{p.slate}Workshop upgrades, optional: {' · '.join(wanted)}.{RESET}")
+    return lines
 
 
 def screen_market(p: Palette, world: World) -> None:
@@ -12312,6 +12355,10 @@ def shipyard_lines(world: World) -> list[str]:
          key_label("R", "refuel")],
     ], "llrl", styles=[["label", "value", "value", "value"]] * 2, optional=(3,),
         repeat_header=False)[1:], portrait(ship_portrait(ship, "compact"), "info"))
+    if (route := tracked_route_fuel_text(world)) is not None:
+        plan = tracked_route_fuel(world)
+        lines.append(alert("danger" if plan["over"] else "note" if plan["buy"] else "good",
+                           f"Tracked #{plan['mission'].id}", route))
     lines.append(section("UPGRADES"))
     rows, styles = [], []
     for index, (key, upgrade) in enumerate(UPGRADES.items()):
@@ -12960,6 +13007,38 @@ def crew_assignment_progress(world: World, role: str) -> tuple[int, int]:
     return max(0, progress), task["required"]
 
 
+def crew_task_objective(world: World, role: str) -> str:
+    """How far along a crew task is, in its own unit."""
+    have, need = crew_assignment_progress(world, role)
+    return (f"{have}/{need} new combat recordings" if role == "gunner" else
+            f"{have}/{need} Machinery aboard" if role == "engineer" else
+            f"{have}/{need} new chart entries" if need else "atlas complete")
+
+
+def crew_task_alert_rows(world: World) -> list[str]:
+    """Each active crew task: ready to hand over here, or how far along and where.
+
+    The deck said only that a task was open, and the engineer's Machinery
+    showed nowhere but the task's own page (issue #41)."""
+    rows = []
+    for role, info in CREW_ASSIGNMENTS.items():
+        task = crew_assignment_record(world, role)
+        if task is None or task["state"] != "active":
+            continue
+        name = _mission_plain(crew_name(world, role))
+        if crew_assignment_blocker(world, role, completing=True) is None:
+            have, need = crew_assignment_progress(world, role)
+            what = f"hand {name} {need} Machinery" if role == "engineer" else f"report to {WORKSHOPS[info['workshop']]['name']}"
+            rows.append(alert("good", "Crew task ready HERE", what, key_label("K", "crew")))
+            continue
+        target = crew_assignment_destination(world, role)
+        jumps = bfs_hops(world.by_id, world.here.id).get(target)
+        where = WORKSHOPS[info["workshop"]]["name"] + (" here" if jumps == 0 else f", {plural(jumps, 'jump')}" if jumps else "")
+        rows.append(alert("note", f"Crew task: {name}", f"{crew_task_objective(world, role)} {glyph('arrow')} {where}",
+                          key_label("K", "crew")))
+    return rows
+
+
 def crew_assignment_blocker(world: World, role: str, *, completing: bool = False) -> str | None:
     if role not in CREW_ASSIGNMENTS: return "Choose a listed specialist."
     if world.save.pending_travel is not None: return "Finish the current journey first."
@@ -13016,9 +13095,7 @@ def crew_assignment_lines(world: World, role: str) -> list[str]:
     lines.append(info["request"])
     target = world.by_id[crew_assignment_destination(world, role)]
     have, need = crew_assignment_progress(world, role)
-    objective = (f"{have}/{need} new combat recordings" if role == "gunner" else
-                 f"{have}/{need} Machinery aboard" if role == "engineer" else
-                 f"{have}/{need} new chart entries" if need else "atlas complete")
+    objective = crew_task_objective(world, role)
     jumps = bfs_hops(world.by_id, world.here.id).get(target.id)
     where = "here" if jumps == 0 else plural(jumps, "jump") if jumps is not None else "unreachable"
     blocker = crew_assignment_blocker(world, role, completing=task is not None)
@@ -13150,6 +13227,51 @@ def _buy_upgrade(p: Palette, world: World, key: str) -> str | None:
     return set_status(f"{u['label']} upgraded to tier {tier + 1} for {cost}cr.", "good")
 
 
+def tracked_route_fuel(world: World) -> dict | None:
+    """What the tracked contract's route burns, and what to buy for it here.
+
+    The refuel prompt offered a full tank while the route's fuel was only on
+    the route screens (issue #41). `buy` fills toward the route's total, never
+    past the tank; `stops` counts the top-ups still needed on the way when the
+    route burns more than a full tank, and `over` a leg no tank can fly. Like
+    the route planner, it assumes every station on the way sells fuel."""
+    mission = tracked_mission(world)
+    if mission is None or (mission.kind == "scan" and world.by_id[mission.target_system].discovered):
+        return None
+    route = mission_route(world, mission)
+    if not route:
+        return None
+    ship = world.save.ship
+    capacity = fuel_capacity(ship)
+    burns, previous = [], world.here
+    for sid in route:
+        burns.append(fuel_cost_for_jump(previous, world.by_id[sid], ship))
+        previous = world.by_id[sid]
+    total = sum(burns)
+    buy = max(0, min(capacity, total) - ship.fuel)
+    tank, stops = ship.fuel + buy, 0
+    for burn in burns:
+        if tank < burn:
+            stops, tank = stops + 1, capacity
+        tank -= burn
+    return {"mission": mission, "jumps": len(route), "total": total, "buy": buy, "stops": stops,
+            "over": any(burn > capacity for burn in burns)}
+
+
+def tracked_route_fuel_text(world: World) -> str | None:
+    """`3 jumps, 14 fuel; tank 9, buy 5 (30cr)`, or None with no route to fuel."""
+    plan = tracked_route_fuel(world)
+    if plan is None:
+        return None
+    text = f"{plural(plan['jumps'], 'jump')}, {plan['total']} fuel; tank {world.save.ship.fuel}"
+    if plan["over"]:
+        return text + "; a leg needs more than a full tank"
+    text += f", buy {plan['buy']} ({plan['buy'] * 6}cr)" if plan["buy"] else ", enough"
+    if plan["stops"]:
+        text += f", then {plural(plan['stops'], 'refuel stop')} on the way"
+    return text
+
+
 def _refuel(p: Palette, world: World) -> str | None:
     ship = world.save.ship
     room = fuel_capacity(ship) - ship.fuel
@@ -13159,7 +13281,9 @@ def _refuel(p: Palette, world: World) -> str | None:
     max_qty = max(0, min(room, affordable))
     if max_qty <= 0:
         return set_status("Not enough credits to buy fuel (6cr/unit).", "bad")
-    out_prompt(f"{p.muted}Fuel to buy (6cr/unit; Enter buys {max_qty} for {max_qty * 6}cr, Esc cancels): {RESET}")
+    plan = tracked_route_fuel(world)
+    route = (f"tracked #{plan['mission'].id} needs {plan['buy']}; " if plan and plan["buy"] and not plan["over"] else "")
+    out_prompt(f"{p.muted}Fuel to buy (6cr/unit; {route}Enter buys {max_qty} for {max_qty * 6}cr, Esc cancels): {RESET}")
     qty = read_quantity(max_qty, max_qty, max_len=4)
     if qty <= 0:
         return
@@ -13289,6 +13413,68 @@ def mission_route(world: World, mission: Mission) -> list[int]:
         retries = preceding_bounties(world, mission) + (1 if not path else 0)
         path += [neighbor, mission.target_system] * retries
     return path
+
+
+#: An untracked contract this close to its deadline gets a row on the deck.
+#: The chart badges every deadline, however far: there it says which
+#: departure leads toward which contract, not that one is urgent.
+DEADLINE_WARNING_DAYS = 3
+#: Deadline rows the deck shows before folding the rest into one.
+DEADLINE_ALERT_ROWS = 2
+
+
+def contract_deadlines(world: World) -> list[dict]:
+    """Every live contract with a deadline and a route: days left, the route,
+    and whether that route arrives too late. Soonest first.
+
+    Only the tracked contract's deadline was on the deck and the chart; an
+    untracked one about to expire showed only in the route planner (issue #41).
+    """
+    watch = []
+    for mission in world.save.active_missions:
+        if (mission.deadline_turn is None or mission_expired(world, mission)
+                or (mission.kind == "scan" and world.by_id[mission.target_system].discovered)):
+            continue
+        route = mission_route(world, mission)
+        left = mission.deadline_turn - world.save.turn
+        watch.append({"mission": mission, "left": left, "route": route, "late": len(route) > left})
+    return sorted(watch, key=lambda entry: (entry["left"], entry["mission"].id))
+
+
+def deadline_alert_rows(world: World) -> list[str]:
+    """Untracked contracts about to expire, with how far away they are."""
+    tracked = tracked_mission(world)
+    urgent = [entry for entry in contract_deadlines(world)
+              # the tracked row has its own gauge; one due here has its own row
+              if not (tracked is not None and entry["mission"].id == tracked.id) and entry["route"]
+              and (entry["left"] <= DEADLINE_WARNING_DAYS or entry["late"])]
+    rows = []
+    for entry in urgent[:DEADLINE_ALERT_ROWS]:
+        mission, left = entry["mission"], entry["left"]
+        when = "today" if left == 0 else f"in {plural(left, 'day')}"
+        rows.append(alert("danger" if entry["late"] else "caution", f"Contract #{mission.id} expires {when}",
+                          f"{plural(len(entry['route']), 'jump')} away" + (" (late)" if entry["late"] else ""),
+                          key_label("B", "board")))
+    # Several at once would push the services off a short terminal (#47 review).
+    rest = urgent[DEADLINE_ALERT_ROWS:]
+    if rest:
+        rows.append(alert("danger" if any(entry["late"] for entry in rest) else "caution",
+                          f"+{plural(len(rest), 'more contract')} expiring",
+                          ", ".join(f"#{entry['mission'].id}" for entry in rest), key_label("B", "board")))
+    return rows
+
+
+def departure_deadline_badges(world: World) -> dict[int, str]:
+    """For each departure, the soonest untracked deadline whose route starts there."""
+    tracked = tracked_mission(world)
+    badges = {}
+    for entry in contract_deadlines(world):
+        mission, route = entry["mission"], entry["route"]
+        if not route or route[0] in badges or (tracked is not None and mission.id == tracked.id):
+            continue
+        tone = "danger" if entry["late"] else "caution" if entry["left"] <= DEADLINE_WARNING_DAYS else "info"
+        badges[route[0]] = badge(f"#{mission.id} {entry['left']}d", tone)
+    return badges
 
 
 def mission_bearing(world: World, mission: Mission) -> str:
@@ -14575,10 +14761,18 @@ def chart_entries(world: World) -> list[tuple[int | None, str]]:
     entries.append((None, "  ".join(key_label(key, label) for key, label in actions)))
     entries.append((None, section("DEPARTURES")))
     rows, styles, ids = [], [], []
+    deadlines = departure_deadline_badges(world)
     for sid in sorted(here.connections):
         dest = world.by_id[sid]
         cost = fuel_cost_for_jump(here, dest, world.save.ship)
         short = world.save.ship.fuel < cost
+        # Which contract this departure leads toward, and how long it has
+        # left: the tracked one's badge alone hid the rest (issue #41).
+        marks = [badge("TRACKED", "brand")] if route and route[0] == sid else []
+        if sid in deadlines:
+            marks.append(deadlines[sid])
+        if short:
+            marks.append(badge("LOW FUEL", "danger"))
         rows.append([
             dest.name if dest.discovered else "Uncharted Bearing",
             f"{dest.x},{dest.y}",
@@ -14586,7 +14780,7 @@ def chart_entries(world: World) -> list[tuple[int | None, str]]:
             dest.economy if dest.discovered else "?",
             danger_dots(dest.danger, known=dest.discovered),
             f"{p.alarm}{cost}{RESET}" if short else f"{p.ink}{cost}{RESET}",
-            badge("TRACKED", "brand") if route and route[0] == sid else (badge("LOW FUEL", "danger") if short else ""),
+            " ".join(marks),
         ])
         styles.append(["value", "label", "label", "label", "value", "value", "value"])
         ids.append(sid)
