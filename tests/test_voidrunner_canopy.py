@@ -475,19 +475,20 @@ def test_the_screen_is_not_cleared_until_the_new_frame_is_ready(canopy, monkeypa
     if not live:
         monkeypatch.setattr(vr, "_live_terminal", lambda: False)
     buffer = io.StringIO()
-    painted = []
+    painted, skies = [], []
     real = vr.canopy_paint
 
     def paint(*args, **kwargs):
         painted.append("\x1b[2J" in buffer.getvalue())
-        return real(*args, **kwargs)
+        skies.append(real(*args, **kwargs))
+        return skies[-1]
     monkeypatch.setattr(vr, "canopy_paint", paint)
     with contextlib.redirect_stdout(buffer):
         vr.draw_page(vr.pal(), "Deck", ["a"], 0, 1)
     text = buffer.getvalue()
     assert text.count("\x1b[2J") == 1
     if live:
-        # Composed before the clear; the clear is followed by the sky at once.
-        assert painted == [False] and text.index("\x1b[2J") < text.index("\x1b[1;")
+        # Composed before the clear, and nothing between the clear and the sky.
+        assert painted == [False] and "\x1b[2J\x1b[H" + skies[0] in text
     else:
         assert painted == []
