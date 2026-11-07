@@ -163,6 +163,35 @@ A change to a screen comes with gallery pictures: the tests can prove that a
 screen fits, never that it looks right. The game's design (rules, saves,
 presentation) is in [docs/design.md](docs/design.md).
 
+### Local disk hygiene
+
+Scratch that is never deleted once took this development host down: a sibling
+project wrote a new folder for every test run until its checkouts held several
+million files, and then, moved to the system temp folder, passed half a million
+entries there. Recovery took a day and an offline disk check. These rules keep
+Voidrunner's scratch bounded:
+
+- Run `pytest` without `--basetemp`. It then uses the system temp folder and
+  keeps only the last run's failed tests' folders (`pyproject.toml`). If your
+  sandbox can write only inside the checkout, use exactly
+  `--basetemp=.test-tmp/pytest`, which every run replaces; the suite refuses any
+  other `--basetemp` inside the checkout.
+- Tests use `tmp_path`, never `tempfile.mkdtemp()`: a mkdtemp folder outlives
+  the run. Tools that need the temp folder name their entries `voidrunner-*`
+  and remove them when done.
+- **The system temp folder is not storage.** A gallery or capture worth keeping
+  goes on the PR, never only in a temp path.
+- The suite refuses to start when `.test-tmp`, `.pytest_cache` and `build` hold
+  more than 50,000 files, or when this project's `voidrunner-*` entries in the
+  temp folder do. `python tools/clean_scratch.py` removes the checkout's
+  ignored scratch (never `.venv` or tracked files);
+  `python tools/clean_scratch.py --temp` removes `voidrunner-*` temp entries
+  with nothing written for 24 hours; `--report` lists file counts for every
+  worktree and flags those already merged into `origin/main`.
+- One worktree per active branch; `git worktree remove` it once its PR merges,
+  and clean your scratch before you go idle. Run one full suite at a time.
+- Keep checkouts outside OneDrive or any other synced folder.
+
 Voidrunner was developed inside NetBBS until October 2026. Its history came
 along, but issue numbers in older commits, comments and the design text refer
 to [Thiesi/NetBBS](https://github.com/Thiesi/NetBBS) issues.
