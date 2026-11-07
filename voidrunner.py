@@ -2,6 +2,7 @@
 """
 Voidrunner -- a persistent single-player space trading/exploration door
 for NetBBS (issue #172 vertical: door-managed private save).
+Copyright (c) 2026 Thiesi. BSD-2-Clause.
 
 Same v1 door contract as `netbbs.doors.bundled.retro_trivia`: reads the
 drop-file NetBBS hands it via `NETBBS_DOOR_INFO` for handle/user_id/color
