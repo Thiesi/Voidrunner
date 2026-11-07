@@ -2,9 +2,25 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from .support import vr
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Refuse runs that would grow unbounded local scratch (tests/scratch_guard.py)."""
+    if hasattr(config, "workerinput"):
+        # An xdist worker: the controller already checked, and the worker's own
+        # --basetemp is a subfolder xdist picked inside the controller's.
+        return
+    from .scratch_guard import basetemp_problem, scratch_problem, temp_problem
+    problem = basetemp_problem(config.option.basetemp, REPO_ROOT) or scratch_problem(REPO_ROOT) or temp_problem()
+    if problem:
+        raise pytest.UsageError(problem)
 
 
 @pytest.fixture(autouse=True)

@@ -572,17 +572,17 @@ def test_real_score_paging_back_and_eof_preserve_career_and_scores(tmp_path,comm
     assert {path:path.read_bytes() for path in paths}==before
 
 
-def test_screen_hall_of_fame_records_are_complete_and_width_safe(monkeypatch):
+def test_screen_hall_of_fame_records_are_complete_and_width_safe(monkeypatch, tmp_path):
     world = _world_with_seed(307)
     import json
-    import tempfile
-    from pathlib import Path
 
     entries = [{
         "user_id": 1, "handle": "SixteenCharHandl", "best_credits": 999_999,
         "rank": vr.RANKS[-1][1], "retirements": 3, "kills": 120, "missions_completed": 88,
     }]
-    save_dir = Path(tempfile.mkdtemp())
+    # tmp_path, not tempfile.mkdtemp(): a fresh mkdtemp folder per run was never
+    # removed and piled up in the system temp folder (tests/scratch_guard.py).
+    save_dir = tmp_path
     (save_dir / "leaderboard.json").write_text(json.dumps(entries), encoding="utf-8")
     vr.import_hall_of_fame(save_dir)  # the old file reaches the screen through `scores/` (#421)
     monkeypatch.setattr(vr, "read_key", lambda: "B")
