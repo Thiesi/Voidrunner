@@ -1419,6 +1419,35 @@ one row with no rule, under the gauges: what it asks and what it pays while it
 is open, the streak once it is flown. That row is paid for with a row of
 window, which leaves nine of ten at 80x24.
 
+**The wire (review, v1.3).** A board's pilots could not see each other except
+as rows in the Hall, and only NetBBS with game events on said anything aloud.
+The wire is what the pilots of one board have lately done, one line of it on
+the deck: a promotion, a silver or gold achievement, a retirement, a lost ship,
+a dispatch run at three days and at every seventh. A bronze achievement is not
+news, and neither is anything a career catches up on at its first launch on a
+new build -- the wire goes live after the launch tick, as NetBBS's game events
+do (#25).
+
+There is no shared file. Each pilot's last six events are kept in that pilot's
+own score record and written only by their own session, under their own
+session lock, by the save that follows the event; a write that fails keeps
+them for the next. A reader merges every record it can read, newest first. An
+event is a predicate that reads after a callsign (`reached Merchant Captain`),
+at most sixty characters, of a known kind, and both it and the callsign are
+sanitized before they are styled: a score record is a file anyone could have
+edited. Score records are a projection, so a lost one loses a pilot's wire and
+nothing else.
+
+The deck has one row from outside the ship, not two. While today's order is
+open the row is the order, because that is the one a pilot can act on; once it
+is flown the row is the newest thing another pilot did in the last fourteen
+days -- a pilot's own news is not news to them -- and with nothing recent it
+stays the streak. A board with the dispatch switched off gives the wire the
+row whenever there is news. The deck is drawn after every action, so the board
+is read at most once a minute. The Dispatch page lists the last eight events
+with their dates on the node's calendar; dates and not ages, so a panel drawn
+tomorrow is the same panel.
+
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 250-credit high-water milestone in cumulative contraband sales minus purchases
 and new futures outlay/refunds. The step is 250 because the non-Haven demand
