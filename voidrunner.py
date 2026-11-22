@@ -1504,7 +1504,7 @@ UPGRADES: dict[str, dict] = {
     "shield": {"label": "Deflector Shields", "max_tier": 3, "cost": lambda t: 1100 + t * 950,
                "effect": "-incoming damage"},
     "scanner": {"label": "Long-Range Scanner", "max_tier": 2, "cost": lambda t: 900 + t * 700,
-                "effect": "+scan range"},
+                "effect": "+scan range, +read"},
     "hull": {"label": "Hull Reinforcement", "max_tier": 4, "cost": lambda t: 700 + t * 550,
              "effect": "+35 max hull"},
 }
@@ -3822,8 +3822,14 @@ def cargo_load_fraction(world: World, *, cargo_units: int | None = None) -> floa
 TACTICAL_PROFILES = {
     "Raider": ("attack", "volley", "recover"),
     "Bulwark": ("cover", "volley", "recover"),
-    "Skirmisher": ("harry", "attack", "volley"),
+    # Harry, then the volley, then it has to recover like the others. Until
+    # ruleset 4 a Skirmisher went harry > attack > volley and never recovered:
+    # a tier-3 one beat a starting Shuttle 98 times in 100 where the other two
+    # patterns lost 95, and which pattern a raider flies is a hash of its name.
+    "Skirmisher": ("harry", "volley", "recover"),
 }
+#: The patterns a fight saved before ruleset 4 keeps to its end.
+TACTICAL_PROFILES_BEFORE_4 = dict(TACTICAL_PROFILES, Skirmisher=("harry", "attack", "volley"))
 # Outgoing/incoming percentages; the displayed intent uses this same calculation.
 TACTICAL_INTENTS = {"attack": (100, 100), "volley": (100, 160),
                     "recover": (125, 35), "cover": (65, 65), "harry": (80, 75)}
@@ -3842,8 +3848,27 @@ TACTICAL_INTENTS = {"attack": (100, 100), "volley": (100, 160),
 # full hull) is after the cargo, not the wreck: dumping half the hold breaks
 # contact three times in four, and Evade has a floor. Escape costs a trader what
 # they came for; it no longer costs the ship as a matter of course.
-TACTICAL_THREAT_BONUS_BY_VERSION = {1: (0, 3, 6, 20, 55), 2: (0, 3, 6, 8, 34), 3: (0, 3, 6, 8, 34)}
-TACTICAL_RULESET_VERSION = 3
+#
+# Version 4 (review, v1.3) keeps version 3's damage and takes away a certainty.
+# A contact's pattern, its next move and that move's exact damage were all on
+# the panel, so one rule solved every fight: Guard on a volley, otherwise Fire.
+# From tier 2 a contact may *jump its pattern*: the panel shows the move it is
+# set up for and how surely the pilot reads it, and the rest of the time it
+# makes the move after that one instead -- an attack that turns out a volley, a
+# volley that turns out a recovery with the Guard spent on it. Tiers 0 and 1
+# are read perfectly, so the first fights of a career teach the pattern as they
+# did. Each Long-Range Scanner tier reads a tenth more, which gives the scanner
+# something to do in a fight.
+TACTICAL_THREAT_BONUS_BY_VERSION = {1: (0, 3, 6, 20, 55), 2: (0, 3, 6, 8, 34), 3: (0, 3, 6, 8, 34),
+                                    4: (0, 3, 6, 8, 34)}
+TACTICAL_RULESET_VERSION = 4
+READ_RULESET_VERSION = 4
+READ_FIRST_TIER = 2                       # the lowest tier that may jump its pattern
+READ_PER_TIER, READ_PER_SCANNER = 0.1, 0.1
+READ_FLOOR = 0.5
+#: A move made by jumping the pattern is rushed: it lands at this share of its
+#: strength. Without that the rule only made fights harder.
+READ_JUMP_PERCENT = 85
 OUTCLASSED_RULESET_VERSION = 3
 OUTCLASSED_EVADE_FLOOR = 0.30
 OUTCLASSED_DUMP_CHANCE = 0.75
@@ -3877,13 +3902,56 @@ def new_tactics(pirate: Pirate, version: int = TACTICAL_RULESET_VERSION) -> dict
     """Opening tactical state. A fight keeps the ruleset it started under, so
     resuming a checkpoint or switching squadron target inside one carries its
     saved `version` rather than adopting the current one (issue #406 review)."""
-    profile = list(TACTICAL_PROFILES)[sum(map(ord, pirate.name)) % len(TACTICAL_PROFILES)]
     # `brace_ready` is the saved field; the player-facing verb is Guard (#400).
-    return {"version": version, "profile": profile, "step": 0, "brace_ready": True}
+    return {"version": version, "profile": tactical_profile(pirate.name), "step": 0, "brace_ready": True}
+
+
+def tactical_profile(name: str) -> str:
+    """The pattern a contact flies, from its name: the one draw the fight, the
+    panel and the picture of its hull all make."""
+    return list(TACTICAL_PROFILES)[sum(map(ord, name)) % len(TACTICAL_PROFILES)]
+
+
+def tactical_steps(tactics: dict) -> tuple[str, ...]:
+    """The three moves a contact cycles through, under the ruleset its fight
+    started with: a Skirmisher's pattern changed at ruleset 4."""
+    table = TACTICAL_PROFILES if tactics["version"] >= READ_RULESET_VERSION else TACTICAL_PROFILES_BEFORE_4
+    return table[tactics["profile"]]
 
 
 def tactical_intent(tactics: dict) -> str:
-    return TACTICAL_PROFILES[tactics["profile"]][tactics["step"]]
+    return tactical_steps(tactics)[tactics["step"]]
+
+
+def tactical_jump(tactics: dict) -> str:
+    """The move a contact makes when it jumps its pattern: the one after the
+    move it is set up for."""
+    return tactical_steps(tactics)[(tactics["step"] + 1) % 3]
+
+
+def tactical_read(ship: Ship, tier: int, tactics: dict) -> float:
+    """How surely the pilot reads the contact's next move: 1.0 is certain.
+
+    A fight keeps the ruleset it started under, so one saved before ruleset 4
+    is read perfectly to its end."""
+    if tactics["version"] < READ_RULESET_VERSION or tier < READ_FIRST_TIER:
+        return 1.0
+    return max(READ_FLOOR, min(1.0, 1.0 - READ_PER_TIER * tier + READ_PER_SCANNER * ship.scanner_tier))
+
+
+def _tactical_act(world: World, pirate: Pirate, tactics: dict) -> tuple[str, bool]:
+    """The move the contact makes this turn and whether it jumped its pattern
+    to make it; its cycle moves on past the move it made.
+
+    Rolled when the contact acts, never when the panel is drawn: the event
+    RNG's state is saved with the fight, so a resumed turn makes the move it
+    would have made. A contact read perfectly draws nothing, which keeps every
+    low-tier fight on the random sequence it always had."""
+    read = tactical_read(world.save.ship, pirate.tier, tactics)
+    jumped = read < 1.0 and world.event_rng.random() >= read
+    intent = tactical_jump(tactics) if jumped else tactical_intent(tactics)
+    tactics["step"] = (tactics["step"] + (2 if jumped else 1)) % 3
+    return intent, jumped
 
 
 def squadron_cover(world: World) -> int:
@@ -3921,9 +3989,10 @@ def squadron_terms(world: World) -> list[str]:
 
 
 def _tactical_incoming_damage(ship: Ship, tier: int, intent: str, roll: int, tactics: dict, *,
-                              braced: bool = False, cover: int = 0) -> int:
+                              braced: bool = False, cover: int = 0, jumped: bool = False) -> int:
     raw = roll + tactical_threat_bonus(tactics)[tier]
-    damage = max(1, (raw * TACTICAL_INTENTS[intent][1] + 99) // 100 - ship.shield_tier * 3)
+    strength = TACTICAL_INTENTS[intent][1] * (READ_JUMP_PERCENT if jumped else 100)
+    damage = max(1, (raw * strength + 9999) // 10000 - ship.shield_tier * 3)
     damage += cover
     return (damage + 3) // 4 if braced else damage
 
@@ -3935,12 +4004,17 @@ def _tactical_outgoing_damage(ship: Ship, intent: str, roll: int, *, guarded: bo
     return max(1, damage * 55 // 100) if guarded else damage
 
 
-def tactical_retaliation(world: World, pirate: Pirate, tactics: dict, *, braced: bool = False) -> tuple[int, list[str]]:
-    intent = tactical_intent(tactics)
+def tactical_retaliation(world: World, pirate: Pirate, tactics: dict, *, braced: bool = False,
+                         act: tuple[str, bool] | None = None) -> tuple[int, list[str]]:
+    """The contact's move against the pilot. `act` is the move a round has
+    already drawn for it (the pilot's own shot depends on it too); without one
+    the contact acts here, as when an escape fails."""
+    intent, jumped = act if act is not None else _tactical_act(world, pirate, tactics)
     damage = _tactical_incoming_damage(world.save.ship, pirate.tier, intent, world.event_rng.randint(4, 9), tactics,
-                                       braced=braced, cover=squadron_cover(world))
+                                       braced=braced, cover=squadron_cover(world), jumped=jumped)
     world.save.ship.hull_hp = max(0, world.save.ship.hull_hp - damage)
-    tactics["step"] = (tactics["step"] + 1) % 3
+    if jumped:
+        return damage, [f"The {pirate.name} jumps its pattern to {intent} and hits you for {damage} damage."]
     return damage, [f"The {pirate.name} uses {intent} and hits you for {damage} damage."]
 
 
@@ -3950,17 +4024,20 @@ def tactical_round(world: World, pirate: Pirate, tactics: dict, action: str) -> 
     if pirate.hp <= 0 or world.save.ship.hull_hp <= 0:
         raise ValueError("This exchange is already over.")
     ship = world.save.ship
-    intent = tactical_intent(tactics)
-    damage = _tactical_outgoing_damage(ship, intent, world.event_rng.randint(9, 14), guarded=action == "G")
+    # The pilot's roll first, as always; then the move the contact makes this
+    # turn, which the shot is weighed against (cover blunts it, recovery opens
+    # the contact up) whether or not the contact lives to make it.
+    roll = world.event_rng.randint(9, 14)
+    act = _tactical_act(world, pirate, tactics)
+    damage = _tactical_outgoing_damage(ship, act[0], roll, guarded=action == "G")
     pirate.hp = max(0, pirate.hp - damage)
     tactics["brace_ready"] = action == "F"
     lines = [f"You hit the {pirate.name} for {damage} damage." + (" Guarding; fire to recharge." if action == "G" else "")]
     if pirate.hp > 0:
-        received, retaliation = tactical_retaliation(world, pirate, tactics, braced=action == "G")
+        received, retaliation = tactical_retaliation(world, pirate, tactics, braced=action == "G", act=act)
         lines += retaliation
     else:
         received = 0
-        tactics["step"] = (tactics["step"] + 1) % 3
         lines.append(f"The {pirate.name} is destroyed!")
     return damage, received, lines
 
@@ -7908,8 +7985,8 @@ def _hostile_art(name: str | None, patrol: bool = False) -> tuple[str, ...]:
     the pattern always agree, with nothing saved to keep them so."""
     if patrol:
         return _SCENE_PATROL
-    profile = list(TACTICAL_PROFILES)[sum(map(ord, name or "")) % len(TACTICAL_PROFILES)]
-    return {"Raider": _SCENE_RAIDER, "Bulwark": _SCENE_BULWARK, "Skirmisher": _SCENE_SKIRMISHER}[profile]
+    return {"Raider": _SCENE_RAIDER, "Bulwark": _SCENE_BULWARK,
+            "Skirmisher": _SCENE_SKIRMISHER}[tactical_profile(name or "")]
 
 
 _SCENE_COLORS = dict(_SPLASH_SHIP_COLORS,
@@ -14511,6 +14588,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         f"5. First upgrade: [Y] Yard, [{YARD_LETTERS[list(UPGRADES).index('cargo')]}] Cargo Bay Expansion adds 8 cargo spaces. [{YARD_LETTERS[list(UPGRADES).index('hull')]}] Hull Reinforcement adds 35 maximum hull. Keep travel money before investing.",
         f"Your next cargo tier costs {UPGRADES['cargo']['cost'](world.save.ship.cargo_tier):,} cr." if world.save.ship.cargo_tier < UPGRADES['cargo']['max_tier'] else "Your cargo upgrades are complete.",
         "Danger is a risk rating, not a guarantee you can win a fight. Evasion can fail; bribes cost credits and can be refused. Read the encounter choices before acting.",
+        "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
         "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
         "The Mission Board ([B] on the station deck) shows full contract terms, tracking and abandonment. [G] Guide keeps this recap available. On every other screen [B] is Back; [Q] on the station deck saves and leaves the game.",
     ]
@@ -16663,7 +16741,7 @@ def combat_contact_rows(world: World, pirate: Pirate, pirate_hp: int, hull_hp: i
     cells = _gauge_cells()
     condition = hull_condition(dataclasses.replace(ship, hull_hp=max(0, hull_hp)))
     contact = [[_mission_plain(pirate.name), gauge(pirate_hp, pirate.hp_max, cells, tone="danger"),
-                f"{pirate_hp}/{pirate.hp_max}", f"tier {pirate.tier}"],
+                f"{pirate_hp}/{pirate.hp_max}", f"tier {pirate.tier} {tactical_profile(pirate.name)}"],
                ["Your hull", gauge(hull_hp, hull_hp_max(ship), cells),
                 f"{hull_hp}/{hull_hp_max(ship)}", condition]]
     return table(["", "", "", ""], contact, "llrl",
@@ -16777,15 +16855,22 @@ def _option_table(rows: list[list[str]]) -> list[str]:
             for action, offer, price in rows]
 
 
-def combat_intent_row(pirate: Pirate, tactics: dict, low: int, high: int) -> str:
+def combat_intent_row(pirate: Pirate, tactics: dict, low: int, high: int, jump: tuple | None = None) -> str:
     """The contact's pattern with the move it makes next picked out, and what
-    that move is worth: `Skirmisher  harry > ATTACK > volley  incoming 4-9`.
-    The whole cycle is on the row because reading it is the fight."""
+    that move is worth: `harry > VOLLEY > recover   incoming 11-19`. The whole
+    cycle is on the row because reading it is the fight. `jump` is (move, low,
+    high, chance) where the contact may jump its pattern instead:
+    `incoming 11-19, or RECOVER 2-4 (30%)`. Whose pattern it is, is on the
+    contact's own row beside its tier."""
     p = pal()
     steps = [badge(step.upper(), "danger") if number == tactics["step"] else f"{p.slate}{step}{RESET}"
-             for number, step in enumerate(TACTICAL_PROFILES[tactics["profile"]])]
-    return (f"{p.ink}{tactics['profile']}{RESET}  " + f" {p.deep}>{RESET} ".join(steps)
-            + f"   {p.slate}incoming{RESET} {harm(span(low, high))}")
+             for number, step in enumerate(tactical_steps(tactics))]
+    row = f" {p.deep}>{RESET} ".join(steps) + f"   {p.slate}incoming{RESET} {harm(span(low, high))}"
+    if jump is not None:
+        move, low_j, high_j, chance = jump
+        row += (f"{p.slate}, or{RESET} {badge(move.upper(), 'caution')} {harm(span(low_j, high_j))} "
+                f"{p.slate}({chance:.0%}){RESET}")
+    return row
 
 
 def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, patrol: bool, tactics: dict, details: bool = False, warrant: dict | None = None, hull_before: int | None = None) -> list[str]:
@@ -16809,7 +16894,17 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     # cells: which bar is longer *is* who is winning, and it used to be two
     # sentences with the numbers buried in the middle of them.
     lines += combat_contact_rows(world, pirate, pirate.hp, ship.hull_hp)
-    lines.append(combat_intent_row(pirate, tactics, low, high))
+    read = tactical_read(ship, pirate.tier, tactics)
+    jump = None
+    if read < 1.0:
+        # The one thing on the panel that is not certain, said as a number and
+        # with what the other move is worth: a guess a pilot can weigh.
+        move = tactical_jump(tactics)
+        low_j, high_j = (_tactical_incoming_damage(ship, pirate.tier, move, roll, tactics, cover=squadron_cover(world),
+                                                   jumped=True)
+                         for roll in (4, 9))
+        jump = (move, low_j, high_j, 1.0 - read)
+    lines.append(combat_intent_row(pirate, tactics, low, high, jump))
     if not patrol and outclassed(world, pirate, tactics):
         # One row, said where the decision is made: the numbers above already
         # show it, but only to a pilot who knows what their hull is worth.
@@ -16832,8 +16927,12 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         # Everything the table leaves out, in sentences, for the pilot who asks.
         lots = plural(sum(1 for quantity in world.save.cargo.values() if quantity > 0), "lot")
         lines += [section("TACTICAL SYSTEMS"),
-                  f"{tactics['profile']} pattern: " + " > ".join(TACTICAL_PROFILES[tactics["profile"]]) + ".",
+                  f"{tactics['profile']} pattern: " + " > ".join(tactical_steps(tactics)) + ".",
                   "Cover/harry reduce your shot; recovery exposes the enemy. Harry lowers escape chance by 10 percentage points, minimum 5%.",
+                  (f"Read {tactical_read(ship, pirate.tier, tactics):.0%}: a contact of tier {READ_FIRST_TIER} or more may jump its pattern "
+                   "and make the move after the one shown; the table quotes the move shown. Each Long-Range Scanner tier reads 10% more."
+                   if tactical_read(ship, pirate.tier, tactics) < 1.0 else
+                   "Read 100%: this contact makes the move shown."),
                   "Fire: one shot; a surviving enemy returns fire. Guard: your shot at 55%, incoming cut to a quarter; Fire recharges Guard.",
                   "Dump jettisons one unit of a random held commodity. A failed Evade or Dump draws enemy fire; a bribe's "
                   "refusal draws it too. A bribe is charged only if accepted, and earns Blackwake +2."
