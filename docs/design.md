@@ -1457,6 +1457,32 @@ as nothing but the commission (bounties and escorts) changed it. A promotion's
 scene, its result line and the Pilot Record's next-rank row say what the rank
 brings.
 
+**Station stakes (review, v1.3).** By about day 45 of a trading career every
+upgrade and both refits are bought, and the top rank is another seventy-five
+jumps of the same runs with nothing to work toward (issue #405 lowered the top
+rank for this reason and left the sink open). A stake is something to own: a
+share in a station's yards, bought at that station's market (`[K] Stake`) in
+three steps of 15,000, 30,000 and 60,000cr, at up to three stations --
+315,000cr in all, which is the second half of a career.
+
+What it buys is the one thing that throttles a route flown again and again. A
+station's stock and demand pools refill six or three units a day, and a pair of
+stations worked back and forth settles to a fraction of its first runs. With
+one, two or three steps the pools at that station come back two, three and
+four times as fast for the holder. A pair of staked stations is a lane that
+keeps paying; it does not out-earn touring the galaxy, it is another way to
+fly, and it gives the big hulls the pools used to cap something to carry. A
+stake changes no price and no ceiling.
+
+Nothing new is saved. A step bought is a flag, `stake_<system>_<step>`, and a
+career's flags are a set of names an older build keeps whole. Only the pace of
+refill changes, never a pool's ceiling, so every stored figure stays inside
+what any build will load. That ruled out the more obvious design, deeper pools:
+a stored stock above the old ceiling is a save an older build refuses. Stakes
+belong to the career and end with it. The market's header wears `STAKE 2/3`,
+the exchange quotes the faster pace, two achievements count the steps held,
+and buying in is news on the wire.
+
 **The daily dispatch (review, v1.3).** Nothing in the game was different
 tomorrow: no turn limit, no calendar, and a private galaxy for every career, so
 two callers had nothing to compare and neither had a reason to dial in again.
