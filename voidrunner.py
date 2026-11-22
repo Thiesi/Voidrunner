@@ -8425,7 +8425,10 @@ class _Scene:
         self.sky_rows = self.caption_row - 1
         self.sky_px = self.sky_rows * 2
         self.mid = self.sky_px // 2
-        self.zoom = 1 if self.sky_px < 52 else 2 if self.sky_px < 84 else 3
+        # Two pixels to an art pixel from an 80x24 terminal up (a sky of 40
+        # pixels): at one, a seven-pixel ship was three and a half rows of a
+        # twenty-row sky, and the quieter scenes were a speck in a void.
+        self.zoom = 1 if self.sky_px < 36 else 2 if self.sky_px < 84 else 3
         rng = random.Random(f"scene-stars:{seed}")
         count = max(8, width * self.sky_rows // 60)
         self.stars = [(rng.uniform(0, width), rng.randrange(max(1, self.sky_rows)), rng.random() < 0.2)
@@ -10073,18 +10076,17 @@ def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
             canopy.label(1, side_left + 2, [("▲ ", _SCENE_ALARM), ("RED ALERT", _SCENE_ALARM)], side - 3)
             canopy.label(2, side_left + 4, [(scene["name"], _SCENE_INK)], side - 5)
     elif kind == "void" and (side or band):
-        # Before there is a career: the title's violet world, and the Shuttle
-        # every career starts in, waiting in front of it.
+        # Before there is a career: the title's violet world. The Shuttle every
+        # career starts in is on the commission card in front of it, beside
+        # the line that names it; drawn here as well it was two ships.
         glow = (190, 150, 255)
         if side:
-            radius = min(side * 0.7, h2 * 0.36)
-            canopy.planet("Haven", side_left + side * 0.74, h2 - radius * 0.62, radius, glow)
-            canopy.sprite(_SPLASH_SHIP, side_left + side * 0.40, h2 * 0.34, max(1.0, side * 0.3 / len(_SPLASH_SHIP[0])))
+            radius = min(side * 1.05, h2 * 0.42)
+            canopy.planet("Haven", side_left + side * 0.7, h2 - radius * 0.3, radius, glow)
         else:
             top, depth = band_top * 2, band * 2
             radius = width * 1.6
             canopy.planet("Haven", width * 0.36, top + depth * 0.52 + radius, radius, glow, sun=(-0.25, -0.75, 0.6))
-            canopy.sprite(_SPLASH_SHIP, width * 0.78, top + depth * 0.32, max(1.0, depth * 0.3 / len(_SPLASH_SHIP)))
     elif kind == "transit":
         # The lane: long streaks of drive-light, the jump still in the glass.
         for _ in range(width * height // 40):
@@ -10204,11 +10206,44 @@ def star_chart(world: World, path: list[int], public_target: int | None, sector:
             if fall > 0:
                 canopy.put(x, y, light, 0.11 * fall * fall)
     canopy.stars(0.006)
-    # Lanes between charted systems, then the route over them.
+
+    def lane(a: tuple[float, float], b: tuple[float, float], color: tuple, amount: float, dashed: bool = False) -> None:
+        """A lane from `a` towards `b`, kept inside the chart's own rows: one
+        that leaves the window runs to its edge, which is how a pilot sees
+        that the way on is in the next sector."""
+        clipped = _clip_segment(a, b, left - 2.0, top - 1.0, right + 2.0, bottom + 1.0)
+        if clipped is None:
+            return
+        (x0, y0), (x1, y1) = clipped
+        if not dashed:
+            canopy.line(x0, y0, x1, y1, color, amount)
+            return
+        length = math.hypot(x1 - x0, y1 - y0)
+        steps = max(1, int(length / 2.4))
+        for step in range(0, steps, 2):
+            canopy.line(x0 + (x1 - x0) * step / steps, y0 + (y1 - y0) * step / steps,
+                        x0 + (x1 - x0) * (step + 1) / steps, y0 + (y1 - y0) * (step + 1) / steps, color, amount)
+
+    # Lanes between charted systems, on to the edge where one leaves the
+    # window, and dashed out to each uncharted bearing a charted system links
+    # to. Then the route over them. A bearing gives away what the chart's list
+    # already does -- that there is a way on, and which way -- and nothing else.
+    bearings: dict[int, tuple[float, float]] = {}
     for sid, (sx, sy) in shown.items():
-        for other in world.by_id[sid].connections:
-            if other in shown and sid < other and world.by_id[sid].discovered and world.by_id[other].discovered:
-                canopy.line(sx, sy, *shown[other], (62, 82, 120), 0.75)
+        station = world.by_id[sid]
+        if not station.discovered:
+            continue
+        for other in station.connections:
+            neighbour = world.by_id[other]
+            if neighbour.discovered:
+                if other not in shown or sid < other:
+                    lane((sx, sy), place(neighbour), (96, 122, 170), 0.85)
+            else:
+                lane((sx, sy), place(neighbour), (128, 136, 160), 0.8, dashed=True)
+                if other not in shown and xmin <= neighbour.x <= xmax and ymin <= neighbour.y <= ymax:
+                    bearings[other] = place(neighbour)
+    for bx, by in bearings.values():
+        _chart_ring(canopy, bx, by, 1.2, (120, 126, 146), 1.0)
     legs = list(zip([world.here.id] + path, path))
     for number, (a, b) in enumerate(legs):
         if a in shown and b in shown:
@@ -10231,8 +10266,11 @@ def star_chart(world: World, path: list[int], public_target: int | None, sector:
     for sid, color in ((end, _SPLASH_GOLD), (goal, _SCENE_ALARM), (world.here.id, _SPLASH_PLASMA)):
         if sid in shown:
             _chart_ring(canopy, *shown[sid], ring, color, 1.0)
-    # Names, most important first, each where it fits.
+    # Names, most important first, each where it fits. An ordinary name keeps
+    # off a bearing's mark, which is the only thing that says the bearing is
+    # there; the ship, the objective and the route's end are named regardless.
     taken: set[tuple[int, int]] = set()
+    marks = {(math.floor(by / 2), math.floor(bx) + dx) for bx, by in bearings.values() for dx in (-1, 0, 1)}
     order = ([world.here.id, goal, end] + [sid for sid in path] +
              sorted(sid for sid in shown if world.by_id[sid].discovered))
     for sid in dict.fromkeys(order):
@@ -10257,7 +10295,8 @@ def star_chart(world: World, path: list[int], public_target: int | None, sector:
         ringed = sid in (world.here.id, goal, end)
         for column in (math.floor(sx) + (4 if ringed else 2), math.floor(sx) - (3 if ringed else 1) - len(text)):
             cells = {(row, c) for c in range(column - 1, column + len(text) + 1)}
-            if column >= 1 and column + len(text) < width - 1 and 1 <= row < legend_row and not cells & taken:
+            if (column >= 1 and column + len(text) < width - 1 and 1 <= row < legend_row and not cells & taken
+                    and (ringed or not cells & marks)):
                 canopy.label(row, column, pieces, len(text))
                 taken |= cells
                 break
@@ -10289,6 +10328,25 @@ def star_chart(world: World, path: list[int], public_target: int | None, sector:
         parts.append(f"{ESC}[{row + 1};1H" + glass(text + " " * max(0, fill_to - _visible_width(text)), CANOPY_STRIP))
     parts.append(f"{RESET}{ESC}[{legend_row + 2};1H")
     return "".join(parts)
+
+
+def _clip_segment(a: tuple[float, float], b: tuple[float, float], left: float, top: float, right: float,
+                  bottom: float) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """The part of the segment a-b inside a box, or None when none of it is
+    (Liang-Barsky)."""
+    (x0, y0), (x1, y1) = a, b
+    dx, dy = x1 - x0, y1 - y0
+    low, high = 0.0, 1.0
+    for delta, near, far in ((dx, left - x0, right - x0), (dy, top - y0, bottom - y0)):
+        if delta == 0:
+            if near > 0 or far < 0:
+                return None
+            continue
+        enter, leave = sorted((near / delta, far / delta))
+        low, high = max(low, enter), min(high, leave)
+        if low > high:
+            return None
+    return (x0 + dx * low, y0 + dy * low), (x0 + dx * high, y0 + dy * high)
 
 
 def _chart_ring(canopy: "_Canopy", cx: float, cy: float, radius: float, color: tuple, amount: float) -> None:
