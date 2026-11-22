@@ -607,7 +607,7 @@ def test_screen_customs_large_contraband_stash_has_complete_width_safe_terms(mon
     with contextlib.redirect_stdout(buf):
         vr.screen_customs(vr.Palette(truecolor=False), world)
     text = page_text(buf.getvalue())
-    assert "35 units" in text and "60% acceptance" in text and "no debt" in text
+    assert "35 units" in text and "75% acceptance" in text and "no debt" in text
     assert all(vr._visible_width(line) <= 80 for line in buf.getvalue().splitlines())
 
 

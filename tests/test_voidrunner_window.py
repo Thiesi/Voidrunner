@@ -136,7 +136,7 @@ def test_every_option_names_its_price_on_its_own_row():
     assert f"take {incoming}" in _option(lines, "F")
     for key in "ED":
         assert re.search(r"\d+% escape", _option(lines, key)) and f"else take {incoming}" in _option(lines, key)
-    assert "one unit overboard" in _option(lines, "D")
+    assert "1 unit overboard" in _option(lines, "D")  # an eighth of six units, one at least
     bribe = _option(lines, "P")
     assert f"{vr.bribe_cost(pirate)}cr" in bribe and "Blackwake +2" in bribe and f"else take {incoming}" in bribe
     # The cycle is on the row with the move it makes next picked out of it.

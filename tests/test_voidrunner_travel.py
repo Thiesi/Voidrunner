@@ -1442,7 +1442,7 @@ def test_customs_pages_keep_complete_terms_without_mutation(monkeypatch, termina
     with contextlib.redirect_stdout(output), pytest.raises(EOFError):
         vr.screen_customs(vr.Palette(False), world)
     text = " ".join(" ".join(content).split())
-    for phrase in ("2 units", "pay no fine", "60% acceptance", "Pay only if accepted", "If refused:", "no debt", "notoriety"):
+    for phrase in ("2 units", "pay no fine", "75% acceptance", "Pay only if accepted", "If refused:", "no debt", "notoriety"):
         assert phrase in text
 
 
