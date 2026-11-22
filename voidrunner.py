@@ -1584,6 +1584,16 @@ RANKS = [
     # only promotes; it never demotes an existing career.
     (150_000, "Legend of the Frontier"),
 ]
+# What a rank is worth besides its title (review, v1.3). A rank was a title, a
+# scene and a chat line: none unlocked a ship, a contract or a price, so the
+# ladder a career is measured by changed nothing a pilot could do. Each now
+# brings one thing, and all of them are about contracts, which is where a
+# rich pilot's turns had the least to offer: room for a fourth and a fifth at
+# once, and a premium on every one. Ranks are retained, so a perk never lapses.
+RANK_CONTRACT_SLOTS = (3, 4, 4, 5, 5)
+RANK_CONTRACT_BONUS = (0, 0, 10, 10, 20)   # percent on every contract's reward
+RANK_PERKS = ("", "a fourth contract slot", "a 10% premium on every contract",
+              "a fifth contract slot", "a 20% premium on every contract")
 
 SYSTEM_NAMES = [
     "Aldrin's Reach", "Bastion", "Calyx", "Draven's Drift", "Erebus Point",
@@ -3680,8 +3690,8 @@ def _generate_mission(world: World, kind: str, hops: dict[int, int], *, rng=None
 def accept_mission(world: World, mission: Mission) -> None:
     if mission.opening_assignment:
         raise MissionError("Accept First Flight from the Pilot Guide.")
-    if len(world.save.active_missions) >= MAX_ACTIVE_MISSIONS:
-        raise MissionError(f"You can carry at most {MAX_ACTIVE_MISSIONS} active contracts. Finish a contract first.")
+    if len(world.save.active_missions) >= contract_slots(world.save):
+        raise MissionError(f"You can carry at most {contract_slots(world.save)} active contracts. Finish a contract first.")
     if mission_expired(world, mission):
         raise MissionError("That contract has expired.")
     if any(m.id == mission.id for m in world.save.active_missions):
@@ -3743,8 +3753,8 @@ def accept_opening_assignment(world: World, expected: Mission) -> None:
     offer = opening_assignment_offer(world)
     if offer is None or offer.to_dict() != expected.to_dict():
         raise MissionError("The opening assignment changed or is unavailable. Reopen the guide.")
-    if len(world.save.active_missions) >= MAX_ACTIVE_MISSIONS:
-        raise MissionError(f"You can carry at most {MAX_ACTIVE_MISSIONS} active contracts.")
+    if len(world.save.active_missions) >= contract_slots(world.save):
+        raise MissionError(f"You can carry at most {contract_slots(world.save)} active contracts.")
     world.save.active_missions.append(offer)
     world.save.next_mission_id = offer.id + 1
     world.save.flags["opening_assignment_taken"] = True
@@ -3798,15 +3808,18 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
     still_active: list[Mission] = []
     for m in world.save.active_missions:
         done = False
+        # The one payout rule, here too: what a contract's screens quoted is
+        # what it pays, a rank's premium included.
+        full = mission_reward_for(world.save, m.kind, m.reward)
         if m.kind == "delivery" and world.save.current_system == m.target_system:
             have = world.save.cargo.get(m.commodity, 0)
             if have >= m.quantity:
-                _dispose_cargo(world, m.commodity, m.quantity, proceeds=m.reward, kind="delivery")
+                _dispose_cargo(world, m.commodity, m.quantity, proceeds=full, kind="delivery")
                 done = True
         elif m.kind == "scan" and just_discovered == m.target_system:
             done = True
         if done:
-            paid = remote_survey_payout(m.reward) if remote and m.kind == "scan" else m.reward
+            paid = remote_survey_payout(full) if remote and m.kind == "scan" else full
             world.save.pilot.credits += paid
             adjust_reputation(world, FACTION_CONCORD, CONCORD_STANDING_PER_CONTRACT)
             if m.opening_assignment:
@@ -3816,7 +3829,7 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
             world.save.pilot.missions_completed += 1
             bump_accolade(world.save, "deliveries" if m.kind == "delivery" else "surveys")
             msg = (f"Mission complete: {m.description} (+{paid}cr"
-                   + (", scanner survey at half pay" if paid != m.reward else "")
+                   + (", scanner survey at half pay" if paid != full else "")
                    + f", +{CONCORD_STANDING_PER_CONTRACT} Concord standing)")
             world.save.pilot.note(msg)
             msgs.append(msg)
@@ -4501,9 +4514,22 @@ def mission_reward_for(save: SaveData, kind: str, base_reward: int) -> int:
     The Concord commission is evaluated at payout, so the figure a contract
     quotes, the figure it pays and the figure retirement records as forfeited
     are the same number (issue #403 review)."""
+    reward = base_reward
     if kind in ("bounty", "escort") and perk_active(save, FACTION_CONCORD):
-        return round(base_reward * (1 + CONCORD_COMMISSION_BOUNTY_BONUS))
-    return base_reward
+        reward = round(reward * (1 + CONCORD_COMMISSION_BOUNTY_BONUS))
+    # A rank's premium is on top of the commission's, on every kind of contract.
+    return reward * (100 + RANK_CONTRACT_BONUS[career_rank_index(save.pilot)]) // 100
+
+
+def rank_perk_line(title: str) -> str:
+    """What a rank just reached brings, as the deck says it; "" for the first."""
+    index = next((number for number, (_, name) in enumerate(RANKS) if name == title), 0)
+    return f"{title} brings {RANK_PERKS[index]}." if RANK_PERKS[index] else ""
+
+
+def contract_slots(save: SaveData) -> int:
+    """Contracts a pilot may hold at once: three, and one more at each of two ranks."""
+    return RANK_CONTRACT_SLOTS[career_rank_index(save.pilot)]
 
 
 def bounty_reward_for(world: World, base_reward: int) -> int:
@@ -10577,7 +10603,8 @@ def screen_station_menu(p: Palette, world: World) -> str:
         title = world.pending_promotions[-1]
         rank = next((number for number, (_, name) in enumerate(RANKS) if name == title), 0)
         play_scene(lambda w, h: _EmblemScene(w, h, kind="rank", rank=rank, title=f"Promoted  ·  {title}",
-                                             detail="rank retained for this career", seed=_scene_seed(world, "rank")))
+                                             detail=RANK_PERKS[rank] or "rank retained for this career",
+                                             seed=_scene_seed(world, "rank")))
     earned = list(world.pending_accolades)
     world.pending_accolades.clear()
     # A rank's achievement is the promotion's own moment: listed, not played twice.
@@ -10585,7 +10612,8 @@ def screen_station_menu(p: Palette, world: World) -> str:
     if ceremony:
         play_scene(lambda w, h: _accolade_scene(w, h, ceremony, seed=_scene_seed(world, "accolades")))
     completed[0:0] = accolade_announcements(earned)
-    completed[0:0] = [f"Promoted to {title}; rank retained for this career." for title in world.pending_promotions]
+    completed[0:0] = [line for title in world.pending_promotions
+                      for line in (f"Promoted to {title}; rank retained for this career.", rank_perk_line(title)) if line]
     world.pending_promotions.clear()
     completed[0:0] = world.hop_report
     world.hop_report = []
@@ -14674,6 +14702,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         "About three systems in five have a market of their own: one good in standing surplus, sold cheap, or in standing shortage, bought dear. The chart shows a ? until you have docked there, and the trait after.",
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
         "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
+        "Ranks are kept once reached, and each brings something: a fourth contract slot at Independent Trader, a 10% premium on every contract at Merchant Captain, a fifth slot at Void Baron and a 20% premium at Legend of the Frontier.",
         "The Mission Board ([B] on the station deck) shows full contract terms, tracking and abandonment. [G] Guide keeps this recap available. On every other screen [B] is Back; [Q] on the station deck saves and leaves the game.",
     ]
     if dispatch_order(world) is not None:
@@ -15050,7 +15079,7 @@ def screen_missions(p: Palette, world: World) -> None:
         entries = [(m, False) for m in posted_mission_offers(world)] + [(m, True) for m in world.save.active_missions]
         wrapped = [(mission, active, mission_card(world, mission, active, max(1, _page_content_width() - 4)))
                    for mission, active in entries]
-        summary = [f"Active: {len(world.save.active_missions)}/{MAX_ACTIVE_MISSIONS}"]
+        summary = [f"Active: {len(world.save.active_missions)}/{contract_slots(world.save)}"]
         posted = world.save.mission_boards.get(world.save.current_system)
         if posted:
             summary.append(f"New offers on day {posted['refresh_turn']}")
@@ -15210,6 +15239,7 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
                      f"{gauge(max(0, pilot.credits - previous), max(1, following[0] - previous), cells, tone='brand')} "
                      f"{p.ink}{max(0, following[0] - pilot.credits):,}cr{RESET} {p.slate}to {following[1]} "
                      f"({following[0]:,}cr){RESET}")
+        lines.append(f"{p.slate}it brings{RESET} {p.ink}{RANK_PERKS[earned + 1]}{RESET}")
     event = world.save.active_event
     if event:
         lines.append(alert("caution", "Economy event",
@@ -15862,8 +15892,9 @@ def survey_terms(world: World) -> list[str]:
     contracts = [m for m in world.save.active_missions if m.kind == "scan" and m.target_system in candidates and not mission_expired(world, m)]
     if contracts:
         checks.append(("CONTRACTS", f"{len(contracts)} in range; scanner payout "
-                       f"{sum(remote_survey_payout(m.reward) for m in contracts):,}cr, half of "
-                       f"{sum(m.reward for m in contracts):,}cr on arrival", "good"))
+                       f"{sum(remote_survey_payout(mission_reward_for(world.save, m.kind, m.reward)) for m in contracts):,}cr, "
+                       f"half of {sum(mission_reward_for(world.save, m.kind, m.reward) for m in contracts):,}cr on arrival",
+                       "good"))
     lines.append(section("SURVEY"))
     lines += _sheet_rows(checks)
     lines.append(f"{p.slate}Charts every contact in range: station, economy and danger. No day or wages pass; "

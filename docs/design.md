@@ -1441,6 +1441,22 @@ simply finds its systems have traits; its remembered quotes are as stale as
 any others. The chart's MARKET column takes the SECTOR column's room at eighty
 columns; the sector is on the star map's Info.
 
+**What a rank brings (review, v1.3).** A rank was a title, a scene and a chat
+line: none unlocked a ship, a contract or a price, so the ladder a career is
+measured by changed nothing a pilot could do. Each rank above the first now
+brings one thing, and all of them are about contracts, which is where a rich
+pilot's turns had least to offer: a fourth contract slot at Independent
+Trader, a 10% premium on every contract's reward at Merchant Captain, a fifth
+slot at Void Baron and a 20% premium at Legend of the Frontier. Ranks are
+retained, so a perk never lapses when the credits are spent. The premium lives
+in `mission_reward_for`, the one payout rule every screen quotes a contract by,
+on top of the Concord commission where that applies -- and deliveries and
+surveys now pay through that rule too. They paid the bare reward while the
+screens quoted the rule's figure, which were the same number only for as long
+as nothing but the commission (bounties and escorts) changed it. A promotion's
+scene, its result line and the Pilot Record's next-rank row say what the rank
+brings.
+
 **The daily dispatch (review, v1.3).** Nothing in the game was different
 tomorrow: no turn limit, no calendar, and a private galaxy for every career, so
 two callers had nothing to compare and neither had a reason to dial in again.
