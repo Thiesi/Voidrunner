@@ -1414,6 +1414,33 @@ win for a starting ship and hull lost by an upgraded one is within a few points
 of what it was. The contact's pattern is named beside its tier on its own row
 (`Ashclaw ... tier 3 Skirmisher`), and the pattern row is the cycle alone.
 
+**A system's own market (review, v1.3).** A price was the commodity's base and
+the economy's two multipliers and nothing else, so forty-eight systems were
+five price tables: a pilot who had seen one Tech station had seen them all, and
+charting a system told them nothing a trader could use. About three systems in
+five now have one thing of their own, a standing surplus of one good (sold 30%
+under its usual price there) or a standing shortage (bought 40% over it).
+Always a good that economy neither makes nor wants, so a trait is a second
+source or a second buyer for something -- a Mining world with Medicine to
+spare, a Tech world short of Textiles -- and never a better deal than the
+trade the economy already defines. Routes get geography and the neglected
+goods get buyers; income is not inflated. Home has none.
+
+A trait is drawn from the galaxy seed and the system's number with an RNG of
+its own, so galaxy generation keeps its seed's call sequence, the galaxy
+version stays 1 and nothing is saved. It is found by docking: charting or
+scanning a system names its economy and its danger, and its market is a `?` in
+the chart's MARKET column until the pilot has stood in it, which is the one
+column on the chart that says "go and look". The first docking says what was
+found among the arrival's results; after that it is a badge on the market's
+header (`RAW ORE CHEAP`), the chart's column, the remembered market's heading
+and the Viewport's station view, in the market's own two words. The price
+ladder a quote is judged against is still the economies' own, so a surplus
+reads `cheap` and a shortage `dear` there. A career begun before this build
+simply finds its systems have traits; its remembered quotes are as stale as
+any others. The chart's MARKET column takes the SECTOR column's room at eighty
+columns; the sector is on the star map's Info.
+
 **The daily dispatch (review, v1.3).** Nothing in the game was different
 tomorrow: no turn limit, no calendar, and a private galaxy for every career, so
 two callers had nothing to compare and neither had a reason to dial in again.
