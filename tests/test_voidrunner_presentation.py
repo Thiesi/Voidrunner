@@ -1154,13 +1154,15 @@ def test_retirement_forfeits_the_commissioned_reward_the_contract_showed():
     world.save.pilot.has_concord_commission = True
     world.save.pilot.reputation[vr.FACTION_CONCORD] = 100
     quoted = vr.bounty_reward_for(world, 1000)
-    assert quoted == 1250  # the commission the contract screen and every loss path show
+    # The commission and, since ranks bring something, a Legend's 20% premium:
+    # the figure the contract screen and every loss path show.
+    assert quoted == 1500
     assert f"forfeited {quoted:,}cr" in " ".join(vr.finish_career(world.save, "legend").pilot.log)
     world.save.pilot.has_concord_commission = False
-    assert "forfeited 1,000cr" in " ".join(vr.finish_career(world.save, "legend").pilot.log)
+    assert "forfeited 1,200cr" in " ".join(vr.finish_career(world.save, "legend").pilot.log)  # the premium alone
     world.save.active_missions = [vr.Mission(5, "delivery", "Deliver goods", 1000, 0, target, commodity="food", quantity=2)]
     world.save.pilot.has_concord_commission = True
-    assert "forfeited 1,000cr" in " ".join(vr.finish_career(world.save, "legend").pilot.log)  # deliveries carry no commission
+    assert "forfeited 1,200cr" in " ".join(vr.finish_career(world.save, "legend").pilot.log)  # deliveries carry no commission
 
 
 def test_absent_loss_counters_default_to_zero_and_the_record_shows_them():
