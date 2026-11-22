@@ -10234,7 +10234,7 @@ def canopy_rows(cells: list[list[tuple]], rows: range, start=lambda row: 0) -> s
 
 
 def star_chart(world: World, path: list[int], public_target: int | None, sector: int | None,
-               footer: str) -> str:
+               footer: str, *, bounds: tuple[int, int, int, int] | None = None) -> str:
     """The star map as a picture, for a terminal the canopy is drawn on
     (Thiesi/Voidrunner#30): the same projection as `spatial_map_grid`, and the
     same rules for what an uncharted system gives away, drawn the way the rest
@@ -10257,9 +10257,9 @@ def star_chart(world: World, path: list[int], public_target: int | None, sector:
     bar_rows = action_bar_rows(footer)
     legend_row = max(1, height - 2 - bar_rows)
     scene = canopy_scene(world)
-    canopy = _Canopy(width, height, canopy_across(), scene["sky"], f"chart:{sector}")
+    canopy = _Canopy(width, height, canopy_across(), scene["sky"], f"chart:{bounds or sector}")
     canopy.nebula(0.6)
-    xmin, xmax, ymin, ymax = map_bounds(sector)
+    xmin, xmax, ymin, ymax = bounds or map_bounds(sector)
     ids = sorted(map_system_ids(world, path, public_target))
     goal = map_goal(world, public_target)
     end = path[-1] if path else None
@@ -10275,7 +10275,7 @@ def star_chart(world: World, path: list[int], public_target: int | None, sector:
     shown = {sid: place(world.by_id[sid]) for sid in ids
              if xmin <= world.by_id[sid].x <= xmax and ymin <= world.by_id[sid].y <= ymax}
     # Charted space, glowing in its trades' light.
-    reach = 9.0 if sector is None else 13.0
+    reach = 9.0 if xmax - xmin > 60 else 13.0  # a system's glow, smaller on a chart of the whole galaxy
     for sid, (sx, sy) in shown.items():
         station = world.by_id[sid]
         if not station.discovered or canopy.flat:
@@ -10382,7 +10382,7 @@ def star_chart(world: World, path: list[int], public_target: int | None, sector:
                 break
     cells = canopy.cells()
     # The title and legend sit on strips of the console's glass.
-    heading = "Star Map: " + (SECTOR_NAMES[sector] if sector is not None else "Galaxy")
+    heading = map_heading(sector, bounds)
     bounds = f"X {xmin}-{xmax} {glyph('dot')} Y {ymin}-{ymax}"
     p = pal()
     title = f" {p.ink}{BOLD}{heading}{RESET}"
@@ -16307,6 +16307,50 @@ def map_bounds(sector: int | None) -> tuple[int, int, int, int]:
             ((row + 1) * 50 + SECTOR_ROWS - 1) // SECTOR_ROWS - 1)
 
 
+# Known space (review, v1.3). The map framed a fixed sixth of the galaxy, so a
+# career's first chart was three stars in a corner of an empty picture, and the
+# text grid for every other terminal was the same three marks in the same
+# corner. It opens on what the pilot knows instead: every charted system, the
+# ship, the objective, the route, and the bearings charted systems lead to,
+# with a little room around them. The frame is never smaller than a quarter of
+# the galaxy across, so a new career's three systems are not blown up into a
+# diagram, and its edges sit on steps of five, so it holds still from one jump
+# to the next and moves only when the pilot has pushed past it.
+MAP_KNOWN_LEAST = (24, 12)   # units across and down
+MAP_KNOWN_STEP = 5
+MAP_KNOWN_ROOM = 2
+
+
+def map_bearings(world: World) -> set[int]:
+    """Uncharted systems a charted one links to: the ways on."""
+    return {other for system in world.galaxy if system.discovered
+            for other in system.connections if not world.by_id[other].discovered}
+
+
+def known_space_bounds(world: World, path: list[int], public_target: int | None) -> tuple[int, int, int, int]:
+    """The map's frame around everything the pilot knows of."""
+    ids = map_system_ids(world, path, public_target) | map_bearings(world)
+
+    def span(values: list[int], least: int, limit: int) -> tuple[int, int]:
+        low, high = min(values) - MAP_KNOWN_ROOM, max(values) + MAP_KNOWN_ROOM
+        short = least - (high - low)
+        if short > 0:
+            low, high = low - short // 2, high + short - short // 2
+        low = max(0, low // MAP_KNOWN_STEP * MAP_KNOWN_STEP)
+        high = min(limit, -(-(high + 1) // MAP_KNOWN_STEP) * MAP_KNOWN_STEP - 1)
+        return low, high
+
+    xmin, xmax = span([world.by_id[sid].x for sid in ids], MAP_KNOWN_LEAST[0], 99)
+    ymin, ymax = span([world.by_id[sid].y for sid in ids], MAP_KNOWN_LEAST[1], 49)
+    return xmin, xmax, ymin, ymax
+
+
+def map_heading(sector: int | None, bounds: tuple[int, int, int, int] | None) -> str:
+    if bounds is not None:
+        return "Star Map: Known space"
+    return "Star Map: " + (SECTOR_NAMES[sector] if sector is not None else "Galaxy")
+
+
 def map_goal(world: World, public_target: int | None) -> int | None:
     mission = tracked_mission(world)
     return mission.target_system if mission is not None else public_target
@@ -16325,12 +16369,17 @@ def map_system_ids(world: World, path: list[int], public_target: int | None) -> 
 
 
 def spatial_map_grid(world: World, path: list[int], *, public_target: int | None,
-                     sector: int | None, columns: int, rows: int) -> list[str]:
-    """Bounded coordinate projection. Lines are visual; exact links live in Info."""
+                     sector: int | None, columns: int, rows: int,
+                     bounds: tuple[int, int, int, int] | None = None) -> list[str]:
+    """Bounded coordinate projection. Lines are visual; exact links live in Info.
+
+    A bearing -- an uncharted system a charted one links to -- is a `?` at the
+    end of its lane, as it is a hollow mark on the picture: that there is a way
+    on, and which way, and nothing else about it."""
     columns, rows = max(3, min(119, columns)), max(3, min(36, rows))
     width, height = columns - 2, rows - 2
-    xmin, xmax, ymin, ymax = map_bounds(sector)
-    ids = map_system_ids(world, path, public_target)
+    xmin, xmax, ymin, ymax = bounds or map_bounds(sector)
+    ids = map_system_ids(world, path, public_target) | map_bearings(world)
     positions = {}
     for sid in sorted(ids):
         station = world.by_id[sid]
@@ -16348,7 +16397,9 @@ def spatial_map_grid(world: World, path: list[int], *, public_target: int | None
             if glyph == ":" or grid[y][x] == " ": grid[y][x] = glyph
     for sid in positions:
         for neighbor in world.by_id[sid].connections:
-            if neighbor in positions and sid < neighbor and world.by_id[sid].discovered and world.by_id[neighbor].discovered:
+            if neighbor not in positions or not world.by_id[sid].discovered:
+                continue
+            if not world.by_id[neighbor].discovered or sid < neighbor:
                 line(sid, neighbor, ".")
     for a, b in sorted(route_edges):
         if a in positions and b in positions:
@@ -16469,16 +16520,16 @@ def _screen_map_info(p: Palette, world: World, sid: int, path: list[int], public
 
 
 def _draw_map_grid(p: Palette, world: World, path: list[int], public_target: int | None,
-                   sector: int | None, footer: str) -> None:
+                   sector: int | None, footer: str, *, frame: tuple[int, int, int, int] | None = None) -> None:
     """The star map as its ASCII grid, heading to legend, sized to leave the footer its rows."""
-    heading = "Star Map: " + (SECTOR_NAMES[sector] if sector is not None else "Galaxy")
-    xmin, xmax, ymin, ymax = map_bounds(sector)
+    heading = map_heading(sector, frame)
+    xmin, xmax, ymin, ymax = frame or map_bounds(sector)
     bounds = f"X {xmin}-{xmax}; Y {ymin}-{ymax}"
     legend = map_legend(p)
     overhead = 2 + sum(len(_wrap_output(text, max(1, _OUTPUT_WIDTH - 1)).split("\r\n")) for text in (heading, bounds, legend, footer))
     out_line(f"{p.hull}{BOLD}{heading}{RESET}"); out_line(f"{p.slate}{bounds}{RESET}")
     for row in spatial_map_grid(world, path, public_target=public_target, sector=sector,
-                                columns=_OUTPUT_WIDTH - 1, rows=_OUTPUT_HEIGHT - overhead):
+                                columns=_OUTPUT_WIDTH - 1, rows=_OUTPUT_HEIGHT - overhead, bounds=frame):
         out_line(style_map_row(p, row))
     out_line(legend)
 
@@ -16492,7 +16543,9 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
     if public_target is None and mission:
         public_target = mission.target_system
     path = list(path)
-    sector = SECTOR_NAMES.index(sector_for(world.here))
+    # The map opens on known space. `sector` is a sector's number or None for
+    # the whole galaxy, as it always was; `known` is the third view, over both.
+    sector, known = None, True
     compact = False  # one layout above the floor (issue #495)
     list_mode, page = compact, 0
     title = "Charted Systems"
@@ -16512,15 +16565,17 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
             # instead, which drew it under the chart and added another whole copy
             # beneath the last at every sector change (issue #643). The clear
             # takes the blank line's row.
-            footer = "[N/P] Sector [O] Overview [L] List [I] Info [B] Back: "
+            frame = known_space_bounds(world, path, public_target) if known else None
+            # [O] goes out to the whole galaxy, and from there back to known space.
+            footer = f"[N/P] Sector [O] {'Known' if sector is None and not known else 'Overview'} [L] List [I] Info [B] Back: "
             clear_screen()
             if canopy_active():
                 # The picture (Thiesi/Voidrunner#30); the grid carries the same
                 # marks for a terminal the canopy is not drawn on.
-                out(star_chart(world, path, public_target, sector, footer))
+                out(star_chart(world, path, public_target, sector, footer, bounds=frame))
                 chart_strip()
             else:
-                _draw_map_grid(p, world, path, public_target, sector, footer)
+                _draw_map_grid(p, world, path, public_target, sector, footer, frame=frame)
         out_prompt(footer); key = read_command_at_prompt(); out_line(key)
         if key in ("B", "Q"): return
         if key == "I":
@@ -16535,10 +16590,14 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
                 page = moved
             elif key == "M" and not compact: list_mode = False
         elif key == "L": list_mode = True
-        elif key == "O": sector = None
+        elif key == "O":
+            known = sector is None and not known  # a sector or known space -> the galaxy -> known space
+            sector = None
         elif key in ("N", "P"):
-            current = SECTOR_NAMES.index(sector_for(world.here)) if sector is None else sector
-            sector = (current + (1 if key == "N" else -1)) % len(SECTOR_NAMES)
+            # From known space or the galaxy, the first press is the ship's own sector.
+            home = SECTOR_NAMES.index(sector_for(world.here))
+            sector = home if sector is None else (sector + (1 if key == "N" else -1)) % len(SECTOR_NAMES)
+            known = False
 
 
 def prepare_route_jump(world: World, destination: int) -> int:

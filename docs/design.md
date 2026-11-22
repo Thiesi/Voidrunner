@@ -1391,6 +1391,21 @@ never a name, an economy or a danger. Ordinary names keep off a bearing's
 mark; the ship, the objective and the route's end are named regardless. The
 lanes are a shade brighter.
 
+And it opens on known space (review, v1.3). The map framed a fixed sixth of
+the galaxy, the sector the ship was in, so a career's first chart was three
+stars in a corner of an empty picture, and the text grid every other terminal
+gets was the same three marks in the same corner. It opens instead on a frame
+around what the pilot knows of: every charted system, the ship, the objective,
+the route, and the bearings charted systems lead to, with two units of room.
+The frame is never less than 24 units across and 12 down, so three systems are
+a chart and not a diagram, and its edges sit on steps of five, so it holds
+still from jump to jump and moves only when the pilot has pushed past it. Once
+the galaxy is charted it is the galaxy. `[O]` goes out to the whole galaxy and
+from there back; `[N/P]` step through the sectors as before, starting with the
+ship's own. The text grid marks a bearing too, a `?` at the end of its lane:
+it had shown only charted systems, which is why known space would have been as
+empty there as the sector was.
+
 **A system's world is its own.** Forty-eight systems shared five pictures, one
 per economy, so arriving somewhere new looked like arriving somewhere already
 seen. `world_look` makes a world from its economy and the system's name alone
