@@ -424,9 +424,11 @@ def test_tactical_intent_displayed_damage_range_matches_resolution(monkeypatch, 
     pirate = vr.Pirate("Probe", 2, 200, 200)
     tactics = {"version": 1, "profile": profile, "step": step, "brace_ready": True}
     lines = vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics, details=True)
+    # Guard's own row quotes what a guarded round takes; the pattern row quotes
+    # the unguarded move, which is what Fire and a failed escape take too.
     label = next(plainly(line) for line in lines
-                 if (plainly(line).startswith("[G]") if action == "G" else " intent " in plainly(line)))
-    found = re.search(r"incoming (\d+)(?:-(\d+))?", label)
+                 if (plainly(line).startswith("[G]") if action == "G" else " incoming " in plainly(line)))
+    found = re.search(r"(?:incoming|take) (\d+)(?:-(\d+))?", label)
     low, high = int(found[1]), int(found[2] or found[1])  # "2", not "2-2" (#648)
     monkeypatch.setattr(world.event_rng, "randint", lambda lo, hi: hi)
     _, received, _ = vr.tactical_round(world, pirate, tactics, action)
@@ -1311,7 +1313,7 @@ def test_the_panel_says_outclassed_and_prices_the_dump_it_will_actually_make():
     # The alert names the cargo, so the option that spends it leads the list: as
     # the fourth option it fell onto page two at 80x24, away from the alert.
     options = [row[:3] for row in rows[rows.index(next(row for row in rows if "OPTIONS" in row)) + 1:] if row.startswith("[")]
-    assert options[:3] == ["[D]", "[F]", "[E]"]
+    assert options[:4] == ["[D]", "[F]", "[G]", "[E]"]
     vr._OUTPUT_WIDTH, vr._OUTPUT_HEIGHT = 80, 24
     bar = vr.combat_action_bar("F/G/E/D/P")
     first = [plain(row) for row in vr._service_pages(vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics), "Combat 1,000cr", bar)[0]]
@@ -1320,7 +1322,7 @@ def test_the_panel_says_outclassed_and_prices_the_dump_it_will_actually_make():
     rows = [plain(row) for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics)]
     assert not any("OUTCLASSED" in row for row in rows)
     options = [row[:3] for row in rows[rows.index(next(row for row in rows if "OPTIONS" in row)) + 1:] if row.startswith("[")]
-    assert options[:3] == ["[F]", "[E]", "[D]"]  # a fair fight keeps the order it had
+    assert options[:4] == ["[F]", "[G]", "[E]", "[D]"]  # a fair fight keeps the order it had
 
 
 def test_a_cautious_starter_shuttle_usually_survives_the_raider_that_used_to_kill_it():

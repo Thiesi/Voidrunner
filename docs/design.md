@@ -1270,6 +1270,33 @@ the terminal is sent UTF-8 and NetBBS has not said the caller's font lacks them
 always over CP437. A SysOp can switch it off for everyone with `DOOR_CANOPY=0`,
 or keep everyone to half blocks with `DOOR_PIXELS=half`.
 
+**The window is budgeted, not left over (review, v1.3).** At 80x24 the canopy's
+picture is a band along the bottom ten rows, and "whatever the console leaves
+uncovered" had come to mean four of them on the two screens a pilot looks at
+most: the Command Deck was nineteen rows and a fight nineteen or twenty-two, so
+the station, the world and the contact under its lock were drawn every time and
+seen almost never. Those two screens now fit above the band. The deck is
+fourteen rows: the station on one row, then the career row and the gauges as
+one block with the hull beside all four of them (no SHIP rule, no blank row
+under three gauges for a four-row hull), and the services in three columns of
+five rather than two of seven, which every label is kept short enough for
+(`Yard: 6 upgrades`, a landmark without its article). The services run row by
+row from what a turn is made of -- Market, Chart, Board -- to the ship and its
+books, the people, and last the pages nobody opens twice a session. A fight is
+thirteen rows on its opening page and sixteen on a turn's, which carries the
+last exchange: the contact's pattern is one row with the move it makes next
+picked out of its cycle (`Skirmisher  harry > ATTACK > volley  incoming 7-12`),
+and the options are a table of three columns -- the key, what it does, what it
+costs (`[F] Fire  deal 9-14  take 7-12`; `[D] Dump  56% escape  one unit
+overboard; else take 7-12`) -- where there were six sentences, most of them the
+same clause about enemy fire. The shot it quotes is computed by the function a
+round resolves with. The sentences, and the fuel, hold and day chips, are on
+the Info page. Where three columns do not fit a row (forty columns), each
+option is one line that wraps: a stacked table gave every option three rows, a
+page for every two. The contact is composed low in the band so its lock clears
+a turn's page. The same budget is a rule for any screen a pilot sits on: a new
+row on the deck or in a fight is paid for with a row of window.
+
 **The star map is a picture there too.** Drawn in the canopy's pixels: charted
 space glowing faintly in its trades' colors with the unknown dark between,
 lanes as fine lines, the plotted route in the lane's gold-to-plasma, each
@@ -1286,7 +1313,7 @@ one slab. The ship on the deck, the record, a refit preview and a career's
 ending is the scenes' own pixel hull in half blocks, its damage scorched
 plating (as many marks as the ASCII art's `x`s, which mono and plain keep). A
 page's header carries the lane streak, which shoots out of the title on
-arrival in `auto`. Combat's fuel, hold and day are one row of chips, and its
+arrival in `auto`. Combat's fuel, hold and day are one row of chips on its Info page, and its
 identification paragraph follows the options it qualifies, so every option is
 on the first page at 80x24 (#28). A market quote is a mark on the scale from the
 galaxy's cheapest price to its dearest. The deck names a system's danger in
