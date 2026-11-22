@@ -675,10 +675,21 @@ def _screen_rows(running: "Door") -> list[str]:
     Only the last page it drew. A door does not clear between screens, so the
     whole conversation is still on the wire, and an entry read out of an earlier
     screen would send the walk somewhere else entirely.
+
+    Read off the terminal the door has painted, not out of its bytes. A page
+    drawn on a canopy that is still intact sends no clear and is placed by
+    cursor address, so in the byte stream the board is written after the deck
+    it replaced with nothing to say where one ends: a walk looking for the
+    chart's letter for a system found the board's digit for a contract there
+    first, pressed it at the chart, and left a "combat" fixture with no fight
+    in it (review, v1.3).
     """
-    rows = [re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", row).strip()
-            for row in last_screen(running.read()).replace("\r\n", "\n").split("\n")]
-    opened = max((index for index, row in enumerate(rows) if row[:1] in ("\u256d", "+")), default=0)
+    width, height = (int(side) for side in running.size.split("x"))
+    canvas = term.Screen(width, height)
+    canvas.feed(last_screen(running.read()))
+    rows = ["".join(char for char, _ in row).strip() for row in canvas.cells]
+    # The frame's top-left corner, in either spelling. A lone `+` is a star.
+    opened = next((index for index, row in enumerate(rows) if re.match(r"\u256d|\+[-=]", row)), 0)
     return [row.strip("\u2502\u2551|").strip() for row in rows[opened:]]
 
 
@@ -770,8 +781,16 @@ def build_voidrunner_combat(door_name: str, door: pathlib.Path, state: pathlib.P
                     break
                 running.press(b">")
             running.press(b"A")
-            running.press(b"B")  # back to the board
-            running.press(b"B")  # back to the deck
+            # Back out to the deck from wherever accepting left us, by reading
+            # the title rather than counting: an accepted contract is reported
+            # on the board it returns to (issue #38), where this used to press
+            # Back twice for a contract page and a board -- and the deck's own
+            # `B` opens the board, so the second one went straight back in and
+            # the chart's key was typed at a list of contracts (review, v1.3).
+            for _ in range(3):
+                if "Command Deck" in _screen_rows(running)[0]:
+                    break
+                running.press(b"B")
             running.press(b"C")  # the chart
             letter = _entry_key(_screen_rows(running), re.escape(target))
             if letter is None:
@@ -779,7 +798,9 @@ def build_voidrunner_combat(door_name: str, door: pathlib.Path, state: pathlib.P
                 continue
             running.press(letter.encode())
             running.press(b"Y")  # depart; the bounty is waiting on arrival
-            if "Combat" not in " ".join(_screen_rows(running)):
+            # The page's title, not anywhere on it: a bounty's own terms say
+            # "Combat: intercept a tier 1 raider", which passed for a fight.
+            if "Combat" not in _screen_rows(running)[0]:
                 running.kill()
                 continue
         except BaseException:
