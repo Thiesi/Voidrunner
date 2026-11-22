@@ -10766,9 +10766,12 @@ def deck_service_entries(world: World) -> list[tuple[str, str]]:
                ("Y", yard), ("S", "Status"), ("T", "Ledger"),
                ("P", "Concord"), ("W", "Blackwake"), ("N", "Archive"),
                ("V", "Viewport"), ("H", "Hall of Fame"), ("G", "Guide"),
-               ("O", "Display"), ("Q", "Disembark")]
+               ("O", "Display")]
+    # Disembark is not in the grid: the action bar under it always says
+    # `[Q] Exit`, and as the grid's last entry it was, on the days the count
+    # came out one over a multiple of three, a row of window to itself.
     if dispatch_order(world) is not None:
-        entries.insert(len(entries) - 2, ("J", "Dispatch"))
+        entries.insert(len(entries) - 1, ("J", "Dispatch"))
     day = world.save.turn
     entries = [(key, label) for key, label in entries if deck_service_day(world, key) <= day]
     if landmark_available_here(world):

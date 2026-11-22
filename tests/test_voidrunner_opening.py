@@ -16,7 +16,7 @@ import pytest
 
 from .support import _finale_world, _world_with_seed, plain, vr
 
-FIRST_DAY = {"M", "C", "B", "Y", "S", "G", "O", "Q"}
+FIRST_DAY = {"M", "C", "B", "Y", "S", "G", "O"}
 
 
 def _keys(world) -> set[str]:
@@ -110,3 +110,17 @@ def test_the_guide_opens_on_the_game_and_says_what_arrives_later(terminal):
     assert any(row.startswith("Danger is a risk rating") for row in rows[later:])
     world.save.turn = 3
     assert not any("The deck fills in" in plain(row) for row in vr.pilot_guide_lines(world))
+
+
+def test_disembark_is_the_action_bars_and_never_a_row_of_its_own(monkeypatch, terminal):
+    """As the grid's last entry it was, some days, a fifth row with one key on
+    it; the bar under the grid always says `[Q] Exit`."""
+    terminal(80, 24)
+    for day in range(5):
+        world = _world_with_seed(42)
+        world.save.turn = day
+        assert "Q" not in _keys(world)
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr.screen_station_menu(vr.Palette(False), _world_with_seed(42)) == "Q"
+    assert "[Q] Exit" in " ".join(plain(output.getvalue()).split())
