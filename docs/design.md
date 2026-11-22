@@ -979,6 +979,24 @@ is a place to put credits, as intended. And contracts are the slow road: a
 contractor ends with about half a trader's worth in either version, and the
 rank's extra slots made this one poorer, because it took the work.
 
+**What a contract pays (review, v1.3).** The careers flown above put a pilot
+who lives off the board at about half the worth of one who trades, in v1.2 and
+after the review alike, and from the first week on: a hold's margin grows with
+the hold, and a contract's sum did not grow at all. A survey paid 200 and 80 a
+jump while one Shuttle-load cleared 700. The rank's premium, at a tenth and a
+fifth, did not register, and the extra slots made the contractor poorer for
+taking the work. So every sum is doubled -- a survey is 400 and 160 a jump, a
+bounty 600 and 500 a tier, an escort 500 with 300 a jump and 300 a tier, and
+a delivery pays the goods' base value and three tenths more a jump, with 100
+on top -- and the premium is half as much again at Merchant Captain and double
+at Legend of the Frontier. Flown again, a contractor ends on about three
+quarters of a trader's worth where it was half; the first ten days move by an
+eighth, so the opening is not sped up; and nothing changes for a pilot who
+never opens the board. The board is still the slower road, on purpose: it is
+also the one with standing, kills and a record on it. The figures are constants
+(`DELIVERY_PAY`, `SURVEY_PAY`, `BOUNTY_PAY`, `ESCORT_PAY`) so the simulator can
+move them. An offer already posted keeps the terms it was posted with.
+
 ## Terminal floor and presentation review
 
 **Voidrunner requires a terminal of at least 40 columns by 12 rows, and has
@@ -1512,8 +1530,9 @@ line: none unlocked a ship, a contract or a price, so the ladder a career is
 measured by changed nothing a pilot could do. Each rank above the first now
 brings one thing, and all of them are about contracts, which is where a rich
 pilot's turns had least to offer: a fourth contract slot at Independent
-Trader, a 10% premium on every contract's reward at Merchant Captain, a fifth
-slot at Void Baron and a 20% premium at Legend of the Frontier. Ranks are
+Trader, half as much again on every contract's reward at Merchant Captain, a
+fifth slot at Void Baron and double pay at Legend of the Frontier (10% and 20%
+until the careers were flown; see "What a contract pays"). Ranks are
 retained, so a perk never lapses when the credits are spent. The premium lives
 in `mission_reward_for`, the one payout rule every screen quotes a contract by,
 on top of the Concord commission where that applies -- and deliveries and
