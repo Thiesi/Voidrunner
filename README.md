@@ -119,6 +119,12 @@ the board has flown it. The day changes at midnight on the node's calendar.
 The Hall of Fame ranks the longest runs, read from `scores/` like the rest. A
 SysOp can switch the dispatch off with `DOOR_DISPATCH=0`.
 
+Once a pilot has flown the day's order, that deck row carries **the wire**
+instead: the newest thing another pilot on the board did, such as a promotion,
+a silver or gold achievement, a retirement or a lost ship. Each pilot's last
+six events are kept in their own `scores/` record, so nothing new needs backing
+up and no file is written by two sessions.
+
 Pilots earn achievements across all of their careers (Pilot Record,
 `[A] Achievements`, which an 80-column bar shortens to `[A] Awards`). Each one shows how many of the board's pilots hold it,
 read from the same `scores/` records the Hall of Fame uses, so back that

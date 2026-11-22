@@ -2489,8 +2489,17 @@ class World:
         # the reporter. None, as in every domain-only world, is no dispatch.
         self.dispatch_clock: Callable[[], int | None] | None = None
         # What this session did that the board's wire should carry; written
-        # into the pilot's own score record by the next save.
+        # into the pilot's own score record by the save that follows. Live only
+        # once the executable says so, after the launch tick: a career first
+        # opened by this build catches up on old achievements there, and those
+        # are history, not news (the rule NetBBS's game events follow, #25).
         self.wire_events: list[dict] = []
+        self.wire_live = False
+        # The board's wire as the deck reads it, bound by the executable to the
+        # score records; None, as in every domain-only world, is no wire.
+        self.wire_source: Callable[[], list[dict]] | None = None
+        self.wire_user: int | None = None  # whose news the deck leaves out: the caller's own
+        self._wire_read: tuple[float, list[dict]] | None = None
         self.reset(save)
 
     def advance_station_state(self) -> None:
@@ -2525,6 +2534,7 @@ class World:
         check_dispatch(self)  # before the rank and the accolades its reward may earn
         promoted = check_rank_up(self)
         earned = unlock_accolades(self.save)
+        self.wire_earned([promoted] if promoted else [], earned)
         remember_local_market(self)  # no-op mid-journey; `remember_local_market` checks
         if tracked_mission(self) is None:
             # A contract that ended mid-journey must not leave a dangling id in
@@ -2544,8 +2554,28 @@ class World:
         self.report_earned([promoted] if promoted else [], earned)
 
     def wire(self, kind: str, text: str) -> None:
-        """Note something the board's wire should carry about this pilot."""
-        self.wire_events.append({"at": int(time.time()), "kind": kind, "text": text})
+        """Note something the board's wire should carry about this pilot: a
+        predicate that reads after their callsign (`reached Merchant Captain`)."""
+        if self.wire_live:
+            self.wire_events.append({"at": int(time.time()), "kind": kind, "text": text[:WIRE_TEXT_MAX]})
+
+    def wire_earned(self, promotions: list[str], accolades: list[Accolade]) -> None:
+        """Promotions and silver or gold achievements, as the wire words them."""
+        for title in promotions:
+            self.wire("rank", f"reached {title}")
+        for accolade in accolades:
+            if accolade.tier >= EVENT_ACCOLADE_TIER and accolade.metric != "rank":
+                self.wire("award", f"earned {accolade.name}")
+
+    def board_wire(self) -> list[dict]:
+        """The board's wire, newest first, read at most once a minute: the deck
+        is drawn after every action and the wire is other people's news."""
+        if self.wire_source is None:
+            return []
+        now = time.monotonic()
+        if self._wire_read is None or now - self._wire_read[0] > WIRE_REFRESH_SECONDS:
+            self._wire_read = (now, self.wire_source())
+        return self._wire_read[1]
 
     def report_earned(self, promotions: list[str], accolades: list[Accolade]) -> None:
         """Tell the bound reporter (NetBBS game events) what a saved action earned."""
@@ -4379,6 +4409,7 @@ def destroy_ship(world: World, *, patrol: bool = False, hull_before: int | None 
     the fight, so seeking destruction is never a free repair."""
     ship = world.save.ship
     lost_cargo = sum(world.save.cargo.values())
+    world.wire("lost", f"lost a {ship.hull_class} to {'a Concord patrol' if patrol else 'raiders'}")
     for commodity, quantity in list(world.save.cargo.items()):
         _dispose_cargo(world, commodity, quantity)
     fee = salvage_fee(ship)
@@ -5147,7 +5178,9 @@ def fly_dispatch(world: World, order: dict) -> str:
     message = (f"Daily dispatch flown: +{reward:,}cr. "
                + (f"{streak} days running." if streak > 1 else "Fly tomorrow's to start a streak."))
     report_hop(world, [message])
-    world.wire("dispatch", f"flew the daily dispatch, {streak} {'days' if streak != 1 else 'day'} running")
+    if streak == 3 or streak % 7 == 0:
+        # The flight line already lists who flew today; the wire says a run.
+        world.wire("dispatch", f"flew the daily dispatch {streak} days running")
     return message
 
 
@@ -5706,7 +5739,60 @@ def _score_entry(data, user_id: int | None = None) -> dict | None:
     dispatch = _score_dispatch(data.get("dispatch"))
     if dispatch is not None:
         entry["dispatch"] = dispatch
+    wire = _score_wire(data.get("wire"))
+    if wire is not None:
+        entry["wire"] = wire
     return entry
+
+
+#: The wire (review, v1.3): what the pilots of one board have lately done, a
+#: line of it on the deck. Each pilot's last few events are kept in that
+#: pilot's own score record and written only by their own session, under their
+#: own session lock, so there is no file two sessions write. A reader merges
+#: every record it can read; a record that will not read is left out.
+WIRE_KEEP = 6               # events kept per pilot
+WIRE_TEXT_MAX = 60          # a predicate, not a paragraph
+WIRE_DECK_DAYS = 14         # older than this is not news for the deck
+WIRE_REFRESH_SECONDS = 60
+WIRE_PAGE_ITEMS = 8         # what the Dispatch page lists
+WIRE_KINDS = ("rank", "award", "retired", "dispatch", "lost")
+
+
+def _score_wire(data) -> list[dict] | None:
+    """A pilot's wire events as their score record lists them, or None."""
+    if not isinstance(data, list) or not 0 < len(data) <= WIRE_KEEP:
+        return None
+    events = []
+    for item in data:
+        if (not isinstance(item, dict) or set(item) != {"at", "kind", "text"}
+                or type(item["at"]) is not int or not 0 <= item["at"] < 2**63
+                or item["kind"] not in WIRE_KINDS or not isinstance(item["text"], str)
+                or not 0 < len(item["text"]) <= WIRE_TEXT_MAX):
+            return None
+        events.append({"at": item["at"], "kind": item["kind"], "text": item["text"]})
+    return events
+
+
+def board_wire(entries: list[dict]) -> list[dict]:
+    """Every pilot's events as one wire, newest first, each with whose it is."""
+    items = [dict(event, user_id=entry["user_id"], handle=entry["handle"])
+             for entry in entries for event in entry.get("wire", ())]
+    return sorted(items, key=lambda item: (-item["at"], item["user_id"], item["text"]))
+
+
+def wire_line(item: dict) -> str:
+    """One event as a sentence: another pilot's callsign and what they did,
+    both sanitized, since a score record is a file anyone could have edited."""
+    return f"{_mission_plain(str(item['handle']))} {_mission_plain(item['text'])}"
+
+
+def wire_date(item: dict) -> str:
+    """The day an event happened, on the node's calendar and in its format."""
+    try:
+        moment = datetime.fromtimestamp(item["at"], _NODE_ZONE) if _NODE_ZONE is not None else datetime.fromtimestamp(item["at"])
+    except (OverflowError, OSError, ValueError):
+        return "?"
+    return show_date(moment.date().isoformat())
 
 
 def _score_dispatch(data) -> dict | None:
@@ -5874,11 +5960,15 @@ def achievement_ranking(entries: list[dict], category: str) -> list[dict]:
     return sorted(candidates, key=lambda record: (-record[metric], record["user_id"], record["number"]))[:HALL_OF_FAME_SIZE]
 
 
-def update_hall_of_fame(save_dir: Path, user_id: int, save: SaveData) -> None:
-    """Under the pilot session lock, replace only this pilot's optional record."""
+def update_hall_of_fame(save_dir: Path, user_id: int, save: SaveData, events: list[dict] | None = None) -> bool:
+    """Under the pilot session lock, replace only this pilot's optional record.
+
+    `events` are what this session has to add to the pilot's wire. Returns
+    whether the record now holds them, so the caller knows to stop offering
+    them: a write that failed is repaired, events and all, by a later save."""
     raw = _read_score_json(save_dir / "scores" / f"{user_id}.json")
     if _future_score_achievements(raw):
-        return
+        return False
     prior = _pilot_score(save_dir, user_id) or {}
     pilot = save.pilot
     best = max(save.best_credits, pilot.credits, prior.get("best_credits", 0))
@@ -5889,12 +5979,16 @@ def update_hall_of_fame(save_dir: Path, user_id: int, save: SaveData) -> None:
              "accolades": sorted((save.accolades or {}).get("unlocked", {}))}
     if dispatch_record(save)["total"]:
         entry["dispatch"] = dispatch_record(save)
+    wire = (prior.get("wire", []) + list(events or []))[-WIRE_KEEP:]
+    if wire:
+        entry["wire"] = wire
     if raw == entry and _score_entry(raw, user_id) == entry:
-        return
+        return True
     try:
         _write_json_atomic(save_dir / "scores" / f"{user_id}.json", entry)
     except OSError:
-        pass  # A later checkpoint repairs this optional projection of the save.
+        return False  # A later checkpoint repairs this optional projection of the save.
+    return True
 
 
 def persist(world: World, save_dir: Path, user_id: int) -> None:
@@ -5905,7 +5999,8 @@ def persist(world: World, save_dir: Path, user_id: int) -> None:
                                   prior.get("best_credits", 0))
     world.save.pilot.retirements = max(world.save.pilot.retirements, prior.get("retirements", 0))
     write_save(save_dir, user_id, world.save)
-    update_hall_of_fame(save_dir, user_id, world.save)
+    if update_hall_of_fame(save_dir, user_id, world.save, world.wire_events):
+        world.wire_events.clear()
 
 
 # NetBBS game events (door API 5, issue #25). A NetBBS node whose SysOp has
@@ -10241,6 +10336,25 @@ def dispatch_deck_row(world: World) -> str | None:
     return alert("note", "DISPATCH", dispatch_text(order, short=True), gain(f"+{reward:,}cr"))
 
 
+def wire_deck_row(world: World, user_id: int | None = None) -> str | None:
+    """The newest thing another pilot on this board did, as one deck row, or
+    None when there is nothing recent. A pilot's own news is not news to them."""
+    floor = time.time() - WIRE_DECK_DAYS * 86400
+    for item in world.board_wire():
+        if item["user_id"] != user_id and item["at"] >= floor:
+            return alert("note", "WIRE", _fit_text(wire_line(item), max(8, _page_content_width() - 8)))
+    return None
+
+
+def deck_wire_row(world: World) -> str | None:
+    """The deck's one row from outside the ship: today's order while it is
+    open, and once it is flown the board's news, or the streak if there is none."""
+    order = dispatch_order(world)
+    if order is not None and not dispatch_flown(world, order):
+        return dispatch_deck_row(world)
+    return wire_deck_row(world, world.wire_user) or dispatch_deck_row(world)
+
+
 def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
     """The Command Deck: a status band, the cockpit, the alerts, the services.
 
@@ -10254,8 +10368,8 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
     # under the gauges, which is two rows of window at 80x24.
     station, career = status_band(world)
     lines = [station] + ship_gauge_rows(world, lead=[career])
-    if (dispatch := dispatch_deck_row(world)) is not None:
-        lines.append(dispatch)
+    if (wire := deck_wire_row(world)) is not None:
+        lines.append(wire)
     alerts = deck_alert_rows(world)
     if alerts:
         lines.append(section("ALERTS"))
@@ -15092,6 +15206,8 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
         clear_result_log()  # New Game+ begins in this same session (#51 review)
         world.pending_promotions.extend(fresh.pending_promotions)
         world.pending_accolades.extend(fresh.pending_accolades)
+        world.wire("retired", f"retired as {label}")
+        world.wire_earned([], fresh.pending_accolades)
         world.commit()
         # What retiring earned was found by `fresh`, which has no storage; it
         # is reported now that the save holding it has succeeded.
@@ -15291,8 +15407,12 @@ def dispatch_lines(world: World, entries: list[dict], user_id: int) -> list[str]
         lines += _dispatch_table(today[:HALL_OF_FAME_SIZE], user_id, day, ("STREAK",))
     else:
         lines.append("Nobody on this board has flown today's order yet.")
-    lines.append("One order a day, the same for every pilot on every board. It changes at midnight on this board's calendar; "
-                 "the longest runs are in the Hall of Fame.")
+    lines.append("One order a day for every pilot on every board; it changes at midnight here.")
+    wire = board_wire(entries)[:WIRE_PAGE_ITEMS]
+    if wire:
+        lines.append(section("THE WIRE"))
+        lines += table(["", ""], [[wire_date(item), wire_line(item)] for item in wire], "ll",
+                       styles=[["label", "value"] for _ in wire], repeat_header=False)[1:]
     return lines
 
 
@@ -17331,6 +17451,11 @@ def _run_game(info: dict) -> int:
         # this build catches up on accolades, and those are history (#25).
         if (events := GameEvents.from_door_info(info, save_dir)) is not None:
             events.bind(world)
+        # The wire, live from here for the same reason: what the launch tick
+        # caught up on is history.
+        world.wire_events.clear()
+        world.wire_live, world.wire_user = True, user_id
+        world.wire_source = lambda: board_wire(_load_score_records(save_dir))
         # `notice` is what loading had to say (a career rolled back to its previous
         # checkpoint). It waits for the first deck with the rest, even when a
         # resumed journey comes first.
