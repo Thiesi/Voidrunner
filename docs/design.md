@@ -1233,7 +1233,7 @@ Every caption repeats what the hop report or the next screen says. Sixteen
 colors may read red here, which the splash never does: a raider, an alarm and a
 fireball are red. Pixel colors are snapped to a coarse step, and gradients
 cool in steps, so a frame sends only what visibly changed. Each scene stays
-under 90 KB at 80x24 truecolor.
+under 100 KB at 80x24 truecolor.
 
 **The canopy (Thiesi/Voidrunner#30).** The pilot is always in the cockpit and
 the void is always outside it. On a live terminal in a full-palette preset
@@ -1297,6 +1297,21 @@ page for every two. The contact is composed low in the band so its lock clears
 a turn's page. The same budget is a rule for any screen a pilot sits on: a new
 row on the deck or in a fight is paid for with a row of window.
 
+**Scenes have presence at 80x24 (review, v1.3).** A scene's sprites were drawn
+one pixel to an art pixel below a 52-pixel sky, which is every terminal under
+about thirty rows: at 80x24 a seven-pixel ship was three and a half rows of a
+twenty-row sky, and the quieter scenes -- a salvage, a distress call, a tow, a
+data burst -- were two specks in a void. They are drawn two to one from a
+36-pixel sky up, so 80x24 gets the size 120x36 had, and a ship is a third of
+the sky. Every hull still fits; the Carrier is half the screen wide, as a
+Carrier should be. It costs about a twentieth more on the wire, and the
+budgets a scene is held to at 80x24 are 96, 70 and 50 KB where they were 90, 66
+and 46. Sixty-four columns and the forty-column floor draw as they did.
+
+**One Shuttle at the commission.** The registration card shows the starting
+Shuttle beside the line that names it, and the canopy behind it drew the same
+Shuttle again in front of the title's world. The sky there is the world alone.
+
 **The star map is a picture there too.** Drawn in the canopy's pixels: charted
 space glowing faintly in its trades' colors with the unknown dark between,
 lanes as fine lines, the plotted route in the lane's gold-to-plasma, each
@@ -1306,6 +1321,18 @@ bearing a hollow grey mark, and charted names beside their stars where there is
 room. It is the grid's projection under the grid's rules -- an uncharted system
 gives away no name (a contract's target excepted), no economy and no danger --
 and the grid remains for every terminal the canopy is not drawn on.
+
+The chart also draws the way on (review, v1.3). It showed charted systems and
+the lanes between two of them, so a career's first chart was two or three
+stars with nothing to say there was anywhere to go, and a destination one jump
+away in the next sector was simply off the picture. A lane that leaves the
+window now runs to its edge; a charted system's lane to an uncharted bearing is
+dashed, out to the bearing's hollow mark, which is drawn for every bearing a
+charted system links to and not only for a route's. A bearing gives away what
+the chart's list already does -- that there is a way on, and which way -- and
+never a name, an economy or a danger. Ordinary names keep off a bearing's
+mark; the ship, the objective and the route's end are named regardless. The
+lanes are a shade brighter.
 
 **A system's world is its own.** Forty-eight systems shared five pictures, one
 per economy, so arriving somewhere new looked like arriving somewhere already

@@ -196,8 +196,9 @@ def test_the_cursor_never_leaves_the_terminal(width, height, depth):
 
 # What a scene may send at 80x24, in bytes. About twice the splash, over a
 # shorter run: the cells that move are the effect, and they are counted
-# against the slowest depth's escapes.
-WIRE_BUDGET = {("auto", True): 90_000, ("auto", False): 66_000, ("basic", False): 46_000}
+# against the slowest depth's escapes. Each is about a twentieth more than it
+# was, which is what drawing the ships at two pixels to an art pixel costs.
+WIRE_BUDGET = {("auto", True): 96_000, ("auto", False): 70_000, ("basic", False): 50_000}
 
 
 @pytest.mark.parametrize("style,truecolor", list(WIRE_BUDGET))

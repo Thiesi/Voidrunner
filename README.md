@@ -156,7 +156,7 @@ pictures use quadrant blocks, or half blocks for CP437 callers and for NetBBS
 callers whose font lacks quadrants. A SysOp can switch the pictures off with
 `DOOR_CANOPY=0`, or keep every caller to half blocks with `DOOR_PIXELS=half`. A SysOp can switch them off for everyone with `DOOR_SPLASH=0`
 (the title splash) and `DOOR_SCENES=0` (the in-flight scenes) in the door's
-environment. A scene sends under 90 KB at 80x24 in truecolor, less at lower
+environment. A scene sends under 100 KB at 80x24 in truecolor, less at lower
 color depths.
 
 Host references: [Synchronet DOOR.SYS](https://wiki.synchro.net/ref:door.sys),
