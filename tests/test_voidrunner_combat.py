@@ -931,11 +931,11 @@ def test_review_combat_dump_terms_disclose_actual_escape_probability(tier, cargo
     # any other Dump is the one-unit feint it always was.
     units = vr.dump_units(world, pirate, tactics)
     bought_off = vr.outclassed(world, pirate, tactics)
-    assert units == ((cargo + 1) // 2 if bought_off else 1) and bought_off == (tier == 4)
+    assert units == ((cargo + 1) // 2 if bought_off else max(1, -(-cargo // 8))) and bought_off == (tier == 4)
     vr._dispose_cargo(after, "food", units)
     assert f"{vr.combat_evade_chance(after, pirate, dumped_cargo=True, tactics=tactics):.0%}" in line
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
-    assert (f"half the hold ({units} of {cargo} units" if bought_off else "one unit") in line
+    assert (f"half the hold ({units} of {cargo} units" if bought_off else f"{vr.plural(units, 'unit')} overboard") in plain(line)
 
 
 @pytest.mark.parametrize("hull", [20, 60])
@@ -1311,9 +1311,12 @@ def test_an_outclassed_ship_can_buy_its_way_out_and_an_older_fight_keeps_its_odd
     world, pirate, old = _shuttle_against(4, version=2)
     assert not vr.outclassed(world, pirate, old) and vr.dump_units(world, pirate, old) == 1
     assert vr.combat_evade_chance(world, pirate, dumped_cargo=False, tactics=old) < 0.10
-    # And a raider the ship can fight is not bought off by anybody.
+    # And a raider the ship can fight is not bought off by anybody: a Dump at
+    # it is a feint that costs an eighth of the hold, one unit at least.
     world, pirate, fair = _shuttle_against(2)
-    assert not vr.outclassed(world, pirate, fair) and vr.dump_units(world, pirate, fair) == 1
+    used = sum(world.save.cargo.values())
+    assert not vr.outclassed(world, pirate, fair) and vr.dump_units(world, pirate, fair) == max(1, -(-used // 8))
+    assert vr.dump_units(world, pirate, dict(fair, version=3)) == 1  # a fight begun before ruleset 4
 
 
 def test_the_panel_says_outclassed_and_prices_the_dump_it_will_actually_make():

@@ -83,9 +83,11 @@ def test_a_trait_is_a_second_source_or_buyer_and_never_the_best_deal_in_the_gala
             assert round(base * vr.TRAIT_PRICE["surplus"]) > ladder[0], commodity   # dearer than where it is made
         if demanded:
             assert round(base * vr.TRAIT_PRICE["shortage"]) < ladder[-1], commodity  # cheaper than where it is wanted
-    # Textiles had no buyer anywhere; a shortage gives them one.
-    assert not any("textiles" in goods for goods in vr.ECONOMY_DEMANDS.values())
-    assert round(vr.COMMODITIES["textiles"]["base"] * vr.TRAIT_PRICE["shortage"]) > vr.price_ladder("textiles")[-1]
+    # Every legal good has a maker and a buyer among the economies (Medicine's
+    # only buyer is a Haven, which the shortage check above leaves out).
+    for commodity in vr.LEGAL_COMMODITIES:
+        assert any(commodity in goods for goods in vr.ECONOMY_PRODUCES.values()), commodity
+        assert any(commodity in goods for goods in vr.ECONOMY_DEMANDS.values()), commodity
 
 
 # --- found by docking ---------------------------------------------------------------

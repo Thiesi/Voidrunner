@@ -1488,9 +1488,30 @@ ECONOMY_DEMANDS = {
     "Agricultural": ["machinery", "electronics"],
     "Industrial": ["food", "electronics"],
     "Mining": ["food", "machinery"],
-    "Tech": ["ore", "metals"],
+    # Textiles too (review, v1.3): no economy wanted them, so the cheapest good
+    # in the galaxy could be bought on any farm world and sold nowhere.
+    "Tech": ["ore", "metals", "textiles"],
     "Haven": ["food", "medicine"],
 }
+#: What contraband fetches away from a Haven, over its base price. It sold at
+#: base, which left a unit of Narcotics 64cr of margin against 96cr on a unit
+#: of legal Electronics with no customs to pass: the risk was all cost. At
+#: half as much again it is the best margin in the galaxy, 156cr a unit, for a
+#: pilot who gets it past an inspection (review, v1.3).
+CONTRABAND_STREET_PREMIUM = 1.5
+
+
+def economy_price_factor(economy: str, commodity: str) -> float:
+    """What an economy does to a commodity's base price: the one rule a quote
+    and the price ladder it is judged against both use."""
+    factor = 1.0
+    if commodity in ECONOMY_PRODUCES[economy]:
+        factor *= 0.6
+    if commodity in ECONOMY_DEMANDS[economy]:
+        factor *= 1.6
+    if not COMMODITIES[commodity]["legal"] and economy != "Haven":
+        factor *= CONTRABAND_STREET_PREMIUM
+    return factor
 SELL_SPREAD = 0.92  # selling always pays a shade under the buy price
 
 # upgrade key -> (label, max tier, cost(current_tier)->credits, effect blurb)
@@ -3097,11 +3118,7 @@ def _quote(world: World, system_id: int, commodity: str, *, selling: bool) -> in
     that is the market and not the pilot.
     """
     system = world.by_id[system_id]
-    mult = 1.0
-    if commodity in ECONOMY_PRODUCES[system.economy]:
-        mult *= 0.6
-    if commodity in ECONOMY_DEMANDS[system.economy]:
-        mult *= 1.6
+    mult = economy_price_factor(system.economy, commodity)
     trait = world.traits.get(system_id)
     if trait is not None and trait["commodity"] == commodity:
         mult *= TRAIT_PRICE[trait["kind"]]
@@ -4034,10 +4051,21 @@ OUTCLASSED_EVADE_FLOOR = 0.30
 OUTCLASSED_DUMP_CHANCE = 0.75
 
 
+#: From ruleset 4 a raider outclasses a hull that two volleys would leave with
+#: less than a twentieth. Two volleys had to *break* it, and a stock
+#: Freighter's 140 hull against a tier-4 raider's 138 was two points the wrong
+#: side: not outclassed, so no way out, and dead about as surely as the Shuttle
+#: the rule was written for. A twentieth, not more: a starting Shuttle against
+#: tier 3 (56 of 60) stays the fight it was.
+OUTCLASSED_SLIVER = 20
+
+
 def raider_outclasses(ship: "Ship", tier: int, version: int = TACTICAL_RULESET_VERSION) -> bool:
-    """Whether two unguarded volleys from this tier would break the ship's full hull."""
+    """Whether two unguarded volleys from this tier would break the ship's full
+    hull, or (from ruleset 4) leave it less than a twentieth."""
     worst = _tactical_incoming_damage(ship, tier, "volley", 9, {"version": version})
-    return worst * 2 >= hull_hp_max(ship)
+    hull = hull_hp_max(ship)
+    return worst * 2 >= (hull - hull // OUTCLASSED_SLIVER if version >= 4 else hull)
 
 
 def outclassed(world: "World", pirate: "Pirate", tactics: dict) -> bool:
@@ -4046,11 +4074,22 @@ def outclassed(world: "World", pirate: "Pirate", tactics: dict) -> bool:
             and raider_outclasses(world.save.ship, pirate.tier, tactics["version"]))
 
 
+#: The share of the hold a Dump jettisons against a raider the ship can fight.
+#: It was one unit whatever the hold held, for twenty points of escape over an
+#: Evade, so with cargo aboard Evade was never the right key (review, v1.3).
+DUMP_HOLD_SHARE = 8
+
+
 def dump_units(world: "World", pirate: "Pirate", tactics: dict) -> int:
-    """Units a Dump gives up: one as a feint, half the hold to buy off a raider
-    the ship cannot fight."""
+    """Units a Dump gives up: an eighth of the hold as a feint (one unit at
+    least), half the hold to buy off a raider the ship cannot fight. A fight
+    begun under an older ruleset keeps its single unit."""
     used = sum(world.save.cargo.values())
-    return (used + 1) // 2 if outclassed(world, pirate, tactics) else min(1, used)
+    if outclassed(world, pirate, tactics):
+        return (used + 1) // 2
+    if tactics["version"] < READ_RULESET_VERSION:
+        return min(1, used)
+    return min(used, max(1, -(-used // DUMP_HOLD_SHARE)))
 TACTICAL_THREAT_BONUS = TACTICAL_THREAT_BONUS_BY_VERSION[TACTICAL_RULESET_VERSION]
 
 
@@ -11967,12 +12006,7 @@ def price_ladder(commodity: str) -> list[int]:
     base = COMMODITIES[commodity]["base"]
     prices = []
     for economy in ECONOMIES:
-        mult = 1.0
-        if commodity in ECONOMY_PRODUCES[economy]:
-            mult *= 0.6
-        if commodity in ECONOMY_DEMANDS[economy]:
-            mult *= 1.6
-        prices.append(max(1, round(base * mult)))
+        prices.append(max(1, round(base * economy_price_factor(economy, commodity))))
     return sorted(prices)
 
 
@@ -17090,7 +17124,8 @@ def combat_option_rows(world: World, pirate: Pirate, *, patrol: bool, tactics: d
             dump = [key_label("D", "Dump"), escape(chance),
                     f"{p.slate}costs half the hold ({units} of {used} units){RESET}"]
         else:
-            dump = [key_label("D", "Dump"), escape(chance), f"{p.slate}one unit overboard;{RESET} {missed}"]
+            dump = [key_label("D", "Dump"), escape(chance),
+                    f"{p.slate}{plural(units, 'unit')} overboard;{RESET} {missed}"]
     # Against a raider that outclasses the hull, Dump is the answer the alert row
     # points at, so it leads the options.
     if dump is not None:
@@ -17196,8 +17231,8 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                    if tactical_read(ship, pirate.tier, tactics) < 1.0 else
                    "Read 100%: this contact makes the move shown."),
                   "Fire: one shot; a surviving enemy returns fire. Guard: your shot at 55%, incoming cut to a quarter; Fire recharges Guard.",
-                  "Dump jettisons one unit of a random held commodity. A failed Evade or Dump draws enemy fire; a bribe's "
-                  "refusal draws it too. A bribe is charged only if accepted, and earns Blackwake +2."
+                  "Dump jettisons an eighth of the hold, one unit at least, chosen at random. A failed Evade or Dump draws "
+                  "enemy fire; a bribe's refusal draws it too. A bribe is charged only if accepted, and earns Blackwake +2."
                   if not patrol else "A failed Evade draws enemy fire. Surrender: pay the fine, clear notoriety, Concord +2 and escape.",
                   "  ".join([chip("Fuel", f"{ship.fuel}/{fuel_capacity(ship)}"),
                              chip("Hold", f"{used}/{cargo_capacity(ship)}", tone="value") + f" {p.slate}{lots}{RESET}",
@@ -17460,7 +17495,8 @@ def customs_display_lines(world: World) -> list[str]:
         f"notoriety unchanged.{RESET}",
         (f"{key_label('P', 'Pay bribe')}  " if credits >= cost else f"{badge('Bribe unavailable', 'danger')}  ")
         + f"{p.slate}offer{RESET} {p.gold}{cost}cr{RESET} {p.slate}at{RESET} "
-        f"{gauge(60, 100, 6, tone='caution')} {p.ink}60%{RESET} {p.slate}acceptance. "
+        f"{gauge(round(CUSTOMS_BRIBE_CHANCE * 100), 100, 6, tone='caution')} "
+        f"{p.ink}{CUSTOMS_BRIBE_CHANCE:.0%}{RESET} {p.slate}acceptance. "
         f"Pay only if accepted, keep all cargo, and leave standing and notoriety unchanged.{RESET}",
         section("IF THE BRIBE IS REFUSED"),
         f"{p.slate}If refused: all contraband is confiscated. Fine{RESET} {p.ink}{fine}cr{RESET}{p.slate}, "
@@ -17468,6 +17504,14 @@ def customs_display_lines(world: World) -> list[str]:
         f"{p.slate}Concord standing{RESET} {p.alarm}-5{RESET}{p.slate} down to its limit, "
         f"notoriety{RESET} {p.alarm}+{NOTORIETY_PER_CUSTOMS_BUST}{RESET}{p.slate}.{RESET}",
     ]
+
+
+#: How often a customs officer takes the bribe. At 60% the bribe lost to
+#: surrendering whatever was in the hold: it risks the cargo, a fine of the
+#: cargo's value and more, standing and notoriety to save half the cargo's
+#: value three times in five. At 75% it is the better bet for a hold worth
+#: more than about 900cr and still the worse one for a few units (review, v1.3).
+CUSTOMS_BRIBE_CHANCE = 0.75
 
 
 def resolve_customs(world: World, action: str) -> list[str]:
@@ -17478,7 +17522,7 @@ def resolve_customs(world: World, action: str) -> list[str]:
     if action == "P":
         if world.save.pilot.credits < cost:
             raise ValueError(f"Insufficient credits: bribe requires {cost}cr. No cargo or credits changed.")
-        if world.event_rng.random() < 0.6:
+        if world.event_rng.random() < CUSTOMS_BRIBE_CHANCE:
             world.save.pilot.credits -= cost
             bump_accolade(world.save, "customs_bribes")
             return [f"{cost}cr changes hands quietly. Move along."]

@@ -1483,6 +1483,38 @@ belong to the career and end with it. The market's header wears `STAKE 2/3`,
 the exchange quotes the faster pace, two achievements count the steps held,
 and buying in is news on the wire.
 
+**Options that were never the right key (review, v1.3).** Five rules had an
+option on screen that no pilot should have chosen, and an option nobody should
+choose is noise on a small screen.
+
+- *Dump* jettisoned one unit whatever the hold held, for twenty points of
+  escape over Evade, so with cargo aboard Evade was never right. From ruleset 4
+  a Dump at a raider the ship can fight costs an eighth of the hold, one unit
+  at least; Evade is the free one. Against a raider that outclasses the ship
+  it is still half the hold.
+- *The customs bribe* risked the cargo, a fine of its value and more, standing
+  and notoriety, to save half the cargo's value three times in five: it lost
+  to surrendering for every hold. It is now taken 75% of the time, which makes
+  it the better bet for a hold worth more than about 900cr and still the worse
+  one for a few units.
+- *Contraband* sold at its base price away from a Haven, which left Narcotics
+  64cr a unit against 96cr on legal Electronics with no customs to pass. It
+  now fetches half as much again (`CONTRABAND_STREET_PREMIUM`): 156cr a unit
+  on Narcotics, the best margin in the galaxy for a pilot who gets it past an
+  inspection, and enough that the Cartel's standing, which follows contraband
+  profit, is reachable.
+- *Textiles* were made on every farm world and wanted nowhere. Tech stations
+  want them.
+- *The outclassed rule* asked whether two volleys would break a full hull. A
+  stock Freighter's 140 against a tier-4 raider's 138 was two points the wrong
+  side: not outclassed, so no half-hold Dump and no Evade floor, and dead about
+  as surely as the Shuttle the rule was written for. From ruleset 4 a raider
+  outclasses a hull that two volleys would leave under a twentieth.
+
+`economy_price_factor` is the one rule a quote and the price ladder it is
+judged against both use. Futures remain what they were: a price lock in a
+market whose prices do not move on their own.
+
 **The daily dispatch (review, v1.3).** Nothing in the game was different
 tomorrow: no turn limit, no calendar, and a private galaxy for every career, so
 two callers had nothing to compare and neither had a reason to dial in again.
