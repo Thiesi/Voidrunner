@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import colorsys
 import contextlib
 import dataclasses
 import errno
@@ -7512,6 +7513,24 @@ _SCENE_RAIDER = ("rr...........",
                  "..rrrrrrrkk..",
                  ".rrk....s....",
                  "rr...........")
+# A raider's hull is how it fights (`TACTICAL_PROFILES`), so the silhouette in
+# the glass says what the pattern row says: the Raider's swept wings, the
+# Bulwark's armored block that covers and then volleys, the Skirmisher's dart
+# that harries. All three are one size, so no scene is composed around one.
+_SCENE_BULWARK = ("..kkkkkkk....",
+                  ".krrrrrrrkk..",
+                  "srrrrrrrrrkk.",
+                  "yrrkkrrrrrkkg",
+                  "srrrrrrrrrkk.",
+                  ".krrrrrrrkk..",
+                  "..kkkkkkk....")
+_SCENE_SKIRMISHER = (".....rrk.....",
+                     "...rrrk......",
+                     ".yrrrrrrrk...",
+                     "rrrrrrrrrkkgg",
+                     ".yrrrrrrrk...",
+                     "...rrrk......",
+                     ".....rrk.....")
 _SCENE_PATROL = ("......oooo....",
                  "...wwwwwwoo...",
                  ".xwbbbbbbbbooo",
@@ -7519,6 +7538,18 @@ _SCENE_PATROL = ("......oooo....",
                  ".zwbbbbbbbbooo",
                  "...wwwwwwoo...",
                  "......oooo....")
+
+
+def _hostile_art(name: str | None, patrol: bool = False) -> tuple[str, ...]:
+    """The hull a contact flies: a Concord cutter, or the raider its name makes
+    it -- the same draw from the name `new_tactics` makes, so the picture and
+    the pattern always agree, with nothing saved to keep them so."""
+    if patrol:
+        return _SCENE_PATROL
+    profile = list(TACTICAL_PROFILES)[sum(map(ord, name or "")) % len(TACTICAL_PROFILES)]
+    return {"Raider": _SCENE_RAIDER, "Bulwark": _SCENE_BULWARK, "Skirmisher": _SCENE_SKIRMISHER}[profile]
+
+
 _SCENE_COLORS = dict(_SPLASH_SHIP_COLORS,
                      r=(178, 58, 52), k=(92, 34, 44), y=(255, 206, 72), g=(255, 130, 70),
                      s=(150, 150, 164), w=(232, 238, 248), b=(64, 112, 222), o=(118, 128, 150),
@@ -7908,7 +7939,8 @@ class _ContactScene(_Scene):
         super().__init__(width, height, seed)
         self.art = _SCENE_HULLS.get(hull, _SPLASH_SHIP)
         self.kind, self.target = kind, target
-        self.enemy = _SCENE_PATROL if kind == "patrol" else _SCENE_RAIDER
+        self.enemies = [_hostile_art(name, kind == "patrol") for name in names] or [_SCENE_RAIDER]
+        self.enemy = self.enemies[min(target, len(self.enemies) - 1)]
         self.count = max(1, len(names))
         self.title, self.color = _contact_title(kind, self.count)
         name = _scene_text(names[target] if names else "unknown")
@@ -7948,7 +7980,7 @@ class _ContactScene(_Scene):
         colors = dict(_SCENE_COLORS, x=(255, 64, 64) if strobe else (80, 20, 30),
                       z=(40, 60, 120) if strobe else (80, 150, 255))
         for number, (ex, ey) in enumerate(self.enemy_spots(t)):
-            _scene_sprite(stage, self.enemy, ex, ey, zoom=self.zoom, colors=colors,
+            _scene_sprite(stage, self.enemies[number], ex, ey, zoom=self.zoom, colors=colors,
                           tint=(10, 10, 20), amount=0.0 if number == self.target else 0.35)
             for d in range(1, 3 + index % 2):
                 stage.plot(ex + ew - 1 + d, ey + eh // 2, _heat(0.75 - d * 0.2))
@@ -7988,7 +8020,7 @@ class _KillScene(_Scene):
     def __init__(self, width: int, height: int, *, hull: str, patrol: bool, name: str, loot: int, seed: str):
         super().__init__(width, height, seed)
         self.art = _SCENE_HULLS.get(hull, _SPLASH_SHIP)
-        self.enemy = _SCENE_PATROL if patrol else _SCENE_RAIDER
+        self.enemy = _hostile_art(name, patrol)
         ew, eh = self.sprite_size(self.enemy)
         self.ex, self.ey = width * 0.68 - ew / 2, self.mid - eh // 2
         palette = ("w", "b", "o") if patrol else ("r", "k", "s")
@@ -8040,7 +8072,7 @@ class _LostScene(_Scene):
     def __init__(self, width: int, height: int, *, hull: str, patrol: bool, name: str, seed: str):
         super().__init__(width, height, seed)
         self.art = _SCENE_HULLS.get(hull, _SPLASH_SHIP)
-        self.enemy = _SCENE_PATROL if patrol else _SCENE_RAIDER
+        self.enemy = _hostile_art(name, patrol)
         art_w, art_h = self.sprite_size(self.art)
         self.sx, self.sy = width * 0.36 - art_w / 2, self.mid - art_h // 2
         hull_keys = [key for row in self.art for key in row if key != "."]
@@ -8094,7 +8126,7 @@ class _EscapeScene(_Scene):
     def __init__(self, width: int, height: int, *, hull: str, patrol: bool, name: str, seed: str):
         super().__init__(width, height, seed)
         self.art = _SCENE_HULLS.get(hull, _SPLASH_SHIP)
-        self.enemy = _SCENE_PATROL if patrol else _SCENE_RAIDER
+        self.enemy = _hostile_art(name, patrol)
         self.detail = [("the ", _SCENE_SLATE), (_scene_text(name), _SCENE_INK), (" falls behind", _SCENE_SLATE)]
 
     def draw(self, stage: _Stage, index: int, t: float) -> None:
@@ -8189,32 +8221,136 @@ class _ScanScene(_Scene):
         self.caption(stage, t, 0.64, "CONTRABAND DETECTED", _SCENE_ALARM, self.detail)
 
 
+def _turn_hue(rgb: tuple, turn: float, saturation: float = 1.0, value: float = 1.0) -> tuple:
+    """`rgb` with its hue turned by `turn` of a full circle, and its saturation
+    and brightness scaled: how one economy's palette becomes forty-eight worlds."""
+    h, s, v = colorsys.rgb_to_hsv(*(component / 255 for component in rgb))
+    r, g, b = colorsys.hsv_to_rgb((h + turn) % 1.0, max(0.0, min(1.0, s * saturation)), max(0.0, min(1.0, v * value)))
+    return (round(r * 255), round(g * 255), round(b * 255))
+
+
+#: How far a world may stray from its economy's palette, as (hue turn either
+#: way, chance of ice caps): far enough that two farm worlds are two places,
+#: never so far that a farm world stops being green and blue. The station's
+#: lights are what a pilot reads the trade by, and those do not move.
+_WORLD_DRIFT = {"Agricultural": (0.06, 0.55), "Industrial": (0.05, 0.15), "Mining": (0.05, 0.3),
+                "Tech": (0.07, 0.45), "Haven": (0.06, 0.1)}
+
+
+@functools.lru_cache(maxsize=256)
+def world_look(economy: str, name: str | None) -> dict | None:
+    """What one system's world looks like, from its name alone: no save field,
+    no draw from the career's RNG, and the same world on every visit and in
+    every career that charts a system of that name (Thiesi/Voidrunner review).
+
+    The economy still decides the palette's family -- a farm world is green
+    and blue, a foundry world rust -- but the hue, the banding, an ice cap, a
+    ring and up to two moons are the system's own. Forty-eight systems used to
+    share five pictures, so arriving somewhere new looked like arriving
+    somewhere already seen. None for no name: the title's world stays as drawn.
+    """
+    if not name:
+        return None
+    rng = random.Random(f"world:{economy}:{name}")
+    drift, cap_chance = _WORLD_DRIFT.get(economy, _WORLD_DRIFT["Industrial"])
+    turn, saturation, value = rng.uniform(-drift, drift), rng.uniform(0.82, 1.18), rng.uniform(0.88, 1.12)
+    base = _SCENE_WORLD_BANDS.get(economy, _SCENE_WORLD_BANDS["Industrial"])
+    start = rng.randrange(len(base))
+    bands = tuple(_turn_hue(color, turn, saturation, value) for color in base[start:] + base[:start])
+    look = {"bands": bands, "frequency": rng.uniform(2.1, 4.4), "swirl": rng.uniform(0.08, 0.5),
+            "twist": rng.uniform(3.0, 7.0), "cap": None, "ring": None, "moons": ()}
+    if rng.random() < cap_chance:
+        look["cap"] = (rng.uniform(0.14, 0.3), _mix((236, 244, 255), bands[0], 0.12))
+    if rng.random() < 0.24:
+        inner = rng.uniform(1.28, 1.5)
+        look["ring"] = (inner, inner + rng.uniform(0.22, 0.5), rng.uniform(0.2, 0.34),
+                        _mix(bands[1], (226, 214, 190), 0.6))
+    moons = []
+    for _ in range(rng.choice((0, 0, 1, 1, 1, 2))):
+        tone = rng.uniform(0.0, 1.0)
+        moons.append((rng.uniform(0.0, 1.0), rng.uniform(0.0, 1.0), rng.uniform(0.07, 0.15),
+                      _mix((150, 146, 140), _turn_hue(bands[2], 0.5, 0.5), tone * 0.5)))
+    look["moons"] = tuple(moons)
+    return look
+
+
 def _scene_planet(width: int, height_px: int, economy: str, pcx: float, pcy: float,
-                  radius: float) -> dict[tuple[int, int], tuple]:
+                  radius: float, look: dict | None = None) -> dict[tuple[int, int], tuple]:
     """A banded world lit from the upper left, as {(x, y): color} for the pixels
-    of a `width` x `height_px` sky it covers. Composed once: it never moves."""
+    of a `width` x `height_px` sky it covers. Composed once: it never moves.
+    With a `look` it is that system's world: its bands, its cap, and behind
+    and around it whatever moons and ring it has."""
     planet: dict[tuple[int, int], tuple] = {}
-    bands = _SCENE_WORLD_BANDS.get(economy, _SCENE_WORLD_BANDS["Industrial"])
+    bands = look["bands"] if look else _SCENE_WORLD_BANDS.get(economy, _SCENE_WORLD_BANDS["Industrial"])
+    for moon_x, moon_y, size, tone in (look["moons"] if look else ()):
+        # In the sky up and to the left of the world, where the station is not.
+        mcx = pcx - radius * (1.25 + moon_x * 0.9)
+        mcy = pcy - radius * (0.55 + moon_y * 0.75)
+        mr = max(1.5, radius * size)
+        for y in range(max(0, math.floor(mcy - mr)), min(height_px, math.ceil(mcy + mr) + 1)):
+            for x in range(max(0, math.floor(mcx - mr)), min(width, math.ceil(mcx + mr) + 1)):
+                shaded = _planet_shade((x + 0.5 - mcx) / mr, (y + 0.5 - mcy) / mr, (tone, _scale(tone, 0.8)))
+                if shaded is not None:
+                    planet[(x, y)] = shaded
     for y in range(height_px):
         for x in range(width):
-            shaded = _planet_shade((x + 0.5 - pcx) / radius, (y + 0.5 - pcy) / radius, bands)
-            if shaded is not None:
+            dx, dy = (x + 0.5 - pcx) / radius, (y + 0.5 - pcy) / radius
+            ring = _ring_shade(dx, dy, look)
+            shaded = _planet_shade(dx, dy, bands, look=look)
+            if ring is not None and (shaded is None or dy > 0):
+                planet[(x, y)] = ring  # in front of the world below its middle, behind it above
+            elif shaded is not None:
                 planet[(x, y)] = shaded
     return planet
 
 
+def _scene_world(width: int, height_px: int, economy: str, name: str | None, pcx: float, low: float,
+                 radius: float) -> dict[tuple[int, int], tuple]:
+    """The world behind a station, for the scenes that draw one: `low` of the
+    way down the sky and mostly below it -- unless it is ringed, when it rides
+    higher and smaller so the ring crosses its face instead of being cut off."""
+    look = world_look(economy, name)
+    if look and look["ring"]:
+        return _scene_planet(width, height_px, economy, pcx, height_px * 0.7, radius * 0.62, look)
+    return _scene_planet(width, height_px, economy, pcx, height_px * low, radius, look)
+
+
+def _ring_shade(dx: float, dy: float, look: dict | None) -> tuple | None:
+    """A ringed world's ring at (dx, dy) in units of the world's radius, or None."""
+    if not look or look["ring"] is None:
+        return None
+    inner, outer, tilt, color = look["ring"]
+    rho = math.hypot(dx, dy / tilt)
+    if not inner <= rho <= outer:
+        return None
+    lane = (rho - inner) / (outer - inner)
+    if 0.42 < lane < 0.52:
+        return None  # the gap between its two bands
+    return _scale(color, 0.62 + 0.38 * math.sin(lane * math.pi) - (0.18 if dx > 0.4 and dy < 0 else 0.0))
+
+
 def _planet_shade(dx: float, dy: float, bands: tuple,
-                  sun: tuple[float, float, float] = (-0.62, -0.5, 0.6)) -> tuple | None:
+                  sun: tuple[float, float, float] = (-0.62, -0.5, 0.6), look: dict | None = None) -> tuple | None:
     """A banded world's color at (dx, dy) in units of its radius, lit from
-    `sun` (the upper left unless told otherwise), or None off its disc."""
+    `sun` (the upper left unless told otherwise), or None off its disc. A
+    `look` (`world_look`) sets how tightly it is banded and whether its poles
+    are iced; without one it is the world the scenes always drew."""
     disc = dx * dx + dy * dy
     if disc > 1.0:
         return None
     z = math.sqrt(1.0 - disc)
     light = max(0.0, sun[0] * dx + sun[1] * dy + sun[2] * z)
-    band = (dy * 3.0 + 0.2 * math.sin(dx * 5.0 + dy * 3.0)) % len(bands)
+    if look:
+        band = (dy * look["frequency"] + look["swirl"] * math.sin(dx * look["twist"] + dy * 3.0)) % len(bands)
+    else:
+        band = (dy * 3.0 + 0.2 * math.sin(dx * 5.0 + dy * 3.0)) % len(bands)
     low = int(band)
     color = _mix(bands[low], bands[(low + 1) % len(bands)], band - low)
+    if look and look["cap"] is not None:
+        extent, ice = look["cap"]
+        edge = 1.0 - extent + 0.035 * math.sin(dx * 9.0)
+        if abs(dy) > edge:
+            color = _mix(color, ice, min(1.0, (abs(dy) - edge) / 0.05))
     shaded = _mix((8, 6, 20), color, 0.08 + 0.95 * light)
     if z < 0.3 and light > 0.15:
         shaded = _mix(shaded, (150, 210, 255), (0.3 - z) * 1.5)
@@ -8298,7 +8434,7 @@ class _DockScene(_Scene):
     frames = 26
 
     def __init__(self, width: int, height: int, *, economy: str, station: str, system: str,
-                 charted: bool, seed: str, contracts: int = 0, paid: int = 0):
+                 charted: bool, seed: str, contracts: int = 0, paid: int = 0, world: str | None = None):
         super().__init__(width, height, seed)
         self.economy = economy if economy in _SCENE_LIGHTS else "Industrial"
         self.lights = _SCENE_LIGHTS[self.economy]
@@ -8314,8 +8450,8 @@ class _DockScene(_Scene):
             self.detail += [("new system charted", _SCENE_MINT), ("  ·  ", _SCENE_SLATE)]
         self.detail.append((self.economy, _SCENE_SLATE))
         # The world behind the station never moves: compose it once.
-        self.planet = _scene_planet(width, self.sky_px, self.economy, width * 0.78, self.sky_px * 0.92,
-                                    max(4.0, min(self.sky_px * 0.62, width * 0.3)))
+        self.planet = _scene_world(width, self.sky_px, self.economy, world, width * 0.78, 0.92,
+                                   max(4.0, min(self.sky_px * 0.62, width * 0.3)))
         self.max_radius = max(5.0, min(self.sky_px * 0.4, width * 0.2))
         self.cx = width * 0.38
 
@@ -8969,7 +9105,7 @@ def canopy_scene(world) -> dict:
     sky = DANGER_SKIES[danger_tone(here.danger)]
     return {"kind": "dock", "sky": sky, "hull": hull, "economy": here.economy if here.economy in _SCENE_LIGHTS
             else "Industrial", "station": _scene_text(here.station_name), "danger": here.danger,
-            "seed": f"dock:{here.id}"}
+            "world": here.name, "seed": f"dock:{here.id}"}
 
 
 @functools.lru_cache(maxsize=65536)
@@ -9062,16 +9198,21 @@ class _Canopy:
         return math.exp(-off * off * 3.2)
 
     def planet(self, economy: str, cx: float, cy: float, radius: float, glow: tuple,
-               sun: tuple[float, float, float] = (-0.62, -0.5, 0.6)) -> None:
+               sun: tuple[float, float, float] = (-0.62, -0.5, 0.6), look: dict | None = None) -> None:
         """A banded world, and an atmosphere a couple of units thick just off
         its limb -- the same thickness on a world the size of the window and
-        on a horizon wider than the screen."""
-        bands = _SCENE_WORLD_BANDS.get(economy, _SCENE_WORLD_BANDS["Industrial"])
+        on a horizon wider than the screen. With a `look`, that system's own
+        world (`world_look`), ring included."""
+        bands = look["bands"] if look else _SCENE_WORLD_BANDS.get(economy, _SCENE_WORLD_BANDS["Industrial"])
         air = 2.6
-        reach = radius + air
+        reach = radius * (look["ring"][1] if look and look["ring"] else 1.0) + air
         for x, y, sx, sy in self.each(cx - reach, cy - reach, cx + reach, cy + reach):
             dx, dy = (sx - cx) / radius, (sy - cy) / radius
-            color = _planet_shade(dx, dy, bands, sun)
+            color = _planet_shade(dx, dy, bands, sun, look)
+            ring = _ring_shade(dx, dy, look)
+            if ring is not None and (color is None or dy > 0):
+                self.put(x, y, ring)
+                continue
             if color is not None:
                 self.put(x, y, color)
                 continue
@@ -9079,6 +9220,13 @@ class _Canopy:
             if rim < air:
                 toward = max(0.0, (sun[0] * dx + sun[1] * dy) / max(0.01, math.hypot(dx, dy)))
                 self.put(x, y, glow, (1 - rim / air) ** 2 * (0.2 + 0.65 * toward))
+
+    def moon(self, cx: float, cy: float, radius: float, tone: tuple) -> None:
+        """A small lit body in the sky: one of a world's moons."""
+        for x, y, sx, sy in self.each(cx - radius, cy - radius, cx + radius, cy + radius):
+            color = _planet_shade((sx - cx) / radius, (sy - cy) / radius, (tone, _scale(tone, 0.8)))
+            if color is not None:
+                self.put(x, y, color)
 
     def station(self, economy: str, cx: float, cy: float, radius: float) -> None:
         lights = _SCENE_LIGHTS.get(economy, _SCENE_LIGHTS["Industrial"])
@@ -9202,10 +9350,25 @@ def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
     if kind == "dock" and (side or band):
         economy = scene["economy"]
         glow = _mix(_SCENE_LIGHTS[economy], (140, 190, 255), 0.6)
+        look = world_look(economy, scene.get("world"))
+        own = _SCENE_HULLS.get(scene["hull"], _SPLASH_SHIP)
         if side:
-            radius = min(side * 0.7, h2 * 0.36)
-            canopy.planet(economy, side_left + side * 0.74, h2 - radius * 0.62, radius, glow)
-            canopy.station(economy, side_left + side * 0.42, h2 * 0.36, min(side * 0.25, h2 * 0.15))
+            # A world that fills the corner and runs off two edges of the
+            # screen: the station and the pilot's hull hang in front of it.
+            radius = min(side * 1.05, h2 * 0.42)
+            if look and look["ring"]:
+                radius *= 0.72  # room for the ring inside the window
+            pcx, pcy = side_left + side * 0.7, h2 - radius * 0.3
+            for moon_x, moon_y, size, tone in (look["moons"] if look else ()):
+                canopy.moon(pcx - radius * (0.9 + moon_x * 0.7), pcy - radius * (1.25 + moon_y * 0.7),
+                            max(1.5, radius * size), tone)
+            canopy.planet(economy, pcx, pcy, radius, glow, look=look)
+            station_r = min(side * 0.25, h2 * 0.15)
+            canopy.station(economy, side_left + side * 0.42, h2 * 0.36, station_r)
+            # The pilot's own hull, moored off the station's arm: the picture
+            # is of where *this* ship is, and a refit shows in it.
+            canopy.sprite(own, side_left + side * 0.42 - station_r * 1.1, h2 * 0.36 + station_r * 1.25,
+                          max(0.6, station_r * 0.9 / len(own[0])))
             canopy.label(1, side_left + 2, [("◢ ", _SCENE_LIGHTS[economy]), (scene["station"].upper(), _SCENE_INK)], side - 3)
             tone = {"good": _SCENE_MINT, "caution": (255, 179, 71), "danger": _SCENE_ALARM}[danger_tone(scene["danger"])]
             canopy.label(2, side_left + 4, [(economy, _SCENE_SLATE), (" · ", (70, 80, 100)),
@@ -9215,10 +9378,20 @@ def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
             # above, with the station riding above its limb.
             top, depth = band_top * 2, band * 2
             radius = width * 1.6
-            canopy.planet(economy, width * 0.36, top + depth * 0.52 + radius, radius, glow, sun=(-0.25, -0.75, 0.6))
-            canopy.station(economy, width * 0.78, top + depth * 0.36, min(depth * 0.42, width * 0.12))
+            for moon_x, moon_y, size, tone in (look["moons"] if look else ()):
+                canopy.moon(width * (0.08 + moon_x * 0.34), top + depth * (0.14 + moon_y * 0.16),
+                            max(1.5, depth * size * 0.9), tone)
+            canopy.planet(economy, width * 0.36, top + depth * 0.52 + radius, radius, glow, sun=(-0.25, -0.75, 0.6),
+                          # A horizon shows a sliver of the disc: its belts are drawn
+                          # that much tighter, or the limb would be one flat color.
+                          look=dict(look, ring=None, frequency=look["frequency"] * 9, cap=look["cap"] and
+                                    (look["cap"][0] * 0.04, look["cap"][1])) if look else None)
+            station_r = min(depth * 0.42, width * 0.12)
+            canopy.station(economy, width * 0.78, top + depth * 0.36, station_r)
+            canopy.sprite(own, width * 0.78 - station_r * 2.4, top + depth * 0.3,
+                          max(0.6, station_r * 0.8 / len(own[0])))
     elif kind == "combat" and (side or band):
-        enemy = _SCENE_PATROL if scene["enemy"] == "patrol" else _SCENE_RAIDER
+        enemy = _hostile_art(scene["name"], scene["enemy"] == "patrol")
         own = _SCENE_HULLS.get(scene["hull"], _SPLASH_SHIP)
         if side:
             size = max(1.0, min(side * 0.62 / len(enemy[0]), h2 * 0.26 / len(enemy)))
@@ -10746,13 +10919,14 @@ class _ViewportStation(_ViewportScene):
 
     station_pixel = _DockScene.station_pixel
 
-    def __init__(self, width: int, height: int, *, station: str, items: list, economy: str, seed: str):
+    def __init__(self, width: int, height: int, *, station: str, items: list, economy: str, seed: str,
+                 world: str | None = None):
         super().__init__(width, height, title=_scene_text(station).upper(), title_color=_SPLASH_GOLD,
                          items=items, seed=seed)
         self.economy = economy if economy in _SCENE_LIGHTS else "Industrial"
         self.lights = _SCENE_LIGHTS[self.economy]
-        self.planet = _scene_planet(width, self.sky_px, self.economy, width * 0.82, self.sky_px * 0.95,
-                                    max(4.0, min(self.sky_px * 0.7, width * 0.32)))
+        self.planet = _scene_world(width, self.sky_px, self.economy, world, width * 0.82, 0.95,
+                                   max(4.0, min(self.sky_px * 0.7, width * 0.32)))
         self.radius = max(5.0, min(self.sky_px * 0.44, width * 0.24))
         self.cx = width * 0.38
 
@@ -11011,7 +11185,7 @@ def viewport_scene(world: World, view: str, width: int, height: int) -> _Viewpor
                 items.append([("Specialist: ", _SCENE_SLATE), (_scene_text(info["name"]), _SCENE_INK),
                               ("; ", _SCENE_SLATE), (_scene_text(info["owner"]), _VIEWPORT_TEXT)])
         return _ViewportStation(width, height, station=here.station_name, items=items, economy=here.economy,
-                                seed=seed)
+                                seed=seed, world=here.name)
     if here.id == world.landmark["system_id"] or world.save.flags.get("landmark_investigated"):
         if world.save.flags.get("landmark_investigated"):
             status = [("Salvage already claimed.", _SCENE_SLATE)]
@@ -15942,7 +16116,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         if not world.ship_destroyed_this_hop:
             play_scene(lambda w, h: _DockScene(
                 w, h, economy=dest.economy, station=dest.station_name, system=dest.name,
-                charted=not travel["was_discovered"], seed=_scene_seed(world, "dock"),
+                charted=not travel["was_discovered"], seed=_scene_seed(world, "dock"), world=dest.name,
                 contracts=completed, paid=paid))
         _show_result(p, world, lines)
     if travel["encounter"].get("inspect"):
