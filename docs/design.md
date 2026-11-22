@@ -1381,6 +1381,39 @@ take, as Return already buys a full tank at the fuel prompt: selling the hold
 is what a trader docks to do, and it took six keys. Cargo a delivery is waiting
 for is never part of it and still has to be typed and confirmed.
 
+**Tactical ruleset 4: a contact may jump its pattern (review, v1.3).** A
+contact's pattern, the move it makes next and that move's exact damage were all
+on the panel, so one rule solved every fight: Guard on a volley unless the shot
+kills, otherwise Fire. The telegraph is the right idea for a door -- readable,
+quick, no reflexes -- and it stays; what goes is the certainty. From tier 2 a
+contact may *jump its pattern* and make the move after the one it is set up
+for: an attack that turns out a volley, a volley that turns out a recovery
+with the Guard spent on it. The panel says so in the row it already had:
+`HARRY > volley > recover   incoming 9-13, or VOLLEY 17-24 (30%)`. Tiers 0 and
+1 are read perfectly, so a career's first fights teach the pattern as they
+did; tier 2 is read 80% of the time, tier 3 70%, tier 4 60%, and each
+Long-Range Scanner tier reads a tenth more, which gives the scanner something
+to do in a fight. A jumped move is rushed and lands at 85% of its strength.
+
+The jump is rolled when the contact acts, never when the panel is drawn: the
+event RNG's state is saved with the fight, so a resumed turn makes the move it
+would have made, and the panel can be redrawn or paged without changing
+anything. A contact read perfectly draws nothing, so every low-tier fight is on
+the random sequence it had under ruleset 3. A fight keeps the ruleset it
+started under, as before: one saved under ruleset 3 is certain to its end.
+Nothing new is saved; the tactics record has the four fields it had.
+
+The same ruleset gives the Skirmisher a recovery (`harry > volley > recover`;
+it was `harry > attack > volley`). Which pattern a raider flies is a hash of
+its name, and a starting Shuttle that Guarded correctly beat a tier-3 Raider 99
+times in 100 and a tier-3 Bulwark 94, and a tier-3 Skirmisher twice: a fight
+decided by the name the raider drew. Under ruleset 4 the same Shuttle wins
+about 68%, 58% and 64% of those (1,500 fights each, the door's own functions),
+which over the ten raider names is 61% where ruleset 3 was 58%. Tier 2 stays a
+win for a starting ship and hull lost by an upgraded one is within a few points
+of what it was. The contact's pattern is named beside its tier on its own row
+(`Ashclaw ... tier 3 Skirmisher`), and the pattern row is the cycle alone.
+
 **The daily dispatch (review, v1.3).** Nothing in the game was different
 tomorrow: no turn limit, no calendar, and a private galaxy for every career, so
 two callers had nothing to compare and neither had a reason to dial in again.

@@ -867,8 +867,9 @@ def test_target_switch_survives_real_disconnect_before_acknowledgement(tmp_path)
         assert vr.World(saved).event_rng.getstate() == rng
 
 
-@pytest.mark.parametrize("lead,prefer_switch", [("Hollow Fang", False), ("Grimwire", True)])
-def test_squadron_target_order_has_profile_dependent_tradeoffs(monkeypatch, lead, prefer_switch):
+def _squadron_damage(monkeypatch, lead: str) -> list[int]:
+    """Hull lost over 32 seeded fights against a tier-4 `lead` and its tier-2
+    partner, fire only: [the lead first, the partner first]."""
     damage = []
     for switch in (False, True):
         total = 0
@@ -887,7 +888,18 @@ def test_squadron_target_order_has_profile_dependent_tradeoffs(monkeypatch, lead
             assert world.save.pilot.kills == 2
             total += 400 - world.save.ship.hull_hp
         damage.append(total)
-    assert (damage[1] < damage[0]) == prefer_switch
+    return damage
+
+
+def test_squadron_target_order_has_profile_dependent_tradeoffs(monkeypatch):
+    """Which ship to fight first is a real choice, and what it is worth depends
+    on the pattern the lead flies. Under ruleset 3 a Raider lead was better
+    fought first and a Bulwark lead second; since ruleset 4 gave the tier-2
+    Skirmisher partner a recovery, taking the partner first is cheaper against
+    both, and still worth more than twice as much against the Bulwark."""
+    raider, bulwark = (_squadron_damage(monkeypatch, lead) for lead in ("Hollow Fang", "Grimwire"))
+    saved = [stay - switch for stay, switch in (raider, bulwark)]
+    assert saved[0] > 0 and saved[1] > 2 * saved[0], (raider, bulwark)
 
 
 @pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])

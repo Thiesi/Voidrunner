@@ -1746,7 +1746,9 @@ def test_combat_rows_name_whose_pattern_it_is_and_say_guard_plainly():
     # The pattern is named for what it is, with the move it makes next picked
     # out of its cycle; "Bulwark intent COVER" under "Ravage" read as a second
     # contact (#648), and the profile's name before its own steps cannot.
-    assert any(re.match(r"Bulwark\s+COVER > volley > recover\s+incoming \d", row) for row in rows)
+    assert any(re.match(r"COVER > volley > recover\s+incoming \d", row) for row in rows)
+    # Whose pattern it is, is beside the contact's tier on the contact's own row.
+    assert any(row.startswith("Ravage") and row.endswith(f"tier 2 {vr.tactical_profile('Ravage')}") for row in rows)
     assert any(re.match(r"\[G\] Guard\s+deal \d+(-\d+)?\s+take \d", row) for row in rows)
     assert any("Guard: your shot at 55%" in row for row in rows)  # the sentence is on the Info page
     assert "Bulwark pattern: cover > volley > recover." in rows

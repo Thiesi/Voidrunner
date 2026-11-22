@@ -140,5 +140,7 @@ def test_every_option_names_its_price_on_its_own_row():
     bribe = _option(lines, "P")
     assert f"{vr.bribe_cost(pirate)}cr" in bribe and "Blackwake +2" in bribe and f"else take {incoming}" in bribe
     # The cycle is on the row with the move it makes next picked out of it.
-    steps = vr.TACTICAL_PROFILES[tactics["profile"]]
-    assert intent.startswith(f"{tactics['profile']}  {steps[0].upper()} > {steps[1]} > {steps[2]}")
+    steps = vr.tactical_steps(tactics)
+    assert intent.startswith(f"{steps[0].upper()} > {steps[1]} > {steps[2]}")
+    # Whose pattern it is, is on the contact's own row beside its tier.
+    assert any(plain(row).startswith("Probe") and plain(row).endswith(f"tier 1 {tactics['profile']}") for row in lines)
