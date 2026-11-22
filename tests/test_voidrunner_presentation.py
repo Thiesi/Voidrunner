@@ -467,10 +467,12 @@ def test_navigation_chart_pages_preserve_all_connections_and_career(monkeypatch,
     # Remove repeated row keys before joining wrapped entry text.
     text=" ".join(re.sub(r"\[[A-Z]\] ","",vr._ANSI_RE.sub(""," ".join(frames))).split())
     for station in world.galaxy[1:]:
-        # The sector is one of the columns forty columns gives up; the name,
-        # the danger and the fuel cost are not (issue #493), and nor is the
-        # economy a trader picks a jump by (issue #648).
-        if discovered: assert station.name in text and station.economy in text and (width < 80 or vr.sector_for(station) in text)
+        # The sector is one of the columns a chart gives up -- at forty columns
+        # always, and at eighty since the MARKET column took its room; it is on
+        # the star map's Info. The name, the danger and the fuel cost are never
+        # given up (issue #493), nor the economy a trader picks a jump by
+        # (issue #648), nor what the market there is known for.
+        if discovered: assert station.name in text and station.economy in text and (width < 80 or "MARKET" in text)
         else: assert station.name not in text
     if not discovered: assert "Uncharted Bearing" in text and "danger unknown" not in text
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng

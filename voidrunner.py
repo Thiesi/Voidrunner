@@ -2617,6 +2617,7 @@ class World:
             if sid in self.by_id:
                 self.by_id[sid].discovered = True
         self.landmark: dict = generate_landmark(save.seed, self.galaxy)
+        self.traits: dict[int, dict] = system_traits(save.seed, self.galaxy)
         self.event_rng = random.Random()
         if save.event_rng_state is not None:
             try:
@@ -2996,6 +2997,72 @@ def bfs_path(by_id: dict[int, GalaxySystem], start_id: int, dest_id: int) -> lis
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# A system's own market (review, v1.3). A price was the commodity's base and
+# the economy's two multipliers and nothing else, so forty-eight systems were
+# five price tables: a pilot who had seen one Tech station had seen them all,
+# and charting a system told them nothing a trader could use.
+#
+# About three systems in five now have one thing of their own: a standing
+# surplus of one good, sold 30% under its usual price there, or a standing
+# shortage, bought 40% over it. Always a good that economy neither makes nor
+# wants, so a trait is a second source or a second buyer for something -- a
+# Mining world with Medicine to spare, a Tech world short of Textiles -- and
+# never a better deal than the trade the economy already defines. Routes get
+# geography; income does not get inflated.
+#
+# A trait is drawn from the galaxy seed and the system's number with an RNG of
+# its own, so galaxy generation keeps its seed's call sequence and nothing is
+# saved. It is found by docking: a chart or a scan names a system's economy
+# and danger, and its market stays a question mark until the pilot has stood
+# in it.
+# ---------------------------------------------------------------------------
+TRAIT_CHANCE = {"surplus": 0.3, "shortage": 0.3}
+TRAIT_PRICE = {"surplus": 0.7, "shortage": 1.4}
+
+
+def system_traits(seed: int, galaxy: list[GalaxySystem]) -> dict[int, dict]:
+    """Each system's own market trait, by system id; a system without one is absent.
+    Home has none: every career starts from the same plain Freeport."""
+    traits: dict[int, dict] = {}
+    for system in galaxy:
+        if system.id == 0:
+            continue
+        rng = random.Random(f"trait:{seed}:{system.id}")
+        roll = rng.random()
+        kind = ("surplus" if roll < TRAIT_CHANCE["surplus"]
+                else "shortage" if roll < TRAIT_CHANCE["surplus"] + TRAIT_CHANCE["shortage"] else None)
+        neutral = [commodity for commodity in LEGAL_COMMODITIES
+                   if commodity not in ECONOMY_PRODUCES[system.economy] and commodity not in ECONOMY_DEMANDS[system.economy]]
+        if kind is not None and neutral:
+            traits[system.id] = {"kind": kind, "commodity": rng.choice(neutral)}
+    return traits
+
+
+def system_visited(world: World, system_id: int) -> bool:
+    """Whether the pilot has docked here. A docked market is remembered with its
+    stock; a quote a passing trader's data burst gave is not."""
+    return any("stock" in quote for quote in world.save.market_memory.get(system_id, {}).values())
+
+
+def known_trait(world: World, system_id: int) -> dict | None:
+    """The system's trait, once the pilot has docked there; None for a system
+    that has none and for one whose market is still unseen."""
+    return world.traits.get(system_id) if system_visited(world, system_id) else None
+
+
+def trait_label(trait: dict) -> str:
+    """A trait in the market's own two words: `Medicine cheap`, `Textiles dear`."""
+    return f"{COMMODITIES[trait['commodity']]['label']} {'cheap' if trait['kind'] == 'surplus' else 'dear'}"
+
+
+def trait_sentence(trait: dict) -> str:
+    label = COMMODITIES[trait["commodity"]]["label"]
+    if trait["kind"] == "surplus":
+        return f"a standing surplus of {label}, sold about {round((1 - TRAIT_PRICE['surplus']) * 100)}% under its usual price"
+    return f"a standing shortage of {label}, bought about {round((TRAIT_PRICE['shortage'] - 1) * 100)}% over its usual price"
+
+
 def _market_rest(world: World, system_id: int, commodity: str) -> float:
     """The drift a quote rests at with the pilot's own trading taken out of it:
     1.0, or the level an active economy event holds this station at."""
@@ -3025,6 +3092,9 @@ def _quote(world: World, system_id: int, commodity: str, *, selling: bool) -> in
         mult *= 0.6
     if commodity in ECONOMY_DEMANDS[system.economy]:
         mult *= 1.6
+    trait = world.traits.get(system_id)
+    if trait is not None and trait["commodity"] == commodity:
+        mult *= TRAIT_PRICE[trait["kind"]]
     drift = world.save.market_drift.get(system_id, {}).get(commodity, 1.0)
     rest = _market_rest(world, system_id, commodity)
     drift = min(drift, rest) if selling else max(drift, rest)
@@ -3088,6 +3158,11 @@ def remember_local_market(world: World) -> None:
     """Observe only docked, locally visible quotes, without consuming RNG."""
     if world.save.pending_travel is not None:
         return
+    here = world.here.id
+    if not system_visited(world, here) and here in world.traits:
+        # The first time a pilot stands in this market: what it is known for is
+        # news, and it is the reason to have come.
+        report_hop(world, [f"Local market: {world.here.name} has {trait_sentence(world.traits[here])}."])
     for commodity in COMMODITIES:
         legal = COMMODITIES[commodity]["legal"]
         if not legal and world.here.economy != "Haven" and not world.save.cargo.get(commodity, 0):
@@ -11167,6 +11242,7 @@ def viewport_content(world: World, view: str) -> tuple[list[str],list[str],list[
     if view=="2":
         art=PORTRAITS["port"][here.economy]
         details=[f"{here.station_name}: {here.economy}.",f"{here.name} ({here.x},{here.y}); {sector_for(here)}; danger {here.danger}/5."]
+        if here.id in world.traits: details.append(f"Market: {trait_label(world.traits[here.id])}.")
         for module,sid in specialist_stations(world).items():
             if sid==here.id:
                 info=WORKSHOPS[module];details.append(f"Specialist: {info['name']}; {info['owner']}.")
@@ -11672,6 +11748,8 @@ def viewport_scene(world: World, view: str, width: int, height: int) -> _Viewpor
         items = [[(_scene_text(here.name), _SCENE_INK), (f" ({here.x},{here.y})", _SCENE_SLATE)],
                  [(_scene_text(sector_for(here)), _SCENE_INK)], [(here.economy, _SCENE_INK)],
                  [("danger ", _SCENE_SLATE), (f"{here.danger}/5", _SCENE_INK)]]
+        if here.id in world.traits:
+            items.append([("market ", _SCENE_SLATE), (trait_label(world.traits[here.id]), _SCENE_INK)])
         for module, sid in specialist_stations(world).items():
             if sid == here.id:
                 info = WORKSHOPS[module]
@@ -11952,6 +12030,9 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
     if event and system.id in economy_event_system_ids(world, event):
         head += "   " + badge("CRASH" if event["direction"] == "crash" else "BOOM",
                               "danger" if event["direction"] == "crash" else "good")
+    trait = world.traits.get(system.id)
+    if trait is not None:
+        head += "   " + badge(trait_label(trait).upper(), "good" if trait["kind"] == "surplus" else "caution")
     lines = [head]
     rows, styles = [], []
     needs = mission_cargo_needs(world)
@@ -12401,7 +12482,9 @@ def remembered_market_lines(world: World) -> list[str]:
         system = world.by_id[sid]
         jumps = hops.get(sid)
         where = "here" if sid == world.here.id else (plural(jumps, "jump") if jumps is not None else "unreachable")
-        lines.append(section(f"{_mission_plain(system.name)} · {system.economy} · {where}"))
+        trait = known_trait(world, sid)
+        lines.append(section(f"{_mission_plain(system.name)} · {system.economy} · {where}"
+                             + (f" · {trait_label(trait)}" if trait else "")))
         rows, styles = [], []
         for commodity, quote in quotes.items():
             age = world.save.turn - quote["day"]
@@ -14588,6 +14671,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         f"5. First upgrade: [Y] Yard, [{YARD_LETTERS[list(UPGRADES).index('cargo')]}] Cargo Bay Expansion adds 8 cargo spaces. [{YARD_LETTERS[list(UPGRADES).index('hull')]}] Hull Reinforcement adds 35 maximum hull. Keep travel money before investing.",
         f"Your next cargo tier costs {UPGRADES['cargo']['cost'](world.save.ship.cargo_tier):,} cr." if world.save.ship.cargo_tier < UPGRADES['cargo']['max_tier'] else "Your cargo upgrades are complete.",
         "Danger is a risk rating, not a guarantee you can win a fight. Evasion can fail; bribes cost credits and can be refused. Read the encounter choices before acting.",
+        "About three systems in five have a market of their own: one good in standing surplus, sold cheap, or in standing shortage, bought dear. The chart shows a ? until you have docked there, and the trait after.",
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
         "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
         "The Mission Board ([B] on the station deck) shows full contract terms, tracking and abandonment. [G] Guide keeps this recap available. On every other screen [B] is Back; [Q] on the station deck saves and leaves the game.",
@@ -15606,21 +15690,31 @@ def chart_entries(world: World) -> list[tuple[int | None, str]]:
             marks.append(deadlines[sid])
         if short:
             marks.append(badge("LOW FUEL", "danger"))
+        # What the market there is known for: its trait once the pilot has
+        # docked, nothing if it has none, and a question mark until then --
+        # which is the one column on the chart that says "go and look".
+        trait = known_trait(world, sid)
+        market = (f"{p.tone('good' if trait['kind'] == 'surplus' else 'caution')}{trait_label(trait)}{RESET}" if trait
+                  else "" if system_visited(world, sid) else f"{p.slate}?{RESET}")
         rows.append([
             dest.name if dest.discovered else "Uncharted Bearing",
             f"{dest.x},{dest.y}",
             sector_for(dest) if dest.discovered else "?",
             dest.economy if dest.discovered else "?",
+            market,
             danger_dots(dest.danger, known=dest.discovered),
             f"{p.alarm}{cost}{RESET}" if short else f"{p.ink}{cost}{RESET}",
             " ".join(marks),
         ])
-        styles.append(["value", "label", "label", "label", "value", "value", "value"])
+        styles.append(["value", "label", "label", "label", "value", "value", "value", "value"])
         ids.append(sid)
     # ECONOMY is not optional: it is the column a trader picks a jump by. A
     # terminal too narrow for it stacks each record instead (issue #648).
-    heading, records = table_records(["DESTINATION", "AT", "SECTOR", "ECONOMY", "DANGER", "FUEL", ""],
-                                     rows, "lllllrl", styles=styles, optional=(1, 2),
+    # MARKET gives way last, after the coordinates and the sector, and only
+    # where it would cost every destination a row: what a market is known for
+    # is in the Ledger's remembered markets, a keypress away.
+    heading, records = table_records(["DESTINATION", "AT", "SECTOR", "ECONOMY", "MARKET", "DANGER", "FUEL", ""],
+                                     rows, "llllllrl", styles=styles, optional=(4, 1, 2),
                                      width=max(1, _page_content_width() - 4))
     # The heading sits under the same key prefix its rows will carry, and keeps
     # its sticky mark so it is repeated on every page of the departures. A
