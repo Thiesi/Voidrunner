@@ -160,6 +160,8 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Command Deck", b"OB"),
         ("Command Deck, expanded", b"OBX"),
         ("Commodity Market", b"M"),
+        # The stake a pilot can buy in a station is behind the market: `K` from `M`.
+        ("Station Stake", b"MK"),
         ("Engineering Yard", b"Y"),
         # The crew roster is behind the yard, not the deck: `K` from `Y`.
         ("Crew Roster", b"YK"),
