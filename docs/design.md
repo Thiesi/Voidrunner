@@ -1515,6 +1515,27 @@ choose is noise on a small screen.
 judged against both use. Futures remain what they were: a price lock in a
 market whose prices do not move on their own.
 
+**The staged opening (review, v1.3).** A first career's first deck listed
+fourteen services at one weight: a ledger with nothing in it, an archive, two
+factions and a hall of fame beside the four things a first flight is made of.
+The rules are gentle -- losing the ship is a tow, the first contract is
+hand-held, nothing is permanent -- and that screen was not. A first career now
+opens on Market, Chart, Board, Yard, Status, Guide, Display and Disembark, three
+rows of services and twelve rows of deck at 80x24. The Ledger, the Viewport and
+the Hall of Fame arrive after the first jump, and Concord, Blackwake and the
+Archive after the third; the arrival that brings them says `New on the deck:`
+among its results. Whatever a pilot is already involved with is on the deck
+whatever the day -- a faction they have standing with, an archive errand begun,
+a ledger with a trade in it. A service that has not arrived still answers its
+key, and the Pilot Guide names them all, so nothing is locked. A pilot who has
+retired once sees everything from day zero. It is derived from the career's day
+and what it already records; nothing is saved for it.
+
+The Pilot Guide opens on what the game is and how a turn works (it opened on
+how to press Back), and is divided by a rule: a first flight above it, and
+`ONCE YOU HAVE FLOWN A FEW DAYS` below, where the lines about ranks, stakes,
+local markets, a raider's read and the dispatch live.
+
 **The daily dispatch (review, v1.3).** Nothing in the game was different
 tomorrow: no turn limit, no calendar, and a private galaxy for every career, so
 two callers had nothing to compare and neither had a reason to dial in again.

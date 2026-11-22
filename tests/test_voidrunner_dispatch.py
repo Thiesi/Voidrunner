@@ -324,8 +324,13 @@ def test_the_deck_says_todays_order_in_one_row_and_the_page_fits(terminal, width
     pages = vr._service_pages(deck, "Command Deck: 1,200cr", "[X] Expand [Q] Exit: ")
     if width == 80:
         assert vr._visible_width(vr.dispatch_deck_row(world)) <= vr._page_content_width()
-        # One row of window for the order: the deck is one page and fifteen rows.
-        assert len(pages) == 1 and len(pages[0]) + 3 == round(24 * 0.58) + 1
+        # One row of window for the order: a first deck is one page and well
+        # inside the band, and the full deck of day three is fifteen rows.
+        assert len(pages) == 1 and len(pages[0]) + 3 <= round(24 * 0.58)
+        world.save.turn = 3
+        full = vr._service_pages(vr.station_deck_lines(world), "Command Deck: 1,200cr", "[X] Expand [Q] Exit: ")
+        assert len(full) == 1 and len(full[0]) + 3 == round(24 * 0.58) + 1
+        world.save.turn = 0
         assert vr.menu_columns([f"[{key}] {label}" for key, label in vr.deck_service_entries(world)]) == 3
     for page in vr._service_pages(vr.dispatch_lines(world, [], 1), "Daily Dispatch", "[<>] Page [B] Back: "):
         assert len(page) + 3 <= height
