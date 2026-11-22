@@ -12292,8 +12292,15 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
             holding = f"have {have}: {promised} for {places} deliveries, {spare} spare"
         else:
             holding = f"have {have}"
-        out_prompt(f"{p.muted}Quantity ({holding}; station buys {max_qty}; Enter or Esc cancels): {RESET}")
-        qty = read_quantity(max_qty)
+        # Return sells what is spare, up to what the station will take: selling
+        # the hold is what a trader docks to do, and typing the number the
+        # prompt already shows was six keys a sale (the same reasoning as
+        # refuelling, issue #36). Never cargo a delivery is waiting for -- that
+        # still has to be typed, and confirmed below.
+        default = min(max_qty, spare)
+        enter = f"Enter sells {default}, Esc cancels" if default else "Enter or Esc cancels"
+        out_prompt(f"{p.muted}Quantity ({holding}; station buys {max_qty}; {enter}): {RESET}")
+        qty = read_quantity(max_qty, default)
         if qty <= 0:
             return
         # Selling into a promise is allowed -- the pilot may mean to rebuy -- but
@@ -13943,7 +13950,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         "1. Buy cargo: [M] Market, choose the commodity's letter, [P] Purchase, enter a quantity. Buying spends credits and needs free hold space. Enter with no quantity cancels.",
         f"2. Keep fuel: [Y] Yard, [R] Refuel. Each fuel unit costs {FUEL_PRICE} cr. Reserve enough for the outward and return jumps; keep credits for repairs and crew wages too.",
         "3. Depart: [C] Chart, select the destination's letter, then confirm its fuel cost and danger. A jump advances one day, uses fuel and charges wages. Browsing, trading and upgrades do not advance the day.",
-        "4. Deliver a contract by docking with its full cargo. Ordinary trading instead uses [M] Market, commodity letter, [S] Sell. Sales pay less than the local buy quote; distant prices can change.",
+        "4. Deliver a contract by docking with its full cargo. Ordinary trading instead uses [M] Market, commodity letter, [S] Sell, and Enter sells all your spare cargo. Sales pay less than the local buy quote, and your own buying never raises what a station pays; distant prices can change.",
         f"5. First upgrade: [Y] Yard, [{YARD_LETTERS[list(UPGRADES).index('cargo')]}] Cargo Bay Expansion adds 8 cargo spaces. [{YARD_LETTERS[list(UPGRADES).index('hull')]}] Hull Reinforcement adds 35 maximum hull. Keep travel money before investing.",
         f"Your next cargo tier costs {UPGRADES['cargo']['cost'](world.save.ship.cargo_tier):,} cr." if world.save.ship.cargo_tier < UPGRADES['cargo']['max_tier'] else "Your cargo upgrades are complete.",
         "Danger is a risk rating, not a guarantee you can win a fight. Evasion can fail; bribes cost credits and can be refused. Read the encounter choices before acting.",

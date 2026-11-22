@@ -3527,3 +3527,39 @@ def test_an_untouched_market_and_an_event_price_both_sides_alike():
     world.save.market_drift[0]["food"] = vr.ECONOMY_EVENT_CRASH_LEVEL
     assert vr.price_for(world, 0, "food") < calm
     assert vr.sell_price_for(world, 0, "food") == round(vr.price_for(world, 0, "food") * vr.SELL_SPREAD)
+
+
+def _typed(monkeypatch, *keys: str) -> None:
+    feed = iter(keys)
+    monkeypatch.setattr(vr, "read_key", lambda: next(feed))
+
+
+def test_return_sells_the_spare_hold_and_never_promised_cargo(monkeypatch):
+    world = _world_with_seed(42)
+    _set_cargo(world, {"food": 9})
+    before = world.save.pilot.credits
+    _typed(monkeypatch, "S", "\r")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._trade_commodity(vr.Palette(False), world, "food")
+    assert "Enter sells 9, Esc cancels" in output.getvalue()
+    assert not world.save.cargo.get("food") and world.save.pilot.credits > before
+
+    # Escape still sells nothing.
+    world = _world_with_seed(42)
+    _set_cargo(world, {"food": 9})
+    saved = world.save.to_dict()
+    _typed(monkeypatch, "S", vr.ESCAPE_KEY)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._trade_commodity(vr.Palette(False), world, "food")
+    assert world.save.to_dict() == saved
+
+    # Cargo a delivery is waiting for is not what Return sells.
+    world = _world_with_seed(42)
+    _set_cargo(world, {"food": 9})
+    monkeypatch.setattr(vr, "spare_cargo", lambda world, commodity: 4)
+    monkeypatch.setattr(vr, "contract_cargo", lambda world: {"food": (5, ["Ember Reach"])})
+    _typed(monkeypatch, "S", "\r")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._trade_commodity(vr.Palette(False), world, "food")
+    # At 80 columns this prompt wraps, so it is read with its breaks taken out.
+    assert "Enter sells 4, Esc cancels" in " ".join(output.getvalue().split()) and world.save.cargo["food"] == 5

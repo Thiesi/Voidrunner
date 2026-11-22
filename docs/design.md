@@ -1329,6 +1329,11 @@ untouched market quotes both sides exactly as before, and an economy event
 moves both, since that is the market and not the pilot. Nothing is saved for
 this; it is read from the drift a career already carries.
 
+At the sell prompt, Return sells the spare cargo up to what the station will
+take, as Return already buys a full tank at the fuel prompt: selling the hold
+is what a trader docks to do, and it took six keys. Cargo a delivery is waiting
+for is never part of it and still has to be typed and confirmed.
+
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 250-credit high-water milestone in cumulative contraband sales minus purchases
 and new futures outlay/refunds. The step is 250 because the non-Haven demand
