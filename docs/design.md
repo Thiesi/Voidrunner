@@ -1563,6 +1563,20 @@ how to press Back), and is divided by a rule: a first flight above it, and
 `ONCE YOU HAVE FLOWN A FEW DAYS` below, where the lines about ranks, stakes,
 local markets, a raider's read and the dispatch live.
 
+**The crew speak (review, v1.3).** A specialist was a name, one line of
+character on the roster, a bonus and a wage, and the whole game held about
+eight hundred words of authored text. Aboard, a specialist now says one line
+when something happens on a hop, in the voice the roster gives them, among the
+results on the deck that follows: the gunner of a kill, the engineer of a hull
+in a bad way or a tank nearly dry, the navigator of a system nobody had
+charted, a market with something of its own, a dangerous harbor. Each of the
+nine has their own lines (`CREW_VOICES`), two a moment so the same one does not
+come round every time, and one line a hop at most. The rarer moments are
+always spoken to and the common ones every second day. Which line, and whether
+a common moment is spoken at all, follow from the day: the talk draws nothing
+from the event RNG, so a crew changes no encounter by talking, and nothing a
+pilot needs is only in a line.
+
 **The daily dispatch (review, v1.3).** Nothing in the game was different
 tomorrow: no turn limit, no calendar, and a private galaxy for every career, so
 two callers had nothing to compare and neither had a reason to dial in again.

@@ -1550,6 +1550,42 @@ CREW_CANDIDATES = {
                   ("Sana Reed", "Finds patterns in noise and stories in empty sectors."),
                   ("Noor Ash", "Marks safe harbors first and distant mysteries second.")],
 }
+# What each specialist says when something happens on a hop (review, v1.3).
+# They had a name, one line of character on the roster and a task; aboard, they
+# were a bonus and a wage. One line now and then, in the voice the roster gives
+# them, on the deck that follows the hop: a kill, a hull in a bad way, a system
+# nobody had charted, a market with something of its own, a dangerous harbor,
+# a tank nearly dry. Two lines a moment, so the same one does not come round
+# every time, and nothing a pilot needs is only here.
+CREW_VOICES: dict[str, dict[str, tuple[str, str]]] = {
+    "Nia Voss": {"kill": ("One less for the next convoy to meet.", "Clean. I have seen it go the other way."),
+                 "hull": ("We are still flying. Keep your head.", "I have brought worse than this home.")},
+    "Jax Sera": {"kill": ("I counted every shot. None wasted.", "Down. And the way out was open the whole time."),
+                 "hull": ("That one cost us. Mind where the door is.", "Count the plates we have left, then decide.")},
+    "Tavi Renn": {"kill": ("Nobody touches this ship.", "It is quiet again. Good."),
+                  "hull": ("See to the others first. I am fine.", "They will not get a second go at us.")},
+    "Ada Flint": {"hull": ("She is complaining. I can hear it from here.", "That bearing was tired before they hit it."),
+                  "fuel": ("The tank is singing its empty song.", "I can hear how little is left in her.")},
+    "Lev Orin": {"hull": ("I have a labelled bin for exactly this.", "Noted, tagged, and none of it is good."),
+                 "fuel": ("Fuel: low. I have written it on the tank.", "The reserve label is not a suggestion.")},
+    "Mika Sol": {"hull": ("Every plate we lose is a plate I have to find.", "The old manuals call this 'avoidable'."),
+                 "fuel": ("The manual says not to run her this dry.", "Waste not. There is nothing left to waste.")},
+    "Eli Quill": {"chart": ("Give me a minute. This one goes on paper too.", "A new square for the paper chart."),
+                  "market": ("I am pencilling that in the margin.", "That is worth a note beside the star."),
+                  "danger": ("My paper chart has a skull drawn here.", "I would not have marked this one a harbor.")},
+    "Sana Reed": {"chart": ("Another empty square with a story in it.", "Nobody had written this place down. Now we have."),
+                  "market": ("There is the pattern. Markets always leave one.", "Listen to what this place is short of."),
+                  "danger": ("Too quiet. That is a pattern too.", "The noise here says to keep moving.")},
+    "Noor Ash": {"chart": ("Marked. Harbor first, mystery second.", "One more harbor on the chart."),
+                 "market": ("A harbor with a bargain. Marked twice.", "Worth remembering the way back here."),
+                 "danger": ("No safe harbor here. Let us not stay.", "I have marked the way out already.")},
+}
+#: The moments a specialist always speaks at; at the others, every second day.
+CREW_VOICE_ALWAYS = ("hull", "market", "danger")
+CREW_VOICE_ROLE = {"kill": "gunner", "hull": "engineer", "fuel": "engineer", "chart": "navigator",
+                   "market": "navigator", "danger": "navigator"}
+CREW_LOW_FUEL = 3
+
 CREW_SERVICE_LEVELS = ((0, "Recruit"), (5, "Seasoned"), (15, "Veteran"), (30, "Ace"))
 CREW_ASSIGNMENTS = {
     "gunner": {"title": "Lessons for the convoy", "workshop": "cargo", "reward": 600,
@@ -2661,6 +2697,8 @@ class World:
         self.ship_destroyed_this_hop = bool(
             save.pending_travel and save.pending_travel["destroyed"]
         )
+        # What the crew's talk compares a hop against: the kills it began with.
+        self.hop_kills = save.pilot.kills
         # The daily dispatch watches what a commit changed: this session's
         # sales, and the counters as the last commit left them.
         self.dispatch_sales: list[tuple[str, int, int, str]] = []
@@ -2944,6 +2982,37 @@ def crew_identity(world: World, role: str) -> int:
 
 def crew_name(world: World, role: str) -> str:
     return CREW_CANDIDATES[role][crew_identity(world, role)][0]
+
+
+def crew_voice(world: World, *, new_system: bool, kills_before: int) -> str | None:
+    """What a specialist aboard says about the hop that just ended, if anything:
+    one line, the first of these moments that someone aboard speaks to.
+
+    No draw from the event RNG -- which line, and whether a common moment is
+    spoken at all, follow from the day -- so a crew's talk changes no encounter."""
+    ship, here, day = world.save.ship, world.here, world.save.turn
+    moments = []
+    if world.save.pilot.kills > kills_before:
+        moments.append("kill")
+    if ship.hull_hp * 3 <= hull_hp_max(ship):
+        moments.append("hull")
+        if not ship.has_engineer:
+            moments.append("hull:gunner")  # with no engineer aboard, the gunner has a view
+    if new_system:
+        moments.append("market" if here.id in world.traits else "chart")
+    if here.danger >= 4:
+        moments.append("danger")
+    if ship.fuel <= CREW_LOW_FUEL:
+        moments.append("fuel")
+    for moment in moments:
+        moment, _, role = moment.partition(":")
+        role = role or CREW_VOICE_ROLE[moment]
+        if not getattr(ship, f"has_{role}"):
+            continue
+        lines = CREW_VOICES.get(crew_name(world, role), {}).get(moment)
+        if lines and (moment in CREW_VOICE_ALWAYS or day % 2 == 0):
+            return f'{crew_name(world, role)}: "{lines[(day // 2) % len(lines)]}"'
+    return None
 
 
 def crew_level(ship: Ship, role: str) -> int:
@@ -17010,6 +17079,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         world.save.ship.fuel -= burn
         world.save.turn += 1
         world.ship_destroyed_this_hop = False
+        world.hop_kills = world.save.pilot.kills
         # The transition is shown as it happens but not retained: the deck keeps
         # outcomes, and "Jumping to" took one of its rows from them (#648).
         jumping = f"Jumping to {'the unknown' if not dest.discovered else dest.name}..."
@@ -17093,6 +17163,9 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
             )
             completed = sum(1 for line in lines if line.startswith("Mission complete:"))
             paid = max(0, world.save.pilot.credits - credits_before)
+            voice = crew_voice(world, new_system=not travel["was_discovered"], kills_before=world.hop_kills)
+            if voice:
+                lines.append(voice)
             if has_contraband(world) and dest.economy != "Haven":
                 chance = customs_risk_for(world, dest)
                 inspect = world.event_rng.random() < chance
