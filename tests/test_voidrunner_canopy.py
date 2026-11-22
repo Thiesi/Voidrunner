@@ -215,8 +215,12 @@ def test_a_wide_canopy_puts_its_picture_in_the_window_not_under_the_glass(canopy
     world = _world_with_seed(42)
     canopy(120, 36, world=world)
     cells = vr.canopy_cells(vr.canopy_scene(world), 120, 36)
-    # Under the console every cell is sky: one color, no block, no art.
-    for row in cells[:30]:
+    # Under the console every cell is sky: one color, no block, no art. That is
+    # the rows a deck, a market or a contract sheet covers -- the top two thirds.
+    # Below them the system's world rises out of the corner and may run under
+    # the console's column, where a short page leaves it showing and a long
+    # one simply covers it.
+    for row in cells[:24]:
         for ch, fg, bg in row[:vr._box_outer_width()]:
             assert ch in " ·•+", ch
     assert any(ch not in " ·•+" for row in cells for ch, _, _ in row[vr._box_outer_width() + 1:])
