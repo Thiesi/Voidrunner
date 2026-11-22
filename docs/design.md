@@ -1639,6 +1639,25 @@ how to press Back), and is divided by a rule: a first flight above it, and
 `ONCE YOU HAVE FLOWN A FEW DAYS` below, where the lines about ranks, stakes,
 local markets, a raider's read and the dispatch live.
 
+**Seasons, and what a futures order bets on (review, v1.3).** A price was its
+economy's, its trait's, and whatever the pilot's own trading or the rare event
+had done to it. Nothing moved that a pilot could see coming, so a futures order
+-- today's price, held for an 8% fee -- was never worth its fee, and the trade
+loop had nothing left to read once its lanes were learned. Every legal good now
+has a season in each sector: a swing of 12% either way over 24 to 40 days, the
+same for every station in the sector, so a lane inside a sector keeps its shape
+and what changes is when a good is worth carrying and which sector to carry it
+to. It starts level on day zero, so a first day is what it was. It is the same
+every time for a career's seed, and it is shown: the market marks each price as
+rising or falling and for how many more days, and a futures order says what
+the season should have the price at on the day it can be collected, and whether
+locking saves or costs against buying then. A lock at the bottom of a swing for
+ten or twenty days is now worth having -- up to about a fifth of the goods'
+price after the fee -- and a lock at the top is a plain loss, which the order
+says before it is signed. Contraband has no season; its price rules are its
+own. Nothing is saved: the seed and the day give it (`season_factor`). Flown
+through the career simulator, seasons move a career's worth by about 2%.
+
 **The far site (review, v1.3).** A galaxy had one landmark, found by chance or
 on Mara's errand, and once its salvage was claimed exploration had nothing left
 that was a place. The first site's record now carries a bearing to a second:

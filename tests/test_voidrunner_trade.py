@@ -31,8 +31,9 @@ def _world_with_market_memory():
     return world, destination
 
 
-def test_market_memory_observes_locally_and_stays_stale_until_revisited(tmp_path):
+def test_market_memory_observes_locally_and_stays_stale_until_revisited(tmp_path, monkeypatch):
     import copy
+    monkeypatch.setattr(vr, "SEASON_SWING", 0)  # a week passes here; this is about the pilot's own buying
     world, destination = _world_with_market_memory()
     initial = copy.deepcopy(world.save.market_memory[destination])
     rng = world.event_rng.getstate()
