@@ -10583,6 +10583,40 @@ def affordable_upgrades(world: World) -> int:
                and upgrade["cost"](getattr(ship, f"{key}_tier")) <= credits)
 
 
+# The staged opening (review, v1.3). A first career's first deck listed
+# fourteen services at one weight: a ledger with nothing in it, an archive, two
+# factions and a hall of fame beside the four things a first flight is made of.
+# The rules are gentle; that screen was not. A pilot's first career now opens
+# on what a first turn needs and the rest arrives as it starts to matter: the
+# books and the views after the first jump, the people after the third. A
+# service that has not arrived yet still answers its key -- the Guide names
+# them all -- and a pilot who has retired once sees everything from day zero.
+DECK_SERVICE_DAY = {"T": 1, "V": 1, "H": 1, "P": 3, "W": 3, "N": 3}
+
+
+def deck_service_day(world: World, key: str) -> int:
+    """The day a deck service arrives for this career: 0 is from the start."""
+    save = world.save
+    if save.pilot.retirements or key not in DECK_SERVICE_DAY:
+        return 0
+    # Whatever the pilot is already involved with is on the deck, whatever the day.
+    involved = {"P": bool(save.pilot.reputation.get(FACTION_CONCORD)) or FACTION_CONCORD in save.faction_stories,
+                "W": bool(save.pilot.reputation.get(FACTION_BLACKWAKE)) or FACTION_BLACKWAKE in save.faction_stories,
+                "N": bool(save.flags.get("archive_v1_started")),
+                "T": save.trading_ledger.since_day is not None}
+    return 0 if involved.get(key) else DECK_SERVICE_DAY[key]
+
+
+DECK_SERVICE_NAMES = {"T": "Ledger", "V": "Viewport", "H": "Hall of Fame", "P": "Concord", "W": "Blackwake",
+                      "N": "Archive"}
+
+
+def deck_services_arriving(world: World) -> list[tuple[str, str]]:
+    """The services that reach the deck today, for the arrival that brings them."""
+    day = world.save.turn
+    return [(key, name) for key, name in DECK_SERVICE_NAMES.items() if day and deck_service_day(world, key) == day]
+
+
 def deck_service_entries(world: World) -> list[tuple[str, str]]:
     goods = len(LEGAL_COMMODITIES) + sum(1 for c in CONTRABAND_COMMODITIES
                                          if world.here.economy == "Haven" or world.save.cargo.get(c, 0) > 0)
@@ -10608,6 +10642,8 @@ def deck_service_entries(world: World) -> list[tuple[str, str]]:
                ("O", "Display"), ("Q", "Disembark")]
     if dispatch_order(world) is not None:
         entries.insert(len(entries) - 2, ("J", "Dispatch"))
+    day = world.save.turn
+    entries = [(key, label) for key, label in entries if deck_service_day(world, key) <= day]
     if landmark_available_here(world):
         label = world.landmark["label"].removeprefix("the ")
         entries.append(("L", label[:1].upper() + label[1:]))
@@ -14845,8 +14881,13 @@ def journey_resumed_lines(world: World) -> list[str]:
 
 
 def pilot_guide_lines(world: World) -> list[str]:
-    lines = ["Use [B] Back to return to the station deck before using its market, yard or chart commands.",
-             "Your ship is your livelihood. Supply outlying stations, build capital, and choose what kind of pilot to become."]
+    # What the game is, then how a turn works; it used to open on how to press Back.
+    lines = ["Your ship is your livelihood. Buy where a thing is made, fly a day, sell where it is wanted, and build the "
+             "ship and the career you want.",
+             "A jump is a turn: trading, upgrades and browsing cost no time. [B] goes back to the station deck from any screen."]
+    if not world.save.pilot.retirements and world.save.turn < max(DECK_SERVICE_DAY.values()):
+        lines.append("The deck fills in as you fly: [T] Ledger, [V] Viewport and [H] Hall of Fame after your first jump; "
+                     "[P] Concord, [W] Blackwake and [N] Archive after your third. Their keys answer from the start.")
     lines += pilot_recap(world)
     active = next((m for m in world.save.active_missions if m.opening_assignment), None)
     if active is not None:
@@ -14868,6 +14909,9 @@ def pilot_guide_lines(world: World) -> list[str]:
         "4. Deliver a contract by docking with its full cargo. Ordinary trading instead uses [M] Market, commodity letter, [S] Sell, and Enter sells all your spare cargo. Sales pay less than the local buy quote, and your own buying never raises what a station pays; distant prices can change.",
         f"5. First upgrade: [Y] Yard, [{YARD_LETTERS[list(UPGRADES).index('cargo')]}] Cargo Bay Expansion adds 8 cargo spaces. [{YARD_LETTERS[list(UPGRADES).index('hull')]}] Hull Reinforcement adds 35 maximum hull. Keep travel money before investing.",
         f"Your next cargo tier costs {UPGRADES['cargo']['cost'](world.save.ship.cargo_tier):,} cr." if world.save.ship.cargo_tier < UPGRADES['cargo']['max_tier'] else "Your cargo upgrades are complete.",
+        # Everything above is a first flight. What follows is reference for the
+        # days after it, and says so: the guide was one undivided run of rules.
+        section("ONCE YOU HAVE FLOWN A FEW DAYS"),
         "Danger is a risk rating, not a guarantee you can win a fight. Evasion can fail; bribes cost credits and can be refused. Read the encounter choices before acting.",
         "About three systems in five have a market of their own: one good in standing surplus, sold cheap, or in standing shortage, bought dear. The chart shows a ? until you have docked there, and the trait after.",
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
@@ -16929,6 +16973,9 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
                      + (f"; crew wages {wages}cr." if wages else ".")
                      + f" {world.save.pilot.credits:,}cr on hand.")
         lines.extend(wage_messages)
+        arrived = deck_services_arriving(world)
+        if arrived:
+            lines.append("New on the deck: " + ", ".join(f"[{key}] {label}" for key, label in arrived) + ".")
         was_discovered = dest.discovered
         dest.discovered = True
         if not was_discovered:

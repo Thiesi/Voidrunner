@@ -714,7 +714,14 @@ def test_screen_blackwake_made_grants_perk_and_bonus_on_confirmation(monkeypatch
 
 
 def test_station_menu_always_offers_faction_contacts(monkeypatch):
+    """Whatever the pilot's standing. A first career's deck brings them on its
+    third day (the staged opening); their keys answer from the first."""
     world = _world_with_seed(189)
+    assert [key for key in "PW" if key in dict(vr.deck_service_entries(world))] == []
+    monkeypatch.setattr(vr, "read_key", lambda: "P")
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert vr.screen_station_menu(vr.Palette(truecolor=False), world) == "P"
+    world.save.turn = 3
     monkeypatch.setattr(vr, "read_key", lambda: "Q")
 
     buf = io.StringIO()

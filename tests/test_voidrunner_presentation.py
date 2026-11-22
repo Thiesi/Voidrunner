@@ -380,8 +380,9 @@ def test_station_deck_pages_keep_telemetry_actions_and_exit_visible(monkeypatch,
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):assert vr.screen_station_menu(vr.Palette(False),world)=="Q"
     text=page_text(frames)
-    for phrase in ("FREEPORT ANCHORAGE", "CRITICAL HULL", "Contraband aboard", "Regional supply disruption", "Wages unaffordable", "2/24", "[M]", "[Y]", "[B]", "[C]", "[S]", "[H]", "[G]", "[T]"):
+    for phrase in ("FREEPORT ANCHORAGE", "CRITICAL HULL", "Contraband aboard", "Regional supply disruption", "Wages unaffordable", "2/24", "[M]", "[Y]", "[B]", "[C]", "[S]", "[G]", "[T]"):
         assert phrase in text
+    assert "[H]" not in text  # day zero of a first career: the Hall arrives after the first jump
     if expanded:assert "charted" in text and "Crew" in text
     assert world.save.to_dict()==before
 
