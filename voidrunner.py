@@ -3127,6 +3127,75 @@ def _nudge_drift(world: World, system_id: int, commodity: str, delta: float) -> 
     table[commodity] = max(0.6, min(1.6, current + delta))
 
 
+# ---------------------------------------------------------------------------
+# Station stakes (review, v1.3). By about day 45 of a trading career every
+# upgrade and both refits are bought, and the top rank is another seventy-five
+# jumps of the same runs with nothing to work toward (the #405 note above
+# `RANKS` says as much). A stake is something to own: a share in a station's
+# yards, bought in three steps at up to three stations, 315,000cr in all.
+#
+# What it buys is the one thing that throttles a route flown again and again:
+# a station's stock and demand come back two, three and four times as fast for
+# a pilot who holds one, two or three steps there. A pair of staked stations
+# is a lane that keeps paying; it does not out-earn touring the galaxy, it is
+# another way to fly. Big hulls, which the pools used to cap, have a use for it.
+#
+# Nothing new is saved. A step bought is a flag (`stake_<system>_<step>`), and
+# a career's flags are a set of names an older build keeps whole. The pools
+# themselves keep their ceilings -- only how fast they refill changes -- so
+# every stored figure stays inside what any build will load.
+# ---------------------------------------------------------------------------
+STAKE_COSTS = (15_000, 30_000, 60_000)
+STAKE_MAX_STATIONS = 3
+
+
+def stake_level(save: SaveData, system_id: int) -> int:
+    """Steps of stake a career holds at a station: 0 to 3."""
+    return sum(1 for step in range(1, len(STAKE_COSTS) + 1) if save.flags.get(f"stake_{system_id}_{step}"))
+
+
+def stakes(save: SaveData) -> dict[int, int]:
+    """Every station the career holds a stake at, by system id, with its level."""
+    held: dict[int, int] = {}
+    for name, bought in save.flags.items():
+        parts = name.split("_")
+        if bought and len(parts) == 3 and parts[0] == "stake" and parts[1].isdecimal() and parts[2].isdecimal():
+            held[int(parts[1])] = stake_level(save, int(parts[1]))
+    return {system_id: level for system_id, level in sorted(held.items()) if level}
+
+
+def stake_blocker(world: World) -> str | None:
+    """Why the next step cannot be bought here, or None when it can."""
+    here, save = world.here.id, world.save
+    level = stake_level(save, here)
+    if save.pending_travel is not None:
+        return "Finish the journey before investing."
+    if level >= len(STAKE_COSTS):
+        return "You hold every step this station offers."
+    if not level and len(stakes(save)) >= STAKE_MAX_STATIONS:
+        return f"A pilot may hold stakes at {STAKE_MAX_STATIONS} stations."
+    if save.pilot.credits < STAKE_COSTS[level]:
+        return f"The next step costs {STAKE_COSTS[level]:,}cr."
+    return None
+
+
+def buy_stake(world: World) -> str:
+    """Buy the next step of stake at this station."""
+    blocker = stake_blocker(world)
+    if blocker is not None:
+        raise TradeError(blocker)
+    here = world.here
+    level = stake_level(world.save, here.id) + 1
+    world.save.pilot.credits -= STAKE_COSTS[level - 1]
+    world.save.flags[f"stake_{here.id}_{level}"] = True
+    world.save.pilot.highlight(f"Bought a stake in {here.station_name}." if level == 1
+                               else f"Raised the stake in {here.station_name} to step {level}.")
+    world.save.pilot.note(f"Stake in {here.station_name}, step {level}: -{STAKE_COSTS[level - 1]}cr.")
+    world.wire("stake", f"bought into {here.station_name}" if level == 1 else f"raised a stake in {here.station_name}")
+    return (f"Stake in {here.station_name}, step {level} of {len(STAKE_COSTS)}: "
+            f"its stock and demand return {level + 1} times as fast for you.")
+
+
 def market_depth_limits(economy: str, commodity: str) -> dict[str, int]:
     """Public spot-market ceilings and replenishment per game day."""
     stock_rate = 6 if commodity in ECONOMY_PRODUCES[economy] else 3
@@ -3138,6 +3207,9 @@ def market_depth_limits(economy: str, commodity: str) -> dict[str, int]:
 def market_depth_quote(world: World, system_id: int, commodity: str) -> dict[str, int]:
     """Read-only lazy replenishment; neither browsing nor restart creates stock."""
     limits = market_depth_limits(world.by_id[system_id].economy, commodity)
+    # A stake brings stock and demand back faster; the ceilings are the station's.
+    faster = 1 + stake_level(world.save, system_id)
+    limits.update(stock_rate=limits["stock_rate"] * faster, demand_rate=limits["demand_rate"] * faster)
     stored = world.save.market_depth.get(system_id, {}).get(commodity)
     elapsed = world.save.turn - stored["day"] if stored is not None else 0
     return {**limits, "day": world.save.turn,
@@ -5039,6 +5111,9 @@ ACCOLADES: tuple[Accolade, ...] = tuple([
     Accolade("story_concord", "Factions", "For the Concord", "Finish the Concord story.", "story_concord"),
     Accolade("story_blackwake", "Factions", "Family Business", "Finish the Blackwake story.", "story_blackwake"),
     Accolade("archive", "Factions", "Archivist", "Complete Mara Venn's archive assignment.", "archive", tier=2),
+    Accolade("stake_1", "Wealth", "Shareholder", "Buy a stake in a station.", "stake_steps", tier=2),
+    Accolade("stake_lane", "Wealth", "Lane Baron", "Hold every step of stake at three stations.", "stake_steps",
+             len(STAKE_COSTS) * STAKE_MAX_STATIONS),
     Accolade("module_max", "Ship", "Top of the Line", "Upgrade one ship module to its highest tier.", "modules_maxed", tier=2),
     Accolade("modules_all", "Ship", "No Expense Spared", "Upgrade every ship module to its highest tier.",
              "modules_maxed", len(UPGRADES)),
@@ -5111,6 +5186,7 @@ def accolade_metrics(save: SaveData) -> dict[str, int]:
         modules_maxed=sum(1 for key, upgrade in UPGRADES.items()
                           if getattr(save.ship, key + "_tier") >= upgrade["max_tier"]),
         full_crew=int(save.ship.has_gunner and save.ship.has_engineer and save.ship.has_navigator),
+        stake_steps=sum(stakes(save).values()),
         carrier=int("Carrier" in flown),
         hulls=len(flown & set(HULL_CLASSES)),
         **{f"finale_{key}": int(key in finales) for key in CAREER_FINALES},
@@ -5933,7 +6009,7 @@ WIRE_TEXT_MAX = 60          # a predicate, not a paragraph
 WIRE_DECK_DAYS = 14         # older than this is not news for the deck
 WIRE_REFRESH_SECONDS = 60
 WIRE_PAGE_ITEMS = 8         # what the Dispatch page lists
-WIRE_KINDS = ("rank", "award", "retired", "dispatch", "lost")
+WIRE_KINDS = ("rank", "award", "retired", "dispatch", "lost", "stake")
 
 
 def _score_wire(data) -> list[dict] | None:
@@ -6344,7 +6420,7 @@ def letter_span(letters: list[str]) -> str:
 CHART_RESERVED_LETTERS = BACK_KEY + "SGVRQ"
 
 
-MARKET_LETTERS = choice_letters("XQ")
+MARKET_LETTERS = choice_letters("XQK")  # K is the market's Stake
 YARD_LETTERS = choice_letters("RPKSVUQ")
 CREW_LETTERS = choice_letters("Q")
 
@@ -12061,6 +12137,8 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
     trait = world.traits.get(system.id)
     if trait is not None:
         head += "   " + badge(trait_label(trait).upper(), "good" if trait["kind"] == "surplus" else "caution")
+    if stake_level(world.save, system.id):
+        head += "   " + badge(f"STAKE {stake_level(world.save, system.id)}/{len(STAKE_COSTS)}", "brand")
     lines = [head]
     rows, styles = [], []
     needs = mission_cargo_needs(world)
@@ -12156,9 +12234,14 @@ def screen_market(p: Palette, world: World) -> None:
         goods = LEGAL_COMMODITIES + [c for c in CONTRABAND_COMMODITIES if world.here.economy == "Haven" or world.save.cargo.get(c, 0) > 0]
         lines = market_catalog_lines(world, goods)
         if result: set_status(result); result = None  # handed over once (#42 review)
-        footer = f"[<] Prev [>] Next [{letter_span(MARKET_LETTERS[:len(goods)])}] Trade [X] Futures [B] Back: "
+        footer = f"[<] Prev [>] Next [{letter_span(MARKET_LETTERS[:len(goods)])}] Trade [X] Futures [K] Stake [B] Back: "
         key, page, count = _draw_service_page(p, f"Market: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return
+        if key == "K":
+            response = screen_stake(p, world)
+            if response is not None: result = response
+            page = 0
+            continue
         if (moved := page_step(key, page, count)) is not None:
             page = moved
             continue
@@ -12172,6 +12255,59 @@ def screen_market(p: Palette, world: World) -> None:
         if 0 <= idx < len(goods):
             response = _trade_commodity(p, world, goods[idx])
             if response is not None: result, page = response, 0
+
+
+def stake_lines(world: World) -> list[str]:
+    """A station's stake as a sheet: what the next step costs and buys, and
+    what the career already holds."""
+    p = pal()
+    here, save = world.here, world.save
+    level = stake_level(save, here.id)
+    blocker = stake_blocker(world)
+    lines = [f"{p.ink}{BOLD}{here.station_name}{RESET} {p.deep}{glyph('dot')}{RESET} {p.slate}a share in its yards{RESET}",
+             section("THIS STATION")]
+    held = f"{gauge(level, len(STAKE_COSTS), len(STAKE_COSTS) * 2, tone='brand')} step {level} of {len(STAKE_COSTS)}"
+    rows = [("HELD", held if level else "none", None),
+            ("RETURN", f"stock and demand come back {level + 1} times as fast" if level else "the station's own pace", None)]
+    if level < len(STAKE_COSTS):
+        rows.append(("NEXT", f"step {level + 1} for {p.gold}{STAKE_COSTS[level]:,}cr{p.ink}: {level + 2} times as fast",
+                     "bad" if blocker else "good"))
+    lines += _sheet_rows(rows)
+    lines.append(section("YOUR STAKES"))
+    held_all = stakes(save)
+    if held_all:
+        lines += table(["STATION", "ECONOMY", "STEP", "RETURN"],
+                       [[_mission_plain(world.by_id[sid].station_name), world.by_id[sid].economy,
+                         f"{step}/{len(STAKE_COSTS)}", f"x{step + 1}"] for sid, step in held_all.items()], "lllr")
+    else:
+        lines.append(f"None yet. A pilot may hold stakes at {STAKE_MAX_STATIONS} stations, three steps at each.")
+    lines.append(section("NEXT"))
+    lines.append(blocker if blocker else "[P] Purchase the next step after final confirmation.")
+    lines.append("A stake does not change a price or a station's ceilings: it brings back what you bought and sold "
+                 "sooner, so a route flown again and again keeps paying. Stakes belong to this career.")
+    return lines
+
+
+def screen_stake(p: Palette, world: World) -> str | None:
+    page, said = 0, None
+    while True:
+        available = stake_blocker(world) is None
+        key, page, count = _draw_service_page(p, f"Station Stake: {world.save.pilot.credits:,}cr", stake_lines(world),
+                                              "[P] Purchase [<>] Page [B] Back: " if available else "[<>] Page [B] Back: ", page)
+        if key in ("B", "Q"):
+            return said
+        if (moved := page_step(key, page, count)) is not None:
+            page = moved
+            continue
+        if key != "P" or not available:
+            continue
+        level = stake_level(world.save, world.here.id)
+        if not confirm(f"Buy step {level + 1} of a stake in {world.here.station_name} for {STAKE_COSTS[level]:,}cr?", p):
+            continue
+        said = buy_stake(world)
+        world.commit()
+        set_status(said, "good")
+        page = 0
 
 
 def screen_futures(p: Palette, world: World, goods: list[str]) -> str | None:
@@ -14703,6 +14839,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
         "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
         "Ranks are kept once reached, and each brings something: a fourth contract slot at Independent Trader, a 10% premium on every contract at Merchant Captain, a fifth slot at Void Baron and a 20% premium at Legend of the Frontier.",
+        "Once the ship is built there is something to own: [K] Stake in any market buys a share in that station, in three steps at up to three stations. Its stock and demand come back two, three and four times as fast for you, so a route you fly again and again keeps paying.",
         "The Mission Board ([B] on the station deck) shows full contract terms, tracking and abandonment. [G] Guide keeps this recap available. On every other screen [B] is Back; [Q] on the station deck saves and leaves the game.",
     ]
     if dispatch_order(world) is not None:
