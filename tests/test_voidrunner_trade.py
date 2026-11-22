@@ -49,7 +49,10 @@ def test_market_memory_observes_locally_and_stays_stale_until_revisited(tmp_path
     world.save.current_system = destination
     world.checkpoint()
     assert world.save.market_memory[destination]["food"]["day"] == 7
-    assert world.save.market_memory[destination]["food"]["sell"] != initial["food"]["sell"]
+    # The drift went up, which is the pilot's own buying: it moves what the
+    # station asks and never what it pays.
+    assert world.save.market_memory[destination]["food"]["buy"] != initial["food"]["buy"]
+    assert world.save.market_memory[destination]["food"]["sell"] == initial["food"]["sell"]
 
 
 def test_market_memory_does_not_invent_history_from_legacy_discoveries():
@@ -414,7 +417,7 @@ def test_trading_ledger_preserves_fifo_costs_across_a_restart(tmp_path):
     vr.persist(world, tmp_path, 77)
     save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
     world = vr.World(save)
-    unit = round(vr.price_for(world, 0, "food") * vr.SELL_SPREAD)
+    unit = vr.sell_price_for(world, 0, "food")
     vr.trade_cargo(world, "food", 3, buying=False)
     ledger = world.save.trading_ledger
     assert ledger.sales_revenue == 3 * unit and ledger.sales_cost == first_cost
@@ -586,7 +589,7 @@ def test_trading_ledger_real_purchases_and_sales_survive_kill_without_duplicate_
         bought, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert bought.cargo_basis == {"food": [[3, cost]]}
         assert bought.market_depth[0]["food"] == {"day": 0, "stock": 45, "demand": 96}
-    unit = round(vr.price_for(vr.World(bought), 0, "food") * vr.SELL_SPREAD)
+    unit = vr.sell_price_for(vr.World(bought), 0, "food")
     with _door_stopped_at(tmp_path, b"M" + key + b"S2\n", b"Sold 2x"):
         sold, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert sold.cargo_basis == {"food": [[1, cost // 3]]}
@@ -3470,3 +3473,57 @@ def test_every_fuel_figure_follows_the_one_fuel_price(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr._refuel(vr.Palette(False), world)
     assert "7cr/unit" in plain(output.getvalue()) and world.save.ship.fuel == 10 and world.save.pilot.credits == 0
+
+
+# --- a pilot's own trading never moves a price in the pilot's favor (review, v1.3) ---
+
+@pytest.mark.parametrize("commodity", ["machinery", "electronics", "medicine", "food"])
+@pytest.mark.parametrize("lot", [1, 5, 12])
+def test_buying_in_small_lots_and_selling_the_lot_never_pays(commodity, lot):
+    """Every order moved the quote by up to 5% and a lot traded at the price
+    before it, so this used to pay about a thousand credits a station."""
+    world = _world_with_seed(42)
+    world.save.pilot.credits = start = 50_000
+    world.save.ship.hull_class = "Freighter"
+    while True:
+        room = vr.cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
+        stock = vr.market_depth_quote(world, 0, commodity)["stock"]
+        count = min(lot, room, stock)
+        if count <= 0:
+            break
+        vr.trade_cargo(world, commodity, count, buying=True)
+    held = world.save.cargo[commodity]
+    vr.trade_cargo(world, commodity, min(held, vr.market_depth_quote(world, 0, commodity)["demand"]), buying=False)
+    left = world.save.cargo.get(commodity, 0)
+    assert world.save.pilot.credits + left * vr.sell_price_for(world, 0, commodity) < start
+
+
+def test_selling_in_small_lots_and_buying_the_lot_back_never_pays():
+    world = _world_with_seed(42)
+    _set_cargo(world, {"electronics": 40})
+    world.save.ship.hull_class = "Freighter"
+    world.save.pilot.credits = start = 50_000
+    asked = vr.price_for(world, 0, "electronics")
+    for _ in range(8):
+        vr.trade_cargo(world, "electronics", 5, buying=False)
+    # The station pays less for every lot; what it asks has not moved.
+    assert vr.sell_price_for(world, 0, "electronics") < round(asked * vr.SELL_SPREAD)
+    assert vr.price_for(world, 0, "electronics") == asked
+    vr.trade_cargo(world, "electronics", 40, buying=True)
+    assert world.save.pilot.credits < start and world.save.cargo["electronics"] == 40
+
+
+def test_an_untouched_market_and_an_event_price_both_sides_alike():
+    world = _world_with_seed(42)
+    for commodity in vr.LEGAL_COMMODITIES:
+        assert vr.sell_price_for(world, 0, commodity) == round(vr.price_for(world, 0, commodity) * vr.SELL_SPREAD)
+    calm = vr.price_for(world, 0, "food")
+    world.save.active_event = {"economy": "Industrial", "commodity": "food", "direction": "boom", "turns_remaining": 5,
+                               "description": "Food prices spike", "system_ids": [0]}
+    world.save.market_drift.setdefault(0, {})["food"] = vr.ECONOMY_EVENT_BOOM_LEVEL
+    assert vr.price_for(world, 0, "food") > calm
+    assert vr.sell_price_for(world, 0, "food") == round(vr.price_for(world, 0, "food") * vr.SELL_SPREAD)
+    world.save.active_event["direction"] = "crash"
+    world.save.market_drift[0]["food"] = vr.ECONOMY_EVENT_CRASH_LEVEL
+    assert vr.price_for(world, 0, "food") < calm
+    assert vr.sell_price_for(world, 0, "food") == round(vr.price_for(world, 0, "food") * vr.SELL_SPREAD)
