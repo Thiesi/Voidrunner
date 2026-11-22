@@ -1208,10 +1208,11 @@ def test_combat_lines_name_the_escort_at_stake_only_during_escort_fights():
     world, mission = _escort_world("escaped"); world.save.pilot.credits = 10_000
     _set_cargo(world, {"food": 1})  # Dump is only offered with something to dump (#414)
     lines = [vr._mission_plain(row) for row in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=vr.new_tactics(pirate))]
-    evade = next(row for row in lines if row.startswith("[E]")); dump = next(row for row in lines if row.startswith("[D]"))
-    bribe = next(row for row in lines if row.startswith("[P]"))
-    assert evade.endswith("Escaping fails the escort contract.") and dump.endswith("Escaping fails the escort contract.")
-    assert bribe.endswith("An accepted bribe fails the escort contract.")
+    # One alert under the options table, not a clause on three of its rows.
+    stake = [row for row in lines if "fails the escort contract" in row]
+    assert len(stake) == 1 and "ESCORT" in stake[0] and "escaping" in stake[0] and "bribe" in stake[0]
+    options = next(number for number, row in enumerate(lines) if row.startswith("[F]"))
+    assert lines.index(stake[0]) > options
 
 
 @pytest.mark.parametrize("paid_jumps,expected", [(0, 3), (5, 3), (15, 2), (30, 2)])
@@ -1742,8 +1743,12 @@ def test_combat_rows_name_whose_pattern_it_is_and_say_guard_plainly():
     pirate = vr.Pirate("Ravage", 2, 200, 200)
     tactics = {"version": 1, "profile": "Bulwark", "step": 0, "brace_ready": True}
     rows = [plain(line) for line in vr.combat_display_lines(world, pirate, [], patrol=False, tactics=tactics, details=True)]
-    assert any(row.startswith("Ravage flies Bulwark; intent COVER") for row in rows)
-    assert any(row.startswith("[G] Guard: your shot at 55%, incoming ") for row in rows)
+    # The pattern is named for what it is, with the move it makes next picked
+    # out of its cycle; "Bulwark intent COVER" under "Ravage" read as a second
+    # contact (#648), and the profile's name before its own steps cannot.
+    assert any(re.match(r"Bulwark\s+COVER > volley > recover\s+incoming \d", row) for row in rows)
+    assert any(re.match(r"\[G\] Guard\s+deal \d+(-\d+)?\s+take \d", row) for row in rows)
+    assert any("Guard: your shot at 55%" in row for row in rows)  # the sentence is on the Info page
     assert "Bulwark pattern: cover > volley > recover." in rows
     assert not any(re.search(r"\b(\d+)-\1\b", row) for row in rows)
 
