@@ -2485,6 +2485,12 @@ class World:
         # Told what each saved commit earned; bound by the executable, after
         # the launch checkpoint. Like the storage binding, a reset keeps it.
         self.reporter: Callable[[World, list[str], list[Accolade]], None] | None = None
+        # The calendar the daily dispatch reads, bound by the executable like
+        # the reporter. None, as in every domain-only world, is no dispatch.
+        self.dispatch_clock: Callable[[], int | None] | None = None
+        # What this session did that the board's wire should carry; written
+        # into the pilot's own score record by the next save.
+        self.wire_events: list[dict] = []
         self.reset(save)
 
     def advance_station_state(self) -> None:
@@ -2516,6 +2522,7 @@ class World:
         this market's stock and price move.
         """
         self.sync_discovered()
+        check_dispatch(self)  # before the rank and the accolades its reward may earn
         promoted = check_rank_up(self)
         earned = unlock_accolades(self.save)
         remember_local_market(self)  # no-op mid-journey; `remember_local_market` checks
@@ -2535,6 +2542,10 @@ class World:
             self.pending_promotions.append(promoted)
         self.pending_accolades.extend(earned)
         self.report_earned([promoted] if promoted else [], earned)
+
+    def wire(self, kind: str, text: str) -> None:
+        """Note something the board's wire should carry about this pilot."""
+        self.wire_events.append({"at": int(time.time()), "kind": kind, "text": text})
 
     def report_earned(self, promotions: list[str], accolades: list[Accolade]) -> None:
         """Tell the bound reporter (NetBBS game events) what a saved action earned."""
@@ -2588,6 +2599,10 @@ class World:
         self.ship_destroyed_this_hop = bool(
             save.pending_travel and save.pending_travel["destroyed"]
         )
+        # The daily dispatch watches what a commit changed: this session's
+        # sales, and the counters as the last commit left them.
+        self.dispatch_sales: list[tuple[str, int, int, str]] = []
+        self.dispatch_marks = _dispatch_marks(self)
 
     @property
     def here(self) -> GalaxySystem:
@@ -3319,6 +3334,7 @@ def trade_cargo(world: World, commodity: str, quantity: int, *, buying: bool) ->
     if quantity > depth["demand"]:
         raise TradeError(f"Station can buy {depth['demand']} units; demand replenishes {depth['demand_rate']}/day.")
     total = quantity * sell_price_for(world, world.here.id, commodity)
+    world.dispatch_sales.append((commodity, quantity, total, world.here.economy))
     _consume_market_depth(world, commodity, quantity, buying=False)
     world.save.pilot.credits += total
     _dispose_cargo(world, commodity, quantity, proceeds=total, kind="sale")
@@ -4727,8 +4743,9 @@ ACCOLADE_VERSION = 1
 # counts and committed with it, so a resumed hop cannot count it twice.
 ACCOLADE_COUNTERS = ("squadrons", "flawless", "giant_slayer", "close_calls", "escapes", "raider_bribes",
                      "patrol_kills", "wrong_bounties", "deliveries", "surveys", "bounties", "escorts",
-                     "distress", "derelicts", "ships_lost", "tows", "busts", "customs_bribes")
-ACCOLADE_GROUPS = ("Travel", "Exploration", "Combat", "Contracts", "Encounters", "Trading", "Wealth",
+                     "distress", "derelicts", "ships_lost", "tows", "busts", "customs_bribes",
+                     "dispatches", "dispatch_best")
+ACCOLADE_GROUPS = ("Travel", "Exploration", "Combat", "Contracts", "Dispatch", "Encounters", "Trading", "Wealth",
                    "Ranks", "Factions", "Ship", "Legacy", "Misfortune")
 # The id pattern a newer build's accolade may use; this build keeps those it
 # does not know rather than discarding what it cannot read.
@@ -4784,6 +4801,12 @@ ACCOLADES: tuple[Accolade, ...] = tuple([
     Accolade("escorts_10", "Contracts", "Shepherd", "Complete 10 escort contracts.", "escorts", 10, tier=2),
     Accolade("wrong_bounty", "Contracts", "Wrong Guy", "Destroy the wrong bounty target.", "wrong_bounties",
              tier=1, hidden=True),
+    *_ladder("dispatch", "Dispatch", "dispatches", ((1, "On the Wire", "Fly a daily dispatch."),
+                                                     (10, "Regular", "Fly {n} daily dispatches."),
+                                                     (50, "Dispatch Rider", "Fly {n} daily dispatches.")), ""),
+    *_ladder("streak", "Dispatch", "dispatch_best", ((3, "Three in a Row", "Fly the daily dispatch {n} days running."),
+                                                     (7, "Full Week", "Fly the daily dispatch {n} days running."),
+                                                     (30, "Clockwork", "Fly the daily dispatch {n} days running.")), ""),
     Accolade("distress_1", "Encounters", "Good Samaritan", "Answer a distress call.", "distress", tier=1),
     Accolade("distress_10", "Encounters", "Guardian Angel", "Answer 10 distress calls.", "distress", 10),
     Accolade("derelicts_1", "Encounters", "Scavenger", "Salvage a derelict hulk.", "derelicts", tier=1),
@@ -4938,6 +4961,194 @@ def _validate_accolades(value, retirements: int) -> None:
     if len(set(hulls)) != len(hulls) or any(not isinstance(hull, str) or hull not in HULL_CLASSES
                                             for hull in hulls):
         raise ValueError("invalid accolade hulls")
+
+
+# ---------------------------------------------------------------------------
+# The daily dispatch (review, v1.3). One order a real day, the same for every
+# pilot on every board, drawn from the date alone: sell this at that kind of
+# station, win a fight, finish a contract, chart a system. It is the one thing
+# two callers with two private galaxies can both be asked, and the first thing
+# in the game that is different tomorrow.
+#
+# A pilot does not accept it. Doing what it asks today, in the ordinary course
+# of play, flies it: the commit that saves the sale or the kill pays the reward
+# and extends the streak, so a resumed session cannot fly it twice.
+#
+# Nothing new is saved for it. The account's dispatch record -- the day last
+# flown, the streak, the best streak, when -- is five integers among the
+# accolade counters, which already ride through retirement and which an older
+# build keeps even where it does not know them. So the save format is the one
+# it was, and a board's score records carry the same five for the Hall.
+#
+# The door reads the calendar only for the date, and only where the executable
+# has bound a clock (`World.dispatch_clock`): a domain-only world has no
+# dispatch, which is what keeps every other test the same on every day of the
+# year. `DOOR_DISPATCH=0` switches it off for a board; `DOOR_DISPATCH=2026-11-22`
+# pins the day, for a gallery whose panels have to compare.
+# ---------------------------------------------------------------------------
+
+DISPATCH_HAUL_UNITS = 12          # fits a starting Shuttle's hold twice over
+DISPATCH_SALE_VALUE = 2000        # a Shuttle's hold of Machinery where it is wanted
+DISPATCH_REWARD_BASE, DISPATCH_REWARD_PER_RANK = 600, 400
+DISPATCH_STREAK_BONUS, DISPATCH_STREAK_CAP = 0.1, 5
+#: The account's dispatch record among the accolade counters: the last day
+#: flown (a date's ordinal), the streak as of that day, and when (epoch seconds).
+DISPATCH_FIELDS = ("dispatch_day", "dispatch_streak", "dispatch_at")
+#: A week's orders: three hauls of different goods and one of each other kind.
+_DISPATCH_WEEK = ("haul", "haul", "haul", "sale", "kill", "contract", "chart")
+
+
+def _dispatch_hauls() -> list[tuple[str, str]]:
+    """(commodity, economy) for every legal good a lawful economy pays up for."""
+    return sorted((commodity, economy) for economy, goods in ECONOMY_DEMANDS.items() if economy != "Haven"
+                  for commodity in goods if COMMODITIES[commodity]["legal"])
+
+
+@functools.lru_cache(maxsize=8)
+def _dispatch_week(week: int) -> tuple[tuple, ...]:
+    """One week's seven orders, shuffled by the week's number: every kind of
+    order comes round every week, and a week never asks for the same haul
+    twice. Drawn a day at a time, a fortnight came out as seven fights."""
+    rng = random.Random(f"dispatch-week:{week}")
+    hauls = iter(rng.sample(_dispatch_hauls(), _DISPATCH_WEEK.count("haul")))
+    orders = [(kind, *next(hauls)) if kind == "haul" else (kind,) for kind in _DISPATCH_WEEK]
+    rng.shuffle(orders)
+    return tuple(orders)
+
+
+def daily_dispatch(day: int) -> dict:
+    """The order for `day` (a date's ordinal), from the day alone."""
+    week, slot = divmod(day, 7)
+    orders = list(_dispatch_week(week))
+    if orders[0] == _dispatch_week(week - 1)[-1]:
+        # Sunday's order is not Saturday's over again. A week's last order is
+        # never one of the two swapped, so this needs no look further back.
+        orders[0], orders[1] = orders[1], orders[0]
+    kind, *haul = orders[slot]
+    order: dict = {"day": day, "kind": kind}
+    if haul:
+        order["commodity"], order["economy"] = haul
+    return order
+
+
+def dispatch_text(order: dict, *, short: bool = False) -> str:
+    """An order as the sentence a pilot is given; `short` is the deck's row,
+    which leaves "in one sale" to the Dispatch page."""
+    kind = order["kind"]
+    if kind == "haul":
+        economy = order["economy"]
+        article = "an" if economy[0] in "AEIOU" else "a"
+        return (f"Sell {DISPATCH_HAUL_UNITS}+ {COMMODITIES[order['commodity']]['label']} "
+                f"{'' if short else 'in one sale '}at {article} {economy} station")
+    return {"sale": f"Make one sale worth {DISPATCH_SALE_VALUE:,}cr or more", "kill": "Win a fight",
+            "contract": "Complete a contract", "chart": "Chart a new system"}[kind]
+
+
+def dispatch_setting() -> str:
+    """`DOOR_DISPATCH`: "" (live), "off", or a pinned ISO date."""
+    value = os.environ.get("DOOR_DISPATCH", "").strip().lower()
+    return "off" if value in ("0", "off", "no", "false") else value
+
+
+def dispatch_day() -> int | None:
+    """Today on the node's calendar as a date's ordinal; a pinned day where the
+    SysOp or a gallery pinned one; None where the dispatch is switched off."""
+    setting = dispatch_setting()
+    if setting == "off":
+        return None
+    if setting:
+        try:
+            return datetime.strptime(setting, "%Y-%m-%d").date().toordinal()
+        except ValueError:
+            return None  # an unreadable pin is off, not a guess at a day
+    now = datetime.now(_NODE_ZONE) if _NODE_ZONE is not None else datetime.now()
+    return now.date().toordinal()
+
+
+def dispatch_record(save: SaveData) -> dict:
+    """The account's dispatch record: day last flown, streak then, best, total, when."""
+    counters = (save.accolades or {}).get("counters", {})
+    return {"day": counters.get("dispatch_day", 0), "streak": counters.get("dispatch_streak", 0),
+            "best": counters.get("dispatch_best", 0), "total": counters.get("dispatches", 0),
+            "at": counters.get("dispatch_at", 0)}
+
+
+def dispatch_streak(record: dict, day: int) -> int:
+    """The streak still alive on `day`: one flown today or yesterday."""
+    return record["streak"] if record["day"] >= day - 1 else 0
+
+
+def dispatch_reward(save: SaveData, streak: int) -> int:
+    """What flying today's order pays: more for a higher rank, and a tenth more
+    for each day of an unbroken streak, up to half as much again."""
+    base = DISPATCH_REWARD_BASE + DISPATCH_REWARD_PER_RANK * career_rank_index(save.pilot)
+    return round(base * (1 + DISPATCH_STREAK_BONUS * min(max(0, streak - 1), DISPATCH_STREAK_CAP)))
+
+
+def dispatch_order(world: World) -> dict | None:
+    """Today's order for this pilot, or None where there is no dispatch.
+
+    One order for everybody, with one allowance: a pilot with nothing left to
+    chart is asked for a contract instead, since the order has to be flyable."""
+    day = world.dispatch_clock() if world.dispatch_clock is not None else None
+    if day is None:
+        return None
+    order = daily_dispatch(day)
+    if order["kind"] == "chart" and all(system.discovered for system in world.galaxy):
+        order = dict(order, kind="contract")
+    return order
+
+
+def dispatch_flown(world: World, order: dict | None = None) -> bool:
+    """Whether this account has flown today's order."""
+    order = dispatch_order(world) if order is None else order
+    return order is not None and dispatch_record(world.save)["day"] == order["day"]
+
+
+def _dispatch_marks(world: World) -> tuple[int, int, int]:
+    """What a commit compares against the commit before it: kills, contracts
+    completed and systems charted. Session state; a session starts level."""
+    pilot = world.save.pilot
+    return (pilot.kills, pilot.missions_completed, sum(1 for system in world.galaxy if system.discovered))
+
+
+def check_dispatch(world: World) -> str | None:
+    """Fly today's order if the action being committed did what it asks.
+
+    Called by `World.commit` before the save is written, so the reward and the
+    streak are in the document that records the action that earned them."""
+    sales, world.dispatch_sales = world.dispatch_sales, []
+    before, now = world.dispatch_marks, _dispatch_marks(world)
+    world.dispatch_marks = now
+    order = dispatch_order(world)
+    if order is None or dispatch_flown(world, order):
+        return None
+    kind = order["kind"]
+    met = ((kind == "kill" and now[0] > before[0]) or (kind == "contract" and now[1] > before[1])
+           or (kind == "chart" and now[2] > before[2])
+           or (kind == "sale" and any(total >= DISPATCH_SALE_VALUE for _, _, total, _ in sales))
+           or (kind == "haul" and any(commodity == order["commodity"] and economy == order["economy"]
+                                      and quantity >= DISPATCH_HAUL_UNITS
+                                      for commodity, quantity, _, economy in sales)))
+    return fly_dispatch(world, order) if met else None
+
+
+def fly_dispatch(world: World, order: dict) -> str:
+    """Record today's order as flown and pay it; returns the line that says so."""
+    record, day = dispatch_record(world.save), order["day"]
+    streak = record["streak"] + 1 if record["day"] == day - 1 else 1
+    reward = dispatch_reward(world.save, streak)
+    counters = _accolade_record(world.save)["counters"]
+    counters.update(dispatch_day=day, dispatch_streak=streak, dispatch_best=max(record["best"], streak),
+                    dispatch_at=int(time.time()))
+    bump_accolade(world.save, "dispatches")
+    world.save.pilot.credits += reward
+    world.save.pilot.note(f"Flew the daily dispatch: +{reward}cr, day {streak} of a streak.")
+    message = (f"Daily dispatch flown: +{reward:,}cr. "
+               + (f"{streak} days running." if streak > 1 else "Fly tomorrow's to start a streak."))
+    report_hop(world, [message])
+    world.wire("dispatch", f"flew the daily dispatch, {streak} {'days' if streak != 1 else 'day'} running")
+    return message
 
 
 # ---------------------------------------------------------------------------
@@ -5407,7 +5618,7 @@ def replace_unsupported_career(save_dir: Path, user_id: int, save: SaveData) -> 
 HALL_OF_FAME_SIZE = 20
 
 SCORE_CATEGORIES = {"wealth": "Wealth", "trading": "Trading", "exploration": "Exploration",
-                    "combat": "Combat", "careers": "Completed careers"}
+                    "combat": "Combat", "careers": "Completed careers", "dispatch": "Daily dispatch"}
 SCORE_CAREER_FIELDS = ("number", "seed", "started", "ended", "finale", "days", "credits",
                        "market_margin", "kills", "missions", "charted")
 
@@ -5492,7 +5703,19 @@ def _score_entry(data, user_id: int | None = None) -> dict | None:
     accolades = _score_accolades(data.get("accolades"))
     if accolades is not None:
         entry["accolades"] = accolades
+    dispatch = _score_dispatch(data.get("dispatch"))
+    if dispatch is not None:
+        entry["dispatch"] = dispatch
     return entry
+
+
+def _score_dispatch(data) -> dict | None:
+    """A pilot's dispatch record as their score record carries it, or None."""
+    fields = ("day", "streak", "best", "total", "at")
+    if (not isinstance(data, dict) or set(data) != set(fields)
+            or any(type(data[key]) is not int or not 0 <= data[key] < 2**63 for key in fields)):
+        return None
+    return {key: data[key] for key in fields}
 
 
 def _score_accolades(data) -> list[str] | None:
@@ -5636,6 +5859,10 @@ def load_hall_of_fame(save_dir: Path) -> list[dict]:
 
 
 def achievement_ranking(entries: list[dict], category: str) -> list[dict]:
+    if category == "dispatch":
+        flown = [entry for entry in entries if entry.get("dispatch", {}).get("total")]
+        return sorted(flown, key=lambda entry: (-entry["dispatch"]["best"], -entry["dispatch"]["total"],
+                                                entry["user_id"]))[:HALL_OF_FAME_SIZE]
     if category in ("wealth", "careers"):
         metric = "best_credits" if category == "wealth" else "retirements"
         candidates = [entry for entry in entries if category == "wealth" or entry[metric] > 0]
@@ -5660,6 +5887,8 @@ def update_hall_of_fame(save_dir: Path, user_id: int, save: SaveData) -> None:
              "kills": pilot.kills, "missions_completed": pilot.missions_completed,
              "achievements": score_achievements(save),
              "accolades": sorted((save.accolades or {}).get("unlocked", {}))}
+    if dispatch_record(save)["total"]:
+        entry["dispatch"] = dispatch_record(save)
     if raw == entry and _score_entry(raw, user_id) == entry:
         return
     try:
@@ -9989,10 +10218,27 @@ def deck_service_entries(world: World) -> list[tuple[str, str]]:
                ("P", "Concord"), ("W", "Blackwake"), ("N", "Archive"),
                ("V", "Viewport"), ("H", "Hall of Fame"), ("G", "Guide"),
                ("O", "Display"), ("Q", "Disembark")]
+    if dispatch_order(world) is not None:
+        entries.insert(len(entries) - 2, ("J", "Dispatch"))
     if landmark_available_here(world):
         label = world.landmark["label"].removeprefix("the ")
         entries.append(("L", label[:1].upper() + label[1:]))
     return entries
+
+
+def dispatch_deck_row(world: World) -> str | None:
+    """The deck's one row about today's order: what it asks and what it pays
+    while it is open, the streak once it is flown. None where there is no
+    dispatch. One row and no rule: the deck's rows are the window's."""
+    order = dispatch_order(world)
+    if order is None:
+        return None
+    record = dispatch_record(world.save)
+    if dispatch_flown(world, order):
+        running = f"{record['streak']} days running; " if record["streak"] > 1 else ""
+        return alert("good", "DISPATCH flown", f"{running}a new order tomorrow")
+    reward = dispatch_reward(world.save, dispatch_streak(record, order["day"]) + 1)
+    return alert("note", "DISPATCH", dispatch_text(order, short=True), gain(f"+{reward:,}cr"))
 
 
 def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
@@ -10008,6 +10254,8 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
     # under the gauges, which is two rows of window at 80x24.
     station, career = status_band(world)
     lines = [station] + ship_gauge_rows(world, lead=[career])
+    if (dispatch := dispatch_deck_row(world)) is not None:
+        lines.append(dispatch)
     alerts = deck_alert_rows(world)
     if alerts:
         lines.append(section("ALERTS"))
@@ -10088,7 +10336,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
         elif choice == "X": expanded, page = not expanded, 0
         # Every key the deck advertises is a key the deck answers -- `K` opens
         # the roster the crew alert names, rather than redrawing (#493 review).
-        elif choice in "MYBCSHGTQKLDPWONV" and len(choice) == 1:
+        elif choice in "MYBCSHGTQKLDPWONVJ" and len(choice) == 1:
             return choice
 
 
@@ -14152,6 +14400,9 @@ def pilot_guide_lines(world: World) -> list[str]:
         "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
         "The Mission Board ([B] on the station deck) shows full contract terms, tracking and abandonment. [G] Guide keeps this recap available. On every other screen [B] is Back; [Q] on the station deck saves and leaves the game.",
     ]
+    if dispatch_order(world) is not None:
+        lines.append("The Daily Dispatch ([J] on the station deck) is one order a day, the same for every pilot on "
+                     "every board. Do what it asks today and it pays, a tenth more for each day in a row.")
     return lines
 
 
@@ -14950,6 +15201,8 @@ def achievement_lines(entries: list[dict], category: str, user_id: int) -> list[
     ranked = achievement_ranking(entries, category)
     if category == "wealth":
         return hall_of_fame_lines(ranked, user_id)
+    if category == "dispatch":
+        return dispatch_ranking_lines(ranked, user_id, dispatch_day())
     lines = [f"Top {plural(len(ranked), 'local pilot' if category == 'careers' else 'local career')} by {SCORE_CATEGORIES[category].lower()}. [YOU] marks your pilot."]
     explanations = []
     if category == "trading":
@@ -14985,6 +15238,77 @@ def achievement_lines(entries: list[dict], category: str, user_id: int) -> list[
     return lines + explanations
 
 
+def _dispatch_table(ranked: list[dict], user_id: int, day: int | None, columns: tuple[str, ...]) -> list[str]:
+    """Pilots and their dispatch records as a table; `columns` picks the figures."""
+    p = pal()
+    rows = []
+    for position, entry in enumerate(ranked, 1):
+        mine = entry["user_id"] == user_id
+        record = entry["dispatch"]
+        handle = _mission_plain(str(entry["handle"]))
+        alive = dispatch_streak(record, day) if day is not None else 0
+        cells = {"STREAK": plural(alive, "day") if alive else f"{p.slate}none{RESET}",
+                 "BEST": plural(record["best"], "day"), "FLOWN": str(record["total"])}
+        rows.append([standing_cell(position), f"{p.plasma}{BOLD}{handle}{RESET}" if mine else f"{p.ink}{handle}{RESET}"]
+                    + [cells[column] for column in columns] + [badge("[YOU]", "brand") if mine else ""])
+    return table(["", "PILOT", *columns, ""], rows, "rl" + "r" * len(columns) + "l")
+
+
+def dispatch_ranking_lines(ranked: list[dict], user_id: int, day: int | None) -> list[str]:
+    """The Hall's dispatch view: the longest streaks this board has flown."""
+    if not ranked:
+        return ["Nobody on this board has flown a daily dispatch yet. One order a day, the same for every pilot: "
+                "[J] on the station deck."]
+    lines = [f"Top {plural(len(ranked), 'pilot')} by longest run of daily dispatches. [YOU] marks your pilot."]
+    lines += _dispatch_table(ranked, user_id, day, ("BEST", "STREAK", "FLOWN"))
+    lines.append("One order a day, the same for every pilot: best is the longest run of days, streak the run still alive.")
+    return lines
+
+
+def dispatch_lines(world: World, entries: list[dict], user_id: int) -> list[str]:
+    """The Dispatch page: today's order, the pilot's record, and who flew today."""
+    p = pal()
+    order = dispatch_order(world)
+    record, day = dispatch_record(world.save), order["day"]
+    flown = dispatch_flown(world, order)
+    streak = dispatch_streak(record, day)
+    reward = dispatch_reward(world.save, streak if flown else streak + 1)
+    status = (("flown today", "good") if flown else
+              ("open: do it today, anywhere, in the ordinary course of play", "info"))
+    lines = [section("TODAY'S ORDER")]
+    lines += _sheet_rows([("ORDER", dispatch_text(order), None),
+                          ("PAYS", f"{p.gold}+{reward:,}cr{p.ink}; a tenth more for each day running, up to half again", None),
+                          ("STATUS", status[0], status[1])])
+    lines.append(section("YOUR RECORD"))
+    running = (f"{gauge(min(streak, 7), 7, 7, tone='good')} {plural(streak, 'day')} running" if streak
+               else "none: fly today's to start one" if not record["total"] else "broken: fly today's to start again")
+    lines += _sheet_rows([("STREAK", running, None), ("BEST", plural(record["best"], "day") if record["best"] else "none yet", None),
+                          ("FLOWN", f"{record['total']} dispatch{'' if record['total'] == 1 else 'es'}", None)])
+    today = sorted((entry for entry in entries if entry.get("dispatch", {}).get("day") == day),
+                   key=lambda entry: (entry["dispatch"]["at"], entry["user_id"]))
+    lines.append(section("FLOWN TODAY"))
+    if today:
+        lines += _dispatch_table(today[:HALL_OF_FAME_SIZE], user_id, day, ("STREAK",))
+    else:
+        lines.append("Nobody on this board has flown today's order yet.")
+    lines.append("One order a day, the same for every pilot on every board. It changes at midnight on this board's calendar; "
+                 "the longest runs are in the Hall of Fame.")
+    return lines
+
+
+def screen_dispatch(p: Palette, world: World, save_dir: Path, user_id: int) -> None:
+    """Today's order and this board's flight line. Read-only: an order is flown by play."""
+    entries = _load_score_records(save_dir)
+    page = 0
+    while True:
+        key, page, count = _draw_service_page(p, "Daily Dispatch", dispatch_lines(world, entries, user_id),
+                                              "[<>] Page [B] Back: ", page)
+        if key in ("B", "Q"):
+            return
+        if (moved := page_step(key, page, count)) is not None:
+            page = moved
+
+
 def hall_view_rows() -> list[str]:
     """The Hall's own view switcher, as the menu it is.
 
@@ -15001,7 +15325,7 @@ def hall_view_rows() -> list[str]:
 
 def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) -> None:
     entries = _load_score_records(save_dir)
-    footer = "[1-5] View [N] Next [P] Prev [B] Back: "
+    footer = f"[1-{len(SCORE_CATEGORIES)}] View [N] Next [P] Prev [B] Back: "
     category, page, cache = "wealth", 0, {}
     while True:
         # The same rule the registration box follows: a screen whose title will
@@ -15015,12 +15339,13 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
         if category not in cache:
             lines = achievement_lines(entries, category, user_id)
             lines += hall_view_rows()
-            lines += ["Local accomplishments; starting advantages and game rules may differ. No shared-seed competition."]
+            lines += ["Local accomplishments; starting advantages and game rules may differ. The daily dispatch is the one "
+                      "order every pilot shares."]
             cache[category] = _service_pages(lines, title, footer)
         key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[category])
         if key == RESIZE_KEY: cache, page = {}, 0  # the cached pages were cut for the old terminal
         if key in ("B", "Q"): return
-        if key in ("1", "2", "3", "4", "5"):
+        if len(key) == 1 and key.isdigit() and 1 <= int(key) <= len(SCORE_CATEGORIES):
             category, page = list(SCORE_CATEGORIES)[int(key) - 1], 0
         elif (moved := page_step(">" if key == "N" else "<" if key == "P" else key, page, count)) is not None:
             page = moved
@@ -16999,6 +17324,7 @@ def _run_game(info: dict) -> int:
                 # confirmed; a cancelled registration changes nothing (#421).
                 replace_unsupported_career(save_dir, user_id, save)
         world = World(save, checkpoint=lambda current: persist(current, save_dir, user_id))
+        world.dispatch_clock = dispatch_day
         set_canopy_world(world)
         world.checkpoint()  # the launch tick prepares the station this career opens at
         # After that tick, never before: it is where a career first opened by
@@ -17052,6 +17378,10 @@ def _run_game(info: dict) -> int:
                 continue
             elif choice == "H":
                 screen_hall_of_fame(p, world, save_dir, user_id)
+                continue
+            elif choice == "J":
+                if dispatch_order(world) is not None:
+                    screen_dispatch(p, world, save_dir, user_id)
                 continue
             elif choice == "N":
                 screen_archive(p, world)

@@ -182,6 +182,9 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Hall of Fame, exploration", b"H3", "played"),
         ("Hall of Fame, combat", b"H4", "played"),
         ("Hall of Fame, careers", b"H5", "played"),
+        ("Hall of Fame, dispatch", b"H6", "played"),
+        # Today's order, the pilot's record and the board's flight line.
+        ("Daily Dispatch", b"J"),
         ("Pilot Guide", b"G"),
         # A new career at Freeport on day zero is offered First Flight.
         ("First Flight offer", b"GO"),
@@ -301,6 +304,9 @@ class Door:
                    # A panel is the screen a walk arrives at, not a scene
                    # played on the way; scenes are reviewed frame by frame.
                    DOOR_SCENES="0",
+                   # One fixed day's dispatch: the order changes at midnight,
+                   # and a panel has to compare with yesterday's run of it.
+                   DOOR_DISPATCH="2026-11-22",
                    PYTHONIOENCODING="utf-8")
         self.encoding = GALLERY_ENCODING
         command = [sys.executable, str(door)]

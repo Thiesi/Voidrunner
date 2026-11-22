@@ -111,6 +111,14 @@ The allowance comes from classic drop-file minutes or NetBBS's
 Absent or invalid limits leave sessions unbounded; an explicit zero expires
 immediately. The limit belongs to this launch and is never stored in a career.
 
+Every real day has one **daily dispatch**: an order that is the same for every
+pilot on every board, such as selling twelve Machinery at an Agricultural
+station or winning a fight. Doing what it asks that day pays a reward that
+grows with each day in a row, and the deck's `[J] Dispatch` page lists who on
+the board has flown it. The day changes at midnight on the node's calendar.
+The Hall of Fame ranks the longest runs, read from `scores/` like the rest. A
+SysOp can switch the dispatch off with `DOOR_DISPATCH=0`.
+
 Pilots earn achievements across all of their careers (Pilot Record,
 `[A] Achievements`, which an 80-column bar shortens to `[A] Awards`). Each one shows how many of the board's pilots hold it,
 read from the same `scores/` records the Hall of Fame uses, so back that
