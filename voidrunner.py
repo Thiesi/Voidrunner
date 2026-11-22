@@ -2950,16 +2950,49 @@ def bfs_path(by_id: dict[int, GalaxySystem], start_id: int, dest_id: int) -> lis
 # ---------------------------------------------------------------------------
 
 
-def price_for(world: World, system_id: int, commodity: str) -> int:
+def _market_rest(world: World, system_id: int, commodity: str) -> float:
+    """The drift a quote rests at with the pilot's own trading taken out of it:
+    1.0, or the level an active economy event holds this station at."""
+    event = world.save.active_event
+    if (event is not None and event["commodity"] == commodity
+            and system_id in economy_event_system_ids(world, event)):
+        return ECONOMY_EVENT_CRASH_LEVEL if event["direction"] == "crash" else ECONOMY_EVENT_BOOM_LEVEL
+    return 1.0
+
+
+def _quote(world: World, system_id: int, commodity: str, *, selling: bool) -> int:
+    """A unit's price before the spread, for the side of the counter asked for.
+
+    A station's drift moves with what the pilot trades there: up as they buy,
+    down as they sell. Each side of the counter only ever sees the half of that
+    movement that goes against the pilot. Buying raises what the station asks
+    and never what it pays; selling lowers what it pays and never what it asks.
+    One shared price let a pilot walk it: every order moved the quote by up to
+    5% however small it was, and a whole lot traded at the price before it, so
+    five five-unit purchases and one sale of the lot paid a profit without
+    leaving the dock (review, v1.3). An economy event moves both sides, since
+    that is the market and not the pilot.
+    """
     system = world.by_id[system_id]
-    base = COMMODITIES[commodity]["base"]
     mult = 1.0
     if commodity in ECONOMY_PRODUCES[system.economy]:
         mult *= 0.6
     if commodity in ECONOMY_DEMANDS[system.economy]:
         mult *= 1.6
     drift = world.save.market_drift.get(system_id, {}).get(commodity, 1.0)
-    return max(1, round(base * mult * drift))
+    rest = _market_rest(world, system_id, commodity)
+    drift = min(drift, rest) if selling else max(drift, rest)
+    return max(1, round(COMMODITIES[commodity]["base"] * mult * drift))
+
+
+def price_for(world: World, system_id: int, commodity: str) -> int:
+    """What a station asks for a unit."""
+    return _quote(world, system_id, commodity, selling=False)
+
+
+def sell_price_for(world: World, system_id: int, commodity: str) -> int:
+    """What a station pays for a unit: its own side of the quote, less the spread."""
+    return round(_quote(world, system_id, commodity, selling=True) * SELL_SPREAD)
 
 
 def _nudge_drift(world: World, system_id: int, commodity: str, delta: float) -> None:
@@ -3018,7 +3051,7 @@ def remember_local_market(world: World) -> None:
 
 
 def _remember_market_quote(world: World, system_id: int, commodity: str, unit: int, *, depth: dict | None = None) -> dict:
-    quote = {"day": world.save.turn, "sell": round(unit * SELL_SPREAD),
+    quote = {"day": world.save.turn, "sell": sell_price_for(world, system_id, commodity),
              "buy": unit if COMMODITIES[commodity]["legal"] or world.by_id[system_id].economy == "Haven" else None}
     if depth is not None:
         quote.update(stock=depth["stock"], demand=depth["demand"])
@@ -3284,7 +3317,7 @@ def trade_cargo(world: World, commodity: str, quantity: int, *, buying: bool) ->
         raise TradeError("You do not have that much cargo.")
     if quantity > depth["demand"]:
         raise TradeError(f"Station can buy {depth['demand']} units; demand replenishes {depth['demand_rate']}/day.")
-    total = quantity * round(unit * SELL_SPREAD)
+    total = quantity * sell_price_for(world, world.here.id, commodity)
     _consume_market_depth(world, commodity, quantity, buying=False)
     world.save.pilot.credits += total
     _dispose_cargo(world, commodity, quantity, proceeds=total, kind="sale")
@@ -11223,7 +11256,7 @@ def market_memory_hints(world: World, goods: list[str]) -> list[tuple[str, str, 
     held_rows, cost_rows, trade_rows = [], [], []
     for commodity in goods:
         buy = price_for(world, here, commodity)
-        sell = round(buy * SELL_SPREAD)
+        sell = sell_price_for(world, here, commodity)
         prohibited = not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven"
         seen = [(sid, quote) for sid, quotes in world.save.market_memory.items()
                 if sid != here and (quote := quotes.get(commodity))]
@@ -11254,7 +11287,8 @@ def market_memory_lines(world: World, goods: list[str]) -> list[str]:
     rows, styles = [], []
     for commodity, what, unit, sid, day in hints:
         buy = price_for(world, world.here.id, commodity)
-        here = f"sell {round(buy * SELL_SPREAD)}" if what == "sells" and spare_cargo(world, commodity) else f"buy {buy}"
+        here = (f"sell {sell_price_for(world, world.here.id, commodity)}"
+                if what == "sells" and spare_cargo(world, commodity) else f"buy {buy}")
         jumps = hops.get(sid)
         place = _mission_plain(world.by_id[sid].name) + (f", {jumps} jump{'s' if jumps != 1 else ''}" if jumps else "")
         age = world.save.turn - day
@@ -11310,7 +11344,7 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
             key_label(MARKET_LETTERS[index], COMMODITIES[commodity]["label"],
                       tone="danger" if illegal else "value"),
             glyph("flat") if prohibited else f"{quote}",
-            f"{round(quote * SELL_SPREAD)}",
+            f"{sell_price_for(world, system.id, commodity)}",
             f"{depth['stock']}", f"{depth['demand']}",
             f"{held}" if held else f"{p.deep}0{RESET}",
             f"{p.gold}{needs[commodity][0]}{RESET}" if commodity in needs else "",
@@ -12199,7 +12233,7 @@ def screen_trading_ledger(p: Palette, world: World) -> None:
 def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
     label = COMMODITIES[commodity]["label"]
     buy = price_for(world, world.here.id, commodity)
-    sell = round(buy * SELL_SPREAD)
+    sell = sell_price_for(world, world.here.id, commodity)
     depth = market_depth_quote(world, world.here.id, commodity)
     prohibited = not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven"
     purchase = "Buy prohibited at this station" if prohibited else f"Buy {buy}cr/unit"
@@ -12258,8 +12292,15 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
             holding = f"have {have}: {promised} for {places} deliveries, {spare} spare"
         else:
             holding = f"have {have}"
-        out_prompt(f"{p.muted}Quantity ({holding}; station buys {max_qty}; Enter or Esc cancels): {RESET}")
-        qty = read_quantity(max_qty)
+        # Return sells what is spare, up to what the station will take: selling
+        # the hold is what a trader docks to do, and typing the number the
+        # prompt already shows was six keys a sale (the same reasoning as
+        # refuelling, issue #36). Never cargo a delivery is waiting for -- that
+        # still has to be typed, and confirmed below.
+        default = min(max_qty, spare)
+        enter = f"Enter sells {default}, Esc cancels" if default else "Enter or Esc cancels"
+        out_prompt(f"{p.muted}Quantity ({holding}; station buys {max_qty}; {enter}): {RESET}")
+        qty = read_quantity(max_qty, default)
         if qty <= 0:
             return
         # Selling into a promise is allowed -- the pilot may mean to rebuy -- but
@@ -13909,7 +13950,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         "1. Buy cargo: [M] Market, choose the commodity's letter, [P] Purchase, enter a quantity. Buying spends credits and needs free hold space. Enter with no quantity cancels.",
         f"2. Keep fuel: [Y] Yard, [R] Refuel. Each fuel unit costs {FUEL_PRICE} cr. Reserve enough for the outward and return jumps; keep credits for repairs and crew wages too.",
         "3. Depart: [C] Chart, select the destination's letter, then confirm its fuel cost and danger. A jump advances one day, uses fuel and charges wages. Browsing, trading and upgrades do not advance the day.",
-        "4. Deliver a contract by docking with its full cargo. Ordinary trading instead uses [M] Market, commodity letter, [S] Sell. Sales pay less than the local buy quote; distant prices can change.",
+        "4. Deliver a contract by docking with its full cargo. Ordinary trading instead uses [M] Market, commodity letter, [S] Sell, and Enter sells all your spare cargo. Sales pay less than the local buy quote, and your own buying never raises what a station pays; distant prices can change.",
         f"5. First upgrade: [Y] Yard, [{YARD_LETTERS[list(UPGRADES).index('cargo')]}] Cargo Bay Expansion adds 8 cargo spaces. [{YARD_LETTERS[list(UPGRADES).index('hull')]}] Hull Reinforcement adds 35 maximum hull. Keep travel money before investing.",
         f"Your next cargo tier costs {UPGRADES['cargo']['cost'](world.save.ship.cargo_tier):,} cr." if world.save.ship.cargo_tier < UPGRADES['cargo']['max_tier'] else "Your cargo upgrades are complete.",
         "Danger is a risk rating, not a guarantee you can win a fight. Evasion can fail; bribes cost credits and can be refused. Read the encounter choices before acting.",
