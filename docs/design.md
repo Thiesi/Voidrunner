@@ -1315,6 +1315,25 @@ recovery uses the default presentation until a valid career is available. Motion
 is on in `auto` and `basic` and off in the other three, under the conditions in
 the Voidrunner presentation contract above.
 
+A pilot's own trading never moves a price in the pilot's favor (review, v1.3).
+A station's drift rises as the pilot buys there and falls as they sell, and it
+used to be one price for both sides of the counter. Every order moved it by up
+to 5% however small the order, and a whole lot traded at the price before it,
+so five five-unit purchases followed by one sale of the lot paid a profit
+without leaving the dock (about 1,000cr a station in a Freighter), and a hold
+of imports sold for up to 41% more after a few small purchases of the same
+goods. Each side now sees only the half of the movement that goes against the
+pilot: buying raises what the station asks and never what it pays, selling
+lowers what it pays and never what it asks (`price_for`, `sell_price_for`). An
+untouched market quotes both sides exactly as before, and an economy event
+moves both, since that is the market and not the pilot. Nothing is saved for
+this; it is read from the drift a career already carries.
+
+At the sell prompt, Return sells the spare cargo up to what the station will
+take, as Return already buys a full tank at the fuel prompt: selling the hold
+is what a trader docks to do, and it took six keys. Cargo a delivery is waiting
+for is never part of it and still has to be typed and confirmed.
+
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 250-credit high-water milestone in cumulative contraband sales minus purchases
 and new futures outlay/refunds. The step is 250 because the non-Haven demand
