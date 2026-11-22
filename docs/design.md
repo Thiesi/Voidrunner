@@ -1307,6 +1307,26 @@ room. It is the grid's projection under the grid's rules -- an uncharted system
 gives away no name (a contract's target excepted), no economy and no danger --
 and the grid remains for every terminal the canopy is not drawn on.
 
+**A system's world is its own.** Forty-eight systems shared five pictures, one
+per economy, so arriving somewhere new looked like arriving somewhere already
+seen. `world_look` makes a world from its economy and the system's name alone
+-- no save field and no draw from the career's RNG, so a system is the same
+world on every visit: the economy still decides the palette's family (a farm
+world is green and blue, a foundry world rust), and the hue within it, the
+banding, ice caps, a ring and up to two moons are the system's. The canopy, the
+docking scene and the Viewport's station view all draw it. A horizon shows a
+sliver of the disc, so its belts are drawn tighter there and a ring is left
+out; a ringed world rides higher and smaller in the scenes so the ring crosses
+its face. On a wide terminal the world fills the window's corner and may run
+under the console's column below the rows a deck or a market covers.
+
+**The pilot's hull is in the picture.** Docked, the pilot's own hull class is
+moored off the station, so a refit shows in the window on every page from then
+on, not only in the refit scene. **A raider's hull is how it fights:** the
+Raider's swept wings, the Bulwark's armored block, the Skirmisher's dart, drawn
+from the contact's name by the same rule that picks its pattern, in the fight's
+picture and in the contact, kill, loss and escape scenes.
+
 **The console's instruments.** Gauges are instrument lines read to half a
 cell; full blocks on consecutive rows had fused the deck's hull and fuel into
 one slab. The ship on the deck, the record, a refit preview and a career's
