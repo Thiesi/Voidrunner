@@ -1482,7 +1482,7 @@ def test_wording_uses_singular_forms_and_names_the_offer_refresh():
     ("[R] Route [N] Next [P] Prev [B] Back", "[R] Route [B] Back"),
     ("[1-9] Details [N] Next [P] Prev [B] Back > ", "[1-9] Details [B] Back > "),
     ("[A] Accept [N] Next [P] Prev [B] Back: ", "[A] Accept [B] Back: "),
-    ("[1-5] View [N] Next [P] Prev [B] Back: ", "[1-5] View [B] Back: "),  # the Hall of Fame spelling
+    ("[1-6] View [N] Next [P] Prev [B] Back: ", "[1-6] View [B] Back: "),  # the Hall of Fame spelling
     ("[E] Edit draft [B] Back: ", "[E] Edit draft [B] Back: "),
 ])
 def test_single_page_footers_drop_every_spelling_of_the_paging_tokens(footer, expected):

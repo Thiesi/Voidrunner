@@ -2824,11 +2824,11 @@ def test_achievement_category_pages_keep_snapshot_complete_terms_and_all_navigat
         frame=output.getvalue();output.seek(0);output.truncate(0)
         assert len(frame.splitlines())<=height and all(vr._visible_width(row)<=width for row in frame.splitlines())
         plain=vr._ANSI_RE.sub("",frame)
-        assert "[1-5] View" in " ".join(plain.split()) and "[B] Back:" in " ".join(plain.split())
+        assert "[1-6] View" in " ".join(plain.split()) and "[B] Back:" in " ".join(plain.split())
         match=re.search(r"(\d+)/(\d+)",plain);page,count=map(int,match.groups())
-        bodies[list(vr.SCORE_CATEGORIES)[category]].append(page_text(plain[match.end():].split("[1-5] View")[0]))
+        bodies[list(vr.SCORE_CATEGORIES)[category]].append(page_text(plain[match.end():].split("[1-6] View")[0]))
         if page<count:return "N"
-        category+=1;return str(category+1) if category<5 else "B"
+        category+=1;return str(category+1) if category<len(vr.SCORE_CATEGORIES) else "B"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):vr.screen_hall_of_fame(vr.Palette(False),world,tmp_path,77)
     assert loads==[1] and record_path.read_bytes()==before
@@ -2846,7 +2846,7 @@ def test_real_achievement_category_browsing_keeps_career_and_score_bytes(tmp_pat
     result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,timeout=60,
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
     assert result.returncode==0 and not result.stderr
-    assert b"[1-5] View" in plain_bytes(result.stdout)
+    assert b"[1-6] View" in plain_bytes(result.stdout)
     assert {p:p.read_bytes() for p in paths}==before
 
 

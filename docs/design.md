@@ -1381,6 +1381,44 @@ take, as Return already buys a full tank at the fuel prompt: selling the hold
 is what a trader docks to do, and it took six keys. Cargo a delivery is waiting
 for is never part of it and still has to be typed and confirmed.
 
+**The daily dispatch (review, v1.3).** Nothing in the game was different
+tomorrow: no turn limit, no calendar, and a private galaxy for every career, so
+two callers had nothing to compare and neither had a reason to dial in again.
+The dispatch is one order a real day, the same for every pilot on every board,
+drawn from the date alone. A week's seven orders are three hauls of different
+goods (`Sell 12+ Machinery in one sale at an Agricultural station`), one sale
+by value, one fight, one contract and one chart, shuffled by the week's number,
+so every kind comes round every week and no order is yesterday's over again.
+A pilot with nothing left to chart is asked for a contract instead.
+
+It is not accepted and it takes no contract slot. Doing what it asks that day,
+in the ordinary course of play, flies it: `World.commit` compares the kills,
+contracts and charted systems with what the last commit saw, and the sales
+made since, and the commit that saves the action pays the reward and extends
+the streak. What a career did before the session does not count, and a resumed
+session cannot fly an order twice. The reward is 600cr plus 400cr a rank, a
+tenth more for each day of an unbroken streak up to half as much again; it is
+there to be noticed, not to be a living.
+
+**Nothing new is saved for it.** The account's record -- the day last flown,
+the streak, the best streak, the count and the time -- is five integers among
+the accolade counters, which already ride through retirement and which an
+older build keeps where it does not know them. The save format is unchanged.
+A board's score records carry the same five, so the `[J] Dispatch` page lists
+who flew today's order, in the order they flew it, and the Hall of Fame's sixth
+view ranks the longest runs. Two ladders of achievements count dispatches
+flown and days running.
+
+The door reads the calendar only for the date, on the node's own clock
+(`set_node_calendar`), and only where the executable has bound one
+(`World.dispatch_clock`). A domain-only world has no dispatch, and the suite's
+launched doors run with `DOOR_DISPATCH=0`, so no other test depends on the day
+it runs. A SysOp can set the same switch; `DOOR_DISPATCH=2026-11-22` pins the
+day, which the gallery does so its panels compare. On the deck the order is
+one row with no rule, under the gauges: what it asks and what it pays while it
+is open, the streak once it is flown. That row is paid for with a row of
+window, which leaves nine of ten at 80x24.
+
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 250-credit high-water milestone in cumulative contraband sales minus purchases
 and new futures outlay/refunds. The step is 250 because the non-Haven demand
