@@ -291,11 +291,13 @@ def test_the_viewport_walks_every_picture_and_writes_nothing(monkeypatch, termin
     before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
     world._checkpoint = lambda w: pytest.fail("Viewport wrote a save")
     terminal(80, 24, style)
-    frames = _walk(monkeypatch, world, ["2", "3", "1", "B"])
+    frames = _walk(monkeypatch, world, ["1", "3", "2", "B"])
     plain = [vr._ANSI_RE.sub("", frame) for frame in frames]
-    assert world.save.ship.hull_class.upper() in plain[0]
-    assert world.here.station_name.upper() in plain[1]
+    # It opens on the atlas, at the world outside; then the ship, the site, and back.
+    assert world.here.station_name.upper() in plain[0]
+    assert world.save.ship.hull_class.upper() in plain[1]
     assert world.landmark["label"].upper() in plain[2]
+    assert world.here.station_name.upper() in plain[3]
     assert all("[B] Back" in frame for frame in plain)
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
 

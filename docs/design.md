@@ -1639,6 +1639,22 @@ how to press Back), and is divided by a rule: a first flight above it, and
 `ONCE YOU HAVE FLOWN A FEW DAYS` below, where the lines about ranks, stakes,
 local markets, a raider's read and the dispatch live.
 
+**The atlas (review, v1.3).** The Viewport showed the ship, the station the
+pilot was docked at and one landmark: three pictures of things already on the
+deck, and nothing to come back for. Every system has had a world of its own
+since the review's first pass, and each was seen only from its own dock. The
+station view is now an atlas. The Viewport opens on it, at the world outside,
+and `[N]` and `[P]` turn through every system the pilot has charted, by sector
+and then by name, each drawn as itself with what is known of it: sector, trade
+and danger; what its market is known for, or said to be, or that it has not
+been seen; when the pilot last docked there; a workshop, a stake; and how much
+of the galaxy that is (`world 7 of 14 charted; 9 of 48 docked`). It is a record
+of where a career has been and the place to look a system up without flying to
+it. The same facts are the text portrait's sentences in `mono` and `plain`
+(`atlas_facts`). The ship is view 1, as it was, and is what the yard's `[V]`
+opens. Two achievements count the harbors of one career, at twelve and at
+thirty-six. Nothing is saved for any of it.
+
 **Seasons, and what a futures order bets on (review, v1.3).** A price was its
 economy's, its trait's, and whatever the pilot's own trading or the rare event
 had done to it. Nothing moved that a pilot could see coming, so a futures order

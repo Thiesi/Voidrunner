@@ -5327,6 +5327,8 @@ ACCOLADES: tuple[Accolade, ...] = tuple([
     *_ladder("chart", "Exploration", "charted", ((10, "Cartographer", "Chart {n} systems in one career."),
                                                   (24, "Pathfinder", "Chart half the galaxy, {n} systems, in one career."),
                                                   (48, "Atlas Complete", "Chart all {n} systems in one career.")), ""),
+    *_ladder("harbor", "Exploration", "docked", ((12, "Port of Call", "Dock at {n} systems in one career."),
+                                                 (36, "Every Tide", "Dock at {n} systems in one career.")), ""),
     Accolade("landmark", "Exploration", "Into the Silence", "Investigate a landmark.", "landmark", tier=2),
     Accolade("far_site", "Exploration", "Where the Record Led", "Follow a landmark's record to the second site.",
              "far_site", tier=3),
@@ -5447,6 +5449,7 @@ def accolade_metrics(save: SaveData) -> dict[str, int]:
         rank=max([pilot.highest_rank_seen] + [d["rank"] for d in dossiers]),
         retirements=pilot.retirements,
         contraband=save.contraband_trade_milestones,
+        docked=docked_systems(save),
         landmark=int(bool(save.flags.get("landmark_investigated"))),
         far_site=int(bool(save.flags.get("landmark2_investigated"))),
         concord=int(pilot.has_concord_commission),
@@ -11746,7 +11749,61 @@ def _portrait_pages_for(p: Palette, large: list[str], compact: list[str], detail
                     render=lambda row, index: f"{color or p.accent}{row}{RESET}" if index == illustrated else row)
 
 
-def viewport_content(world: World, view: str) -> tuple[list[str],list[str],list[str],str]:
+# The atlas (review, v1.3). The Viewport showed the ship, the station the pilot
+# was docked at and one landmark: three pictures of things already on the deck,
+# and nothing to come back for. Every system has had a world of its own since
+# the review's first pass, seen only from its dock. The station view is now an
+# atlas: it opens on the world outside and turns through every system the pilot
+# has charted, each drawn as itself, with what is known of it -- its sector,
+# trade and danger, what its market is known or said to be good for, when the
+# pilot last docked there, a workshop or a stake -- and how much of the galaxy
+# that is. It is a record of where a career has been, and it is where a pilot
+# looks up a place without flying to it. Nothing is saved for it.
+def atlas_systems(world: World) -> list[int]:
+    """Every charted system, in the order the atlas turns through them: by
+    sector, then by name. Where the ship is docked is always among them."""
+    order = {name: index for index, name in enumerate(SECTOR_NAMES)}
+    known = [system for system in world.galaxy if system.discovered or system.id == world.here.id]
+    return [system.id for system in sorted(known, key=lambda s: (order[sector_for(s)], s.name, s.id))]
+
+
+def docked_systems(save: SaveData) -> int:
+    """How many systems the pilot has docked at: each one whose market was seen with its stock."""
+    return sum(1 for quotes in save.market_memory.values() if any("stock" in quote for quote in quotes.values()))
+
+
+def atlas_facts(world: World, system_id: int) -> list[tuple[str, str]]:
+    """What the atlas says of a charted system, as label and value, in the order
+    it says it. The same facts feed the picture's caption and the text portrait."""
+    place = world.by_id[system_id]
+    facts = [("", f"{place.name} ({place.x},{place.y})"), ("", sector_for(place)), ("", place.economy),
+             ("danger ", f"{place.danger}/5")]
+    trait, heard = known_trait(world, system_id), rumoured_trait(world, system_id)
+    if trait is not None:
+        facts.append(("market ", trait_label(trait)))
+    elif heard is not None:
+        facts.append(("market ", "said to have something " + ("cheap" if heard == "surplus" else "dear")))
+    elif not system_visited(world, system_id):
+        facts.append(("market ", "not yet seen"))
+    if system_id == world.here.id:
+        facts.append(("", "docked here now"))
+    elif system_visited(world, system_id):
+        seen = max(quote["day"] for quote in world.save.market_memory[system_id].values() if "stock" in quote)
+        facts.append(("last docked ", f"day {seen}"))
+    else:
+        facts.append(("", "charted, never docked"))
+    for module, sid in specialist_stations(world).items():
+        if sid == system_id:
+            facts.append(("Specialist: ", f"{WORKSHOPS[module]['name']}; {WORKSHOPS[module]['owner']}"))
+    if stake_level(world.save, system_id):
+        facts.append(("your stake ", f"step {stake_level(world.save, system_id)} of {len(STAKE_COSTS)}"))
+    systems = atlas_systems(world)
+    facts.append(("world ", f"{systems.index(system_id) + 1} of {len(systems)} charted; "
+                            f"{docked_systems(world.save)} of {len(world.galaxy)} docked"))
+    return facts
+
+
+def viewport_content(world: World, view: str, *, system: int | None = None) -> tuple[list[str],list[str],list[str],str]:
     ship,here=world.save.ship,world.here
     if view=="1":
         details=[f"Your {ship.hull_class}: {hull_condition(ship)}. Hull {ship.hull_hp}/{hull_hp_max(ship)}.",
@@ -11755,13 +11812,13 @@ def viewport_content(world: World, view: str) -> tuple[list[str],list[str],list[
                   else "Hull damage is marked with x shading.") + " Capacity is separate from hull condition."]
         return ship_portrait(ship,"large"),ship_portrait(ship,"compact"),details,ship.hull_class
     if view=="2":
-        art=PORTRAITS["port"][here.economy]
-        details=[f"{here.station_name}: {here.economy}.",f"{here.name} ({here.x},{here.y}); {sector_for(here)}; danger {here.danger}/5."]
-        if here.id in world.traits: details.append(f"Market: {trait_label(world.traits[here.id])}.")
-        for module,sid in specialist_stations(world).items():
-            if sid==here.id:
-                info=WORKSHOPS[module];details.append(f"Specialist: {info['name']}; {info['owner']}.")
-        return art["large"],art["compact"],details,here.economy
+        place=world.by_id[here.id if system is None else system]
+        art=PORTRAITS["port"][place.economy]
+        facts=atlas_facts(world,place.id)
+        # The first four are one sentence, as the portrait always had them; the rest a line each.
+        details=[f"{place.station_name}: {place.economy}.",f"{facts[0][1]}; {facts[1][1]}; danger {place.danger}/5."]
+        details+=[(label[:1].upper()+label[1:]+value if label else value[:1].upper()+value[1:])+"." for label,value in facts[4:]]
+        return art["large"],art["compact"],details,place.economy
     if (shown := discovery_site(world)) is not None:
         site, claimed = shown
         art=PORTRAITS["site"][site["label"]]
@@ -12251,9 +12308,10 @@ class _ViewportSite(_ViewportScene):
                 stage.blend(cx + math.cos(a) * step, cy + math.sin(a) * step, (110, 255, 160), 0.8 - trail * 0.4)
 
 
-def viewport_scene(world: World, view: str, width: int, height: int) -> _ViewportScene:
+def viewport_scene(world: World, view: str, width: int, height: int, *, system: int | None = None) -> _ViewportScene:
     """The picture for viewport `view` at `width` x `height`, carrying every
-    fact the ASCII portrait's text did, the way its caption has room for it."""
+    fact the ASCII portrait's text did, the way its caption has room for it.
+    `system` is the atlas's page: the charted system view 2 draws, here if None."""
     ship, here = world.save.ship, world.here
     seed = f"{world.save.seed}:{here.id}:{view}"
     if view == "1":
@@ -12262,18 +12320,11 @@ def viewport_scene(world: World, view: str, width: int, height: int) -> _Viewpor
                              cargo=f"{sum(world.save.cargo.values())}/{cargo_capacity(ship)}", economy=here.economy,
                              seed=seed)
     if view == "2":
-        items = [[(_scene_text(here.name), _SCENE_INK), (f" ({here.x},{here.y})", _SCENE_SLATE)],
-                 [(_scene_text(sector_for(here)), _SCENE_INK)], [(here.economy, _SCENE_INK)],
-                 [("danger ", _SCENE_SLATE), (f"{here.danger}/5", _SCENE_INK)]]
-        if here.id in world.traits:
-            items.append([("market ", _SCENE_SLATE), (trait_label(world.traits[here.id]), _SCENE_INK)])
-        for module, sid in specialist_stations(world).items():
-            if sid == here.id:
-                info = WORKSHOPS[module]
-                items.append([("Specialist: ", _SCENE_SLATE), (_scene_text(info["name"]), _SCENE_INK),
-                              ("; ", _SCENE_SLATE), (_scene_text(info["owner"]), _VIEWPORT_TEXT)])
-        return _ViewportStation(width, height, station=here.station_name, items=items, economy=here.economy,
-                                seed=seed, world=here.name)
+        place = world.by_id[here.id if system is None else system]
+        items = [[(label, _SCENE_SLATE), (_scene_text(value), _SCENE_INK)] if label else [(_scene_text(value), _SCENE_INK)]
+                 for label, value in atlas_facts(world, place.id)]
+        return _ViewportStation(width, height, station=place.station_name, items=items, economy=place.economy,
+                                seed=f"{world.save.seed}:{place.id}:{view}", world=place.name)
     if (shown := discovery_site(world)) is not None:
         site, claimed = shown
         if claimed:
@@ -12291,9 +12342,11 @@ def viewport_scene(world: World, view: str, width: int, height: int) -> _Viewpor
                          prose="No discovery portrait recorded. Visit a landmark to see its portrait.", seed=seed)
 
 
-def viewport_footer(width: int) -> str:
-    full = "[1] Ship [2] Station [3] Discovery [B] Back: "
-    return full if _visible_width(full) <= width - 1 else "[1-3] View [B] Back: "
+def viewport_footer(width: int, view: str = "1") -> str:
+    """The picture's action bar. The atlas adds its own keys: the world before and the world after."""
+    turn = "[N/P] World " if view == "2" else ""
+    full = f"[1] Ship [2] Atlas [3] Discovery {turn}[B] Back: "
+    return full if _visible_width(full) <= width - 1 else f"[1-3] View {turn}[B] Back: "
 
 
 def show_viewport_picture(scene: _ViewportScene, footer: str, top: int, left: int) -> str:
@@ -12326,20 +12379,23 @@ def show_viewport_picture(scene: _ViewportScene, footer: str, top: int, left: in
     return read_command_at_prompt()
 
 
-def screen_viewport(p: Palette, world: World, view: str = "1") -> None:
-    page=0;footer="[1-3] View [<>] Page [B] Back: "
+def screen_viewport(p: Palette, world: World, view: str = "2") -> None:
+    """The ship, the atlas and the discovery. It opens on the atlas, at the
+    world outside; [N] and [P] turn through every charted system from there."""
+    page, system = 0, world.here.id
     while True:
+        footer = "[1-3] View [N/P] World [<>] Page [B] Back: " if view == "2" else "[1-3] View [<>] Page [B] Back: "
         scene = None
         if viewport_pictures():
             cols, rows, top, left = _splash_box(_OUTPUT_WIDTH, _OUTPUT_HEIGHT)
-            scene = viewport_scene(world, view, cols, rows)
+            scene = viewport_scene(world, view, cols, rows, system=system)
         if scene is not None and scene.fits:
-            key = show_viewport_picture(scene, viewport_footer(cols), top, left)
+            key = show_viewport_picture(scene, viewport_footer(cols, view), top, left)
         else:
             # The ASCII portrait: for `mono` and `plain`, and for a terminal too
             # small to hold a picture above everything its caption says.
-            large,compact,details,title=viewport_content(world,view)
-            details += ["Views: [1] Ship, [2] Station, [3] Discovery."]
+            large,compact,details,title=viewport_content(world,view,system=system)
+            details += ["Views: [1] Ship, [2] Atlas, [3] Discovery."]
             color = p.wrong if view=="1" and hull_condition(world.save.ship)=="Critical" else p.gold if view=="1" and hull_condition(world.save.ship)!="Intact" else p.accent
             pages=portrait_pages(p,large,compact,details,title,footer,color=color)
             key,page,count=_draw_service_page(p,title,[],footer,page,pages=pages)
@@ -12348,6 +12404,9 @@ def screen_viewport(p: Palette, world: World, view: str = "1") -> None:
                 continue
         if key in ("B","Q"):return
         if key in ("1","2","3"):view,page=key,0
+        elif key in ("N","P") and view=="2":
+            systems=atlas_systems(world)
+            system,page=systems[(systems.index(system)+(1 if key=="N" else -1))%len(systems)],0
 
 
 def screen_landmark(p: Palette, world: World) -> None:
@@ -14336,7 +14395,7 @@ def screen_shipyard(p: Palette, world: World) -> None:
         if (moved := page_step(action, page, count)) is not None:
             page = moved
             continue
-        if action == "V": screen_viewport(p,world); continue
+        if action == "V": screen_viewport(p,world,"1"); continue  # from the yard: the ship
         keys = list(UPGRADES)
         refits = HULL_REFITS[world.save.ship.hull_class]
         refit_keys = YARD_LETTERS[len(keys):len(keys) + len(refits)]
@@ -15287,6 +15346,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         section("ONCE YOU HAVE FLOWN A FEW DAYS"),
         "Danger is a risk rating, not a guarantee you can win a fight. Evasion can fail; bribes cost credits and can be refused. Read the encounter choices before acting.",
         "About three systems in five have a market of their own: one good in standing surplus, sold cheap, or in standing shortage, bought dear. The chart shows a ? until you have docked there, and the trait after. Now and then the dock talks: it names a system nearby and says whether it has a glut or is short, never of what, and the chart then reads cheap ? or dear ? for it.",
+        "[V] Viewport opens on the atlas: the world outside, and with [N] and [P] every system you have charted, each with what you know of it. [1] is your ship and [3] the last site you found.",
         "Prices have seasons: every legal good swings about an eighth either way over a month or so, the same across a sector. The market marks each price as rising or falling and for how many more days. [X] Futures holds today's price for a fee, and says what the price should be on the day you collect.",
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
         "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
