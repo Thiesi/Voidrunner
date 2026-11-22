@@ -52,7 +52,7 @@ def test_the_deck_services_are_three_columns_wherever_a_third_fits(terminal):
 def test_a_landmark_service_is_named_without_its_article(terminal, monkeypatch):
     terminal(80, 24)
     world = _world_with_seed(42)
-    monkeypatch.setattr(vr, "landmark_available_here", lambda world: True)
+    world.save.current_system = world.landmark["system_id"]  # docked at the site, its salvage unclaimed
     world.landmark["label"] = "the Silent Cathedral"
     entries = vr.deck_service_entries(world)
     assert entries[-1] == ("L", "Silent Cathedral")
