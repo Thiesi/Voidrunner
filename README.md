@@ -171,6 +171,7 @@ python -m pytest -n auto              # the suite, about half a minute
 python tools/check_stdlib_only.py     # the door imports only the standard library
 python tools/door_gallery.py --open   # every screen at 80/64/40 columns, every preset
 python tools/door_gallery.py --encoding cp437 --out build/gallery-cp437
+python tools/career_sim.py              # whole careers flown by simple pilots; --help for switching a rule off
 ```
 
 A change to a screen comes with gallery pictures: the tests can prove that a
