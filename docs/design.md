@@ -1639,6 +1639,21 @@ how to press Back), and is divided by a rule: a first flight above it, and
 `ONCE YOU HAVE FLOWN A FEW DAYS` below, where the lines about ranks, stakes,
 local markets, a raider's read and the dispatch live.
 
+**Dockside talk (review, v1.3).** A trait is found by docking, and until then
+the chart says `?` for every system alike, so the only way to look for one was
+to go everywhere. About one docking in three -- fewer once the neighbourhood is
+known -- somebody on the dock says where one is: a system one jump out, or two
+by way of a charted one, that the pilot has not docked at, and whether it has a
+glut of something or is short of it. Never what: the good is still found by
+going. The talk is always true, and it is written on the chart, where that
+system's MARKET reads `cheap ?` or `dear ?` until the pilot has been and seen.
+An uncharted system is not named; it is "the bearing at 61,16", which is what
+the chart calls it. Who is talking depends on the station's economy, two voices
+each (`RUMOUR_VOICES`). Which docking, which system and which voice follow from
+the seed and the day, with no draw from the event RNG, and what was heard is a
+flag (`rumour_<system>`), so an older build loads the save and merely forgets
+the talk.
+
 **The crew speak (review, v1.3).** A specialist was a name, one line of
 character on the roster, a bonus and a wage, and the whole game held about
 eight hundred words of authored text. Aboard, a specialist now says one line
