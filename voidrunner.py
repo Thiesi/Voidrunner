@@ -3881,6 +3881,13 @@ def _tactical_incoming_damage(ship: Ship, tier: int, intent: str, roll: int, tac
     return (damage + 3) // 4 if braced else damage
 
 
+def _tactical_outgoing_damage(ship: Ship, intent: str, roll: int, *, guarded: bool = False) -> int:
+    """The pilot's shot for a roll of 9-14: what a round deals and what the
+    combat panel quotes, so the two cannot disagree."""
+    damage = max(1, (roll + ship.weapon_tier * 4 + gunner_bonus(ship)) * TACTICAL_INTENTS[intent][0] // 100)
+    return max(1, damage * 55 // 100) if guarded else damage
+
+
 def tactical_retaliation(world: World, pirate: Pirate, tactics: dict, *, braced: bool = False) -> tuple[int, list[str]]:
     intent = tactical_intent(tactics)
     damage = _tactical_incoming_damage(world.save.ship, pirate.tier, intent, world.event_rng.randint(4, 9), tactics,
@@ -3897,9 +3904,7 @@ def tactical_round(world: World, pirate: Pirate, tactics: dict, action: str) -> 
         raise ValueError("This exchange is already over.")
     ship = world.save.ship
     intent = tactical_intent(tactics)
-    raw = world.event_rng.randint(9, 14) + ship.weapon_tier * 4 + gunner_bonus(ship)
-    damage = max(1, raw * TACTICAL_INTENTS[intent][0] // 100)
-    if action == "G": damage = max(1, damage * 55 // 100)
+    damage = _tactical_outgoing_damage(ship, intent, world.event_rng.randint(9, 14), guarded=action == "G")
     pirate.hp = max(0, pirate.hp - damage)
     tactics["brace_ready"] = action == "F"
     lines = [f"You hit the {pirate.name} for {damage} damage." + (" Guarding; fire to recharge." if action == "G" else "")]
@@ -9258,10 +9263,12 @@ def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
             ex, ey = side_left + side * 0.60, h2 * 0.40
             sx, sy, own_size = side_left + side * 0.22, h2 * 0.70, max(0.5, size * 0.45)
         else:
+            # Low in the band: a turn's page is two rows taller than the first
+            # (its last exchange), and the contact's lock must clear it.
             top, depth = band_top * 2, band * 2
-            size = max(1.0, depth * 0.55 / len(enemy))
-            ex, ey = width * 0.72, top + depth * 0.5
-            sx, sy, own_size = width * 0.24, top + depth * 0.55, max(0.5, size * 0.6)
+            size = max(1.0, depth * 0.5 / len(enemy))
+            ex, ey = width * 0.72, top + depth * 0.62
+            sx, sy, own_size = width * 0.24, top + depth * 0.66, max(0.5, size * 0.6)
         canopy.sprite(own, sx, sy, own_size)
         canopy.sprite(enemy, ex, ey, size)
         # The lock: four red corners around the contact, and the line to it.
@@ -9597,13 +9604,17 @@ def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str 
     return None
 
 
-def ship_gauge_rows(world: World) -> list[str]:
+def ship_gauge_rows(world: World, lead: list[str] | None = None) -> list[str]:
     """The cockpit: four gauges, aligned, with the silhouette beside them.
 
     Gauges first, numbers always. The bars are what the cockpit reads as at a
     glance and the numbers are what a decision is made on, so neither is ever
     the thing that gives way -- what gives way is the silhouette, then the
     gauge's width, both handled by `beside` and `_gauge_cells`.
+
+    `lead` is rows the silhouette may stand beside as well, above the gauges:
+    the deck hands it the career row, so a four-row hull stands beside four
+    rows of readings rather than hanging a blank row under three.
     """
     p = pal()
     ship = world.save.ship
@@ -9641,9 +9652,10 @@ def ship_gauge_rows(world: World) -> list[str]:
                   optional=(3,))[1:]  # the headers are the gauge labels themselves
     # Tinted before it is laid in: a row that carries the art is already styled,
     # so raw art would be the one thing on the deck with no role (#493 review).
-    return beside(drawn, portrait(ship_portrait(ship, "compact"),
-                                  "danger" if hull_condition(ship) == "Critical" else
-                                  "caution" if hull_condition(ship) != "Intact" else "info"),
+    return beside(list(lead or []) + drawn,
+                  portrait(ship_portrait(ship, "compact"),
+                           "danger" if hull_condition(ship) == "Critical" else
+                           "caution" if hull_condition(ship) != "Intact" else "info"),
                   overhang=True)
 
 
@@ -9790,16 +9802,23 @@ def deck_service_entries(world: World) -> list[tuple[str, str]]:
     # came to ask what the numbers meant (issue #518). The counts agree in
     # number too; `Chart 1 links` was reported from a real screen.
     upgrades = affordable_upgrades(world)
-    yard = f"Yard: {plural(upgrades, 'upgrade')} affordable" if upgrades else "Yard repair/refit"
-    entries = [("M", f"Market: {plural(goods, 'good')}"), ("Y", yard),
-               ("B", f"Board: {plural(offers, 'offer')}"),
+    # Every label fits a third of an 80-column console, so the grid is three
+    # columns and five rows there instead of two and seven: the deck is the
+    # screen a pilot looks at most, and the rows it gives back are the window
+    # (the canopy's band is the bottom ten rows of 80x24). Row by row it runs
+    # from what a turn is made of -- trade, fly, take work -- to the ship and
+    # its books, the people, and last the pages nobody opens twice a session.
+    yard = f"Yard: {plural(upgrades, 'upgrade')}" if upgrades else "Yard repair/refit"
+    entries = [("M", f"Market: {plural(goods, 'good')}"),
                ("C", f"Chart: {plural(len(world.here.connections), 'link')}"),
-               ("S", "Status"), ("H", "Hall of Fame"),
-               ("G", "Guide"), ("N", "Archive"), ("T", "Ledger"),
-               ("V", "Viewport"), ("O", "Display"), ("Q", "Disembark")]
+               ("B", f"Board: {plural(offers, 'offer')}"),
+               ("Y", yard), ("S", "Status"), ("T", "Ledger"),
+               ("P", "Concord"), ("W", "Blackwake"), ("N", "Archive"),
+               ("V", "Viewport"), ("H", "Hall of Fame"), ("G", "Guide"),
+               ("O", "Display"), ("Q", "Disembark")]
     if landmark_available_here(world):
-        entries.append(("L", world.landmark["label"]))
-    entries += [("P", "Concord"), ("W", "Blackwake")]
+        label = world.landmark["label"].removeprefix("the ")
+        entries.append(("L", label[:1].upper() + label[1:]))
     return entries
 
 
@@ -9811,9 +9830,11 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
     grid can still press one.
     """
     ship, pilot, here = world.save.ship, world.save.pilot, world.here
-    lines = list(status_band(world))
-    lines.append(section("SHIP"))
-    lines += ship_gauge_rows(world)
+    # The station on its own row, then the career and the gauges as one block
+    # with the hull beside all of it: no rule between them and no blank row
+    # under the gauges, which is two rows of window at 80x24.
+    station, career = status_band(world)
+    lines = [station] + ship_gauge_rows(world, lead=[career])
     alerts = deck_alert_rows(world)
     if alerts:
         lines.append(section("ALERTS"))
@@ -16058,12 +16079,101 @@ def cost(text: str) -> str:
     return f"{BOLD}{pal().ink}{text}{RESET}"
 
 
+def combat_option_rows(world: World, pirate: Pirate, *, patrol: bool, tactics: dict) -> list[str]:
+    """A fight's choices as a table: the key, what it does, what it risks.
+
+    One row an option, the figure that decides it in the middle column and its
+    price in the last, so a turn is read across and compared down. They were
+    six sentences, most of them the same clause about enemy fire, and at 80x24
+    they covered the fight they were about (the canopy's window is the bottom
+    ten rows). The sentences are on the Info page."""
+    p = pal()
+    ship, pilot = world.save.ship, world.save.pilot
+    used = sum(world.save.cargo.values())
+    intent = tactical_intent(tactics)
+    cover = squadron_cover(world)
+    low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, tactics, cover=cover) for roll in (4, 9))
+    taken = f"{p.slate}take{RESET} {harm(span(low, high))}"
+    missed = f"{p.slate}else take{RESET} {harm(span(low, high))}"
+
+    def dealt(guarded: bool) -> str:
+        weak, strong = (_tactical_outgoing_damage(ship, intent, roll, guarded=guarded) for roll in (9, 14))
+        return f"{p.slate}deal{RESET} {cost(span(weak, strong))}"
+
+    def escape(chance: float) -> str:
+        return f"{odds(chance)} {p.slate}escape{RESET}"
+
+    fire = [key_label("F", "Fire"), dealt(False), taken]
+    if _tactical_outgoing_damage(ship, intent, 9, guarded=False) >= pirate.hp:
+        fire[2] = gain("destroys it")
+    rows = [fire]
+    if tactics["brace_ready"]:
+        low_g, high_g = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, tactics, braced=True, cover=cover)
+                         for roll in (4, 9))
+        rows.append([key_label("G", "Guard"), dealt(True), f"{p.slate}take{RESET} {harm(span(low_g, high_g))}"])
+    else:
+        rows.append([f"{p.slate}Guard{RESET}", f"{p.slate}recharging{RESET}", f"{p.slate}fire once first{RESET}"])
+    rows.append([key_label("E", "Evade"),
+                 escape(combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics, patrol=patrol)), missed])
+    if patrol:
+        fine = notoriety_fine_cost(pilot.notoriety)
+        if pilot.credits >= fine:
+            rows.append([key_label("S", "Surrender"), f"{p.slate}pay{RESET} {cost(f'{fine}cr')}",
+                         f"{p.slate}clears notoriety, Concord +2{RESET}"])
+        else:
+            rows.append([f"{p.slate}Surrender{RESET}", f"{cost(f'{fine}cr')} {harm('UNAFFORDABLE')}", ""])
+        return _option_table(rows)
+    dump = None
+    if used:
+        units = dump_units(world, pirate, tactics)
+        chance = combat_evade_chance(world, pirate, dumped_cargo=True, tactics=tactics, cargo_units=max(0, used - units))
+        if outclassed(world, pirate, tactics):
+            dump = [key_label("D", "Dump"), escape(chance),
+                    f"{p.slate}costs half the hold ({units} of {used} units){RESET}"]
+        else:
+            dump = [key_label("D", "Dump"), escape(chance), f"{p.slate}one unit overboard;{RESET} {missed}"]
+    # Against a raider that outclasses the hull, Dump is the answer the alert row
+    # points at, so it leads the options.
+    if dump is not None:
+        rows.insert(0 if outclassed(world, pirate, tactics) else len(rows), dump)
+    bribe = bribe_cost(pirate)
+    if pilot.credits >= bribe:
+        rows.append([key_label("P", "Pay bribe"),
+                     f"{odds(bribe_chance(world, pirate))} {p.slate}for{RESET} {cost(f'{bribe}cr')}",
+                     f"{p.slate}Blackwake +2;{RESET} {missed}"])
+    else:
+        rows.append([f"{p.slate}Pay bribe{RESET}", f"{cost(f'{bribe}cr')} {harm('UNAFFORDABLE')}", ""])
+    return _option_table(rows)
+
+
+def _option_table(rows: list[list[str]]) -> list[str]:
+    """Three aligned columns where they fit on a row; where they do not, each
+    option is one line that wraps. A stacked table would give every option
+    three rows at forty columns, which is a page for every two options."""
+    widths = [max(_visible_width(row[column]) for row in rows) for column in range(3)]
+    if sum(widths) + 4 <= _page_content_width():
+        return table(["", "", ""], rows, "lll", repeat_header=False)[1:]
+    p = pal()
+    return [f"{action}  {offer}" + (f" {p.deep}{glyph('dot')}{RESET} {price}" if price else "")
+            for action, offer, price in rows]
+
+
+def combat_intent_row(pirate: Pirate, tactics: dict, low: int, high: int) -> str:
+    """The contact's pattern with the move it makes next picked out, and what
+    that move is worth: `Skirmisher  harry > ATTACK > volley  incoming 4-9`.
+    The whole cycle is on the row because reading it is the fight."""
+    p = pal()
+    steps = [badge(step.upper(), "danger") if number == tactics["step"] else f"{p.slate}{step}{RESET}"
+             for number, step in enumerate(TACTICAL_PROFILES[tactics["profile"]])]
+    return (f"{p.ink}{tactics['profile']}{RESET}  " + f" {p.deep}>{RESET} ".join(steps)
+            + f"   {p.slate}incoming{RESET} {harm(span(low, high))}")
+
+
 def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, patrol: bool, tactics: dict, details: bool = False, warrant: dict | None = None, hull_before: int | None = None) -> list[str]:
     """Read-only combat terms; no random draw or persisted presentation state."""
     ship, pilot = world.save.ship, world.save.pilot
     used = sum(world.save.cargo.values())
     p = pal()
-    cells = _gauge_cells()
     lines = []
     if result:
         lines.append(section("LAST EXCHANGE"))
@@ -16080,75 +16190,39 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     # cells: which bar is longer *is* who is winning, and it used to be two
     # sentences with the numbers buried in the middle of them.
     lines += combat_contact_rows(world, pirate, pirate.hp, ship.hull_hp)
-    # Fuel and hold are the stakes of an escape and a dump, not readings that
-    # move in a fight: one row of chips rather than two more gauges, which is
-    # the row that let every option onto the first page at 80x24 (#28).
-    lots = plural(sum(1 for quantity in world.save.cargo.values() if quantity > 0), "lot")
-    lines.append("  ".join([chip("Fuel", f"{ship.fuel}/{fuel_capacity(ship)}"),
-                            chip("Hold", f"{used}/{cargo_capacity(ship)}", tone="value") + f" {p.slate}{lots}{RESET}",
-                            chip("day", str(world.save.turn))]))
-    # Whose pattern it is, said on the row: "Bulwark intent COVER" one row under
-    # "Ravage" read as a second contact or a ship class (#648).
-    lines.append(f"{p.ink}{_mission_plain(pirate.name)}{RESET} {p.slate}flies {tactics['profile']}; intent{RESET} "
-                 f"{badge(intent.upper(), 'danger')}  "
-                 f"{p.slate}incoming{RESET} {harm(span(low, high))} "
-                 f"{p.slate}if it survives or you fail to disengage{RESET}")
-    if tactics["brace_ready"]:
-        low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, tactics, braced=True, cover=squadron_cover(world)) for roll in (4, 9))
-        lines.append(f"{key_label('G', 'Guard')}{p.slate}: your shot at{RESET} {odds(0.55)}{p.slate}, incoming{RESET} "
-                     f"{harm(span(low, high))}{p.slate}. Fire recharges Guard.{RESET}")
-    else: lines.append("Guard recharging: fire once before using G again.")
+    lines.append(combat_intent_row(pirate, tactics, low, high))
     if not patrol and outclassed(world, pirate, tactics):
         # One row, said where the decision is made: the numbers above already
         # show it, but only to a pilot who knows what their hull is worth.
         lines.append(alert("danger", "OUTCLASSED", "two hits can break this hull; it wants your cargo"))
-    if details: lines.append(section("TACTICAL SYSTEMS"))
-    if details:
-        lines.append(f"{tactics['profile']} pattern: " + " > ".join(TACTICAL_PROFILES[tactics["profile"]]) + ".")
-        lines.append("Cover/harry reduce your shot; recovery exposes the enemy. Harry lowers escape chance by 10 percentage points, minimum 5%.")
     if ship.hull_hp * 3 <= hull_hp_max(ship):
         paid = min(pilot.credits, salvage_fee(ship))
         lines.append(f"LOW HULL: one third of maximum hull or less. Destruction: {paid}cr salvage fee, all cargo lost, tow to Freeport"
                      + (f" with hull patched to {salvage_hull(ship, paid, hull_before)}/{hull_hp_max(ship)} (the fee is {salvage_fee(ship)}cr)." if paid < salvage_fee(ship) else "."))
+    lines.append(section("OPTIONS"))
+    lines += combat_option_rows(world, pirate, patrol=patrol, tactics=tactics)
     travel = world.save.pending_travel
-    escort_at_stake = " Escaping fails the escort contract." if travel is not None and travel.get("phase") == "escorts" else ""
-    dump_row = None
-    if not patrol and used:
-        units = dump_units(world, pirate, tactics)
-        chance = combat_evade_chance(world, pirate, dumped_cargo=True, tactics=tactics, cargo_units=max(0, used - units))
-        what = (f"jettison half the hold ({units} of {used} units, chosen at random) for the raider to take"
-                if outclassed(world, pirate, tactics) else "jettison one unit of a random held commodity to try to break contact")
-        dump_row = f"{key_label('D', 'Dump')}: {what}; about {odds(chance)} success; failure draws fire." + escort_at_stake
-    # Against a raider that outclasses the hull, Dump is the answer the alert row
-    # points at, so it leads the options: listed fourth, it fell onto the second
-    # page at 80x24 while the row that names it stayed on the first (the gallery's
-    # "Combat, outclassed" panel is where that was seen).
-    dump_leads = dump_row is not None and outclassed(world, pirate, tactics)
-    lines += [section("OPTIONS")] + ([dump_row] if dump_leads else []) + [
-        f"{key_label('F', 'Fire')}: one shot; a surviving enemy returns fire.",
-        f"{key_label('E', 'Evade')}: about {odds(combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics, patrol=patrol))} success; failure draws enemy fire.{escort_at_stake}",
-    ]
-    if patrol:
-        fine = notoriety_fine_cost(pilot.notoriety)
-        lines.append((f"{key_label('S', 'Surrender')}: pay {cost(f'{fine}cr')}, clear notoriety, Concord +2 and escape. "
-                      if pilot.credits >= fine else f"Surrender requires {cost(f'{fine}cr')}. ") +
-                     ("Available." if pilot.credits >= fine else harm("UNAFFORDABLE") + "; surrender unavailable."))
-    else:
-        if dump_row is not None and not dump_leads:
-            lines.append(dump_row)
-        bribe = bribe_cost(pirate)
-        lines.append((f"{key_label('P', 'Pay bribe')}: " if pilot.credits >= bribe else "Pay bribe unavailable: ") +
-                     f"{cost(f'{bribe}cr')} only if accepted (about {odds(bribe_chance(world, pirate))}); "
-                     "Blackwake +2 if accepted; refusal draws enemy fire."
-                     + ("" if pilot.credits >= bribe else " " + harm("UNAFFORDABLE") + "; bribe unavailable.")
-                     + (" An accepted bribe fails the escort contract." if escort_at_stake else ""))
+    if travel is not None and travel.get("phase") == "escorts":
+        lines.append(alert("caution", "ESCORT", "escaping fails the escort contract, and so does an accepted bribe"))
     if warrant is not None:
         # After the options it qualifies: as the page's opening paragraph it
         # pushed Bribe and Dump onto page two at 80x24 (#28).
         lines.append(section("IDENTIFICATION"))
         lines += bounty_identification_lines(world, warrant)
     if details:
-        lines += [f"Destruction: {salvage_fee(ship)}cr salvage fee, all cargo lost, tow to Freeport; paying less than the fee leaves the hull "
+        # Everything the table leaves out, in sentences, for the pilot who asks.
+        lots = plural(sum(1 for quantity in world.save.cargo.values() if quantity > 0), "lot")
+        lines += [section("TACTICAL SYSTEMS"),
+                  f"{tactics['profile']} pattern: " + " > ".join(TACTICAL_PROFILES[tactics["profile"]]) + ".",
+                  "Cover/harry reduce your shot; recovery exposes the enemy. Harry lowers escape chance by 10 percentage points, minimum 5%.",
+                  "Fire: one shot; a surviving enemy returns fire. Guard: your shot at 55%, incoming cut to a quarter; Fire recharges Guard.",
+                  "Dump jettisons one unit of a random held commodity. A failed Evade or Dump draws enemy fire; a bribe's "
+                  "refusal draws it too. A bribe is charged only if accepted, and earns Blackwake +2."
+                  if not patrol else "A failed Evade draws enemy fire. Surrender: pay the fine, clear notoriety, Concord +2 and escape.",
+                  "  ".join([chip("Fuel", f"{ship.fuel}/{fuel_capacity(ship)}"),
+                             chip("Hold", f"{used}/{cargo_capacity(ship)}", tone="value") + f" {p.slate}{lots}{RESET}",
+                             chip("day", str(world.save.turn))]),
+                  f"Destruction: {salvage_fee(ship)}cr salvage fee, all cargo lost, tow to Freeport; paying less than the fee leaves the hull "
                   f"at a quarter of maximum plus the paid share of the rest, never full and never above the hull you brought into the fight; "
                   + (f"this patrol also collects your {notoriety_fine_cost(pilot.notoriety)}cr fine and clears notoriety only once both are paid."
                      if patrol else "notoriety stays."),

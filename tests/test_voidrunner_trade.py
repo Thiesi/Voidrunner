@@ -2906,7 +2906,7 @@ def test_combat_b_is_harmless_and_p_pays_the_bribe(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()) as output:
         outcome = vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=False)
     plain = vr._ANSI_RE.sub("", output.getvalue())
-    assert outcome == "escaped" and "[P] Pay bribe:" in plain and "[I] Info" in plain and "[Q] Info" not in plain
+    assert outcome == "escaped" and "[P] Pay bribe" in plain and "[I] Info" in plain and "[Q] Info" not in plain
     assert world.save.pilot.credits == credits - vr.bribe_cost(pirate)
 
 
@@ -3432,7 +3432,7 @@ def test_the_deck_counts_yard_upgrades_the_balance_covers():
     assert ("Y", "Yard repair/refit") in vr.deck_service_entries(world)
     world.save.pilot.credits = 10_000_000
     count = sum(1 for key, u in vr.UPGRADES.items() if getattr(world.save.ship, f"{key}_tier") < u["max_tier"])
-    assert ("Y", f"Yard: {vr.plural(count, 'upgrade')} affordable") in vr.deck_service_entries(world)
+    assert ("Y", f"Yard: {vr.plural(count, 'upgrade')}") in vr.deck_service_entries(world)
 
 
 def test_the_deck_warns_three_days_out_and_folds_a_crowd_of_deadlines_into_one_row():
