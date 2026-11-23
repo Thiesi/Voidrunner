@@ -359,7 +359,6 @@ def test_station_deck_pages_keep_telemetry_actions_and_exit_visible(monkeypatch,
     world.save.ship.hull_hp=1
     world.save.pilot.credits=5
     _set_cargo(world, {"weapons":2})
-    world.save.active_event={"description":"Regional supply disruption", "turns_remaining":3}
     before=world.save.to_dict()
     world._checkpoint=lambda _:pytest.fail("Browsing checkpointed")
     output=io.StringIO();frames=[];toggled=False
@@ -380,7 +379,7 @@ def test_station_deck_pages_keep_telemetry_actions_and_exit_visible(monkeypatch,
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):assert vr.screen_station_menu(vr.Palette(False),world)=="Q"
     text=page_text(frames)
-    for phrase in ("FREEPORT ANCHORAGE", "CRITICAL HULL", "Contraband aboard", "Regional supply disruption", "Wages unaffordable", "2/24", "[M]", "[Y]", "[B]", "[C]", "[S]", "[G]", "[T]"):
+    for phrase in ("FREEPORT ANCHORAGE", "CRITICAL HULL", "Contraband aboard", "Wages unaffordable", "2/24", "[M]", "[Y]", "[B]", "[C]", "[S]", "[G]", "[T]"):
         assert phrase in text
     assert "[H]" not in text  # day zero of a first career: the Hall arrives after the first jump
     if expanded:assert "charted" in text and "Crew" in text

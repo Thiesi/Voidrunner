@@ -1968,9 +1968,10 @@ class ResumeError(Exception):
     """An interrupted career must be preserved, never reset automatically."""
 
 
-#: Top-level keys of a save from a build that sold futures. They are read, their
-#: orders refunded (`close_futures_desk`), and they are not written again.
-RETIRED_SAVE_FIELDS = {"active_futures", "next_futures_id"}
+#: Top-level keys of a save from a build that sold futures and ran economy
+#: events. A futures order is read and refunded (`close_futures_desk`); a
+#: running event is simply over (see `SEASON_SWING`). Neither is written again.
+RETIRED_SAVE_FIELDS = {"active_futures", "next_futures_id", "active_event"}
 
 
 def _reject_unknown_save_fields(value, fields: set[str], label: str) -> None:
@@ -2165,12 +2166,6 @@ class SaveData:
     active_missions: list[Mission]
     next_mission_id: int
     flags: dict[str, bool]
-    # At most one galaxy-wide economy event active at a time (see
-    # tick_economy_event) -- a plain dict rather than its own dataclass,
-    # matching `flags`'s own precedent for simple additive save state.
-    # Additive field, safe default via from_dict's own .get() below --
-    # no SCHEMA_VERSION bump needed.
-    active_event: dict | None = None
     # Futures orders in a save an earlier build wrote. The exchange is closed:
     # they are refunded when the career is opened (`close_futures_desk`) and
     # never written again.
@@ -2230,7 +2225,6 @@ class SaveData:
             "active_missions": [m.to_dict() for m in self.active_missions],
             "next_mission_id": self.next_mission_id,
             "flags": self.flags,
-            "active_event": self.active_event,
             "pending_travel": self.pending_travel,
             "event_rng_state": self.event_rng_state,
             "mission_boards": {str(k): v for k, v in self.mission_boards.items()},
@@ -2273,7 +2267,6 @@ class SaveData:
             active_missions=[Mission.from_dict(m) for m in d.get("active_missions", [])],
             next_mission_id=d.get("next_mission_id", 1),
             flags=dict(d.get("flags", {})),
-            active_event=d.get("active_event"),
             closed_futures=[FuturesContract.from_dict(f) for f in d.get("active_futures", [])],
             pending_travel=_load_pending_travel(d.get("pending_travel")),
             event_rng_state=d.get("event_rng_state"),
@@ -2626,26 +2619,6 @@ def _validate_save_document(data: dict) -> None:
     require(not (flags.get("archive_v1_public") and flags.get("archive_v1_private")), "archive ending")
     if flags.get("archive_v1_public") or flags.get("archive_v1_private"):
         require(flags.get("archive_v1_recovered") is True, "archive completion")
-    event = data.get("active_event")
-    if event is not None:
-        event_fields = {"economy", "commodity", "direction", "turns_remaining", "description", "system_ids"}
-        require(isinstance(event, dict), "economy event")
-        if set(event) - event_fields:
-            raise UnsupportedSave("The saved economy event contains unsupported fields.")
-        # An event with no region was economy-wide under the retired schema (#421).
-        require(event_fields <= set(event), "economy event")
-        require(event["economy"] in ECONOMIES and event["commodity"] in COMMODITIES and
-                event["direction"] in ("boom", "crash"), "economy event")
-        integer(event["turns_remaining"], "event duration", minimum=1, maximum=ECONOMY_EVENT_MAX_TURNS)
-        text(event["description"], "economy news")
-        ids = event["system_ids"]
-        require(isinstance(ids, list) and 1 <= len(ids) <= 3, "event region")
-        for sid in ids:
-            system(sid, "event station")
-        require(len(set(ids)) == len(ids), "event region")
-        economies = economies or galaxy_economies(data["seed"])
-        hops = galaxy_hops(data["seed"], ids[0])
-        require(all(economies[sid] == event["economy"] and 0 <= hops[sid] <= 2 for sid in ids), "event region")
 
 
 class World:
@@ -3544,12 +3517,8 @@ def season_trend(world: World, system_id: int, commodity: str) -> tuple[bool, in
 
 
 def _market_rest(world: World, system_id: int, commodity: str) -> float:
-    """The drift a quote rests at with the pilot's own trading taken out of it:
-    1.0, or the level an active economy event holds this station at."""
-    event = world.save.active_event
-    if (event is not None and event["commodity"] == commodity
-            and system_id in economy_event_system_ids(world, event)):
-        return ECONOMY_EVENT_CRASH_LEVEL if event["direction"] == "crash" else ECONOMY_EVENT_BOOM_LEVEL
+    """The drift a quote rests at with the pilot's own trading taken out of it.
+    It was an economy event's level while one ran; there are none now."""
     return 1.0
 
 
@@ -3816,83 +3785,17 @@ def tick_price_reversion(world: World) -> None:
             table[commodity] = max(0.6, min(1.6, reverted))
 
 
-# At most one galaxy-wide economy event active at a time. Deliberately
-# a fixed drift *level* re-asserted every turn while active (see
-# tick_economy_event), not a one-time nudge -- a one-time nudge would
-# just be erased by tick_price_reversion's own per-turn pull toward 1.0
-# within a couple of turns, defeating "temporary but real for a while."
-ECONOMY_EVENT_CHANCE_PER_TURN = 0.05
-ECONOMY_EVENT_MIN_TURNS = 8
-ECONOMY_EVENT_MAX_TURNS = 15
-ECONOMY_EVENT_CRASH_LEVEL = 0.7
-ECONOMY_EVENT_BOOM_LEVEL = 1.3
-
-
-def economy_event_system_ids(world: World, event: dict) -> list[int]:
-    """The stations an active event actually reaches; always recorded (issue #421)."""
-    return list(event["system_ids"])
-
-
-def _regional_economy_ids(world: World, economy: str, commodity: str, direction: str) -> list[int]:
-    candidates = [s.id for s in world.galaxy if s.economy == economy]
-    if not candidates:
-        return []
-    key = f"regional:{world.save.seed}:{world.save.turn}:{economy}:{commodity}:{direction}"
-    anchor = candidates[zlib.crc32(key.encode("utf-8")) % len(candidates)]
-    hops = bfs_hops(world.by_id, anchor)
-    return sorted((sid for sid in candidates if hops[sid] <= 2), key=lambda sid: (hops[sid], sid))[:3]
-
-
-def tick_economy_event(world: World) -> str | None:
-    """Called once per turn, right after `tick_price_reversion` -- ages
-    and ends an already-active event, or (only when none is active)
-    rolls a small chance to start a new one. Returns a narrative line
-    on the turn an event starts or ends, else None (most turns, most
-    careers -- this is meant to be a rare, notable happening, not
-    background noise)."""
-    event = world.save.active_event
-    if event is not None:
-        level = ECONOMY_EVENT_CRASH_LEVEL if event["direction"] == "crash" else ECONOMY_EVENT_BOOM_LEVEL
-        for sid in economy_event_system_ids(world, event):
-            table = world.save.market_drift.setdefault(sid, {})
-            table[event["commodity"]] = level
-        event["turns_remaining"] -= 1
-        if event["turns_remaining"] <= 0:
-            world.save.active_event = None
-            return f"Galaxy news: the {event['description']} has ended -- prices normalize."
-        return None
-
-    if world.event_rng.random() >= ECONOMY_EVENT_CHANCE_PER_TURN:
-        return None
-    economy = world.event_rng.choice(ECONOMIES)
-    commodities = sorted(set(ECONOMY_PRODUCES[economy]) | set(ECONOMY_DEMANDS[economy]))
-    if not commodities:
-        return None
-    commodity = world.event_rng.choice(commodities)
-    direction = world.event_rng.choice(["crash", "boom"])
-    turns = world.event_rng.randint(ECONOMY_EVENT_MIN_TURNS, ECONOMY_EVENT_MAX_TURNS)
-    ids = _regional_economy_ids(world, economy, commodity, direction)
-    if not ids:
-        # Keep the event lifecycle and RNG schedule when an industry is absent.
-        economy = world.here.economy
-        commodity = sorted(set(ECONOMY_PRODUCES[economy]) | set(ECONOMY_DEMANDS[economy]))[0]
-        ids = _regional_economy_ids(world, economy, commodity, direction)
-    label = COMMODITIES[commodity]["label"]
-    verb = "crash" if direction == "crash" else "spike"
-    description = f"{label} prices {verb} near {world.by_id[ids[0]].name} ({len(ids)} {economy} stations)"
-    world.save.active_event = {
-        "economy": economy, "commodity": commodity, "direction": direction,
-        "turns_remaining": turns, "description": description, "system_ids": ids,
-    }
-    level = ECONOMY_EVENT_CRASH_LEVEL if direction == "crash" else ECONOMY_EVENT_BOOM_LEVEL
-    for sid in ids:
-        table = world.save.market_drift.setdefault(sid, {})
-        table[commodity] = level
-    return f"Galaxy news: {description} (roughly {turns} turns)."
-
-
-
-
+# Economy events are folded into seasons (review). An event was a boom or a
+# crash in one good at up to three stations of one economy, 30% either way for
+# eight to fifteen days, with about one running a third of the time. It was the
+# fourth thing moving a price -- after the economy, a system's own trait and
+# the season -- and the only one a pilot could not see coming or plan for; a
+# price that was simply wrong for a fortnight with a badge on it. Switched off
+# in the simulator it moved no pilot's median by more than 1.4%. Seasons do
+# the same job on a calendar a pilot can read, so the event is gone and the
+# ledger's bulletin, which reported the event, reports the seasons of the
+# sector the pilot is in. A save with an event running simply has none; the
+# prices it held drift back to rest like any other.
 class TradeError(ValueError):
     """Rejected economy actions leave the career unchanged."""
 
@@ -5777,7 +5680,7 @@ def work_dock_shift(world: World) -> list[str]:
     save.turn += 1
     lines = expire_missions(world)
     tick_price_reversion(world)
-    event = tick_economy_event(world)
+    world.event_rng.random()  # the draw an economy event's chance took each day: a career's luck is what it was
     save.pilot.credits += DOCK_WORK_PAY
     patched = ship.hull_hp < dock_work_hull(ship)
     ship.hull_hp = max(ship.hull_hp, dock_work_hull(ship))
@@ -5785,8 +5688,6 @@ def work_dock_shift(world: World) -> list[str]:
     story = DOCK_WORK_STORIES[zlib.crc32(f"dock:{save.seed}:{save.turn}".encode("utf-8")) % len(DOCK_WORK_STORIES)]
     lines.insert(0, f"{story} +{DOCK_WORK_PAY}cr"
                  + (f"; the yard patched your hull to {ship.hull_hp}/{hull_hp_max(ship)}." if patched else "."))
-    if event:
-        lines.append(event)
     rumour = dock_rumour(world, sure=True)
     if rumour:
         lines.append(rumour)
@@ -11863,10 +11764,6 @@ def deck_alert_rows(world: World) -> list[str]:
     if wage and pilot.credits < wage:
         rows.append(alert("caution", "Wages unaffordable", f"{wage}cr due next jump",
                           key_label("K", "crew")))
-    event = world.save.active_event
-    if event:
-        rows.append(alert("caution", event["description"],
-                          f"{plural(event['turns_remaining'], 'day')} left", key_label("T", "ledger")))
     rows += due_here_alert_rows(world)
     rows += deadline_alert_rows(world)
     mission = tracked_mission(world)
@@ -13753,10 +13650,6 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
     used, hold = sum(world.save.cargo.values()), cargo_capacity(world.save.ship)
     head = (f"{p.hull}{BOLD}{system.station_name.upper()}{RESET} {p.slate}{system.economy}{RESET}   "
             f"{p.slate}hold{RESET} {gauge(used, hold, 8, tone='info')} {p.ink}{used}/{hold}{RESET}")
-    event = world.save.active_event
-    if event and system.id in economy_event_system_ids(world, event):
-        head += "   " + badge("CRASH" if event["direction"] == "crash" else "BOOM",
-                              "danger" if event["direction"] == "crash" else "good")
     trait = world.traits.get(system.id)
     if trait is not None:
         head += "   " + badge(trait_label(trait).upper(), "good" if trait["kind"] == "surplus" else "caution")
@@ -13776,16 +13669,11 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
         trend = season_trend(world, system.id, commodity)
         season = "" if trend is None else (f"{p.tone('caution' if trend[0] else 'good')}"
                                            f"{glyph('rise' if trend[0] else 'fall')}{trend[1]}{RESET}")
-        # Legality and a running event are separate facts about the same row,
-        # and a contraband commodity in a crash is both.
         marks = []
         if prohibited:
             marks.append(badge("prohibited", "danger"))
         elif illegal:
             marks.append(badge("Illegal", "danger"))
-        if event and event["commodity"] == commodity and system.id in economy_event_system_ids(world, event):
-            marks.append(badge("[CRASH]" if event["direction"] == "crash" else "[BOOM]",
-                               "danger" if event["direction"] == "crash" else "good"))
         flag = " ".join(marks)
         rows.append([
             key_label(MARKET_LETTERS[index], COMMODITIES[commodity]["label"],
@@ -14554,6 +14442,32 @@ def trade_opportunities(world: World) -> list[dict]:
     return candidates[:6]
 
 
+def season_bulletin_lines(world: World) -> list[str]:
+    """The seasons of the sector the pilot is in: for each legal good, whether
+    its price is rising or falling, for how many more days, and how far it
+    stands from its usual level today. What the market's TREND column says of
+    one station, said once for the sector, since a sector shares its seasons."""
+    p = pal()
+    here = world.here
+    rows = []
+    for commodity in LEGAL_COMMODITIES:
+        trend = season_trend(world, here.id, commodity)
+        if trend is None:
+            continue
+        rising, days = trend
+        off = round((season_factor(world, here.id, commodity) - 1) * 100)
+        rows.append([f"{p.ink}{COMMODITIES[commodity]['label']}{RESET}",
+                     f"{p.tone('caution' if rising else 'good')}{glyph('rise' if rising else 'fall')} "
+                     f"{'rising' if rising else 'falling'}{RESET} {p.slate}{plural(days, 'more day')}{RESET}",
+                     f"{p.tone('caution' if off > 0 else 'good' if off < 0 else 'label')}{off:+d}%{RESET} "
+                     f"{p.slate}against usual{RESET}"])
+    lines = [section(f"SEASONS IN {sector_for(here).upper()}")]
+    if not rows:
+        return lines + [f"{p.slate}Prices here are level today.{RESET}"]
+    return lines + table(["", "", ""], rows, "lll", repeat_header=False)[1:] + [
+        f"{p.slate}The same across this sector. A good bought while it is under and sold when it is over pays twice.{RESET}"]
+
+
 def economy_opportunity_lines(world: World, candidates: list[dict]) -> list[str]:
     """The bulletin and the ranked trade leads, a paragraph each (issue #39).
 
@@ -14562,32 +14476,7 @@ def economy_opportunity_lines(world: World, candidates: list[dict]) -> list[str]
     figure that matters in its color: a margin green or red, a risk red.
     """
     p = pal()
-    lines = [section("PUBLIC ECONOMY BULLETIN")]
-    event = world.save.active_event
-    if event is None:
-        lines.append(f"{p.slate}No active disruption reported. Ordinary price differences still create trade leads.{RESET}")
-    else:
-        boom = event["direction"] == "boom"
-        lines.append(f"{p.tone('good' if boom else 'caution')}{BOLD}{_mission_plain(event['description'])}{RESET}"
-                     f"{p.slate}. {plural(event['turns_remaining'], 'jump')} of event time remain.{RESET}")
-        commodity = COMMODITIES[event["commodity"]]["label"]
-        lines.append(f"{p.slate}Lead:{RESET} {p.ink}{'bring' if boom else 'investigate buying'} {commodity}{RESET}"
-                     f"{p.slate}. Prices and availability still need checking.{RESET}")
-        if not COMMODITIES[event["commodity"]]["legal"]:
-            lines.append(f"{p.wrong}ILLEGAL CARGO:{RESET} customs can confiscate this commodity outside Havens.")
-        for sid in economy_event_system_ids(world, event):
-            station = world.by_id[sid]
-            path = bfs_path(world.by_id, world.here.id, sid)
-            threat = (f"{p.tone(danger_tone(station.danger))}danger {station.danger}{RESET}" if station.discovered
-                      else f"{p.slate}danger unknown{RESET}")
-            timing = "event ends by arrival if uninterrupted" if len(path) >= event["turns_remaining"] else "reachable before event ends if uninterrupted"
-            lines.append("")
-            lines.append(f"{p.ink}{BOLD}{_mission_plain(station.name)}{RESET} {p.slate}({station.x},{station.y}), "
-                         f"{plural(len(path), 'jump')};{RESET} {threat}{p.slate}; {timing}.{RESET}")
-            if path:
-                first = world.by_id[path[0]]
-                bearing = _mission_plain(first.name) if first.discovered else f"uncharted connection at ({first.x},{first.y})"
-                lines.append(f"{p.slate}First bearing:{RESET} {p.ink}{bearing}{RESET}{p.slate}. Public news does not chart its destinations.{RESET}")
+    lines = season_bulletin_lines(world)
     lines += [section("TRADE CANDIDATES"),
               f"{p.slate}Remembered prices, outbound margin only; return travel is excluded. Ranked by estimated "
               f"margin per jump. Quotes can be stale; encounters, repairs and market changes can erase a margin.{RESET}"]
@@ -17107,11 +16996,6 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
                      f"{p.ink}{max(0, following[0] - pilot.credits):,}cr{RESET} {p.slate}to {following[1]} "
                      f"({following[0]:,}cr){RESET}")
         lines.append(f"{p.slate}it brings{RESET} {p.ink}{RANK_PERKS[earned + 1]}{RESET}")
-    event = world.save.active_event
-    if event:
-        lines.append(alert("caution", "Economy event",
-                           f"{event['description']} "
-                           f"({event['turns_remaining']} day(s) left)"))
     lines.append(section("SHIP"))
     lines += ship_gauge_rows(world)
     if (crew_row := career_crew_row(world)) is not None:
@@ -18724,9 +18608,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         credits_before = world.save.pilot.credits
         lines.extend(expire_missions(world))
         tick_price_reversion(world)
-        event_msg = tick_economy_event(world)
-        if event_msg:
-            lines.append(event_msg)
+        world.event_rng.random()  # the draw an economy event's chance took each day: a career's luck is what it was
         wage_messages = pay_crew_wages(world)
         wages = max(0, credits_before - world.save.pilot.credits)
         # The charge reads before what the day brought, which is the order the

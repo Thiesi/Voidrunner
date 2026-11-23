@@ -727,7 +727,7 @@ def test_missing_primary_requires_recovery_and_validated_previous_can_be_restore
     assert restored.turn == 7 and (tmp_path / "77.json").read_bytes() == expected
 
 
-@pytest.mark.parametrize("kind", ["schema", "galaxy", "journey", "rng", "event", "journey_field",
+@pytest.mark.parametrize("kind", ["schema", "galaxy", "journey", "rng", "journey_field",
                                  "encounter_field", "pirate_field", "combat_field", "snapshot_field"])
 def test_future_formats_never_offer_or_allow_downgrade_recovery(tmp_path, monkeypatch, kind):
     import json
@@ -742,9 +742,6 @@ def test_future_formats_never_offer_or_allow_downgrade_recovery(tmp_path, monkey
         future["pending_travel"] = {"version": 99}
     elif kind == "rng":
         future["event_rng_state"] = [99, [], None]
-    elif kind == "event":
-        future["active_event"] = {"economy": "Industrial", "commodity": "metals", "direction": "boom",
-                                  "turns_remaining": 2, "description": "News", "future_rule": True}
     else:
         destination = vr.World(vr.SaveData.from_dict(future)).here.connections[0]
         travel = {"version": 1, "origin": 0, "destination": destination, "escort_index": 0, "phase": "primary",
@@ -817,22 +814,6 @@ def test_recovery_hides_restore_and_explains_impossible_preservation(tmp_path, m
     reason = {"oversized": "file size", "unreadable": "cannot be read", "full": "copies are full"}[problem]
     assert reason in rendered
     assert {path.name: path.read_bytes() for path in tmp_path.glob("*.json")} == before
-
-
-def test_missing_economy_event_fields_remain_recoverable_corruption(tmp_path, monkeypatch):
-    import json
-    previous = _broken_career_with_previous(tmp_path)
-    broken = json.loads(previous)
-    broken["active_event"] = {"economy": "Industrial"}
-    (tmp_path / "77.json").write_text(json.dumps(broken), encoding="utf-8")
-    with pytest.raises(vr.ResumeError) as error:
-        vr.load_or_create_save(tmp_path, 77, "Tester")
-    assert not isinstance(error.value, vr.UnsupportedSave)
-    keys = iter("B")
-    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
-    with contextlib.redirect_stdout(io.StringIO()) as output:
-        vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, error.value)
-    assert "[R] Restore" in plain(output.getvalue())
 
 
 @pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
@@ -911,20 +892,18 @@ def test_real_display_saved_before_ack_and_applied_from_restart_title(tmp_path, 
 
 
 def test_a_tagged_market_row_still_fits_one_line(monkeypatch):
-    """`Illegal [CRASH]` on a Haven contraband row overflowed 80 columns (#412 review)."""
+    """`Illegal [CRASH]` on a Haven contraband row overflowed 80 columns (#412 review).
+    Economy events and their tag are gone; the row and its `Illegal` flag still fit."""
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80)
     world = _world_with_seed(303)
     haven = next(s for s in world.galaxy if s.economy == "Haven")
     world.save.current_system = haven.id; haven.discovered = True
     contraband = vr.CONTRABAND_COMMODITIES[0]
-    world.save.active_event = {"economy": haven.economy, "commodity": contraband, "direction": "crash",
-                               "turns_remaining": 4, "description": "Prices collapse",
-                               "system_ids": [haven.id]}
     _set_cargo(world, {contraband: 7})
     rows = [plain(row) for row in vr.market_catalog_lines(world, [contraband])
             if plain(row).startswith("[")]
     assert rows and all(vr._visible_width(row) <= 79 for row in rows)
-    assert "Illegal" in rows[0] and ("[CRASH]" in rows[0] or "[BOOM]" in rows[0])
+    assert "Illegal" in rows[0]
     # The depth columns give way first at the floor; the price, the hold and
     # the flags never do (issue #493).
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40)
