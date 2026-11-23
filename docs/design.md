@@ -1310,6 +1310,19 @@ and a fight is red alert -- the console's glass and its header's streak go red
 with it. The in-flight scenes and the Viewport are lit by the same sky, so a
 scene and the page after it are one place.
 
+Sixteen colors do not get it, and that was tried (review, v1.3). Read through
+the scenes' own sixteen-color rule the sky's haze and the galaxy's band become
+solid blue and magenta shapes larger than the world they are behind. With
+everything dark dropped to black first -- sky, band, the fade at a world's limb
+-- what is left is a starfield, a ship that reads well, a station that breaks
+up where its shadowed half was, and a world that is two or three flat slabs:
+its bands, which are what make one system's world its own, are gone. And a
+half-block pixel needs a background color, of which a sixteen-color terminal
+can be relied on for eight. For that a `basic` caller would give up the ten
+rows of every page the picture takes, on the links least able to carry it. So
+`basic` keeps its black sky and its full page. The pictures of both attempts
+are on the `evidence/sixteen-color-backdrop` branch.
+
 It is a picture, not information: everything in it is on the page (the status
 band names the station, its economy and its danger), and it is drawn only
 where someone can see it -- a scripted session or a transcript is the same
