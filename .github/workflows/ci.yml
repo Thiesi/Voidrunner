@@ -28,3 +28,35 @@ jobs:
         run: python -I tools/check_stdlib_only.py
       - name: Tests
         run: python -m pytest -q -n auto
+
+  # A test that depends on luck passes once and fails on the next leg (#84 to
+  # #87, #93). The test files a pull request adds or changes run ten times, which
+  # catches a one-in-five flake before merge rather than after.
+  changed-tests:
+    name: Changed tests, ten times
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install test tools
+        run: python -m pip install "pytest>=7.3" "pytest-xdist>=3.0"
+      - name: Run each changed test file ten times
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          files=$(git diff --name-only --diff-filter=AMR "$BASE"...HEAD -- 'tests/test_*.py')
+          if [ -z "$files" ]; then
+            echo "No test file changed."
+            exit 0
+          fi
+          echo "$files"
+          for run in $(seq 1 10); do
+            echo "::group::Run $run of 10"
+            python -m pytest -q -n auto -p no:cacheprovider $files
+            echo "::endgroup::"
+          done

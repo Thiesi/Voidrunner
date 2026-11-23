@@ -77,3 +77,18 @@ def test_a_piped_standalone_run_is_left_as_it_is(monkeypatch):
     with vr._standalone_console(info):
         pass
     assert info == {"terminal_width": 80}
+
+
+def test_a_test_world_has_its_luck_fixed_unless_it_asks_for_the_systems():
+    """The event RNG a test world draws from follows its seed (#93): a test
+    that fights or jumps without seeding it used to pass or fail by chance."""
+    from .support import SYSTEM_LUCK, _world_with_seed
+
+    def draws(world):
+        return [world.event_rng.random() for _ in range(4)]
+
+    assert draws(_world_with_seed(42)) == draws(_world_with_seed(42))
+    assert draws(_world_with_seed(42)) != draws(_world_with_seed(43))
+    assert draws(_world_with_seed(42, luck=7)) == draws(_world_with_seed(43, luck=7))
+    # Asked for, the door's own behaviour: a different draw every time.
+    assert draws(_world_with_seed(42, luck=SYSTEM_LUCK)) != draws(_world_with_seed(42, luck=SYSTEM_LUCK))

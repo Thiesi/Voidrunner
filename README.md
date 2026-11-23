@@ -178,6 +178,16 @@ A change to a screen comes with gallery pictures: the tests can prove that a
 screen fits, never that it looks right. The game's design (rules, saves,
 presentation) is in [docs/design.md](docs/design.md).
 
+### What CI runs
+
+- The standard-library check and the suite, on Python 3.11 and 3.13, on Ubuntu
+  and Windows.
+- On a pull request, every test file it adds or changes, ten times over. A
+  world's event RNG is seeded from the system, so a test that fights, jumps or
+  rolls passes or fails by chance unless its luck is fixed. `_world_with_seed`
+  in `tests/support.py` fixes it to the galaxy seed by default; pass
+  `luck=SYSTEM_LUCK` for the door's own behaviour.
+
 ### Local disk hygiene
 
 Scratch that is never deleted once took this development host down: a sibling
