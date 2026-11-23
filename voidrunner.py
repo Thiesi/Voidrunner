@@ -3931,7 +3931,7 @@ def chain_continues(world: World, mission: Mission) -> bool:
     """Whether the client of a delivery just handed over has another leg. The
     first leg is one delivery in `CHAIN_ONE_IN`, by the career's seed and the
     contract's number; a second leg always has a final one."""
-    if mission.kind != "delivery" or mission.opening_assignment:
+    if mission.kind != "delivery" or mission.opening_assignment or faction_contract(mission):
         return False
     leg = chain_leg(mission)
     if leg == 2:
@@ -3982,6 +3982,67 @@ def post_chain_legs(world: World, board: dict) -> None:
             world.save.next_mission_id += 1
 
 
+# Faction contracts (review, v1.3). Joining a faction gave a perk and a
+# story, and after the story nothing: membership never again put anything in
+# front of a pilot. A member in good standing now finds the faction's own work
+# on about one board in two. The Concord Navy posts warrants -- a bounty, at the
+# usual pay, on a raider of at least tier 1 near a charted system -- wherever
+# its writ runs, which is every station but a Haven. The Blackwake Cartel posts
+# runs at Havens, where its goods are sold: contraband, to a station that is
+# not a Haven, past its customs, for half as much again as a delivery of that
+# value. Each pays standing with its own faction where ordinary work pays
+# little or none, and a cartel run pays none with Concord. A faction's offer is
+# known by how its description begins, so no contract gains a field.
+FACTION_CONTRACT_ONE_IN = 2
+FACTION_CONTRACT_STANDING = 3
+FACTION_CONTRACT_TAGS = {FACTION_CONCORD: "Concord warrant: ", FACTION_BLACKWAKE: "Cartel run: "}
+CARTEL_RUN_PREMIUM = 1.5
+
+
+def faction_contract(mission: Mission) -> str | None:
+    """The faction whose own work this contract is, or None for the board's ordinary offers."""
+    return next((faction for faction, tag in FACTION_CONTRACT_TAGS.items() if mission.description.startswith(tag)), None)
+
+
+def faction_offer(world: World, system_id: int) -> Mission | None:
+    """The work a faction posts for a member on this board, on the day the board
+    is prepared: its own draw, so the ordinary offers are what they would have been."""
+    save, station = world.save, world.by_id[system_id]
+    faction = FACTION_BLACKWAKE if station.economy == "Haven" else FACTION_CONCORD
+    if not perk_active(save, faction):
+        return None
+    rng = random.Random(f"voidrunner-faction-v1:{save.seed}:{system_id}:{save.turn}")
+    if rng.randrange(FACTION_CONTRACT_ONE_IN):
+        return None
+    hops = bfs_hops(world.by_id, system_id)
+    tag = FACTION_CONTRACT_TAGS[faction]
+    if faction == FACTION_CONCORD:
+        candidates = sorted(sid for sid, away in hops.items() if 1 <= away <= 3 and world.by_id[sid].discovered)
+        if not candidates:
+            return None
+        target = rng.choice(candidates)
+        tier = max(1, min(4, world.by_id[target].danger + rng.randint(0, 1)))
+        return Mission(id=save.next_mission_id, kind="bounty", reward=BOUNTY_PAY[0] + tier * BOUNTY_PAY[1],
+                       description=f"{tag}hunt down a raider reported near {world.by_id[target].name}",
+                       origin_system=system_id, target_system=target, pirate_tier=tier,
+                       deadline_turn=save.turn + rng.randint(15, 30))
+    # Two jumps at least: the goods are handed over before the far station's
+    # customs look, so it is the harbors on the way that make it a run.
+    candidates = sorted(sid for sid, away in hops.items() if 2 <= away <= 4 and world.by_id[sid].economy != "Haven")
+    if not candidates:
+        return None
+    target = rng.choice(candidates)
+    commodity = rng.choice(sorted(c for c, info in COMMODITIES.items() if not info["legal"]))
+    quantity = rng.randint(3, delivery_contract_ceiling(save.ship))
+    at_origin, per_jump, flat = DELIVERY_PAY
+    reward = round((quantity * COMMODITIES[commodity]["base"] * (at_origin + per_jump * hops[target]) + flat)
+                   * CARTEL_RUN_PREMIUM)
+    return Mission(id=save.next_mission_id, kind="delivery", reward=reward,
+                   description=f"{tag}deliver {quantity}x {COMMODITIES[commodity]['label']} to {world.by_id[target].name}",
+                   origin_system=system_id, target_system=target, commodity=commodity, quantity=quantity,
+                   deadline_turn=save.turn + rng.randint(15, 30))
+
+
 def generate_mission_board(world: World) -> list[Mission]:
     """Stable posted offers: browsing/acceptance never replenishes the board."""
     sid = world.save.current_system
@@ -3996,6 +4057,11 @@ def generate_mission_board(world: World) -> list[Mission]:
             if mission is not None:
                 offers.append(mission.to_dict())
                 world.save.next_mission_id += 1
+        special = faction_offer(world, sid)
+        if special is not None:
+            del offers[3:]  # a full board gives up its last place
+            offers.append(special.to_dict())
+            world.save.next_mission_id += 1
         cached = {"refresh_turn": world.save.turn + MISSION_BOARD_DAYS, "offers": offers}
         world.save.mission_boards[sid] = cached
     post_chain_legs(world, cached)
@@ -4215,7 +4281,12 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
         if done:
             paid = remote_survey_payout(full) if remote and m.kind == "scan" else full
             world.save.pilot.credits += paid
-            adjust_reputation(world, FACTION_CONCORD, CONCORD_STANDING_PER_CONTRACT)
+            # A cartel run is the Cartel's work: its standing, and none with Concord.
+            cartel = faction_contract(m) == FACTION_BLACKWAKE
+            standing = (f"+{FACTION_CONTRACT_STANDING} Blackwake standing" if cartel
+                        else f"+{CONCORD_STANDING_PER_CONTRACT} Concord standing")
+            adjust_reputation(world, FACTION_BLACKWAKE if cartel else FACTION_CONCORD,
+                              FACTION_CONTRACT_STANDING if cartel else CONCORD_STANDING_PER_CONTRACT)
             if m.opening_assignment:
                 world.save.flags["opening_assignment_completed"] = True
             if world.save.pilot.missions_completed == 0:
@@ -4224,7 +4295,7 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
             bump_accolade(world.save, "deliveries" if m.kind == "delivery" else "surveys")
             msg = (f"Mission complete: {m.description} (+{paid}cr"
                    + (", scanner survey at half pay" if paid != full else "")
-                   + f", +{CONCORD_STANDING_PER_CONTRACT} Concord standing)")
+                   + f", {standing})")
             world.save.pilot.note(msg)
             msgs.append(msg)
             if chain_continues(world, m):
@@ -4870,9 +4941,11 @@ def faction_standing_route(faction: str) -> str:
     rather than left for the player to infer from the numbers (issue #407)."""
     if faction == FACTION_CONCORD:
         return (f"Earning standing: +{CONCORD_STANDING_PER_CONTRACT} for every delivery, survey or escort contract "
-                "completed, and +2 for destroying a raider.")
+                f"completed, +2 for destroying a raider, and +{FACTION_CONTRACT_STANDING} for a warrant the Navy "
+                "posts for its own, once you hold its commission.")
     return (f"Earning standing: +1 for every new {CONTRABAND_STANDING_STEP}cr of net contraband trading gain; "
-            "purchases count against the gain.")
+            f"purchases count against the gain. Once you are made, +{FACTION_CONTRACT_STANDING} for each run the "
+            "Cartel posts at a Haven.")
 
 
 def faction_contact_lines(world: World, faction: str) -> list[str]:
@@ -15299,7 +15372,11 @@ def mission_details(world: World, mission: Mission) -> list[str]:
         checks.append(("CASH", f"{outlay:,}cr of {world.save.pilot.credits:,}cr" + (f", {short:,} short" if short > 0 else ""),
                        "bad" if short > 0 else "good"))
     money.append(("NET", reward - outlay, "good" if reward - outlay > 0 else "bad"))
-    if mission.kind in CONCORD_STANDING_CONTRACTS:
+    if faction_contract(mission) == FACTION_BLACKWAKE:
+        money.append((f"also +{FACTION_CONTRACT_STANDING} Blackwake standing", None, "info"))
+    elif faction_contract(mission) == FACTION_CONCORD:
+        money.append((f"also +{FACTION_CONTRACT_STANDING} Concord standing, for the right ship", None, "info"))
+    elif mission.kind in CONCORD_STANDING_CONTRACTS:
         money.append((f"also +{CONCORD_STANDING_PER_CONTRACT} Concord standing", None, "info"))
     if mission.kind == "scan" and not target.discovered:
         money.append((f"scanned from afar: +{remote_survey_payout(reward):,}cr", None, "info"))
@@ -15472,6 +15549,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         "Ranks are kept once reached, and each brings something: a fourth contract slot at Independent Trader, half as much again on every contract at Merchant Captain, a fifth slot at Void Baron and double pay at Legend of the Frontier.",
         "Once the ship is built there is something to own: [K] Stake in any market buys a share in that station, in three steps at up to three stations. Its stock and demand come back two, three and four times as fast for you, so a route you fly again and again keeps paying.",
         "One delivery in three is the first of three: where you hand it over, the client posts a second leg on that station's board, then a final one, each a jump or two on and paying a quarter and then half as much again over a delivery of its size.",
+        "A faction posts work for its own: once you hold the Concord commission, a warrant on about one board in two, worth standing for the right ship; once the Cartel has made you, a contraband run from a Haven, at half as much again and worth standing with them.",
         "The Mission Board ([B] on the station deck) shows full contract terms, tracking and abandonment. [G] Guide keeps this recap available. On every other screen [B] is Back; [Q] on the station deck saves and leaves the game.",
     ]
     if dispatch_order(world) is not None:
@@ -17537,6 +17615,12 @@ def _resolve_bounty(p: Palette, world: World, travel: dict) -> None:
         world.save.pilot.note(f"Bounty complete: {bounty.description} (+{reward}cr)")
         bump_accolade(world.save, "bounties")
         lines.append(f"Bounty complete! +{reward}cr")
+        served = (faction_contract(bounty) == FACTION_CONCORD
+                  and (state.get("warrant") is None or state["warrant"]["matches"]))
+        if served:
+            # The right ship, on the Navy's own warrant: that is worth standing.
+            adjust_reputation(world, FACTION_CONCORD, FACTION_CONTRACT_STANDING)
+            lines.append(f"Concord warrant served: +{FACTION_CONTRACT_STANDING} Concord standing")
         world.event_rng.random()  # Preserve the historical bounty-completion draw.
         if state.get("warrant") is not None and not state["warrant"]["matches"]:
             world.save.pilot.notoriety += NOTORIETY_PER_WRONG_BOUNTY_KILL
