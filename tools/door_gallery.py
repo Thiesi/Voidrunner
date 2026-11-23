@@ -870,22 +870,33 @@ def build_voidrunner_prize(door_name: str, door: pathlib.Path, state: pathlib.Pa
     The door keeps the question with the fight it won, so a career left at the
     prize page comes back to it: the fixture is that career, and the panel is
     the page a resumed journey opens on.
+
+    A fight is won by luck as well as by firing: the door's luck is its own,
+    seeded from the system, and a Shuttle that only fires loses or is driven
+    off now and then. That failed a gallery run on CI (#100), so a fight that
+    ends without a prize is flown again from a fresh career, as the combat
+    fixture already retries a board without an adjacent bounty.
     """
-    build_voidrunner_combat(door_name, door, state)
-    running = Door(door, state, 80, 24, {})
-    try:
-        running.settle()
-        for _ in range(20):
-            shown = " ".join(_screen_rows(running))
-            if "[S] Strip it" in shown:
-                break
-            running.press(b"F" if "[F] Fire" in shown else b"\r", expect=False)
-        else:
-            raise SystemExit("the combat fixture's fight did not end in a prize")
-    except BaseException:
+    for _attempt in range(PRIZE_ATTEMPTS):
+        build_voidrunner_combat(door_name, door, state)
+        running = Door(door, state, 80, 24, {})
+        try:
+            running.settle()
+            for _ in range(20):
+                shown = " ".join(_screen_rows(running))
+                if "[S] Strip it" in shown:
+                    running.kill()  # mid-question on purpose: a clean exit would be a career that had answered
+                    return
+                running.press(b"F" if "[F] Fire" in shown else b"\r", expect=False)
+        except BaseException:
+            running.kill()
+            raise
         running.kill()
-        raise
-    running.kill()  # mid-question on purpose: a clean exit would be a career that had answered
+    raise SystemExit(f"the combat fixture's fight ended without a prize {PRIZE_ATTEMPTS} times running")
+
+
+#: Fresh careers the prize fixture may fly before it gives up.
+PRIZE_ATTEMPTS = 8
 
 
 def build_voidrunner_retiring(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
