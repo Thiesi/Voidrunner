@@ -10228,6 +10228,8 @@ QUADRANT_GLYPHS = " ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█"
 # pixel, like the scenes; the host accepts terminals up to 500x200, where one
 # would take seconds to compose and hundreds of kilobytes to send.
 CANOPY_MAX_WIDTH, CANOPY_MAX_HEIGHT = 200, 60
+#: Rows from which a wide terminal's lower screen is a stage for the picture.
+CANOPY_STAGE_HEIGHT = 40
 #: What may be written between a page's action bar and the next page with its
 #: sky still intact: the key the caller typed, echoed on the strip, and the
 #: line that ends it. Anything else drawn meanwhile clears the screen anyway
@@ -10533,6 +10535,15 @@ def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
     band_top = max(1, round(height * 0.58))
     band = height - band_top if not side and height - band_top >= 4 else 0
     kind = scene["kind"]
+    # A stage (review). On a terminal both wide and tall the console is the top
+    # left of the screen and most pages leave everything under it open: at
+    # 160x48 that is over a hundred columns by twenty-six rows of sky, with the
+    # whole picture squeezed into the column beside the console. There the
+    # lower screen is the stage: the world is drawn across it at more than
+    # twice the size, a fight is flown across it, and the column keeps the
+    # station and the name. A long page covers some of it, as a page always
+    # may; the pages a pilot lives on do not.
+    stage = bool(side) and height >= CANOPY_STAGE_HEIGHT
     if kind == "dock" and (side or band):
         economy = scene["economy"]
         glow = _mix(_SCENE_LIGHTS[economy], (140, 190, 255), 0.6)
@@ -10542,12 +10553,21 @@ def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
             # A world that fills the corner and runs off two edges of the
             # screen: the station and the pilot's hull hang in front of it.
             radius = min(side * 1.05, h2 * 0.42)
+            pcx, pcy = side_left + side * 0.7, h2 - radius * 0.3
+            if stage:
+                # Across the lower screen and off its right and bottom edges.
+                radius = min(width * 0.42, h2 * 0.62)
+                pcx, pcy = width * 0.66, h2 + radius * 0.22
             if look and look["ring"]:
                 radius *= 0.72  # room for the ring inside the window
-            pcx, pcy = side_left + side * 0.7, h2 - radius * 0.3
             for moon_x, moon_y, size, tone in (look["moons"] if look else ()):
-                canopy.moon(pcx - radius * (0.9 + moon_x * 0.7), pcy - radius * (1.25 + moon_y * 0.7),
-                            max(1.5, radius * size), tone)
+                if stage:
+                    # Out over the open sky to the left of the world.
+                    canopy.moon(width * (0.08 + moon_x * 0.22), h2 * (0.66 + moon_y * 0.2),
+                                max(1.5, radius * size), tone)
+                else:
+                    canopy.moon(pcx - radius * (0.9 + moon_x * 0.7), pcy - radius * (1.25 + moon_y * 0.7),
+                                max(1.5, radius * size), tone)
             canopy.planet(economy, pcx, pcy, radius, glow, look=look)
             station_r = min(side * 0.25, h2 * 0.15)
             canopy.station(economy, side_left + side * 0.42, h2 * 0.36, station_r)
@@ -10579,7 +10599,14 @@ def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
     elif kind == "combat" and (side or band):
         enemy = _hostile_art(scene["name"], scene["enemy"] == "patrol")
         own = _SCENE_HULLS.get(scene["hull"], _SPLASH_SHIP)
-        if side:
+        if stage:
+            # Across the lower screen, the pilot's hull on the left and the
+            # contact on the right, as the band of a smaller terminal has them.
+            depth = h2 * 0.45
+            size = max(1.0, min(width * 0.26 / len(enemy[0]), depth * 0.5 / len(enemy)))
+            ex, ey = width * 0.66, h2 * 0.76
+            sx, sy, own_size = width * 0.24, h2 * 0.78, max(0.5, size * 0.6)
+        elif side:
             size = max(1.0, min(side * 0.62 / len(enemy[0]), h2 * 0.26 / len(enemy)))
             ex, ey = side_left + side * 0.60, h2 * 0.40
             sx, sy, own_size = side_left + side * 0.22, h2 * 0.70, max(0.5, size * 0.45)
@@ -10608,7 +10635,10 @@ def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
         # career starts in is on the commission card in front of it, beside
         # the line that names it; drawn here as well it was two ships.
         glow = (190, 150, 255)
-        if side:
+        if stage:
+            radius = min(width * 0.42, h2 * 0.62)
+            canopy.planet("Haven", width * 0.66, h2 + radius * 0.22, radius, glow)
+        elif side:
             radius = min(side * 1.05, h2 * 0.42)
             canopy.planet("Haven", side_left + side * 0.7, h2 - radius * 0.3, radius, glow)
         else:

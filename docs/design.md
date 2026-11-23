@@ -1310,6 +1310,20 @@ and a fight is red alert -- the console's glass and its header's streak go red
 with it. The in-flight scenes and the Viewport are lit by the same sky, so a
 scene and the page after it are one place.
 
+A terminal both wide and tall gets a stage. The side window was composed for
+120 columns by 36 rows: the world in the corner, the station above it, all of
+it inside the column beside the console. At 160x48 that column is still under
+fifty cells wide while the console's pages leave over a hundred columns by
+twenty-six rows of open sky beneath them, so the bigger and better the
+terminal, the more of it was empty. From forty rows (`CANOPY_STAGE_HEIGHT`) the
+lower screen is the stage: the world is drawn across it at more than twice the
+size, running off the right and bottom edges, with its moons out over the open
+sky to the left; a fight is flown across it, the pilot's hull on the left and
+the contact under its lock on the right, as the band of an 80-column terminal
+has always had them; and the column keeps the station, the moored ship and the
+name. A long page covers some of it, as a page always may. The pages a pilot
+lives on -- the deck, the market, a fight -- do not.
+
 Sixteen colors do not get it, and that was tried (review, v1.3). Read through
 the scenes' own sixteen-color rule the sky's haze and the galaxy's band become
 solid blue and magenta shapes larger than the world they are behind. With
