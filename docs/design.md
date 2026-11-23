@@ -959,8 +959,8 @@ Two hundred careers a pilot, a hundred days each, median net worth on day 100
 
 | | trader | smuggler | contractor | explorer |
 | --- | ---: | ---: | ---: | ---: |
-| v1.2, before the review | 313,000 | 307,000 | 159,000 | 289,000 |
-| v1.3, everything on | 347,000 | 375,000 | 180,000 | 331,000 |
+| v1.7.2, before the review | 313,000 | 307,000 | 159,000 | 289,000 |
+| after the review's first round | 347,000 | 375,000 | 180,000 | 331,000 |
 | without system traits | 340,000 | 370,000 | 157,000 | 316,000 |
 | without the contraband premium | 347,000 | 342,000 | 180,000 | 331,000 |
 | without the rank perks | 347,000 | 375,000 | 215,000 | 330,000 |
@@ -980,7 +980,7 @@ contractor ends with about half a trader's worth in either version, and the
 rank's extra slots made this one poorer, because it took the work.
 
 **What a contract pays (review, v1.3).** The careers flown above put a pilot
-who lives off the board at about half the worth of one who trades, in v1.2 and
+who lives off the board at about half the worth of one who trades, in v1.7.2 and
 after the review alike, and from the first week on: a hold's margin grows with
 the hold, and a contract's sum did not grow at all. A survey paid 200 and 80 a
 jump while one Shuttle-load cleared 700. The rank's premium, at a tenth and a
