@@ -12818,7 +12818,7 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
         word, tone = price_standing(quote, ladder)
         held = world.save.cargo.get(commodity, 0)
         trend = season_trend(world, system.id, commodity)
-        season = "" if trend is None else (f" {p.tone('caution' if trend[0] else 'good')}"
+        season = "" if trend is None else (f"{p.tone('caution' if trend[0] else 'good')}"
                                            f"{glyph('rise' if trend[0] else 'fall')}{trend[1]}{RESET}")
         # Legality and a running event are separate facts about the same row,
         # and a contraband commodity in a crash is both.
@@ -12839,24 +12839,33 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
             f"{depth['stock']}", f"{depth['demand']}",
             f"{held}" if held else f"{p.deep}0{RESET}",
             f"{p.gold}{needs[commodity][0]}{RESET}" if commodity in needs else "",
-            f"{price_scale(quote, ladder, tone)} {p.tone(tone)}{word}{RESET}{season}",
+            f"{price_scale(quote, ladder, tone)} {p.tone(tone)}{word}{RESET}",
+            season,
             flag,
         ])
-        styles.append(["value", "value", "value", "label", "label", "value", "value", "value", "value"])
-    headers, aligns, optional = ["COMMODITY", "BUY", "SELL", "STOCK", "DEMAND", "HELD", "NEED", "SPREAD", ""], "lrrrrrrll", (6, 3, 4, 7)
+        styles.append(["value", "value", "value", "label", "label", "value", "value", "value", "value", "value"])
+    # The season's mark is a column of its own and the first to go. Inside the
+    # SPREAD cell it widened that column by four, and on a day a contract's
+    # NEED was also showing the whole spread went with it at 80 columns: the
+    # mark cost the pilot the word it sat beside.
+    headers, aligns, optional = (["COMMODITY", "BUY", "SELL", "STOCK", "DEMAND", "HELD", "NEED", "SPREAD", "TREND", ""],
+                                 "lrrrrrrlll", (6, 3, 4, 7, 8))
     if not needs:
         # No contract needs cargo: no empty column taking a narrow screen's room.
-        headers, aligns, optional = headers[:6] + headers[7:], aligns[:6] + aligns[7:], (3, 4, 6)
+        headers, aligns, optional = headers[:6] + headers[7:], aligns[:6] + aligns[7:], (3, 4, 6, 7)
         rows, styles = [row[:6] + row[7:] for row in rows], [row[:6] + row[7:] for row in styles]
-    lines += table(headers,
-                   # Drop order, last first: the spread is a nicety, the depth
-                   # figures have a screen of their own, and the NEED column is
-                   # repeated under the table; the price, the hold and an
-                   # ILLEGAL flag never go.
-                   rows, aligns, styles=styles, optional=optional)
-    # One note, as it was, with the season's marks explained in it: a second
-    # line here was a second page of market at 80x24.
-    season = f" {glyph('rise')}{glyph('fall')} rising or falling for that many more days." if SEASON_SWING else ""
+    catalog = table(headers,
+                    # Drop order, last first: the season's mark, then the spread, which
+                    # is a nicety; the depth figures have a screen of their own, and
+                    # the NEED column is repeated under the table; the price, the hold
+                    # and an ILLEGAL flag never go.
+                    rows, aligns, styles=styles, optional=optional)
+    lines += catalog
+    # One note, as it was, with the season's marks explained in it where the
+    # table has room to show them: a second line here was a second page of
+    # market at 80x24.
+    marked = SEASON_SWING and catalog and "TREND" in catalog[0]
+    season = f" {glyph('rise')}{glyph('fall')} rising or falling for that many more days." if marked else ""
     lines.append(f"{p.slate}Prices per unit.{season} Only jumps advance days; reopening does not replenish stock.{RESET}")
     if needs:
         # Where the NEED column's cargo goes; on a narrow screen, the column itself.
