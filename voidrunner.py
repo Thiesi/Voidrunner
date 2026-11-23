@@ -1557,33 +1557,67 @@ CREW_CANDIDATES = {
 # nobody had charted, a market with something of its own, a dangerous harbor,
 # a tank nearly dry. Two lines a moment, so the same one does not come round
 # every time, and nothing a pilot needs is only here.
+#
+# The game has since given them more to speak to, and they do (review): the
+# station each takes in a fight -- the gunner's called shot, the engineer's
+# patch, the navigator's slip -- a raider run from and a score settled, the
+# first dock in a sector the ship has never been in, and the morning after a
+# wreck, which is the engineer's.
 CREW_VOICES: dict[str, dict[str, tuple[str, str]]] = {
     "Nia Voss": {"kill": ("One less for the next convoy to meet.", "Clean. I have seen it go the other way."),
-                 "hull": ("We are still flying. Keep your head.", "I have brought worse than this home.")},
+                 "hull": ("We are still flying. Keep your head.", "I have brought worse than this home."),
+                 "called": ("Called it, hit it. That is all there is to it.", "One good shot beats ten hopeful ones."),
+                 "settled": ("That one I will remember for the right reasons.", "The convoys it hit were owed that."),
+                 "ran": ("We live. Convoy rule: come home first.", "It will keep. I never forget a hull.")},
     "Jax Sera": {"kill": ("I counted every shot. None wasted.", "Down. And the way out was open the whole time."),
-                 "hull": ("That one cost us. Mind where the door is.", "Count the plates we have left, then decide.")},
+                 "hull": ("That one cost us. Mind where the door is.", "Count the plates we have left, then decide."),
+                 "called": ("One shot, called and counted.", "That was the one I had been saving."),
+                 "settled": ("Account closed. I kept count of what it owed.", "Paid in full, and I have the tally."),
+                 "ran": ("The exit was there, so we took it. That is arithmetic.", "I counted its guns. Leaving was the right sum.")},
     "Tavi Renn": {"kill": ("Nobody touches this ship.", "It is quiet again. Good."),
-                  "hull": ("See to the others first. I am fine.", "They will not get a second go at us.")},
+                  "hull": ("See to the others first. I am fine.", "They will not get a second go at us."),
+                  "called": ("It was aiming at us. So I aimed first.", "It only needed stopping once."),
+                  "settled": ("It will not come near this crew again.", "Done. Everyone still aboard? Good."),
+                  "ran": ("Everyone is in one piece. That is a win.", "Let it think we are afraid. We are all still here.")},
     "Ada Flint": {"hull": ("She is complaining. I can hear it from here.", "That bearing was tired before they hit it."),
-                  "fuel": ("The tank is singing its empty song.", "I can hear how little is left in her.")},
+                  "fuel": ("The tank is singing its empty song.", "I can hear how little is left in her."),
+                  "mend": ("A patch and a promise. I heard it take.", "She is humming again. Flat, but humming."),
+                  "wreck": ("She will fly. Listen to her and you will ask no more.",
+                            "I can hear every weld the tug made. None are mine.")},
     "Lev Orin": {"hull": ("I have a labelled bin for exactly this.", "Noted, tagged, and none of it is good."),
-                 "fuel": ("Fuel: low. I have written it on the tank.", "The reserve label is not a suggestion.")},
+                 "fuel": ("Fuel: low. I have written it on the tank.", "The reserve label is not a suggestion."),
+                 "mend": ("Patch applied. I have labelled it 'temporary', twice.", "Used spare 14. I will need a new spare 14."),
+                 "wreck": ("The tug crew put nothing back. I am relabelling it all.",
+                           "Inventory: one ship, mostly. I will list the rest.")},
     "Mika Sol": {"hull": ("Every plate we lose is a plate I have to find.", "The old manuals call this 'avoidable'."),
-                 "fuel": ("The manual says not to run her this dry.", "Waste not. There is nothing left to waste.")},
+                 "fuel": ("The manual says not to run her this dry.", "Waste not. There is nothing left to waste."),
+                 "mend": ("The manual has a page on that patch. It begins 'do not'.",
+                          "Nothing wasted: that plate was scrap an hour ago."),
+                 "wreck": ("The manuals say total loss. The manuals never met a tug.",
+                           "A waste of a good hull. We will make her good again.")},
     "Eli Quill": {"chart": ("Give me a minute. This one goes on paper too.", "A new square for the paper chart."),
                   "market": ("I am pencilling that in the margin.", "That is worth a note beside the star."),
-                  "danger": ("My paper chart has a skull drawn here.", "I would not have marked this one a harbor.")},
+                  "danger": ("My paper chart has a skull drawn here.", "I would not have marked this one a harbor."),
+                  "slip": ("I had that turn drawn in pencil before they fired.", "Paper said go left. Paper was right."),
+                  "sector": ("A new sector is a fresh sheet, and I brought one.", "I will need a bigger chart table.")},
     "Sana Reed": {"chart": ("Another empty square with a story in it.", "Nobody had written this place down. Now we have."),
                   "market": ("There is the pattern. Markets always leave one.", "Listen to what this place is short of."),
-                  "danger": ("Too quiet. That is a pattern too.", "The noise here says to keep moving.")},
+                  "danger": ("Too quiet. That is a pattern too.", "The noise here says to keep moving."),
+                  "slip": ("Its volleys had a rhythm. We stepped between the beats.",
+                           "Everything that shoots has a pattern. That one was easy."),
+                  "sector": ("A whole new sector of noise to listen to.", "Different stars, different stories. Give me a day.")},
     "Noor Ash": {"chart": ("Marked. Harbor first, mystery second.", "One more harbor on the chart."),
                  "market": ("A harbor with a bargain. Marked twice.", "Worth remembering the way back here."),
-                 "danger": ("No safe harbor here. Let us not stay.", "I have marked the way out already.")},
+                 "danger": ("No safe harbor here. Let us not stay.", "I have marked the way out already."),
+                 "slip": ("There was a safe way through that. There usually is.", "I had the gap marked before they opened fire."),
+                 "sector": ("New sector. First: where are its harbors?", "I will mark the safe docks. The rest can wait.")},
 }
 #: The moments a specialist always speaks at; at the others, every second day.
-CREW_VOICE_ALWAYS = ("hull", "market", "danger")
+CREW_VOICE_ALWAYS = ("hull", "market", "danger", "settled", "wreck", "sector")
 CREW_VOICE_ROLE = {"kill": "gunner", "hull": "engineer", "fuel": "engineer", "chart": "navigator",
-                   "market": "navigator", "danger": "navigator"}
+                   "market": "navigator", "danger": "navigator", "called": "gunner", "settled": "gunner",
+                   "ran": "gunner", "mend": "engineer", "wreck": "engineer", "slip": "navigator",
+                   "sector": "navigator"}
 CREW_LOW_FUEL = 3
 
 CREW_SERVICE_LEVELS = ((0, "Recruit"), (5, "Seasoned"), (15, "Veteran"), (30, "Ace"))
@@ -2166,6 +2200,9 @@ class SaveData:
     # Raiders with a score open against this career; see `remember_rival`.
     # Absent until there is one.
     rivals: list[dict] = field(default_factory=list)
+    # How many parts of each sector's story this career has heard; see
+    # `sector_tale`. Absent until there is one.
+    tales: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -2203,6 +2240,7 @@ class SaveData:
             **({"retired_careers": self.retired_careers} if self.retired_careers else {}),
             **({"accolades": self.accolades} if self.accolades else {}),
             **({"rivals": self.rivals} if self.rivals else {}),
+            **({"tales": self.tales} if self.tales else {}),
         }
 
     @classmethod
@@ -2247,6 +2285,7 @@ class SaveData:
             retired_careers=[dict(item, highlights=list(item["highlights"])) for item in d.get("retired_careers", [])],
             accolades=_copy_accolades(d.get("accolades", {})),
             rivals=[dict(item) for item in d.get("rivals", [])],
+            tales=dict(d.get("tales", {})),
         )
 
 
@@ -2473,6 +2512,10 @@ def _validate_save_document(data: dict) -> None:
         integer(item["day"], "rival day", maximum=data["turn"])
         require(item["how"] in RIVAL_HOW, "rival history")
     require(len({item["name"] for item in rivals}) == len(rivals), "rivals")
+    tales = data.get("tales", {})
+    require(isinstance(tales, dict) and set(tales) <= set(SECTOR_NAMES), "sector stories")
+    for told in tales.values():
+        integer(told, "sector story", minimum=1, maximum=len(SECTOR_STORY_AT))
     dossiers = data.get("retired_careers", [])
     require(isinstance(dossiers, list) and len(dossiers) <= MAX_RETIRED_CAREERS, "retired careers")
     previous_number = 0
@@ -2744,8 +2787,10 @@ class World:
         self.ship_destroyed_this_hop = bool(
             save.pending_travel and save.pending_travel["destroyed"]
         )
-        # What the crew's talk compares a hop against: the kills it began with.
+        # What the crew's talk compares a hop against: the kills it began with,
+        # and what was done on it (a station used, a raider run from, a score settled).
         self.hop_kills = save.pilot.kills
+        self.hop_events: set[str] = set()
         # The daily dispatch watches what a commit changed: this session's
         # sales, and the counters as the last commit left them.
         self.dispatch_sales: list[tuple[str, int, int, str]] = []
@@ -3033,6 +3078,128 @@ def sector_for(system: GalaxySystem) -> str:
     return SECTOR_NAMES[row * SECTOR_COLS + col]
 
 
+# Sector stories (review). A sector was a name on the star map and a filter on
+# it: six of them, and nothing about any one that was not true of the rest.
+# Each now has a story its docks tell about themselves, in three parts, written
+# and not generated. A part is heard on docking -- the first at a pilot's first
+# station in the sector, the second at their third, the last at their fifth, or
+# sooner where a sector has fewer stations than that -- one part a docking, in
+# order. It is the same six stories in every career; which stations a sector
+# has, and so where each part is heard, is the galaxy's. The whole of a
+# sector's story is an achievement, and a pilot who has it knows the sector:
+# what its markets are known for goes on the chart, as dock talk would have
+# put it there one station at a time. Mara Venn keeps what has been heard, in
+# the Archive's sector files. A career's progress is a field of the save
+# (`tales`), absent until a first part is heard.
+SECTOR_STORY_AT = (1, 3, 5)
+SECTOR_NUMERALS = ("I", "II", "III")
+SECTOR_STORIES: dict[str, tuple[str, tuple[str, str, str]]] = {
+    "Coreward Verge": (
+        "Nearest the old core, and still keeping its hours.",
+        ("They still set the dock clocks by the core here. Nobody has had a time signal from it in forty years.",
+         "Every station on the Verge keeps a berth empty for the core packet. The dockers repaint its number each spring.",
+         "The packet did come once, the old hands say. It carried no cargo and no crew, only forty years of mail.")),
+    "Auroral Span": (
+        "Where the sky is never the same color twice.",
+        ("Pilots on the Span steer by the lights when the beacons drop out. The lights have not been wrong yet.",
+         "A survey crew came to measure the aurora and stayed. Their instruments are in a bar now, still running.",
+         "Traders on the Span swear the lights go green before a season turns. The futures desk does not laugh at them.")),
+    "Farrider's Edge": (
+        "Named for the long-haul crews who mapped it, and did not all come back.",
+        ("The Farriders flew out past the last beacon with a year of air. This sector is as far as their names go.",
+         "Each Farrider left a marker where they turned back. Dockers will tell you which is nearest. Nobody moves them.",
+         "One marker is not a turning point. It says only: kept going, air is good. The date on it is not that old.")),
+    "Hollow Reach": (
+        "Mined out a century ago, and lived in ever since.",
+        ("The Reach was mined hollow and left. The crews who stayed moved into the workings and called them streets.",
+         "Children in the Reach learn the old shaft numbers before their letters. It is how you find your way home.",
+         "The company never struck the claim off. On paper the Reach is still a mine, and everyone in it is on shift.")),
+    "The Long Dark": (
+        "Few stars, long jumps, and a lamp kept burning at every dock.",
+        ("Every dock in the Long Dark keeps a lamp lit on its outer arm. It is the oldest rule out here, and unwritten.",
+         "The lamps are for ships that jump short and come out between stations. It happens less than it used to.",
+         "A lamp went out once, for one night. Three stations sent ships to ask why before the keeper had found a match.")),
+    "Outer Fringe": (
+        "Past the patrols, where people go to be somebody else.",
+        ("Nobody on the Fringe asks where you flew before. They ask what you would like to be called, and they use it.",
+         "The Fringe keeps no records it can be asked for. What it remembers, it remembers in who gets served first.",
+         "Half the Fringe's harbormasters were raiders once. The other half, they will tell you, were customs.")),
+}
+
+
+def sector_stations(world: World, sector: str) -> list[GalaxySystem]:
+    return [system for system in world.galaxy if sector_for(system) == sector]
+
+
+def sector_docked(world: World, sector: str) -> int:
+    """Stations of a sector the pilot has docked at."""
+    return sum(1 for system in sector_stations(world, sector) if system_visited(world, system.id))
+
+
+def sector_story_marks(world: World, sector: str) -> tuple[int, ...]:
+    """How many of a sector's stations a pilot has docked at when each part of
+    its story is heard: the first, the third and the fifth, or as many as there are."""
+    size = len(sector_stations(world, sector))
+    return tuple(min(at, size) for at in SECTOR_STORY_AT)
+
+
+def sector_tale(world: World) -> list[str]:
+    """The next part of this sector's story, if the docking now happening earns
+    it: one part a docking, in order. The last brings what a pilot who knows a
+    sector knows -- the reputations of its markets, on the chart."""
+    save, here = world.save, world.here
+    sector = sector_for(here)
+    told = save.tales.get(sector, 0)
+    if told >= len(SECTOR_STORY_AT):
+        return []
+    docked = sector_docked(world, sector) + (0 if system_visited(world, here.id) else 1)
+    if docked < sector_story_marks(world, sector)[told]:
+        return []
+    save.tales[sector] = told + 1
+    lines = [f"{sector}, {SECTOR_NUMERALS[told]}: {SECTOR_STORIES[sector][1][told]}"]
+    if told + 1 == len(SECTOR_STORY_AT):
+        bump_accolade(save, "sector_tales")
+        save.pilot.highlight(f"Heard the whole story of {sector}.")
+        known = 0
+        for system in sector_stations(world, sector):
+            if (system.id != here.id and system.id in world.traits and not system_visited(world, system.id)
+                    and not save.flags.get(f"rumour_{system.id}")):
+                save.flags[f"rumour_{system.id}"] = True
+                known += 1
+        lines.append(f"{sector}: that is its story whole, and it is in the Archive."
+                     + (f" You know this sector now: {plural(known, 'market')} marked on your chart by reputation."
+                        if known else ""))
+    return lines
+
+
+def sector_file_lines(world: World) -> list[str]:
+    """The Archive's sector files: what the pilot has heard, sector by sector,
+    and how the rest is come by."""
+    p = pal()
+    lines = ["Mara keeps a file on every sector: what its docks say of themselves, which no ledger records. "
+             "A file fills as you dock at more of a sector's stations."]
+    for sector in SECTOR_NAMES:
+        size = len(sector_stations(world, sector))
+        if not size:
+            continue
+        told, docked = world.save.tales.get(sector, 0), sector_docked(world, sector)
+        whole = told >= len(SECTOR_STORY_AT)
+        lines.append(section(f"{sector.upper()}  {told}/{len(SECTOR_STORY_AT)}"))
+        if not told and not docked:
+            lines.append(f"{p.slate}No dock in this sector yet.{RESET}")
+            continue
+        character, parts = SECTOR_STORIES[sector]
+        lines.append(f"{p.hull}{character}{RESET}")
+        lines += [f"{SECTOR_NUMERALS[index]}. {parts[index]}" for index in range(told)]
+        if not whole:
+            more = sector_story_marks(world, sector)[told] - docked
+            lines.append(f"{p.slate}{SECTOR_NUMERALS[told]}. "
+                         + ("Heard at your next dock in this sector." if more <= 0 else
+                            f"Heard once you have docked at {plural(more, 'more station')} here "
+                            f"({docked} of {size} so far).") + RESET)
+    return lines
+
+
 def bfs_hops(by_id: dict[int, GalaxySystem], start_id: int) -> dict[int, int]:
     dist = {start_id: 0}
     q = collections.deque([start_id])
@@ -3055,25 +3222,35 @@ def crew_name(world: World, role: str) -> str:
     return CREW_CANDIDATES[role][crew_identity(world, role)][0]
 
 
-def crew_voice(world: World, *, new_system: bool, kills_before: int) -> str | None:
+def crew_voice(world: World, *, new_system: bool, kills_before: int, wrecked: bool = False) -> str | None:
     """What a specialist aboard says about the hop that just ended, if anything:
     one line, the first of these moments that someone aboard speaks to.
+    `wrecked` is the hop that ended under tow: the engineer's moment and nobody else's.
 
     No draw from the event RNG -- which line, and whether a common moment is
     spoken at all, follow from the day -- so a crew's talk changes no encounter."""
     ship, here, day = world.save.ship, world.here, world.save.turn
+    events = world.hop_events
     moments = []
+    if wrecked:
+        moments.append("wreck")
+    if "settled" in events:
+        moments.append("settled")
     if world.save.pilot.kills > kills_before:
-        moments.append("kill")
-    if ship.hull_hp * 3 <= hull_hp_max(ship):
+        moments += ["called", "kill"] if "called" in events else ["kill"]
+    if ship.hull_hp * 3 <= hull_hp_max(ship) and not wrecked:
         moments.append("hull")
         if not ship.has_engineer:
             moments.append("hull:gunner")  # with no engineer aboard, the gunner has a view
+    moments += [moment for moment in ("mend", "slip", "ran") if moment in events]
+    if (not wrecked and not system_visited(world, here.id) and sector_for(here) != sector_for(world.by_id[0])
+            and not sector_docked(world, sector_for(here))):
+        moments.append("sector")  # the first dock in a sector the ship has never been in; a career begins in Freeport's
     if new_system:
         moments.append("market" if here.id in world.traits else "chart")
-    if here.danger >= 4:
+    if here.danger >= 4 and not wrecked:
         moments.append("danger")
-    if ship.fuel <= CREW_LOW_FUEL:
+    if ship.fuel <= CREW_LOW_FUEL and not wrecked:
         moments.append("fuel")
     for moment in moments:
         moment, _, role = moment.partition(":")
@@ -4438,6 +4615,8 @@ def remember_rival(world: World, pirate: Pirate, how: str) -> None:
     save.rivals.append({"name": pirate.name, "tier": tier, "day": save.turn, "how": how})
     del save.rivals[:-RIVAL_MAX]
     save.pilot.note(f"The {pirate.name} will know this ship again: {RIVAL_HOW[how]}.")
+    if how == "ran":
+        world.hop_events.add("ran")
 
 
 def returning_rival(world: World) -> dict | None:
@@ -4466,6 +4645,7 @@ def settle_rival(world: World, pirate: Pirate) -> list[str]:
     bonus = 40 + pirate.tier * 60
     save.pilot.credits += bonus
     bump_accolade(save, "scores")
+    world.hop_events.add("settled")
     save.pilot.highlight(f"Settled a score with the {pirate.name}.")
     world.wire("score", f"settled a score with the {pirate.name}")
     return [f"A score settled: the {pirate.name} will not be back. Its hold was full of other people's cargo: +{bonus}cr."]
@@ -4804,6 +4984,7 @@ def tactical_mend(world: World, pirate: Pirate, tactics: dict) -> tuple[int, int
     gain = mend_amount(ship)
     ship.hull_hp += gain
     tactics["spent"] += "M"
+    world.hop_events.add("mend")
     received, retaliation = tactical_retaliation(world, pirate, tactics)
     return gain, received, [f"{crew_name(world, 'engineer')} patches the hull under fire: +{gain} hull."] + retaliation
 
@@ -4828,9 +5009,11 @@ def tactical_round(world: World, pirate: Pirate, tactics: dict, action: str) -> 
     tactics["brace_ready"] = action in ("F", "C", "N")
     if action == "C":
         tactics["spent"] += "C"
+        world.hop_events.add("called")
         lines = [f"{crew_name(world, 'gunner')} calls the shot: you hit the {pirate.name} for {damage} damage."]
     elif action == "N":
         tactics["spent"] += "N"
+        world.hop_events.add("slip")
         lines = [f"You hit the {pirate.name} for {damage} damage."]
     else:
         lines = [f"You hit the {pirate.name} for {damage} damage." + (" Guarding; fire to recharge." if action == "G" else "")]
@@ -5766,7 +5949,7 @@ ACCOLADE_VERSION = 1
 ACCOLADE_COUNTERS = ("squadrons", "flawless", "giant_slayer", "close_calls", "escapes", "raider_bribes", "scores",
                      "patrol_kills", "wrong_bounties", "deliveries", "surveys", "bounties", "escorts",
                      "distress", "derelicts", "ships_lost", "tows", "shifts", "busts", "customs_bribes",
-                     "dispatches", "dispatch_best", "chains")
+                     "dispatches", "dispatch_best", "chains", "sector_tales")
 ACCOLADE_GROUPS = ("Travel", "Exploration", "Combat", "Contracts", "Dispatch", "Encounters", "Trading", "Wealth",
                    "Ranks", "Factions", "Ship", "Legacy", "Misfortune")
 # The id pattern a newer build's accolade may use; this build keeps those it
@@ -5805,6 +5988,9 @@ ACCOLADES: tuple[Accolade, ...] = tuple([
     Accolade("landmark", "Exploration", "Into the Silence", "Investigate a landmark.", "landmark", tier=2),
     Accolade("far_site", "Exploration", "Where the Record Led", "Follow a landmark's record to the second site.",
              "far_site", tier=3),
+    Accolade("tale", "Exploration", "Local Knowledge", "Hear the whole of a sector's story.", "sector_tales", tier=1),
+    Accolade("tales_all", "Exploration", "What the Ledgers Leave Out", "Hear the whole story of all six sectors.",
+             "sector_tales", len(SECTOR_NAMES), tier=3),
     *_ladder("kills", "Combat", "kills", ((1, "First Blood", "Win your first fight."),
                                           (10, "Raider Bane", "Win {n} fights."),
                                           (50, "Warden of the Lanes", "Win {n} fights."),
@@ -12143,7 +12329,21 @@ def archive_lines(world: World) -> list[str]:
     if not flags.get("archive_v1_started"):
         lines.append("Visiting the site is required; scanning it is not enough.")
     lines.append(f"{p.slate}Ordinary fuel, wages and travel risks apply. Standing stays within -100 to 100.{RESET}")
+    lines.append(f"{p.slate}[F] Files: what the sectors' docks have told you, {sum(world.save.tales.values())} of "
+                 f"{len(SECTOR_NAMES) * len(SECTOR_STORY_AT)} parts.{RESET}")
     return lines
+
+
+def screen_sector_files(p: Palette, world: World) -> None:
+    page = 0
+    while True:
+        told = sum(world.save.tales.values())
+        action, page, count = _draw_service_page(p, f"Sector Files: {told}/{len(SECTOR_NAMES) * len(SECTOR_STORY_AT)}",
+                                                 sector_file_lines(world), "[B] Back [<>] Page: ", page)
+        if action in ("B", "Q"):
+            return
+        if (moved := page_step(action, page, count)) is not None:
+            page = moved
 
 
 def screen_archive(p: Palette, world: World) -> None:
@@ -12156,13 +12356,18 @@ def screen_archive(p: Palette, world: World) -> None:
             elif flags.get("archive_v1_recovered") and world.here.id == 0: actions = "P/S/"
             elif flags.get("archive_v1_started") and not flags.get("archive_v1_recovered") and world.here.id == world.landmark["system_id"]: actions = "I/"
             else: actions = "R/"
+        actions += "F/"  # the sector files are open whatever the assignment's stage
         action, page, count = _draw_service_page(p, f"Archive {world.save.pilot.credits:,}cr", result + archive_lines(world),
-                                                _detail_action_bar(actions, {"A": "Accept", "I": "Investigate", "P": "Publish", "S": "Sell", "R": "Route"}), page)
+                                                _detail_action_bar(actions, {"A": "Accept", "I": "Investigate", "P": "Publish", "S": "Sell", "R": "Route",
+                                                                             "F": "Files"}), page)
         if action in ("B", "Q"): return
         if (moved := page_step(action, page, count)) is not None:
             page = moved
             continue
         if not action or action not in actions.split("/"): continue
+        if action == "F":
+            screen_sector_files(p, world); page = 0
+            continue
         if action == "R":
             screen_auto_route(p, world, destination=archive_destination(world)); page = 0
             continue
@@ -16181,6 +16386,9 @@ def pilot_guide_lines(world: World) -> list[str]:
         "Danger is a risk rating, not a guarantee you can win a fight. Evasion can fail; bribes cost credits and can be refused. Read the encounter choices before acting.",
         "About three systems in five have a market of their own: one good in standing surplus, sold cheap, or in standing shortage, bought dear. The chart shows a ? until you have docked there, and the trait after. Now and then the dock talks: it names a system nearby and says whether it has a glut or is short, never of what, and the chart then reads cheap ? or dear ? for it.",
         "[V] Viewport opens on the atlas: the world outside, and with [N] and [P] every system you have charted, each with what you know of it. [1] is your ship and [3] the last site you found.",
+        "Every sector has a story its docks tell, in three parts: the first at your first station there, the rest as "
+        "you dock at more. A sector's whole story puts its markets' reputations on your chart. [N] Archive, [F] Files "
+        "keeps what you have heard.",
         "Prices have seasons: every legal good swings about an eighth either way over a month or so, the same across a sector. The market marks each price as rising or falling and for how many more days. [X] Futures holds today's price for a fee, and says what the price should be on the day you collect.",
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
         "Crew fight with you. Each specialist aboard has a station, used once a fight: the gunner's [C] Called shot hits half as hard again and cover cannot blunt it, the engineer's [M] Mend gives back a quarter of the hull for the turn's shot, and the navigator's [N] Slip is a full shot that the raider's move only grazes. Spend the slip on the volley.",
@@ -18317,6 +18525,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         world.save.turn += 1
         world.ship_destroyed_this_hop = False
         world.hop_kills = world.save.pilot.kills
+        world.hop_events = set()
         # The transition is shown as it happens but not retained: the deck keeps
         # outcomes, and "Jumping to" took one of its rows from them (#648).
         jumping = f"Jumping to {'the unknown' if not dest.discovered else dest.name}..."
@@ -18407,9 +18616,14 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
             rumour = dock_rumour(world)
             if rumour:
                 lines.append(rumour)
+            lines += sector_tale(world)
             if has_contraband(world) and dest.economy != "Haven":
                 chance = customs_risk_for(world, dest)
                 inspect = world.event_rng.random() < chance
+        else:
+            voice = crew_voice(world, new_system=False, kills_before=world.hop_kills, wrecked=True)
+            if voice:
+                lines.append(voice)
         travel["phase"] = "customs"
         travel["encounter"] = {"inspect": inspect}
         world.commit()

@@ -1925,6 +1925,46 @@ a common moment is spoken at all, follow from the day: the talk draws nothing
 from the event RNG, so a crew changes no encounter by talking, and nothing a
 pilot needs is only in a line.
 
+**The crew speak to what the game has since given them (review).** The lines
+above were written before the crew had stations in a fight, before raiders
+remembered and before a wreck had a morning after. Each of the nine now has two
+lines for each of these as well, in the same voices: the gunner of a called
+shot that made the kill, of a raider run from and of a score settled; the
+engineer of a patch that held under fire and of the ship the tug brought home;
+the navigator of a slip and of the first dock in a sector the ship has never
+been in. A score settled, a wreck and a new sector are always spoken to; the
+stations, which a crewed ship uses in most fights, every second day like a
+kill. What was done on a hop is kept on the world for the hop
+(`World.hop_events`) by the rules that did it, and is not saved: a session
+resumed mid-hop loses a line, never a result. After a wreck the engineer's is
+the only voice -- nobody remarks on the fuel.
+
+**Sector stories (review).** A sector was a name on the star map and a filter
+on it: six of them, and nothing about one that was not true of the rest. Each
+now has a story its docks tell about themselves, in three parts, written and
+not generated (`SECTOR_STORIES`): the Coreward Verge still keeps a berth for a
+packet from the core, the Long Dark keeps a lamp lit at every dock, the Hollow
+Reach is a mine on paper with everyone in it on shift. A part is a sentence or
+two and fits two rows of an 80-column deck. It is heard on docking, among the
+hop's results: the first at a pilot's first station in the sector, the second
+at their third, the last at their fifth -- or as many as the sector has, since
+a galaxy may give a sector two stations or twelve -- one part a docking, in
+order. A career begins docked in Freeport's sector, so that story starts at the
+first arrival anywhere in it. They are the same six stories in every career;
+where each part is heard is the galaxy's.
+
+The whole of a sector's story is an achievement (all six is another), and a
+pilot who has it knows the sector: every market there they have not yet seen
+goes on the chart by reputation, `cheap ?` or `dear ?`, as dock talk would
+have put it there one station at a time. Mara Venn, who "collects the
+histories that shipping ledgers leave out", keeps what has been heard: `[F]
+Files` in the Archive lists each sector with its line of character, the parts
+heard, and how many more stations the next part wants. Flown through the
+simulator for a hundred days, a trader hears about twelve of the eighteen
+parts and has three sectors whole; an explorer hears seventeen and has five.
+Progress is a field of the save (`tales`), absent until a first part is heard,
+and a new career starts without it.
+
 **The daily dispatch (review).** Nothing in the game was different
 tomorrow: no turn limit, no calendar, and a private galaxy for every career, so
 two callers had nothing to compare and neither had a reason to dial in again.
