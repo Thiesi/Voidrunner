@@ -44,7 +44,9 @@ def every_scene(width: int, height: int) -> dict[str, "vr._Scene"]:
     """One of each scene, on the hulls and in the variants that differ most."""
     scenes = {
         "jump": vr._JumpScene(width, height, hull="Carrier", destination="Kepler Reach",
-                              burn=3, fuel=7, day=14, seed="t"),
+                              burn=3, fuel=7, day=14, seed="t", economy="Tech", world="Kepler Reach"),
+        "jump-ringed": vr._JumpScene(width, height, hull="Freighter", destination="Yarrow",
+                                     burn=1, fuel=9, day=3, seed="t", economy="Tech", world="Yarrow"),
         "jump-uncharted": vr._JumpScene(width, height, hull="Shuttle", destination=None,
                                         burn=2, fuel=1, day=2, seed="t"),
         "raider": vr._ContactScene(width, height, hull="Shuttle", kind="raider", names=["Red Jackal"],

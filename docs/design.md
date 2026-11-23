@@ -1639,6 +1639,19 @@ how to press Back), and is divided by a rule: a first flight above it, and
 `ONCE YOU HAVE FLOWN A FEW DAYS` below, where the lines about ranks, stakes,
 local markets, a raider's read and the dispatch live.
 
+**The jump is its destination's (review, v1.3).** Every jump was the same
+violet tunnel, and a career plays it every turn. A charted destination now
+lights the tunnel in its own trade's light -- the core, the streams and the
+hoops take half of it -- and its world, the one its dock and its atlas page
+show, comes up out of the core at the far end in three steps and holds. An
+uncharted destination keeps the violet and shows a dark disc with nothing on
+it, which is all a pilot knows of it; the scene is never handed more than the
+chart has. A hop that burns one unit of fuel plays twenty frames where a longer
+burn plays twenty-six, to the same last picture. The far end is drawn over the
+streams, so the middle of the tunnel is still once it has arrived. At 80x24 in
+truecolor a charted jump is about 83 KB where an uncharted one is 79, inside
+the budget every scene is held to, and a one-unit hop is 64.
+
 **The atlas (review, v1.3).** The Viewport showed the ship, the station the
 pilot was docked at and one landmark: three pictures of things already on the
 deck, and nothing to come back for. Every system has had a world of its own
