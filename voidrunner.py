@@ -1648,9 +1648,9 @@ RANKS = [
 # rich pilot's turns had the least to offer: room for a fourth and a fifth at
 # once, and a premium on every one. Ranks are retained, so a perk never lapses.
 RANK_CONTRACT_SLOTS = (3, 4, 4, 5, 5)
-RANK_CONTRACT_BONUS = (0, 0, 10, 10, 20)   # percent on every contract's reward
-RANK_PERKS = ("", "a fourth contract slot", "a 10% premium on every contract",
-              "a fifth contract slot", "a 20% premium on every contract")
+RANK_CONTRACT_BONUS = (0, 0, 50, 50, 100)  # percent on every contract's reward
+RANK_PERKS = ("", "a fourth contract slot", "half as much again on every contract",
+              "a fifth contract slot", "double pay on every contract")
 
 SYSTEM_NAMES = [
     "Aldrin's Reach", "Bastion", "Calyx", "Draven's Drift", "Erebus Point",
@@ -3703,6 +3703,16 @@ def settle_futures_contracts(world: World) -> list[str]:
 
 MISSION_BOARD_DAYS = 3
 MAX_ACTIVE_MISSIONS = 3
+# What a contract pays (review, v1.3). Every figure here is twice what it was.
+# Whole careers flown by `tools/career_sim.py` put a pilot who lives off the
+# board at about half the worth of one who trades, from the first week on: a
+# hold's margin grows with the hold and a contract's sum did not grow at all.
+# At these, with the rank's premium, the board is worth about three quarters of
+# trade -- still the slower road, and one with standing, kills and a record on it.
+DELIVERY_PAY = (1.0, 0.3, 100)   # of the goods' base value: at the origin, more for each jump; and a flat sum
+SURVEY_PAY = (400, 160)          # a flat sum, and more for each jump out
+BOUNTY_PAY = (600, 500)          # a flat sum, and more for each tier of the raider
+ESCORT_PAY = (500, 300, 300)     # a flat sum, more for each jump, more for each tier
 
 
 class MissionError(ValueError):
@@ -3800,7 +3810,8 @@ def _generate_mission(world: World, kind: str, hops: dict[int, int], *, rng=None
         target = rng.choice(candidates)
         commodity = rng.choice(LEGAL_COMMODITIES)
         qty = rng.randint(3, delivery_contract_ceiling(world.save.ship))
-        reward = round(qty * COMMODITIES[commodity]["base"] * (0.9 + 0.15 * hops[target])) + 50
+        at_origin, per_jump, flat = DELIVERY_PAY
+        reward = round(qty * COMMODITIES[commodity]["base"] * (at_origin + per_jump * hops[target])) + flat
         desc = f"Deliver {qty}x {COMMODITIES[commodity]['label']} to {world.by_id[target].name}"
         return Mission(id=world.save.next_mission_id, kind=kind, description=desc, reward=reward,
                         origin_system=origin, target_system=target, commodity=commodity, quantity=qty,
@@ -3811,7 +3822,7 @@ def _generate_mission(world: World, kind: str, hops: dict[int, int], *, rng=None
             return None
         target = rng.choice(candidates)
         tier = max(0, min(4, world.by_id[target].danger + rng.randint(-1, 1)))
-        reward = 300 + tier * 250
+        reward = BOUNTY_PAY[0] + tier * BOUNTY_PAY[1]
         desc = f"Hunt down a raider reported near {world.by_id[target].name}"
         return Mission(id=world.save.next_mission_id, kind=kind, description=desc, reward=reward,
                         origin_system=origin, target_system=target, pirate_tier=tier,
@@ -3821,7 +3832,7 @@ def _generate_mission(world: World, kind: str, hops: dict[int, int], *, rng=None
         if not candidates:
             return None
         target = rng.choice(candidates)
-        reward = 200 + hops[target] * 80
+        reward = SURVEY_PAY[0] + hops[target] * SURVEY_PAY[1]
         desc = f"Survey the uncharted system {hops[target]} jump(s) out (bearing logged)"
         return Mission(id=world.save.next_mission_id, kind=kind, description=desc, reward=reward,
                         origin_system=origin, target_system=target, deadline_turn=None)
@@ -3836,7 +3847,7 @@ def _generate_mission(world: World, kind: str, hops: dict[int, int], *, rng=None
             return None
         target = rng.choice(candidates)
         tier = max(0, min(4, world.by_id[target].danger + rng.randint(-1, 1)))
-        reward = 250 + hops[target] * 150 + tier * 150
+        reward = ESCORT_PAY[0] + hops[target] * ESCORT_PAY[1] + tier * ESCORT_PAY[2]
         desc = (f"Escort a supply convoy to {world.by_id[target].name} "
                  f"({hops[target]} jump(s), raider activity expected)")
         return Mission(id=world.save.next_mission_id, kind=kind, description=desc, reward=reward,
@@ -15046,7 +15057,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         "About three systems in five have a market of their own: one good in standing surplus, sold cheap, or in standing shortage, bought dear. The chart shows a ? until you have docked there, and the trait after.",
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
         "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
-        "Ranks are kept once reached, and each brings something: a fourth contract slot at Independent Trader, a 10% premium on every contract at Merchant Captain, a fifth slot at Void Baron and a 20% premium at Legend of the Frontier.",
+        "Ranks are kept once reached, and each brings something: a fourth contract slot at Independent Trader, half as much again on every contract at Merchant Captain, a fifth slot at Void Baron and double pay at Legend of the Frontier.",
         "Once the ship is built there is something to own: [K] Stake in any market buys a share in that station, in three steps at up to three stations. Its stock and demand come back two, three and four times as fast for you, so a route you fly again and again keeps paying.",
         "The Mission Board ([B] on the station deck) shows full contract terms, tracking and abandonment. [G] Guide keeps this recap available. On every other screen [B] is Back; [Q] on the station deck saves and leaves the game.",
     ]

@@ -49,7 +49,7 @@ def test_a_rank_decides_how_many_contracts_a_pilot_may_hold(index, slots):
             world, vr.Mission(91, "bounty", "Too many", 500, world.save.current_system, target, pirate_tier=1))
 
 
-@pytest.mark.parametrize("index,percent", [(0, 0), (1, 0), (2, 10), (3, 10), (4, 20)])
+@pytest.mark.parametrize("index,percent", [(0, 0), (1, 0), (2, 50), (3, 50), (4, 100)])
 def test_one_payout_rule_carries_the_premium_to_every_kind_of_contract(index, percent):
     world = _ranked(index)
     for kind in ("delivery", "scan", "bounty", "escort"):
@@ -64,13 +64,13 @@ def test_one_payout_rule_carries_the_premium_to_every_kind_of_contract(index, pe
 def test_a_retained_rank_keeps_its_perk_when_the_credits_are_spent():
     world = _ranked(3)
     world.save.pilot.credits = 10
-    assert vr.contract_slots(world.save) == 5 and vr.mission_reward_for(world.save, "delivery", 1000) == 1100
+    assert vr.contract_slots(world.save) == 5 and vr.mission_reward_for(world.save, "delivery", 1000) == 1500
 
 
 def test_a_promotion_says_what_it_brought(terminal):
     terminal(80, 24)
     assert vr.rank_perk_line("Independent Trader") == "Independent Trader brings a fourth contract slot."
-    assert vr.rank_perk_line("Merchant Captain") == "Merchant Captain brings a 10% premium on every contract."
+    assert vr.rank_perk_line("Merchant Captain") == "Merchant Captain brings half as much again on every contract."
     assert vr.rank_perk_line("Rookie Hauler") == ""
     rows = [" ".join(plain(row).split()) for row in vr.pilot_record_lines(_world_with_seed(42))]
     assert "it brings a fourth contract slot" in rows
@@ -93,7 +93,7 @@ def test_a_delivery_and_a_survey_pay_what_their_screens_quoted(kind):
         mission = vr.Mission(7, "scan", "Survey", 1000, 0, target)
     world.save.active_missions = [mission]
     quoted = vr.mission_reward_for(world.save, kind, mission.reward)
-    assert quoted == 1100
+    assert quoted == 1500
     before = world.save.pilot.credits
     world.save.current_system = target
     world.by_id[target].discovered = True
@@ -106,4 +106,35 @@ def test_a_delivery_and_a_survey_pay_what_their_screens_quoted(kind):
     world.save.active_missions = [vr.Mission(8, "scan", "Survey", 1000, 0, target)]
     before = world.save.pilot.credits
     vr.check_mission_completions(world, just_discovered=target, remote=True)
-    assert world.save.pilot.credits == before + 600
+    assert world.save.pilot.credits == before + 1000
+
+
+# --- what a contract pays (doubled once whole careers were flown) ---------------------
+
+def test_every_offer_on_a_board_is_priced_by_the_named_figures():
+    seen = set()
+    for seed in range(40, 52):
+        world = _world_with_seed(seed)
+        hops = vr.bfs_hops(world.by_id, world.here.id)
+        for mission in vr.generate_mission_board(world):
+            away = hops[mission.target_system]
+            if mission.kind == "scan":
+                assert mission.reward == vr.SURVEY_PAY[0] + away * vr.SURVEY_PAY[1]
+            elif mission.kind == "bounty":
+                assert mission.reward == vr.BOUNTY_PAY[0] + mission.pirate_tier * vr.BOUNTY_PAY[1]
+            elif mission.kind == "escort":
+                assert mission.reward == (vr.ESCORT_PAY[0] + away * vr.ESCORT_PAY[1]
+                                          + mission.pirate_tier * vr.ESCORT_PAY[2])
+            else:
+                value = mission.quantity * vr.COMMODITIES[mission.commodity]["base"]
+                at_origin, per_jump, flat = vr.DELIVERY_PAY
+                assert mission.reward == round(value * (at_origin + per_jump * away)) + flat
+                assert mission.reward > value  # carrying the goods there is never a loss at their base price
+            seen.add(mission.kind)
+    assert seen == {"delivery", "scan", "bounty", "escort"}
+
+
+def test_the_figures_are_twice_what_a_contract_paid():
+    assert vr.SURVEY_PAY == (400, 160) and vr.BOUNTY_PAY == (600, 500) and vr.ESCORT_PAY == (500, 300, 300)
+    assert vr.DELIVERY_PAY == (1.0, 0.3, 100)
+    assert vr.RANK_CONTRACT_BONUS == (0, 0, 50, 50, 100)
