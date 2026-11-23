@@ -19,7 +19,9 @@ ceiling: they say how the game's parts weigh against each other, not how
 fast a careful caller can go.
 
 `--set NAME=VALUE` changes a module constant before each career, which is how
-one rule is switched off to see what it was contributing. `--door` flies
+one rule is switched off to see what it was contributing. `--prize` is what
+every pilot does with a beaten raider (strip it, by default, which is what a
+kill paid before there was a choice). `--door` flies
 another build with the same pilots, where the functions a pilot uses exist.
 """
 
@@ -76,8 +78,10 @@ def apply_settings(vr, settings: dict[str, str]) -> None:
 class Pilot:
     """One career: the keys a journey asks for, and what to do at a station."""
 
-    def __init__(self, vr, kind: str, seed: int, *, dispatch: bool = True, stakes: bool = True):
+    def __init__(self, vr, kind: str, seed: int, *, dispatch: bool = True, stakes: bool = True, prize: str = "S"):
         self.vr, self.kind, self.buy_stakes = vr, kind, stakes
+        self.prize = prize          # what to do with a beaten raider, where that is offered
+        self.prizes = Counter()     # what was done with each
         vr.apply_display_style("plain")
         save = vr._new_career("Sim")
         save.seed = seed
@@ -111,6 +115,11 @@ class Pilot:
         if offered.get("F") == "Fire":
             choice = self.fight(text, offered)
             self.fights[choice] += 1
+            return choice
+        if offered.get("S") == "Strip":
+            # A beaten raider: this pilot's way with one, or its scrap where that is not offered.
+            choice = self.prize if self.prize in offered else "S"
+            self.prizes[choice] += 1
             return choice
         act = _ACT.search(text[-40:])
         if act:
@@ -417,7 +426,7 @@ class Pilot:
         save = world.save
         return {
             "outcome": outcome, "days": save.turn, "marks": marks, "firsts": firsts, "lost": self.lost, "towed": self.towed,
-            "shifts": self.shifts,
+            "shifts": self.shifts, "prizes": dict(self.prizes),
             "kills": save.pilot.kills, "contracts": save.pilot.missions_completed,
             "failed": save.pilot.missions_failed + save.pilot.missions_expired,
             "charted": sum(1 for system in world.galaxy if system.discovered),
@@ -429,10 +438,11 @@ class Pilot:
 
 
 def fly_one(job: tuple) -> dict:
-    door, kind, seed, days, settings, dispatch, stakes = job
+    door, kind, seed, days, settings, dispatch, stakes, *more = job
+    prize = more[0] if more else "S"
     vr = load_door(door)
     apply_settings(vr, settings)
-    result = Pilot(vr, kind, seed, dispatch=dispatch, stakes=stakes).fly(days)
+    result = Pilot(vr, kind, seed, dispatch=dispatch, stakes=stakes, prize=prize).fly(days)
     result.update(pilot=kind, seed=seed)
     return result
 
@@ -482,11 +492,14 @@ def main() -> None:
                         help="a module constant to change first, as JSON (repeatable)")
     parser.add_argument("--no-dispatch", action="store_true")
     parser.add_argument("--no-stakes", action="store_true")
+    parser.add_argument("--prize", choices=("S", "C", "H", "L"), default="S",
+                        help="what the pilots do with a beaten raider: strip it (the default), take its "
+                             "cargo, hand it to the Navy or let it go")
     parser.add_argument("--json", type=pathlib.Path, help="also write every career's record here")
     parser.add_argument("--jobs", type=int, default=max(1, multiprocessing.cpu_count() - 1))
     args = parser.parse_args()
     settings = dict(item.split("=", 1) for item in args.set)
-    jobs = [(args.door, kind, 1000 + seed, args.days, settings, not args.no_dispatch, not args.no_stakes)
+    jobs = [(args.door, kind, 1000 + seed, args.days, settings, not args.no_dispatch, not args.no_stakes, args.prize)
             for kind in args.pilots for seed in range(args.seeds)]
     if args.jobs > 1:
         with multiprocessing.Pool(args.jobs) as pool:

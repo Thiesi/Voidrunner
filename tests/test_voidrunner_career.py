@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from .support import once_per_heading, plain, plain_bytes, page_source, page_title, plain as plainly, _Sys, _VOIDRUNNER_PATH, _add_cargo, _box_rows, _door_stopped_at, _escort_world, _finale_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_text, vr
+from .support import strip_prizes
 
 
 def test_retire_pilot_increments_retirements_and_grants_cumulative_bonus():
@@ -159,6 +160,7 @@ def test_check_rank_up_skips_ahead_correctly_on_a_big_jump():
 
 
 def test_first_kill_records_a_highlight_but_not_the_second(monkeypatch):
+    strip_prizes(monkeypatch)
     world = _world_with_seed(118)
     pirate = vr.generate_pirate(world, tier=1)
 

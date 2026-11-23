@@ -76,6 +76,16 @@ def test_the_summary_has_a_row_for_each_pilot_flown(sim):
     assert not any(line.startswith("smuggler") for line in lines)
 
 
+def test_a_pilot_does_with_a_beaten_raider_what_it_was_told_to(sim):
+    """`--prize` is each pilot's way with a wreck; where that is not offered -- a
+    warrant's target, a full hold -- it takes the scrap."""
+    stripped = sim.fly_one((DOOR, "contractor", 1003, 40, {}, True, True))
+    assert stripped["prizes"] and set(stripped["prizes"]) == {"S"}
+    spared = sim.fly_one((DOOR, "contractor", 1003, 40, {}, True, True, "L"))
+    assert spared["prizes"].get("L", 0) > 0 and set(spared["prizes"]) <= {"L", "S"}
+    assert spared["outcome"] == stripped["outcome"] == "flew"
+
+
 @pytest.fixture(scope="module")
 def check():
     spec = importlib.util.spec_from_file_location("check_careers_under_test", ROOT / "tools" / "check_careers.py")
