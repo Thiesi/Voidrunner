@@ -194,6 +194,13 @@ presentation) is in [docs/design.md](docs/design.md).
   home more than twice, and each pilot's median day-100 net worth stays inside
   a wide band around `BASELINE`. A change that moves a pilot on purpose updates
   `BASELINE` and quotes the simulator's table in its pull request.
+- In the suite, `tests/test_voidrunner_first_days.py` plays a new career's
+  first three days by keys against the real door, at 80x24 and 160x48:
+  commission, deck, Guide and First Flight, Market, Chart, the arrival, Board,
+  Yard and every deck service. Every stop must fit the terminal with square
+  boxes, every key it presses must be one the screen offers, and at 80x24 the
+  deck must be one page on days zero and one. A finding filed as its own issue
+  goes in the test's `KNOWN` until it is fixed.
 - `tools/door_gallery.py --check`, which fails on a panel that runs past its
   terminal's last column, a box whose right border is not in one column, or a
   replacement character (`tools/frame_check.py`). The default widths run on
