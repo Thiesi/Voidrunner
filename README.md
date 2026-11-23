@@ -142,8 +142,8 @@ splash and plays brief full-screen scenes during play: the jump, a contact, a
 kill or the loss of the ship, an escape, a customs sweep, docking, salvage, a
 rescue, a data burst, a tow, a hull refit, promotions, joining a faction and
 retirement. Any key skips one, and each holds its last frame for two seconds.
-The Viewport is drawn the same way: the pilot's ship, the station and any
-landmark found, idling until a key. Callers who want none choose `fast` in
+The Viewport is drawn the same way: the pilot's ship, an atlas of every
+charted system's world and any landmark found, idling until a key. Callers who want none choose `fast` in
 Display Options.
 
 On a truecolor or 256-color terminal in the `auto` and `fast` presets, every

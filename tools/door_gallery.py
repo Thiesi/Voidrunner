@@ -191,8 +191,11 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # A new career at Freeport on day zero is offered First Flight.
         ("First Flight offer", b"GO"),
         ("Trading Ledger", b"T"),
+        # The Viewport opens on its atlas, at the world outside; [N] turns to
+        # the next charted system, which the played career has several of.
         ("Viewport", b"V"),
-        ("Viewport, station", b"V2"),
+        ("Viewport, atlas", b"VN", "played"),
+        ("Viewport, ship", b"V1"),
         ("Viewport, discovery", b"V3"),
         ("Display Options", b"O"),
         ("Archive Contacts", b"N"),
