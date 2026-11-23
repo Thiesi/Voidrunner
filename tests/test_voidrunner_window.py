@@ -144,3 +144,68 @@ def test_every_option_names_its_price_on_its_own_row():
     assert intent.startswith(f"{steps[0].upper()} > {steps[1]} > {steps[2]}")
     # Whose pattern it is, is on the contact's own row beside its tier.
     assert any(plain(row).startswith("Probe") and plain(row).endswith(f"tier 1 {tactics['profile']}") for row in lines)
+
+
+# --- a busy arrival keeps the deck one page (#95) ---------------------------
+
+#: What First Flight's arrival said in #95: nine rows above a deck with seven free.
+FIRST_FLIGHT_ARRIVAL = [
+    "Departure: 1 fuel unit burned, 23 left. 1,086cr on hand.",
+    "New on the deck: [V] Viewport, [H] Hall of Fame.",
+    "Mission complete: First Flight: deliver 3 Food to Kelburn (+269cr, +1 Concord standing)",
+    "Hollow Reach, I: The Reach was mined hollow and left. The crews who stayed moved into the "
+    "workings and called them streets.",
+    "Local market: Kelburn has a standing surplus of Medicine, sold about 30% under its usual price.",
+    "Achievement unlocked: Contractor -- Complete your first contract.",
+]
+DECK_FOOTER = "[<] Prev [>] Next [X] Expand [Q] Exit: "
+
+
+def _arrival_deck(messages):
+    world = _world_with_seed(42)
+    world.save.turn = 1  # the Ledger, the Viewport and the Hall are on the deck from day one
+    deck = vr.station_deck_lines(world)
+    title = f"Command Deck: {world.save.pilot.credits:,}cr"
+    results = vr.deck_result_rows(messages, deck, title, DECK_FOOTER)
+    return [plain(row) for row in results], vr._service_pages(results + deck, title, DECK_FOOTER)
+
+
+def test_first_flights_arrival_leaves_the_deck_one_page_at_80x24(terminal):
+    terminal(80, 24)
+    results, pages = _arrival_deck(FIRST_FLIGHT_ARRIVAL)
+    assert len(pages) == 1
+    assert len(results) == len(FIRST_FLIGHT_ARRIVAL)  # every result is still said
+    # The longest, the story, gave up its second row, at a word (the market's
+    # line goes next, on a deck with a dispatch row); the payout and the
+    # achievement are whole.
+    assert results[3].startswith("Result: Hollow Reach, I: The Reach was mined") and results[3].endswith("...")
+    assert results[2] == "Result: " + FIRST_FLIGHT_ARRIVAL[2]
+    assert results[5] == "Result: " + FIRST_FLIGHT_ARRIVAL[5]
+    for row in (row for row in results if row.endswith("...")):
+        assert vr._visible_width(row) <= vr._page_content_width()  # a cut result is one row
+        assert not row.endswith(("....", " ...")), row  # cut at a word, and only once
+
+
+def test_an_arrival_with_more_than_fits_gives_up_its_oldest_results_first(terminal):
+    terminal(80, 24)
+    messages = [f"Event {number}: something happened on the way that takes most of a row." for number in range(14)]
+    results, pages = _arrival_deck(messages)
+    assert len(pages) == 1
+    assert 1 <= len(results) < len(messages)
+    assert results[-1] == "Result: " + messages[-1]  # the newest stays, as `report_hop` keeps it
+    assert all(f"Event {number}:" in row for number, row in zip(range(14 - len(results), 14), results))
+
+
+def test_results_that_fit_are_shown_whole(terminal):
+    terminal(160, 48)
+    results, pages = _arrival_deck(FIRST_FLIGHT_ARRIVAL)
+    assert len(pages) == 1
+    assert not any(row.endswith("...") for row in results)
+    assert " ".join(" ".join(results).split()) == " ".join(f"Result: {message}" for message in FIRST_FLIGHT_ARRIVAL)
+
+
+def test_a_deck_that_pages_anyway_keeps_every_result_whole(terminal):
+    terminal(40, 12)
+    results, pages = _arrival_deck(FIRST_FLIGHT_ARRIVAL)
+    assert len(pages) > 1
+    assert not any(row.endswith("...") for row in results)

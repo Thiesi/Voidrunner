@@ -289,8 +289,16 @@ charge itself -- fuel burned, fuel left, crew wages paid and credits on hand --
 then events, discoveries, encounter and combat outcomes, customs results,
 settlements and mission completions appear as `Result:` lines on the first
 Command Deck page after the jump, and are cleared by the next deck action. The
-report is session state, never persisted and bounded to the newest eight lines
-so the deck still fits 24 rows. A journey resumed after an interruption
+report is session state, never persisted and bounded to the newest eight lines.
+Those lines are fitted into the rows the deck leaves free, so a busy arrival
+never pushes the deck's own services onto a second page (#95): while the deck
+fits one page, the longest results give up their second rows first, cut at a
+word with `...` (prose such as a sector's story, which the Archive keeps, or a
+market's standing trait, which the chart shows from then on), and if one row
+each is still too many the oldest go, the departure charge first, whose fuel
+and credits are on the gauges below. First Flight's arrival was nine rows of
+results where seven were free at 80x24. A deck too tall for one page by itself
+(40x12, the expanded view) pages with every result whole. A journey resumed after an interruption
 therefore reports the phases it actually replays, not the ones that completed
 before the interruption: narration is a convenience for the caller who is
 sitting there, and is not worth a save field or a resume-consistency rule of

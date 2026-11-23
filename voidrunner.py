@@ -10585,6 +10585,58 @@ def result_row(message: str) -> str:
     return f"{p.slate}Result:{RESET} " + (f"{p.slate}{head}:{RESET} " if head else "") + body
 
 
+def _result_in_one_row(message: str) -> str:
+    """A result cut to the one row a deck row has beside its `Result:` label:
+    at a word, with an ellipsis, never through one."""
+    width = max(8, _page_content_width() - len("Result: "))
+    if _visible_width(message) <= width:
+        return message
+    cut = _fit_text(message, width - 3)
+    if " " in cut:
+        cut = cut[:cut.rindex(" ")]
+    return cut.rstrip(" ,;:-") + "..."
+
+
+def deck_result_rows(messages: list[str], deck: list[str], title: str, footer: str) -> list[str]:
+    """The deck's result rows, fitted into the rows the deck itself leaves free (#95).
+
+    A jump's results go above the deck, and a busy arrival used to push the
+    deck's own services onto a second page: First Flight's arrival says where
+    the fuel went, what joined the deck, the payout, the sector's story, the
+    station's market and an achievement, nine rows where seven were free at
+    80x24. Now, while the deck fits one page, its results are made to fit too:
+
+    - the longest results are cut to one row first, at a word -- prose such as
+      a sector's story (kept in the Archive) or a market's standing trait (on
+      the chart from now on), which says what it is in its first words;
+    - if one row each is still too many, the oldest go, as `report_hop` drops
+      them: the departure charge first, whose fuel and credits are on the
+      gauges just below.
+
+    A deck too tall for one page by itself (a narrow terminal, the expanded
+    view) pages as it always has, with every result whole.
+    """
+    shown = [result_row(message) for message in messages]
+    if not messages:
+        return shown
+    capacity = page_capacity(deck + shown, title, single_page_footer(footer, 1))
+    room = capacity - sum(len(wrapped_group(line)) for line in deck)
+
+    def rows(texts: list[str]) -> int:
+        return sum(len(wrapped_group(result_row(text))) for text in texts)
+
+    if room < 1 or rows(messages) <= room:
+        return shown
+    texts = list(messages)
+    for index in sorted(range(len(texts)), key=lambda i: -_visible_width(texts[i])):
+        if rows(texts) <= room:
+            break
+        texts[index] = _result_in_one_row(texts[index])
+    while len(texts) > 1 and rows(texts) > room:
+        texts.pop(0)
+    return [result_row(text) for text in texts]
+
+
 def accolade_announcements(earned: list) -> list[str]:
     """The deck's rows for what a moment earned: each one by name when there
     are a few, a single count when a returning career catches up on many."""
@@ -12167,11 +12219,12 @@ def screen_station_menu(p: Palette, world: World) -> str:
     notes, world.launch_notes = world.launch_notes, []
     page, expanded = 0, False
     while True:
-        lines = station_deck_lines(world, expanded=expanded)
-        if notes or completed:
-            lines[0:0] = notes + [result_row(message) for message in completed]
+        lines = notes + station_deck_lines(world, expanded=expanded)
         footer = "[<] Prev [>] Next [X] Compact [Q] Exit: " if expanded else "[<] Prev [>] Next [X] Expand [Q] Exit: "
-        choice, page, count = _draw_service_page(p, f"Command Deck: {world.save.pilot.credits:,}cr", lines, footer, page)
+        title = f"Command Deck: {world.save.pilot.credits:,}cr"
+        if completed:
+            lines[len(notes):len(notes)] = deck_result_rows(completed, lines, title, footer)
+        choice, page, count = _draw_service_page(p, title, lines, footer, page)
         if (moved := page_step(choice, page, count)) is not None: page = moved
         elif choice == "X": expanded, page = not expanded, 0
         # Every key the deck advertises is a key the deck answers -- `K` opens
