@@ -1983,8 +1983,9 @@ for how many more days, and how far from its usual level -- which is what the
 market's TREND column says of one station, said once for the sector. A save
 with an event running is read and simply has none; the prices it held drift
 back to rest like any other. The one random draw a day that the event's chance
-took is still drawn, so the encounters a career's seed leads to are the ones
-it led to before.
+took is still drawn, so a day on which no event would have begun leads to the
+encounters it led to before. From the first day one would have begun -- about
+one day in twenty -- a seed's luck differs, as it does after any rule change.
 
 **Seasons (review).** A price was its
 economy's, its trait's, and whatever the pilot's own trading or the rare event

@@ -3,8 +3,8 @@
 An event was a 30% boom or crash in one good at a few stations for a
 fortnight: the fourth thing moving a price, and the only one a pilot could not
 see coming. These pin its going: nothing draws, saves or shows one, a save
-that had one running is read and simply has none, a career's luck is what it
-was, and the ledger's bulletin reports the seasons of the pilot's own sector.
+that had one running is read and simply has none, a quiet day's luck is what
+it was, and the ledger's bulletin reports the seasons of the pilot's own sector.
 """
 
 from __future__ import annotations
@@ -43,9 +43,9 @@ def test_a_save_with_an_event_running_is_read_and_has_none():
     assert vr.price_for(loaded, 0, "metals") < high
 
 
-def test_a_days_luck_is_what_it_was(monkeypatch):
-    """The chance an event took one draw for each day: the draw stays, so the
-    encounters a career's seed leads to are the ones it led to before."""
+def test_a_quiet_days_luck_is_what_it_was(monkeypatch):
+    """The chance an event took one draw for each day: the draw stays, so a day
+    on which no event would have begun leads to the encounters it did before."""
     world = _world_with_seed(42)
     world.event_rng.seed(7)
     twin = vr.random.Random(7)

@@ -5680,7 +5680,7 @@ def work_dock_shift(world: World) -> list[str]:
     save.turn += 1
     lines = expire_missions(world)
     tick_price_reversion(world)
-    world.event_rng.random()  # the draw an economy event's chance took each day: a career's luck is what it was
+    world.event_rng.random()  # the draw an economy event's chance took each day, kept: a quiet day's luck is what it was
     save.pilot.credits += DOCK_WORK_PAY
     patched = ship.hull_hp < dock_work_hull(ship)
     ship.hull_hp = max(ship.hull_hp, dock_work_hull(ship))
@@ -18608,7 +18608,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         credits_before = world.save.pilot.credits
         lines.extend(expire_missions(world))
         tick_price_reversion(world)
-        world.event_rng.random()  # the draw an economy event's chance took each day: a career's luck is what it was
+        world.event_rng.random()  # the draw an economy event's chance took each day, kept: a quiet day's luck is what it was
         wage_messages = pay_crew_wages(world)
         wages = max(0, credits_before - world.save.pilot.credits)
         # The charge reads before what the day brought, which is the order the
