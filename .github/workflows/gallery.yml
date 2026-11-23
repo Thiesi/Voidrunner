@@ -1,0 +1,74 @@
+name: Gallery
+
+# Overflow and ragged frames only show on the screen a caller is left looking
+# at, at particular sizes and presets (#93). `door_gallery.py --check` drives
+# the real door to every screen and fails on a panel that runs past its last
+# column, a box whose right border is not in one column, or a replacement
+# character. It is slow -- about ten minutes for the default widths -- so it
+# runs on pull requests that touch the door or the gallery, and the wide widths
+# and the CP437 run go nightly.
+on:
+  pull_request:
+    paths:
+      - voidrunner.py
+      - tools/door_gallery.py
+      - tools/ansi_to_html.py
+      - tools/frame_check.py
+      - .github/workflows/gallery.yml
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gallery:
+    name: Gallery at 80, 64 and 40 columns
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build and check the gallery
+        # `--out` is a directory; the page and its fixtures go in it.
+        run: python tools/door_gallery.py --check --out build/gallery
+      - name: Keep the page
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gallery-default
+          path: build/gallery/voidrunner-gallery.html
+          if-no-files-found: ignore
+
+  nightly:
+    name: Gallery ${{ matrix.name }}
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: at 132 and 160 columns
+            key: wide
+            args: --widths 132 160
+          - name: in CP437
+            key: cp437
+            args: --encoding cp437
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build and check the gallery
+        run: python tools/door_gallery.py --check ${{ matrix.args }} --out build/gallery
+      - name: Keep the page
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gallery-${{ matrix.key }}
+          path: build/gallery/voidrunner-gallery.html
+          if-no-files-found: ignore
