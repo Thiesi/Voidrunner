@@ -3282,10 +3282,11 @@ def rumour_candidates(world: World) -> list[tuple[int, int | None]]:
     return sorted(found.items(), key=lambda item: (item[1] is not None, item[0]))
 
 
-def dock_rumour(world: World) -> str | None:
-    """What the dock says on this arrival, if anything, and note it on the chart."""
+def dock_rumour(world: World, *, sure: bool = False) -> str | None:
+    """What the dock says on this arrival, if anything, and note it on the chart.
+    `sure` is a day spent among the dockers: they talk if there is anything to say."""
     here, day = world.here, world.save.turn
-    if zlib.crc32(f"rumour:{world.save.seed}:{day}:{here.id}".encode("utf-8")) % RUMOUR_ONE_IN:
+    if not sure and zlib.crc32(f"rumour:{world.save.seed}:{day}:{here.id}".encode("utf-8")) % RUMOUR_ONE_IN:
         return None
     candidates = rumour_candidates(world)
     if not candidates:
@@ -5334,7 +5335,9 @@ def destroy_ship(world: World, *, patrol: bool = False, hull_before: int | None 
             f"a {penalty}cr salvage fee charged. You wake up at Freeport Anchorage"
             + (f" with hull {ship.hull_hp}/{hull_hp_max(ship)}: the tug patched what {towards_fee}cr covers." if towards_fee < fee else ".")
             + ("" if not patrol else " Notoriety cleared." if cleared
-               else f" The {fine}cr fine went unpaid, so your notoriety stands."))
+               else f" The {fine}cr fine went unpaid, so your notoriety stands.")
+            + (" Freeport's docks have work for a pilot with nothing: [F] on the deck."
+               if world.save.pilot.credits < DOCK_WORK_BELOW else ""))
 
 
 def customs_check_chance(system: GalaxySystem) -> float:
@@ -5418,6 +5421,92 @@ def rescue_stranded_pilot(world: World) -> str:
         msg = "The dockmaster spots your empty tank and tops you off enough to get moving again, no charge."
     world.save.pilot.note(msg)
     return msg
+
+
+# Dock work (review). Losing a ship was never a dead end, and for about one career
+# in a hundred it was the next thing to it: the tug takes the fee out of whatever is
+# on hand, so a pilot wakes at Freeport with nothing, a quarter of a hull and an
+# empty hold. Trading wants capital and a delivery wants its goods bought; what
+# is left is to fly a quarter-hull out for a survey or a bounty, lose it again,
+# and wake at Freeport with nothing. Flown through the simulator, seven careers
+# in eight hundred spent most of their hundred days in that loop.
+#
+# Freeport's foreman now has a shift for any pilot with less than the price of
+# a Shuttle's hold to their name. It costs a day -- contracts run down, prices
+# move -- and gives three things: a day's pay, a hull patched to half by the
+# yard hands, and what the dockers were saying, which is a rumour whenever there
+# is one to tell. Three shifts are a hold of cargo and a ship that can take a
+# hit, and a tip on where to carry it. It is a floor and not a wage: a day's
+# trading in a Shuttle pays several times as much, so nobody who can fly does
+# this instead, and it closes the moment a pilot has the credits to trade.
+DOCK_WORK_BELOW = 600   # credits under which the foreman has a shift
+DOCK_WORK_PAY = 200
+DOCK_WORK_HULL = 2      # the yard hands patch to one part in this many of a full hull
+DOCK_WORK_STORIES = (
+    "A day shifting ore crates for a foreman who never learns your name.",
+    "A day on the cranes. The dockers share their lunch and their opinion of raiders.",
+    "A day scraping a freighter's intakes. You find out why nobody else took the job.",
+    "A day checking manifests against holds. Two do not match, and you are told to stop counting.",
+    "A day hauling coolant line with a crew who all flew once, and tell you how they stopped.",
+    "A day in the bonded store, moving the same forty drums from one wall to the other.",
+    "A day running parts from the yard to the outer berths, which are a long way from the yard.",
+    "A day patching another pilot's hull. You look at your own differently afterwards.",
+)
+
+
+def dock_work_open(world: World) -> bool:
+    """Whether Freeport's foreman has a shift for this pilot today."""
+    save = world.save
+    return save.current_system == 0 and save.pending_travel is None and save.pilot.credits < DOCK_WORK_BELOW
+
+
+def dock_work_hull(ship: Ship) -> int:
+    """The hull the yard hands patch a working pilot's ship up to."""
+    return hull_hp_max(ship) // DOCK_WORK_HULL
+
+
+def work_dock_shift(world: World) -> list[str]:
+    """A day on Freeport's docks: the day passes as a day in port does, and the
+    pilot ends it paid, patched and told what the docks were saying."""
+    if not dock_work_open(world):
+        raise ValueError("The foreman has no shift for you today.")
+    save, ship = world.save, world.save.ship
+    save.turn += 1
+    lines = expire_missions(world)
+    tick_price_reversion(world)
+    event = tick_economy_event(world)
+    save.pilot.credits += DOCK_WORK_PAY
+    patched = ship.hull_hp < dock_work_hull(ship)
+    ship.hull_hp = max(ship.hull_hp, dock_work_hull(ship))
+    bump_accolade(save, "shifts")
+    story = DOCK_WORK_STORIES[zlib.crc32(f"dock:{save.seed}:{save.turn}".encode("utf-8")) % len(DOCK_WORK_STORIES)]
+    lines.insert(0, f"{story} +{DOCK_WORK_PAY}cr"
+                 + (f"; the yard patched your hull to {ship.hull_hp}/{hull_hp_max(ship)}." if patched else "."))
+    if event:
+        lines.append(event)
+    rumour = dock_rumour(world, sure=True)
+    if rumour:
+        lines.append(rumour)
+    save.pilot.note(f"Worked a shift on Freeport's docks (+{DOCK_WORK_PAY}cr).")
+    world.advance_station_state()
+    return lines
+
+
+def dock_work_lines(world: World) -> list[str]:
+    ship = world.save.ship
+    half = dock_work_hull(ship)
+    return [
+        f"Freeport does not let a pilot starve. The foreman has a shift for anyone with less than {DOCK_WORK_BELOW}cr "
+        "to their name: a day on the docks, paid when it ends.",
+        section("A SHIFT"),
+        f"Pay: {DOCK_WORK_PAY}cr",
+        (f"Hull: the yard hands patch it to {half}/{hull_hp_max(ship)} while you work" if ship.hull_hp < half
+         else f"Hull: {ship.hull_hp}/{hull_hp_max(ship)}. The yard hands patch to half and no further"),
+        "Cost: one day. Contracts run down and prices move; no crew wages.",
+        "Talk: a shift ends with what the dockers said of the markets nearby.",
+        f"The foreman stops asking at {DOCK_WORK_BELOW}cr. That is a hold of cargo, and a pilot with one has better "
+        "things to do.",
+    ]
 
 
 def pay_crew_wages(world: World) -> list[str]:
@@ -5676,7 +5765,7 @@ ACCOLADE_VERSION = 1
 # counts and committed with it, so a resumed hop cannot count it twice.
 ACCOLADE_COUNTERS = ("squadrons", "flawless", "giant_slayer", "close_calls", "escapes", "raider_bribes", "scores",
                      "patrol_kills", "wrong_bounties", "deliveries", "surveys", "bounties", "escorts",
-                     "distress", "derelicts", "ships_lost", "tows", "busts", "customs_bribes",
+                     "distress", "derelicts", "ships_lost", "tows", "shifts", "busts", "customs_bribes",
                      "dispatches", "dispatch_best", "chains")
 ACCOLADE_GROUPS = ("Travel", "Exploration", "Combat", "Contracts", "Dispatch", "Encounters", "Trading", "Wealth",
                    "Ranks", "Factions", "Ship", "Legacy", "Misfortune")
@@ -5790,6 +5879,7 @@ ACCOLADES: tuple[Accolade, ...] = tuple([
     Accolade("lost_5", "Misfortune", "Tow Truck Regular", "Lose your ship 5 times.", "ships_lost", 5, tier=2, hidden=True),
     Accolade("towed", "Misfortune", "Running on Fumes", "Get towed home with an empty tank and empty pockets.",
              "tows", tier=1, hidden=True),
+    Accolade("dock_hand", "Misfortune", "Honest Work", "Work a shift on Freeport's docks.", "shifts", tier=1, hidden=True),
     Accolade("busted", "Misfortune", "Busted", "Have your contraband confiscated by customs.", "busts",
              tier=1, hidden=True),
 ])
@@ -11237,6 +11327,9 @@ def deck_alert_rows(world: World) -> list[str]:
     if costs and ship.fuel < min(costs):
         rows.append(alert("danger", "LOW FUEL", f"cheapest jump needs {min(costs)}",
                           key_label("Y", f"refuel {FUEL_PRICE}cr/unit")))
+    if dock_work_open(world):
+        rows.append(alert("note", "Dock work", f"a day's shift pays {DOCK_WORK_PAY}cr and patches the hull",
+                          key_label("F", "foreman")))
     if has_contraband(world):
         rows.append(alert("caution", "Contraband aboard", "customs risk at this station",
                           key_label("D", "jettison")))
@@ -11551,8 +11644,25 @@ def screen_station_menu(p: Palette, world: World) -> str:
         elif choice == "X": expanded, page = not expanded, 0
         # Every key the deck advertises is a key the deck answers -- `K` opens
         # the roster the crew alert names, rather than redrawing (#493 review).
-        elif choice in "MYBCSHGTQKLDPWONVJ" and len(choice) == 1:
+        elif choice in "MYBCSHGTQKLDPWONVJF" and len(choice) == 1:
             return choice
+
+
+def screen_dock_work(p: Palette, world: World) -> None:
+    page = 0
+    while True:
+        key, page, count = _draw_service_page(p, f"Freeport Docks: {world.save.pilot.credits:,}cr", dock_work_lines(world),
+                                              "[W] Work a shift [B] Back [<>] Page: ", page)
+        if key in ("B", "Q"):
+            return
+        if (moved := page_step(key, page, count)) is not None:
+            page = moved
+        elif key == "W":
+            lines = work_dock_shift(world)
+            world.commit()
+            # The deck that follows lists the day with a journey's results.
+            report_hop(world, lines)
+            return
 
 
 def select_display_style(world: World, style: str) -> bool:
@@ -15942,6 +16052,8 @@ def pilot_guide_lines(world: World) -> list[str]:
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
         "Crew fight with you. Each specialist aboard has a station, used once a fight: the gunner's [C] Called shot hits half as hard again and cover cannot blunt it, the engineer's [M] Mend gives back a quarter of the hull for the turn's shot, and the navigator's [N] Slip is a full shot that the raider's move only grazes. Spend the slip on the volley.",
         "Raiders remember. One you ran from, paid off or lost a ship to may be the next raider you meet, a tier stronger. Destroy it and the score is settled: its salvage twice over. [S] Status lists the scores still open.",
+        f"Lose everything and Freeport still has work: with less than {DOCK_WORK_BELOW}cr, [F] on Freeport's deck is a "
+        f"day on the docks for {DOCK_WORK_PAY}cr, a hull patched to half, and whatever the dockers were saying.",
         "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
         "Ranks are kept once reached, and each brings something: a fourth contract slot at Independent Trader, half as much again on every contract at Merchant Captain, a fifth slot at Void Baron and double pay at Legend of the Frontier.",
         "Once the ship is built there is something to own: [K] Stake in any market buys a share in that station, in three steps at up to three stations. Its stock and demand come back two, three and four times as fast for you, so a route you fly again and again keeps paying.",
@@ -19132,6 +19244,10 @@ def _run_game(info: dict) -> int:
             elif choice == "L" and landmark_available_here(world):
                 screen_landmark(p, world)
                 continue
+            elif choice == "F":
+                if dock_work_open(world):
+                    screen_dock_work(p, world)
+                continue  # A shift checkpoints itself.
             elif choice == "D" and has_contraband(world):
                 screen_dump_contraband(p, world)
             elif choice == "P":

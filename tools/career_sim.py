@@ -93,6 +93,7 @@ class Pilot:
         self.earned = Counter()     # credits by where they came from
         self.lost = 0               # ships
         self.towed = 0              # times a tug brought a dry, broke ship home
+        self.shifts = 0             # days worked on Freeport's docks
         self.docked = {}            # the day each station was last left
         self.fights = Counter()     # keys pressed in a fight, by key
         vr.read_key = self.key
@@ -376,6 +377,11 @@ class Pilot:
         while world.save.turn < days:
             day = world.save.turn
             self.sell_hold()
+            while hasattr(vr, "dock_work_open") and vr.dock_work_open(world) and world.save.turn < days:
+                vr.work_dock_shift(world)  # nothing to trade with: a day on Freeport's docks
+                self.shifts += 1
+                self.earned["shifts"] += vr.DOCK_WORK_PAY
+                world.commit()
             self.maintain()
             self.invest()
             self.drop_lost_causes()
@@ -411,6 +417,7 @@ class Pilot:
         save = world.save
         return {
             "outcome": outcome, "days": save.turn, "marks": marks, "firsts": firsts, "lost": self.lost, "towed": self.towed,
+            "shifts": self.shifts,
             "kills": save.pilot.kills, "contracts": save.pilot.missions_completed,
             "failed": save.pilot.missions_failed + save.pilot.missions_expired,
             "charted": sum(1 for system in world.galaxy if system.discovered),
@@ -455,6 +462,10 @@ def summarize(results: list[dict], days: int) -> list[str]:
         ended = Counter(r["outcome"].split(":")[0] for r in flown if r["outcome"] != "flew")
         if ended:
             lines.append(f"{'':<11}did not finish: " + ", ".join(f"{count} {what}" for what, count in ended.items()))
+        worked = [r["shifts"] for r in flown if r.get("shifts")]
+        if worked:
+            lines.append(f"{'':<11}dock work: {len(worked)} of {len(flown)} careers, {sum(worked)} shifts in all, "
+                         f"{max(worked)} at most")
     lines.append("")
     lines.append("Net worth (credits, cargo at cost, and what went into upgrades, hulls and stakes), median by day.")
     lines.append("ships: lost per career, mean.  jobs: contracts completed.  chart: systems charted.  disp: dispatches flown.")
