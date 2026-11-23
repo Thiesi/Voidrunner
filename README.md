@@ -172,6 +172,7 @@ python tools/check_stdlib_only.py     # the door imports only the standard libra
 python tools/door_gallery.py --open   # every screen at 80/64/40 columns, every preset
 python tools/door_gallery.py --encoding cp437 --out build/gallery-cp437
 python tools/career_sim.py              # whole careers flown by simple pilots; --help for switching a rule off
+python tools/check_careers.py build/careers.json   # after career_sim.py --json build/careers.json
 ```
 
 A change to a screen comes with gallery pictures: the tests can prove that a
@@ -187,6 +188,11 @@ presentation) is in [docs/design.md](docs/design.md).
   rolls passes or fails by chance unless its luck is fixed. `_world_with_seed`
   in `tests/support.py` fixes it to the galaxy seed by default; pass
   `luck=SYSTEM_LUCK` for the door's own behaviour.
+- Fifty careers per pilot through `tools/career_sim.py`, checked by
+  `tools/check_careers.py`: every career flies its hundred days, none is towed
+  home more than twice, and each pilot's median day-100 net worth stays inside
+  a wide band around `BASELINE`. A change that moves a pilot on purpose updates
+  `BASELINE` and quotes the simulator's table in its pull request.
 
 ### Local disk hygiene
 

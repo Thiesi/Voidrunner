@@ -74,3 +74,55 @@ def test_the_summary_has_a_row_for_each_pilot_flown(sim):
     assert lines[0].split()[:4] == ["pilot", "day", "10", "day"]
     assert [line.split()[0] for line in lines[1:3]] == ["trader", "explorer"]
     assert not any(line.startswith("smuggler") for line in lines)
+
+
+@pytest.fixture(scope="module")
+def check():
+    spec = importlib.util.spec_from_file_location("check_careers_under_test", ROOT / "tools" / "check_careers.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _career(pilot, worth, *, outcome="flew", towed=0, seed=1000):
+    return {"pilot": pilot, "seed": seed, "outcome": outcome, "days": 100, "towed": towed,
+            "marks": {"100": {"credits": worth, "worth": worth}}}
+
+
+def _healthy(check):
+    return [_career(pilot, baseline) for pilot, baseline in check.BASELINE.items()]
+
+
+def test_the_career_check_passes_careers_like_mains(check):
+    assert check.problems(_healthy(check)) == []
+
+
+def test_the_career_check_fails_a_stranded_a_stuck_and_a_towed_career(check):
+    careers = _healthy(check) + [_career("trader", 355_000, outcome="stranded", seed=1001),
+                                 _career("trader", 355_000, outcome="stuck: 'Act'", seed=1002),
+                                 _career("trader", 355_000, towed=check.MAX_TOWED + 1, seed=1003)]
+    found = check.problems(careers)
+    assert len(found) == 3
+    assert "seed 1001: stranded" in found[0] and "seed 1002: stuck" in found[1] and "towed" in found[2]
+
+
+@pytest.mark.parametrize("factor", [0.5, 2.0])
+def test_the_career_check_fails_a_rule_that_halves_or_doubles_a_career(check, factor):
+    careers = [dict(career) for career in _healthy(check)]
+    careers[2] = _career("contractor", check.BASELINE["contractor"] * factor)
+    assert [line.split(":")[0] for line in check.problems(careers)] == ["contractor"]
+
+
+def test_the_career_check_lets_ordinary_tuning_through(check):
+    careers = [_career(pilot, baseline * factor)
+               for (pilot, baseline), factor in zip(check.BASELINE.items(), (0.8, 1.2, 0.9, 1.3))]
+    assert check.problems(careers) == []
+
+
+def test_the_career_check_reads_a_simulated_career(sim, check):
+    """The keys the check reads are the ones `fly_one` writes."""
+    career = _fly(sim, "explorer", days=10)
+    found = check.problems([career], mark=10)
+    assert found[:3] == [f"{pilot}: no careers flown" for pilot in ("trader", "smuggler", "contractor")]
+    # Day 10 is far below the day-100 band, which says the worth was read.
+    assert len(found) == 4 and found[3].startswith("explorer: median day-10 net worth ")
