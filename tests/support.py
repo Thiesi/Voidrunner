@@ -228,10 +228,30 @@ def page_text(frame: str | list[str]) -> str:
     return " ".join(" ".join(row for text in frames for row in page_rows(text)).split())
 
 
-def _world_with_seed(seed: int) -> "vr.World":
+#: What `_world_with_seed(..., luck=SYSTEM_LUCK)` asks for: the door's own
+#: behaviour, an event RNG seeded from the system.
+SYSTEM_LUCK = object()
+
+
+def _world_with_seed(seed: int, *, luck=None) -> "vr.World":
+    """A new career on galaxy `seed`, with its luck fixed too.
+
+    The door seeds a world's event RNG from the system, not from the save's
+    seed (each caller's luck is their own), so a world built here used to fix
+    the galaxy and nothing about the fights, the jumps or the rolls. A test
+    that drew from it without calling `world.event_rng.seed(n)` passed or failed
+    by chance: #84 to #87 went red on CI under Python 3.13 that way (#93).
+
+    So the event RNG follows `luck`, which defaults to the galaxy seed. A test
+    that really wants a different draw on every run says so with
+    `luck=SYSTEM_LUCK`; reseeding afterwards still works as it always did.
+    """
     save = vr._new_career("Tester")
     save.seed = seed
-    return vr.World(save)
+    world = vr.World(save)
+    if luck is not SYSTEM_LUCK:
+        world.event_rng.seed(seed if luck is None else luck)
+    return world
 
 
 def strip_prizes(monkeypatch, choice: str = "S") -> None:
