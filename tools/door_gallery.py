@@ -2,6 +2,13 @@
 
     python tools/door_gallery.py --out build/gallery --open
     python tools/door_gallery.py --widths 80 64 40 --fresh
+    python tools/door_gallery.py --check --widths 132 160
+
+`--check` also fails the run when a panel would look broken on a real terminal:
+a row that runs past the last column, a box whose right border is not in one
+column, or a replacement character (`tools/frame_check.py`). CI runs it on pull
+requests that touch the door or the gallery, and every night at the wide widths
+and in CP437 (`.github/workflows/gallery.yml`).
 
 Ported from NetBBS's `scripts/door_gallery.py`, which renders its other bundled
 door, War Dialer, too; a few comments below still use War Dialer's screens as
@@ -60,6 +67,7 @@ ROOT = SCRIPTS.parent
 sys.path.insert(0, str(SCRIPTS))
 
 import ansi_to_html as term  # noqa: E402
+from frame_check import frame_problems  # noqa: E402
 
 SPAN = re.compile(r'<span style="([^"]*)">(.*?)</span>')
 ANSI = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
@@ -1015,7 +1023,7 @@ def painted(screen: str, width: int, height: int) -> str:
 
 
 def build(door_name: str, widths: list[int], heights: dict[int, int],
-          out_dir: pathlib.Path, fresh: bool) -> pathlib.Path:
+          out_dir: pathlib.Path, fresh: bool, *, check: bool = False) -> tuple[pathlib.Path, list[str]]:
     door = ROOT / f"{door_name}.py"
     if not door.exists():
         raise SystemExit(f"no such door: {door}")
@@ -1093,6 +1101,17 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
         raise SystemExit(f"{door_name}: a walk did not end on the screen it names:\n"
                          + "\n".join(wrong))
 
+    # `--check`: what a terminal would show broken on each panel (#93) --
+    # overflow, a box whose right border is not in one column, a replacement
+    # character. Collected rather than raised, so the page is still written
+    # and one run names every broken panel.
+    broken = [f"  {label} at {width}x{height} {preset}"
+              + (f" page {number}" if len(pages) > 1 else "") + f": {problem}"
+              for (label, _, preset, _, width, height, _fixture), pages in zip(shots, screens)
+              if check
+              for number, screen in enumerate(pages, 1)
+              for problem in frame_problems(screen, width, height)]
+
     styles: dict[str, str] = {}
     sections, panels, current = [], [], shots[0][0]
     for (label, _, preset, _, width, height, _fixture), pages in zip(shots, screens):
@@ -1143,7 +1162,7 @@ preset. Attach this page to any pull request that changes a screen.</p>
 """
     target = out_dir / f"{door_name}-gallery.html"
     target.write_text(page, encoding="utf-8")
-    return target
+    return target, broken
 
 
 def main() -> None:
@@ -1156,15 +1175,22 @@ def main() -> None:
     parser.add_argument("--open", action="store_true", help="open the page when it is written")
     parser.add_argument("--encoding", choices=("utf-8", "cp437"), default="utf-8",
                         help="wire encoding; CP437 also checks every emitted glyph strictly")
+    parser.add_argument("--check", action="store_true",
+                        help="fail when a panel overflows, has a ragged box or a replacement character")
     args = parser.parse_args()
     GALLERY_ENCODING = args.encoding
 
     heights = {80: 24, 64: 20, 40: 12}
     out_dir = args.out.expanduser().resolve()
-    target = build("voidrunner", args.widths, heights, out_dir, args.fresh)
+    target, broken = build("voidrunner", args.widths, heights, out_dir, args.fresh, check=args.check)
     print(f"wrote {target}")
     if args.open:
         webbrowser.open(target.as_uri())
+    if broken:
+        print(f"{len(broken)} problem(s) on the panels:", *broken, sep="\n", file=sys.stderr)
+        sys.exit(1)
+    if args.check:
+        print("every panel fits its terminal and every box is square")
 
 
 if __name__ == "__main__":

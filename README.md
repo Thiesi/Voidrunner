@@ -171,6 +171,7 @@ python -m pytest -n auto              # the suite, about half a minute
 python tools/check_stdlib_only.py     # the door imports only the standard library
 python tools/door_gallery.py --open   # every screen at 80/64/40 columns, every preset
 python tools/door_gallery.py --encoding cp437 --out build/gallery-cp437
+python tools/door_gallery.py --check  # also fail on overflow, ragged boxes, undecodable bytes
 python tools/career_sim.py              # whole careers flown by simple pilots; --help for switching a rule off
 python tools/check_careers.py build/careers.json   # after career_sim.py --json build/careers.json
 ```
@@ -193,6 +194,11 @@ presentation) is in [docs/design.md](docs/design.md).
   home more than twice, and each pilot's median day-100 net worth stays inside
   a wide band around `BASELINE`. A change that moves a pilot on purpose updates
   `BASELINE` and quotes the simulator's table in its pull request.
+- `tools/door_gallery.py --check`, which fails on a panel that runs past its
+  terminal's last column, a box whose right border is not in one column, or a
+  replacement character (`tools/frame_check.py`). The default widths run on
+  pull requests that touch the door or the gallery (about ten minutes); 132
+  and 160 columns and the CP437 run go nightly.
 
 ### Local disk hygiene
 
