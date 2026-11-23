@@ -3907,6 +3907,81 @@ def _advance_mission_ids(save: SaveData) -> None:
     save.next_mission_id = max([save.next_mission_id, 1] + [value + 1 for value in ids])
 
 
+# Contract chains (review, v1.3). Every contract was a single errand: taken,
+# flown, paid, forgotten, and the next one had nothing to do with it. One
+# delivery in three now turns out to be the first of three: on the dock where
+# it is handed over, the client posts a second leg on that station's board, and
+# after the second a final one. A leg goes one or two jumps on, carries
+# something this station makes where it makes anything, and pays a quarter more
+# than a delivery of its size, then half as much again. It is an offer like any
+# other -- it wants a free slot, it can be left, it goes when the board turns
+# over -- and carrying all three is an achievement. A leg is known by how its
+# description begins, so no contract gains a field and older builds load it.
+CHAIN_ONE_IN = 3
+CHAIN_LEGS = ("", "", "Second leg: ", "Final leg: ")
+CHAIN_PREMIUM = {2: 1.25, 3: 1.5}
+
+
+def chain_leg(mission: Mission) -> int:
+    """Which leg of a chain a delivery is: 1 for an ordinary one, 2 or 3 for a posted follow-up."""
+    return next((leg for leg in (2, 3) if mission.description.startswith(CHAIN_LEGS[leg])), 1)
+
+
+def chain_continues(world: World, mission: Mission) -> bool:
+    """Whether the client of a delivery just handed over has another leg. The
+    first leg is one delivery in `CHAIN_ONE_IN`, by the career's seed and the
+    contract's number; a second leg always has a final one."""
+    if mission.kind != "delivery" or mission.opening_assignment:
+        return False
+    leg = chain_leg(mission)
+    if leg == 2:
+        return True
+    return leg == 1 and zlib.crc32(f"chain:{world.save.seed}:{mission.id}".encode("utf-8")) % CHAIN_ONE_IN == 0
+
+
+def chain_offer(world: World, system_id: int, leg: int, after: int) -> Mission | None:
+    """The leg a client posts at `system_id` after contract number `after`: its
+    own draw, so the board's ordinary offers are what they would have been."""
+    rng = random.Random(f"voidrunner-chain-v1:{world.save.seed}:{system_id}:{after}:{leg}")
+    station = world.by_id[system_id]
+    hops = bfs_hops(world.by_id, system_id)
+    candidates = sorted(sid for sid, away in hops.items() if 1 <= away <= 2)
+    if not candidates:
+        return None
+    target = rng.choice(candidates)
+    made_here = [c for c in LEGAL_COMMODITIES if c in ECONOMY_PRODUCES[station.economy]]
+    commodity = rng.choice(made_here or LEGAL_COMMODITIES)
+    ceiling = delivery_contract_ceiling(world.save.ship)
+    quantity = rng.randint(max(3, ceiling // 2), ceiling)
+    at_origin, per_jump, flat = DELIVERY_PAY
+    reward = round((quantity * COMMODITIES[commodity]["base"] * (at_origin + per_jump * hops[target]) + flat)
+                   * CHAIN_PREMIUM[leg])
+    description = (f"{CHAIN_LEGS[leg]}deliver {quantity}x {COMMODITIES[commodity]['label']} "
+                   f"to {world.by_id[target].name}")
+    return Mission(id=world.save.next_mission_id, kind="delivery", description=description, reward=reward,
+                   origin_system=system_id, target_system=target, commodity=commodity, quantity=quantity,
+                   deadline_turn=world.save.turn + 10 + 4 * hops[target])
+
+
+def post_chain_legs(world: World, board: dict) -> None:
+    """Put the legs clients promised at this station on its board, once each.
+    A full board gives up its last ordinary offer for one."""
+    here = world.save.current_system
+    prefix = f"chain_{here}_"
+    for key in sorted(key for key in world.save.flags if key.startswith(prefix)):
+        del world.save.flags[key]
+        leg, after = (int(part) for part in key[len(prefix):].split("_"))
+        offer = chain_offer(world, here, leg, after)
+        if offer is None:
+            continue
+        ordinary = [item for item in board["offers"] if chain_leg(Mission.from_dict(item)) == 1]
+        if len(board["offers"]) >= 4 and ordinary:
+            board["offers"].remove(ordinary[-1])
+        if len(board["offers"]) < 4:
+            board["offers"].append(offer.to_dict())
+            world.save.next_mission_id += 1
+
+
 def generate_mission_board(world: World) -> list[Mission]:
     """Stable posted offers: browsing/acceptance never replenishes the board."""
     sid = world.save.current_system
@@ -3923,6 +3998,7 @@ def generate_mission_board(world: World) -> list[Mission]:
                 world.save.next_mission_id += 1
         cached = {"refresh_turn": world.save.turn + MISSION_BOARD_DAYS, "offers": offers}
         world.save.mission_boards[sid] = cached
+    post_chain_legs(world, cached)
     return posted_mission_offers(world)
 
 
@@ -4151,6 +4227,13 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
                    + f", +{CONCORD_STANDING_PER_CONTRACT} Concord standing)")
             world.save.pilot.note(msg)
             msgs.append(msg)
+            if chain_continues(world, m):
+                leg = chain_leg(m) + 1
+                world.save.flags[f"chain_{m.target_system}_{leg}_{m.id}"] = True
+                msgs.append(f"The client has more work: a {'second' if leg == 2 else 'final'} leg is on this station's board.")
+            elif m.kind == "delivery" and chain_leg(m) == 3:
+                bump_accolade(world.save, "chains")
+                msgs.append("All three legs carried: the client will remember this ship.")
         else:
             still_active.append(m)
     world.save.active_missions = still_active
@@ -5293,7 +5376,7 @@ ACCOLADE_VERSION = 1
 ACCOLADE_COUNTERS = ("squadrons", "flawless", "giant_slayer", "close_calls", "escapes", "raider_bribes",
                      "patrol_kills", "wrong_bounties", "deliveries", "surveys", "bounties", "escorts",
                      "distress", "derelicts", "ships_lost", "tows", "busts", "customs_bribes",
-                     "dispatches", "dispatch_best")
+                     "dispatches", "dispatch_best", "chains")
 ACCOLADE_GROUPS = ("Travel", "Exploration", "Combat", "Contracts", "Dispatch", "Encounters", "Trading", "Wealth",
                    "Ranks", "Factions", "Ship", "Legacy", "Misfortune")
 # The id pattern a newer build's accolade may use; this build keeps those it
@@ -5352,6 +5435,8 @@ ACCOLADES: tuple[Accolade, ...] = tuple([
     Accolade("surveys_10", "Contracts", "Surveyor", "Complete 10 survey contracts.", "surveys", 10, tier=2),
     Accolade("bounties_10", "Contracts", "Bounty Hunter", "Complete 10 bounty contracts.", "bounties", 10, tier=2),
     Accolade("escorts_10", "Contracts", "Shepherd", "Complete 10 escort contracts.", "escorts", 10, tier=2),
+    Accolade("chain", "Contracts", "Chain of Custody", "Carry a contract through all three of its legs.", "chains",
+             tier=2),
     Accolade("wrong_bounty", "Contracts", "Wrong Guy", "Destroy the wrong bounty target.", "wrong_bounties",
              tier=1, hidden=True),
     *_ladder("dispatch", "Dispatch", "dispatches", ((1, "On the Wire", "Fly a daily dispatch."),
@@ -15386,6 +15471,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
         "Ranks are kept once reached, and each brings something: a fourth contract slot at Independent Trader, half as much again on every contract at Merchant Captain, a fifth slot at Void Baron and double pay at Legend of the Frontier.",
         "Once the ship is built there is something to own: [K] Stake in any market buys a share in that station, in three steps at up to three stations. Its stock and demand come back two, three and four times as fast for you, so a route you fly again and again keeps paying.",
+        "One delivery in three is the first of three: where you hand it over, the client posts a second leg on that station's board, then a final one, each a jump or two on and paying a quarter and then half as much again over a delivery of its size.",
         "The Mission Board ([B] on the station deck) shows full contract terms, tracking and abandonment. [G] Guide keeps this recap available. On every other screen [B] is Back; [Q] on the station deck saves and leaves the game.",
     ]
     if dispatch_order(world) is not None:

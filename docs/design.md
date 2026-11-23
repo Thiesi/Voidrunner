@@ -1639,6 +1639,23 @@ how to press Back), and is divided by a rule: a first flight above it, and
 `ONCE YOU HAVE FLOWN A FEW DAYS` below, where the lines about ranks, stakes,
 local markets, a raider's read and the dispatch live.
 
+**Contract chains (review, v1.3).** Every contract was a single errand: taken,
+flown, paid, forgotten, and the next had nothing to do with it. One delivery in
+three is now the first of three. On the dock where it is handed over the client
+posts a second leg on that station's board, and after the second a final one.
+A leg goes one or two jumps on, carries something this station makes where it
+makes anything -- so it can be bought where it is taken -- at half to all of
+the largest delivery the hold is offered, and pays a quarter more than a
+delivery of its size, then half as much again. It is an offer like any other:
+it wants a free slot, it can be left, and it goes when the board turns over.
+Carrying all three is an achievement. A leg is drawn by its own generator, so a
+board's ordinary offers are what they would have been, and it takes a full
+board's last place. A leg is known by how its description begins (`Second
+leg:`, `Final leg:`) and a promised one is a flag until the board is next
+prepared, which is the same docking: no contract gains a field. Flown through
+the simulator, chains leave a contractor's worth where it was, to within 1%:
+they are something to follow, not a raise.
+
 **The jump is its destination's (review, v1.3).** Every jump was the same
 violet tunnel, and a career plays it every turn. A charted destination now
 lights the tunnel in its own trade's light -- the core, the streams and the
