@@ -3255,6 +3255,62 @@ def dock_rumour(world: World) -> str | None:
     return f"{voice} {name}, {where}, {RUMOUR_WHAT[world.traits[system_id]['kind']]}."
 
 
+# Seasons (review, v1.3). A price was its economy's, its trait's and whatever
+# the pilot's own trading and the rare event had done to it: nothing moved that
+# a pilot could see coming, so a futures order -- today's price, held for a
+# fee -- was never worth its fee, and the trade loop had nothing left to read
+# once its lanes were learned. Every legal good now has a season in each
+# sector: a slow swing of about an eighth either way, over 24 to 40 days, the
+# same for every station in the sector. It is the same every time for a
+# career's seed, starts level on day zero, and is shown: the market says
+# whether a price is rising or falling and for how many more days, and a
+# futures order says what the price should be on the day it is collected.
+# Nothing is saved for it; the day and the seed give it.
+SEASON_SWING = 0.12
+SEASON_PERIODS = (24, 40)
+
+
+@functools.lru_cache(maxsize=None)
+def _season_of(seed: int, sector: str, commodity: str) -> tuple[int, int]:
+    """A good's season in a sector: its length in days, and which way it starts."""
+    rng = random.Random(f"season:{seed}:{sector}:{commodity}")
+    return rng.randint(*SEASON_PERIODS), rng.choice((1, -1))
+
+
+def season_factor(world: World, system_id: int, commodity: str, day: int | None = None) -> float:
+    """What the season does to a good's price at a station on `day` (today)."""
+    if not SEASON_SWING or not COMMODITIES[commodity]["legal"]:
+        return 1.0
+    period, sign = _season_of(world.save.seed, sector_for(world.by_id[system_id]), commodity)
+    day = world.save.turn if day is None else day
+    return 1.0 + SEASON_SWING * sign * math.sin(2 * math.pi * day / period)
+
+
+def season_trend(world: World, system_id: int, commodity: str) -> tuple[bool, int] | None:
+    """Whether the season is carrying this price up, and how many more days it
+    will: (rising, days). None for a good without a season."""
+    if not SEASON_SWING or not COMMODITIES[commodity]["legal"]:
+        return None
+    today = world.save.turn
+
+    def step(day: int) -> bool:
+        return season_factor(world, system_id, commodity, day + 1) > season_factor(world, system_id, commodity, day)
+
+    rising = step(today)
+    days = next(ahead for ahead in range(1, SEASON_PERIODS[1] + 1) if step(today + ahead) != rising)
+    return rising, days
+
+
+def season_forecast(world: World, system_id: int, commodity: str, days: int) -> int:
+    """What a station should ask for a unit `days` from now, by the season
+    alone: today's price carried along the swing. An event or the pilot's own
+    buying can still move it."""
+    today = price_for(world, system_id, commodity)
+    now = season_factor(world, system_id, commodity)
+    then = season_factor(world, system_id, commodity, world.save.turn + days)
+    return max(1, round(today * then / now))
+
+
 def _market_rest(world: World, system_id: int, commodity: str) -> float:
     """The drift a quote rests at with the pilot's own trading taken out of it:
     1.0, or the level an active economy event holds this station at."""
@@ -3283,6 +3339,7 @@ def _quote(world: World, system_id: int, commodity: str, *, selling: bool) -> in
     trait = world.traits.get(system_id)
     if trait is not None and trait["commodity"] == commodity:
         mult *= TRAIT_PRICE[trait["kind"]]
+    mult *= season_factor(world, system_id, commodity)
     drift = world.save.market_drift.get(system_id, {}).get(commodity, 1.0)
     rest = _market_rest(world, system_id, commodity)
     drift = min(drift, rest) if selling else max(drift, rest)
@@ -12509,6 +12566,9 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
         ladder = price_ladder(commodity)
         word, tone = price_standing(quote, ladder)
         held = world.save.cargo.get(commodity, 0)
+        trend = season_trend(world, system.id, commodity)
+        season = "" if trend is None else (f" {p.tone('caution' if trend[0] else 'good')}"
+                                           f"{glyph('rise' if trend[0] else 'fall')}{trend[1]}{RESET}")
         # Legality and a running event are separate facts about the same row,
         # and a contraband commodity in a crash is both.
         marks = []
@@ -12528,7 +12588,7 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
             f"{depth['stock']}", f"{depth['demand']}",
             f"{held}" if held else f"{p.deep}0{RESET}",
             f"{p.gold}{needs[commodity][0]}{RESET}" if commodity in needs else "",
-            f"{price_scale(quote, ladder, tone)} {p.tone(tone)}{word}{RESET}",
+            f"{price_scale(quote, ladder, tone)} {p.tone(tone)}{word}{RESET}{season}",
             flag,
         ])
         styles.append(["value", "value", "value", "label", "label", "value", "value", "value", "value"])
@@ -12543,7 +12603,10 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
                    # repeated under the table; the price, the hold and an
                    # ILLEGAL flag never go.
                    rows, aligns, styles=styles, optional=optional)
-    lines.append(f"{p.slate}Prices per unit. Only jumps advance days; reopening does not replenish stock.{RESET}")
+    # One note, as it was, with the season's marks explained in it: a second
+    # line here was a second page of market at 80x24.
+    season = f" {glyph('rise')}{glyph('fall')} rising or falling for that many more days." if SEASON_SWING else ""
+    lines.append(f"{p.slate}Prices per unit.{season} Only jumps advance days; reopening does not replenish stock.{RESET}")
     if needs:
         # Where the NEED column's cargo goes; on a narrow screen, the column itself.
         lines.append(f"{p.slate}Contracts need:{RESET} " + f"{p.slate} · {RESET}".join(
@@ -12717,6 +12780,26 @@ def _screen_futures_order(p: Palette, world: World, contract: FuturesContract) -
             result, page = "Cancellation declined; order retained.", 0
 
 
+def futures_season_lines(world: World, commodity: str, quantity: int, duration: int) -> list[str]:
+    """What the order is a bet on: where the season should have the price on
+    the day it can be collected, against what locking today's costs."""
+    trend = season_trend(world, world.here.id, commodity)
+    if trend is None:
+        return []
+    principal, fee = futures_quote(world, commodity, quantity)
+    locked = -(-(principal + fee) // quantity)  # a unit, fee included, rounded against the pilot
+    then = season_forecast(world, world.here.id, commodity, duration)
+    rising, days = trend
+    lines = [f"Season: {COMMODITIES[commodity]['label']} here is {'rising' if rising else 'falling'} for {plural(days, 'more day')}; "
+             f"in {duration} days it should ask about {then} a unit."]
+    if then > locked:
+        lines.append(f"Locked at {locked} a unit with the fee, this order should save about {(then - locked) * quantity}cr.")
+    else:
+        lines.append(f"Locked at {locked} a unit with the fee, this order should cost about "
+                     f"{(locked - then) * quantity}cr more than buying then.")
+    return lines
+
+
 def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
     quantity, duration, page, result = 1, FUTURES_DURATIONS[0], 0, None
     while True:
@@ -12728,6 +12811,7 @@ def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
                  f"Station stock {depth['stock']} (+{depth['stock_rate']}/day): {max(0, depth['stock'] - quantity)} left after this order."
                  if quantity <= depth["stock"] else f"Station stock {depth['stock']} (+{depth['stock_rate']}/day): not enough for this order.",
                  "Full cargo space needed only at pickup. Cancellation refunds goods principal only; full holds leave orders waiting."]
+        lines[3:3] = futures_season_lines(world, commodity, quantity, duration)
         if result: set_status(result); result = None  # handed over once (#42 review)
         footer = "[<>] Page [U] Units [T] Term [S] Sign [B] Back: "
         key, page, count = _draw_service_page(p, f"Order {COMMODITIES[commodity]['label']}: {world.save.pilot.credits:,}cr", lines, footer, page)
@@ -15203,6 +15287,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         section("ONCE YOU HAVE FLOWN A FEW DAYS"),
         "Danger is a risk rating, not a guarantee you can win a fight. Evasion can fail; bribes cost credits and can be refused. Read the encounter choices before acting.",
         "About three systems in five have a market of their own: one good in standing surplus, sold cheap, or in standing shortage, bought dear. The chart shows a ? until you have docked there, and the trait after. Now and then the dock talks: it names a system nearby and says whether it has a glut or is short, never of what, and the chart then reads cheap ? or dear ? for it.",
+        "Prices have seasons: every legal good swings about an eighth either way over a month or so, the same across a sector. The market marks each price as rising or falling and for how many more days. [X] Futures holds today's price for a fee, and says what the price should be on the day you collect.",
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
         "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
         "Ranks are kept once reached, and each brings something: a fourth contract slot at Independent Trader, half as much again on every contract at Merchant Captain, a fifth slot at Void Baron and double pay at Legend of the Frontier.",

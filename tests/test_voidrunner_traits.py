@@ -144,7 +144,7 @@ def test_the_market_wears_its_trait_and_the_scale_reads_it(terminal):
         assert f"{label.upper()} {word.upper()}" in rows[0]
         assert vr.trait_label(trait) == f"{label} {word}"
         row = next(r for r in rows if label in r and r.startswith("["))
-        assert row.rstrip().endswith(word)
+        assert row.split()[-2] == word  # the scale's word, then the season's mark after it
 
 
 @pytest.mark.parametrize("width,height", [(80, 24), (40, 12)])
