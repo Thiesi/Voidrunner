@@ -234,6 +234,14 @@ def _world_with_seed(seed: int) -> "vr.World":
     return vr.World(save)
 
 
+def strip_prizes(monkeypatch, choice: str = "S") -> None:
+    """Answer the question a won fight leaves without a key: `choice`, which
+    is to strip the wreck, as every kill did before there was a question. For
+    a test that scripts a fight's keys and is about something else."""
+    monkeypatch.setattr(vr, "prize_choice",
+                        lambda p, world, pirate, actions: choice if choice in actions.split("/") else "S")
+
+
 def _post_and_accept_test_mission(world, mission):
     """Post authored test terms before exercising the real acceptance command."""
     board = world.save.mission_boards.setdefault(world.save.current_system, {

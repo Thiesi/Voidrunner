@@ -1726,6 +1726,53 @@ from the seed and the day, so the encounter's own draws are what they were. The
 scores are a field of the save (`rivals`), absent until there is one, and a new
 career starts with none.
 
+**The prize (review).** Winning a fight ended it: the raider blew up, a sum of
+credits appeared, and the one moment in a fight when the pilot holds every card
+had nothing in it to decide. A beaten raider is now dead in space -- the scene
+says `TARGET DISABLED` and its hull is still there when the light goes -- and
+what becomes of it is a choice, each paid in a different coin:
+
+| Key | Choice | Pays | Costs |
+| --- | --- | --- | --- |
+| `S` | Strip it | the scrap's credits, `40 + 60 x tier`, as a kill always paid | nothing |
+| `C` | Take its cargo | one good, worth 2.5 times the scrap at its usual price | the scrap; hold space; a market; two goods in nine are contraband |
+| `H` | Hand it to the Navy | Concord +5 where a kill is +2, and a point of notoriety forgiven | the scrap |
+| `L` | Let it limp home | Blackwake +3, and a favour: the next raiders met are waved off | the scrap, and the Navy's +2 |
+
+A trader with a full hold strips it; one with room takes the cargo and carries
+the risk; a pilot working toward the commission or shedding a wanted flag hands
+it over; one hauling something precious through bad space buys the next
+passage. What the raider carried follows from the seed, the day and its name,
+so it draws nothing from the event RNG and is the same however often the page
+is opened. A favour is called in at the next raider contact inside forty days,
+whatever its size -- a squadron is turned as readily as one ship -- except that
+a rival with a score to settle is not turned by anyone's debt. A career holds
+three favours at most, and Status lists them.
+
+Three fights leave no choice or less of one. A warrant's target is the Navy's
+already: it is stripped or emptied, not spared and not handed over twice. A
+squadron's first ship is stripped as it always was, since its wingman is still
+shooting. A patrol is no prize at all.
+
+Flown through the simulator, 200 careers a pilot with every pilot making the
+same choice at every wreck, no choice wins on money. Stripping is what the game
+was, to the credit. Taking cargo is within 2% of it either way: the goods are
+worth more than the scrap, and the hold they fill is not carrying trade.
+Handing over costs a contractor, who fights for a living, 7% of a career's
+worth and nobody else anything that shows. Letting raiders go costs the same
+contractor 5%, halves a trader's fights, and takes ships lost per career from
+0.51 to 0.34 across all pilots. Standing, which the simulator's pilots do not
+spend, is what the last two are for.
+
+The question is part of the fight's saved record (`prize`: open, then the key
+chosen), committed with the win, so a connection lost on the page comes back to
+the page and never to a second answer; the kill is counted when it is won, not
+when the wreck is decided. While it is open the window shows the two ships with
+the alert over: the contact dark and adrift, embers falling away from it, no
+lock. Favours are a field of the save (`favours`), absent until there is one;
+a fight in progress from an earlier build finishes with the question like any
+other.
+
 **Dock work (review).** Losing a ship was never a dead end, and for a few
 careers it was the next thing to it. The tug takes its fee out of whatever is
 on hand, so a pilot wakes at Freeport with nothing, a quarter of a hull and an
