@@ -18,6 +18,12 @@ trader here is a little better informed than a caller. None of them is a
 ceiling: they say how the game's parts weigh against each other, not how
 fast a careful caller can go.
 
+The summary ends with when each thing a career works toward is first reached
+-- each hull, every upgrade, each rank, the first stake and the last -- because
+"how long does the game last" is asked in those days and not in credits.
+`--jumps-per-day` says how many jumps a caller flies in a real day: it turns
+the daily dispatch over and translates the days into real ones.
+
 `--set NAME=VALUE` changes a module constant before each career, which is how
 one rule is switched off to see what it was contributing. `--prize` is what
 every pilot does with a beaten raider (strip it, by default, which is what a
@@ -41,7 +47,9 @@ from collections import Counter
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PILOTS = ("trader", "smuggler", "contractor", "explorer")
-CHECKPOINTS = (10, 20, 40, 60, 80, 100)
+CHECKPOINTS = (10, 20, 40, 60, 80, 100, 150, 200, 300)
+#: What a career works toward, in the order the summary lists them: the day each is first reached.
+MILESTONES = ("Freighter", "Cutter", "Carrier", "fitted", "rank 2", "rank 3", "rank 4", "stake", "all stakes")
 #: Careers are flown to a real day: the dispatch changes once for every this many jumps.
 JUMPS_PER_REAL_DAY = 8
 #: More keys than any one journey needs; past it the pilot has met a prompt it cannot read.
@@ -78,8 +86,10 @@ def apply_settings(vr, settings: dict[str, str]) -> None:
 class Pilot:
     """One career: the keys a journey asks for, and what to do at a station."""
 
-    def __init__(self, vr, kind: str, seed: int, *, dispatch: bool = True, stakes: bool = True, prize: str = "S"):
+    def __init__(self, vr, kind: str, seed: int, *, dispatch: bool = True, stakes: bool = True, prize: str = "S",
+                 jumps_per_day: int = JUMPS_PER_REAL_DAY):
         self.vr, self.kind, self.buy_stakes = vr, kind, stakes
+        self.jumps_per_day = max(1, jumps_per_day)
         self.prize = prize          # what to do with a beaten raider, where that is offered
         self.prizes = Counter()     # what was done with each
         vr.apply_display_style("plain")
@@ -89,7 +99,7 @@ class Pilot:
         self.world.event_rng.seed(seed)  # a career's luck is its own; here it follows the seed, to fly it again
         if hasattr(self.world, "dispatch_clock"):
             self.world.dispatch_clock = (
-                (lambda: 740_000 + self.world.save.turn // JUMPS_PER_REAL_DAY) if dispatch else (lambda: None))
+                (lambda: 740_000 + self.world.save.turn // self.jumps_per_day) if dispatch else (lambda: None))
         self.palette = vr.Palette(False)
         self.screen = io.StringIO()
         self.keys = 0
@@ -373,6 +383,20 @@ class Pilot:
 
     # --- the career --------------------------------------------------------------
 
+    def reached(self) -> list[str]:
+        """The milestones beyond hull and rank that this career stands at now."""
+        world, vr = self.world, self.vr
+        ship, labels = world.save.ship, []
+        if all(getattr(ship, f"{key}_tier") >= upgrade["max_tier"] for key, upgrade in vr.UPGRADES.items()):
+            labels.append("fitted")
+        if hasattr(vr, "stakes"):
+            held = sum(vr.stakes(world.save).values())
+            if held:
+                labels.append("stake")
+            if held >= vr.STAKE_MAX_STATIONS * len(vr.STAKE_COSTS):
+                labels.append("all stakes")
+        return labels
+
     def worth(self) -> int:
         world = self.world
         cargo = sum(paid for lots in world.save.cargo_basis.values() for _units, paid in lots)
@@ -418,7 +442,7 @@ class Pilot:
             self.earned["journeys"] += world.save.pilot.credits - credits
             self.lost += bool(world.ship_destroyed_this_hop)
             rank = vr.career_rank_index(world.save.pilot)
-            for label in (f"rank {rank}", world.save.ship.hull_class):
+            for label in (f"rank {rank}", world.save.ship.hull_class, *self.reached()):
                 firsts.setdefault(label, world.save.turn)
             for mark in CHECKPOINTS:
                 if day < mark <= world.save.turn:
@@ -440,16 +464,36 @@ class Pilot:
 def fly_one(job: tuple) -> dict:
     door, kind, seed, days, settings, dispatch, stakes, *more = job
     prize = more[0] if more else "S"
+    jumps_per_day = more[1] if len(more) > 1 else JUMPS_PER_REAL_DAY
     vr = load_door(door)
     apply_settings(vr, settings)
-    result = Pilot(vr, kind, seed, dispatch=dispatch, stakes=stakes, prize=prize).fly(days)
-    result.update(pilot=kind, seed=seed)
+    result = Pilot(vr, kind, seed, dispatch=dispatch, stakes=stakes, prize=prize, jumps_per_day=jumps_per_day).fly(days)
+    result.update(pilot=kind, seed=seed, jumps_per_day=jumps_per_day)
     return result
 
 
 def median(values) -> float:
     values = [value for value in values if value is not None]
     return statistics.median(values) if values else float("nan")
+
+
+def milestone_rows(results: list[dict]) -> list[str]:
+    """When each milestone is first reached: the median day among the careers
+    that reached it, and how many did. A pacing question is asked in these."""
+    reached = [name for name in MILESTONES if any(name in r["firsts"] for r in results)]
+    if not reached:
+        return []
+    lines = [f"{'pilot':<11}" + "".join(f"{name:>13}" for name in reached)]
+    for kind in PILOTS:
+        flown = [r for r in results if r["pilot"] == kind]
+        if not flown:
+            continue
+        row = f"{kind:<11}"
+        for name in reached:
+            days = [r["firsts"][name] for r in flown if name in r["firsts"]]
+            row += f"{f'{statistics.median(days):.0f} ({len(days)})' if days else '-':>13}"
+        lines.append(row)
+    return lines
 
 
 def summarize(results: list[dict], days: int) -> list[str]:
@@ -479,6 +523,14 @@ def summarize(results: list[dict], days: int) -> list[str]:
     lines.append("")
     lines.append("Net worth (credits, cargo at cost, and what went into upgrades, hulls and stakes), median by day.")
     lines.append("ships: lost per career, mean.  jobs: contracts completed.  chart: systems charted.  disp: dispatches flown.")
+    milestones = milestone_rows(results)
+    if milestones:
+        jumps = results[0].get("jumps_per_day", JUMPS_PER_REAL_DAY)
+        lines.append("")
+        lines += milestones
+        lines.append("")
+        lines.append("The day each is first reached, median, and (how many careers reached it). fitted: every upgrade bought.")
+        lines.append(f"A day is one jump. At {jumps} jumps a real day these {days} days are {days / jumps:.1f} real days.")
     return lines
 
 
@@ -495,11 +547,15 @@ def main() -> None:
     parser.add_argument("--prize", choices=("S", "C", "H", "L"), default="S",
                         help="what the pilots do with a beaten raider: strip it (the default), take its "
                              "cargo, hand it to the Navy or let it go")
+    parser.add_argument("--jumps-per-day", type=int, default=JUMPS_PER_REAL_DAY,
+                        help="jumps flown in one real day: it turns the dispatch over, and the summary's "
+                             "days into real days")
     parser.add_argument("--json", type=pathlib.Path, help="also write every career's record here")
     parser.add_argument("--jobs", type=int, default=max(1, multiprocessing.cpu_count() - 1))
     args = parser.parse_args()
     settings = dict(item.split("=", 1) for item in args.set)
-    jobs = [(args.door, kind, 1000 + seed, args.days, settings, not args.no_dispatch, not args.no_stakes, args.prize)
+    jobs = [(args.door, kind, 1000 + seed, args.days, settings, not args.no_dispatch, not args.no_stakes, args.prize,
+             args.jumps_per_day)
             for kind in args.pilots for seed in range(args.seeds)]
     if args.jobs > 1:
         with multiprocessing.Pool(args.jobs) as pool:
