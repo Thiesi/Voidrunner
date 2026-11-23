@@ -423,13 +423,13 @@ def test_real_pipe_lone_escape_is_absorbed_without_blocking_the_next_key(tmp_pat
     assert saved.pilot.credits == 1200
 
 
-def test_pickup_arrival_and_delivery_reward_resume_exactly_once(monkeypatch):
+def test_arrival_and_delivery_reward_resume_exactly_once(monkeypatch):
     import copy
     world = _world_with_seed(42)
     dest = world.here.connections[0]
-    world.save.active_futures = [vr.FuturesContract(1, "food", 2, 22, 1, origin_system=dest,
-                                                   principal=20, reserved=2)]
-    world.save.active_missions = [vr.Mission(1, "delivery", "Pickup delivery", 500, 0, dest, commodity="food", quantity=2)]
+    world.save.cargo, world.save.cargo_basis = {"food": 2}, {"food": [[2, 20]]}
+    world.save.trading_ledger.since_day = 0
+    world.save.active_missions = [vr.Mission(1, "delivery", "Food delivery", 500, 0, dest, commodity="food", quantity=2)]
     snapshots = []
     world._checkpoint = lambda current: snapshots.append(copy.deepcopy(current.save.to_dict()))
     monkeypatch.setattr(vr, "_resolve_random_travel_encounter", lambda *args: None)
@@ -437,7 +437,7 @@ def test_pickup_arrival_and_delivery_reward_resume_exactly_once(monkeypatch):
         vr.screen_travel(vr.Palette(False), world, dest)
     expected = world.save.to_dict()
     assert world.save.pilot.credits == 1700
-    assert not world.save.active_futures and not world.save.active_missions
+    assert not world.save.cargo and not world.save.active_missions
     for snapshot in snapshots:
         if snapshot["pending_travel"] is None:
             continue

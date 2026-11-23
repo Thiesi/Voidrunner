@@ -438,21 +438,6 @@ def test_trading_ledger_partial_disposal_keeps_the_exact_paid_remainder():
     assert not world.save.cargo_basis
 
 
-def test_trading_ledger_futures_basis_includes_fee_once_and_cancel_keeps_no_cargo():
-    world = _world_with_seed(42)
-    principal, fee = vr.futures_quote(world, "food", 3)
-    vr.buy_futures_contract(world, "food", 3, 5)
-    world.save.turn = 5
-    vr.settle_futures_contracts(world)
-    assert world.save.cargo_basis == {"food": [[3, principal + fee]]}
-    assert vr.settle_futures_contracts(world) == []
-    vr.buy_futures_contract(world, "food", 1, 5)
-    order = world.save.active_futures[0]
-    vr.cancel_futures_contract(world, order.id)
-    assert world.save.trading_ledger.cancelled_fees == order.locked_price - order.principal
-    assert world.save.cargo == {"food": 3}
-
-
 def test_trading_ledger_delivery_records_the_payment_and_consumes_basis_once():
     world = _world_with_seed(42)
     cost = 3 * vr.price_for(world, 0, "food")
@@ -762,7 +747,7 @@ def test_market_depth_split_orders_and_buyback_cannot_restore_station_demand():
     assert vr.market_depth_quote(world, 0, "food")["demand"] == 1
 
 
-def test_market_depth_old_career_and_wholesale_orders_follow_station_stock():
+def test_market_depth_old_career_and_purchases_follow_station_stock():
     import copy
     world = _world_with_seed(42)
     data = copy.deepcopy(world.save.to_dict()); data.pop("market_depth")
@@ -770,16 +755,12 @@ def test_market_depth_old_career_and_wholesale_orders_follow_station_stock():
     assert restored.save.market_depth == {} and vr.market_depth_quote(restored, 0, "food")["stock"] == 48
     restored.save.market_depth = {0: {"food": {"day": 0, "stock": 0, "demand": 0}}}
     restored.save.pilot.credits = 100000
-    with pytest.raises(vr.TradeError, match="station stock"):
-        vr.buy_futures_contract(restored, "food", 10, 5)
-    restored.save.turn = 4  # replenished stock (3/day) admits the order
-    vr.buy_futures_contract(restored, "food", 10, 5)
-    assert vr.market_depth_quote(restored, 0, "food")["stock"] == 2
-    restored.save.turn = 9
-    vr.settle_futures_contracts(restored)
-    assert restored.save.cargo["food"] == 10
-    assert restored.save.trading_ledger.since_day == 9
-    assert restored.save.market_depth[0]["food"] == {"day": 4, "stock": 2, "demand": 24}  # settlement leaves the pool alone
+    with pytest.raises(vr.TradeError):
+        vr.trade_cargo(restored, "food", 10, buying=True)
+    restored.save.turn = 4  # replenished stock (3/day) admits the purchase
+    vr.trade_cargo(restored, "food", 10, buying=True)
+    assert vr.market_depth_quote(restored, 0, "food")["stock"] == 2 and restored.save.cargo["food"] == 10
+    assert restored.save.trading_ledger.since_day == 4
 
 
 def test_market_depth_observations_are_stale_and_reports_do_not_invent_quantities():
@@ -1529,212 +1510,6 @@ def test_retiring_resets_active_economy_event():
     assert new_save.active_event is None
 
 
-def test_save_from_dict_defaults_futures_fields_for_old_saves():
-    save = vr._new_career("Legacy")
-    d = save.to_dict()
-    del d["active_futures"], d["next_futures_id"]
-
-    loaded = vr.SaveData.from_dict(d)
-
-    assert loaded.active_futures == []
-    assert loaded.next_futures_id == 1
-
-
-def test_buy_futures_contract_charges_the_premium_and_locks_the_price():
-    world = _world_with_seed(169)
-    spot = vr.price_for(world, world.save.current_system, "food")
-    before_credits = world.save.pilot.credits
-
-    vr.buy_futures_contract(world, "food", 5, 10)
-
-    expected_unit = spot + max(1, (spot * 8 + 99) // 100)
-    assert len(world.save.active_futures) == 1
-    contract = world.save.active_futures[0]
-    assert contract.commodity == "food"
-    assert contract.quantity == 5
-    assert contract.locked_price == expected_unit * 5
-    assert contract.settle_turn == world.save.turn + 10
-    assert world.save.pilot.credits == before_credits - expected_unit * 5
-
-
-def test_buy_futures_contract_increments_the_id_counter():
-    world = _world_with_seed(170)
-    vr.buy_futures_contract(world, "food", 1, 5)
-    vr.buy_futures_contract(world, "textiles", 1, 5)
-
-    ids = [c.id for c in world.save.active_futures]
-    assert len(set(ids)) == 2
-    assert world.save.next_futures_id == 3
-
-
-def test_settle_futures_contracts_does_nothing_before_settle_turn():
-    world = _world_with_seed(171)
-    vr.buy_futures_contract(world, "food", 3, 10)
-
-    messages = vr.settle_futures_contracts(world)
-
-    assert messages == []
-    assert len(world.save.active_futures) == 1
-
-
-def test_settle_futures_contracts_delivers_to_cargo_when_due():
-    world = _world_with_seed(172)
-    vr.buy_futures_contract(world, "food", 3, 5)
-    world.save.turn += 5
-
-    messages = vr.settle_futures_contracts(world)
-
-    assert len(messages) == 1
-    assert "delivered" in messages[0]
-    assert world.save.cargo.get("food") == 3
-    assert world.save.active_futures == []
-
-
-def test_a_full_hold_makes_ready_goods_wait_without_refund_or_lost_fee():
-    world = _world_with_seed(173)
-    cap = vr.cargo_capacity(world.save.ship)
-    world.save.active_futures = [vr.FuturesContract(1, "food", cap, 200, 5, 0, 180, cap)]
-    vr._acquire_cargo(world, "textiles", cap, 100)  # the hold is full of something else
-    before_credits = world.save.pilot.credits
-    world.save.turn += 5
-
-    assert vr.settle_futures_contracts(world) == []
-    assert "food" not in world.save.cargo
-    assert world.save.pilot.credits == before_credits
-    assert len(world.save.active_futures) == 1
-
-
-def test_an_order_settles_only_at_the_station_that_holds_it():
-    world = _world_with_seed(174)
-    world.save.active_futures = [vr.FuturesContract(1, "food", 2, 26, 5, 0, 24, 2)]
-    world.save.current_system = world.by_id[0].connections[0]  # moved away before settlement
-    world.save.turn += 5
-
-    assert vr.settle_futures_contracts(world) == []
-    assert "food" not in world.save.cargo
-
-    world.save.current_system = 0
-    assert len(vr.settle_futures_contracts(world)) == 1
-    assert world.save.cargo.get("food") == 2
-
-
-def test_screen_market_offers_futures_exchange(monkeypatch):
-    world = _world_with_seed(175)
-    monkeypatch.setattr(vr, "read_key", lambda: "Q")
-
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr.screen_market(vr.Palette(truecolor=False), world)
-
-    assert "[X]" in buf.getvalue()
-
-
-def test_screen_futures_lists_tradeable_goods_and_outstanding_contracts(monkeypatch):
-    world = _world_with_seed(176)
-    vr.buy_futures_contract(world, "food", 2, 5)
-    monkeypatch.setattr(vr, "read_key", lambda: "Q")
-
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr.screen_futures(vr.Palette(truecolor=False), world, vr.LEGAL_COMMODITIES)
-
-    text = buf.getvalue()
-    assert "Food" in text
-    assert "Outstanding orders" in text
-
-
-@pytest.mark.parametrize("width,height",[(40,12),(80,24)])
-def test_futures_picker_pages_keep_terms_choices_and_return_position(monkeypatch, terminal,width,height):
-    import re
-    terminal(width, height)
-    world=_world_with_seed(42);world.save.pilot.credits=10_000
-    for commodity in ["food","textiles","medicine"]:vr.buy_futures_contract(world,commodity,1,5)
-    before=world.save.to_dict();output=io.StringIO();frames=[];opened=[];last_page=None
-    def inspect(p,w,contract):opened.append(contract.id)
-    monkeypatch.setattr(vr,"_screen_futures_order",inspect)
-    def choose():
-        nonlocal last_page
-        frame=output.getvalue();output.seek(0);output.truncate(0);frames.append(frame)
-        assert len(frame.splitlines())<=height
-        assert all(vr._visible_width(line)<=width for line in frame.splitlines())
-        assert "[B]" in frame
-        page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
-        if opened:
-            assert page==last_page
-            return "B"
-        if page==count:
-            last_page=page
-            return max(re.findall(r"\[(\d)\]",frame))
-        return "N"
-    monkeypatch.setattr(vr,"read_key",choose)
-    with contextlib.redirect_stdout(output):vr.screen_futures(vr.Palette(False),world,vr.LEGAL_COMMODITIES)
-    assert opened==[world.save.active_futures[-1].id]
-    text=page_text(frames)
-    assert "8%" in text and "Outstanding orders" in text
-    assert world.save.to_dict()==before
-
-
-@pytest.mark.parametrize("width,height",[(40,12),(80,24)])
-@pytest.mark.parametrize("kind",["draft","order"])
-def test_futures_draft_and_order_pages_fit_and_preserve_all_terms(monkeypatch, terminal,width,height,kind):
-    import re
-    terminal(width, height)
-    world=_world_with_seed(42);vr.buy_futures_contract(world,"food",2,5)
-    contract=world.save.active_futures[0]
-    before=world.save.to_dict();frames=[];output=io.StringIO()
-    def choose():
-        frame=vr._ANSI_RE.sub("",output.getvalue());output.seek(0);output.truncate(0);frames.append(frame)
-        assert len(frame.splitlines())<=height
-        assert all(vr._visible_width(line)<=width for line in frame.splitlines())
-        assert "[B] Back:" in page_text(frame)
-        page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
-        return "B" if page==count else ">"
-    monkeypatch.setattr(vr,"read_key",choose)
-    with contextlib.redirect_stdout(output):
-        if kind=="draft":vr._screen_buy_futures(vr.Palette(False),world,"food")
-        else:vr._screen_futures_order(vr.Palette(False),world,contract)
-    text=page_text(frames)
-    assert "nonrefundable" in text and "Pickup:" in text
-    assert world.save.to_dict()==before
-
-
-def test_futures_invalid_quantity_retains_draft_without_saving(monkeypatch):
-    world=_world_with_seed(42);before=world.save.to_dict()
-    keys=iter(["U","U","B"]);values=iter(["3","not a number"])
-    monkeypatch.setattr(vr,"read_key",lambda:next(keys));monkeypatch.setattr(vr,"read_line_raw",lambda **kw:next(values))
-    with contextlib.redirect_stdout(io.StringIO()) as output:vr._screen_buy_futures(vr.Palette(False),world,"food")
-    text=plain(output.getvalue())
-    assert "Quantity must fit" in text and text.count("Quantity: 3;")==2
-    assert world.save.to_dict()==before
-
-
-@pytest.mark.parametrize("commands",[b"MX1>U3\rTTBBQ",b"MX1>",b"MX1U\rBBQ",b"MX1SNBBQ"])
-def test_real_responsive_futures_draft_back_cancel_and_eof_preserve_career(tmp_path,commands):
-    import json,os,subprocess
-    world=_world_with_seed(42)
-    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
-    before=(tmp_path/"77.json").read_bytes()
-    info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
-    result=subprocess.run([sys.executable,str(_VOIDRUNNER_PATH)],input=commands,capture_output=True,
-        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)),timeout=60)
-    assert result.returncode==0 and not result.stderr and b"Order Food:" in result.stdout
-    if b"SN" in commands:assert b"Signing cancelled" in result.stdout
-    assert (tmp_path/"77.json").read_bytes()==before
-
-
-@pytest.mark.parametrize("action",["sign","cancel"])
-def test_retained_futures_result_is_saved_before_disconnect(tmp_path,action):
-    world=_world_with_seed(42)
-    if action=="cancel":vr.buy_futures_contract(world,"food",2,5)
-    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
-    command=b"MX1SY" if action=="sign" else b"MXN4XY"
-    marker=b"Futures contract:" if action=="sign" else b"Order cancelled:"
-    with _door_stopped_at(tmp_path,command,marker):
-        saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
-        assert bool(saved.active_futures)==(action=="sign")
-        assert saved.pilot.credits!=world.save.pilot.credits
-
-
 @pytest.mark.parametrize("count",[0,1,3])
 @pytest.mark.parametrize("notice_count",[0,30])
 def test_picker_footer_only_offers_present_choices(monkeypatch, terminal,count,notice_count):
@@ -1757,48 +1532,6 @@ def test_picker_footer_only_offers_present_choices(monkeypatch, terminal,count,n
     assert frames
 
 
-def test_buy_futures_rejects_invalid_duration_without_mutation():
-    world = _world_with_seed(177)
-    before = world.save.pilot.credits
-    with pytest.raises(vr.TradeError, match="term"):
-        vr.buy_futures_contract(world, "food", 10, 7)
-    assert world.save.pilot.credits == before
-    assert not world.save.active_futures
-
-
-def test_screen_buy_futures_creates_a_contract_on_confirmation(monkeypatch):
-    world = _world_with_seed(178)
-    world.save.pilot.credits = 100_000
-    keys = iter("US")
-    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
-    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: "10")
-    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
-    monkeypatch.setattr(vr, "pause", lambda p: None)
-    with contextlib.redirect_stdout(io.StringIO()):
-        vr._screen_buy_futures(vr.Palette(False), world, "food")
-    assert len(world.save.active_futures) == 1
-    assert world.save.active_futures[0].quantity == 10
-
-
-def test_screen_buy_futures_declines_on_confirmation_refusal(monkeypatch):
-    world = _world_with_seed(179)
-    keys = iter("SB")
-    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
-    monkeypatch.setattr(vr, "confirm", lambda prompt, p: False)
-    with contextlib.redirect_stdout(io.StringIO()):
-        vr._screen_buy_futures(vr.Palette(False), world, "food")
-    assert not world.save.active_futures
-
-
-def test_retiring_resets_futures_contracts():
-    old_save = vr._new_career("Vet")
-    vr.buy_futures_contract(vr.World(old_save), "food", 2, 5)
-
-    new_save = vr.retire_pilot(old_save)
-
-    assert new_save.active_futures == []
-
-
 # Issue #310: exercise the real executable and kill it while nested menus
 # still own input. Save-on-menu-exit and graceful-EOF tests miss this boundary.
 @pytest.mark.parametrize(
@@ -1809,7 +1542,6 @@ def test_retiring_resets_futures_contracts():
         (b"YKAY", b"Gunner hired", "ship.has_gunner", True),
         (b"YR2\r", b"Refueled 2 units", "ship.fuel", 22),
         (b"YPY", b"Hull repaired", "ship.hull_hp", 60),
-        (b"MX1SY", b"Futures contract: 1x Food", "active_futures", "nonempty"),
         (b"B1NNNNNNNNA", b"Accepted:", "active_missions", "nonempty"),
         (b"DY", b"Jettisoned 1 units", "cargo", {}),
         (b"PJY", b"Commission accepted", "pilot.has_concord_commission", True),
@@ -2101,172 +1833,6 @@ def test_absent_contraband_totals_default_without_touching_standing():
     assert loaded.contraband_trade_balance == loaded.contraband_trade_milestones == 0
 
 
-def test_new_futures_wait_for_origin_and_space_and_preserve_fee(tmp_path):
-    world = _world_with_seed(42)
-    before = world.save.pilot.credits
-    vr.buy_futures_contract(world, "food", 3, 5)
-    contract = world.save.active_futures[0]
-    assert contract.principal < contract.locked_price
-    world.save.turn = 5
-    world.save.current_system = 1
-    assert vr.settle_futures_contracts(world) == []
-    assert not world.save.cargo
-    world.save.current_system = 0
-    _set_cargo(world, {"ore": vr.cargo_capacity(world.save.ship)})
-    assert vr.settle_futures_contracts(world) == []
-    assert world.save.active_futures == [contract]
-    assert world.save.pilot.credits == before - contract.locked_price
-    vr.persist(world, tmp_path, 77)
-    save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
-    restored = vr.World(save)
-    vr.cancel_futures_contract(restored, contract.id)
-    assert restored.save.pilot.credits == before - (contract.locked_price - contract.principal)
-    assert not restored.save.active_futures
-    with pytest.raises(vr.TradeError):
-        vr.cancel_futures_contract(restored, contract.id)
-
-
-def test_futures_fee_is_nonzero_and_cannot_be_reduced_by_order_splitting():
-    world = _world_with_seed(42)
-    for commodity in vr.LEGAL_COMMODITIES:
-        principal, fee = vr.futures_quote(world, commodity, 12)
-        unit_principal, unit_fee = vr.futures_quote(world, commodity, 1)
-        assert principal == unit_principal * 12
-        assert fee == unit_fee * 12 and unit_fee >= 1
-
-
-@pytest.mark.parametrize("fault", ["negative", "bool", "too_large", "bad_term", "unaffordable", "illegal", "limit"])
-def test_futures_rejection_is_atomic(fault):
-    import copy
-    world = _world_with_seed(42)
-    commodity, quantity, duration = "food", 1, 5
-    if fault == "negative": quantity = -1
-    elif fault == "bool": quantity = True
-    elif fault == "too_large": quantity = vr.cargo_capacity(world.save.ship) + 1
-    elif fault == "bad_term": duration = 7
-    elif fault == "unaffordable": world.save.pilot.credits = 0
-    elif fault == "illegal": commodity = "weapons"
-    elif fault == "limit":
-        for _ in range(vr.MAX_FUTURES_CONTRACTS):
-            vr.buy_futures_contract(world, "food", 1, 5)
-    before = copy.deepcopy(world.save.to_dict())
-    with pytest.raises(vr.TradeError):
-        vr.buy_futures_contract(world, commodity, quantity, duration)
-    assert world.save.to_dict() == before
-
-
-def test_cancelled_contraband_futures_cannot_award_standing():
-    world = _world_with_seed(42)
-    world.here.economy = "Haven"
-    world.save.pilot.credits = 10000
-    for _ in range(40):
-        vr.buy_futures_contract(world, "weapons", 1, 5)
-        vr.cancel_futures_contract(world, world.save.active_futures[0].id)
-    assert world.save.contraband_trade_balance < 0
-    assert world.save.pilot.reputation[vr.FACTION_BLACKWAKE] == 0
-
-
-def test_futures_draft_edit_and_back_write_nothing(monkeypatch):
-    import copy
-    world = _world_with_seed(42)
-    before = copy.deepcopy(world.save.to_dict())
-    commands = iter("QTTB")
-    monkeypatch.setattr(vr, "read_key", lambda: next(commands))
-    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: "3")
-    for boundary in ("checkpoint", "commit", "advance_station_state"):
-        # Every write path, not just the historical name (#417 review).
-        monkeypatch.setattr(world, boundary, lambda: pytest.fail("Draft persisted"))
-    with contextlib.redirect_stdout(io.StringIO()):
-        vr._screen_buy_futures(vr.Palette(False), world, "food")
-    assert world.save.to_dict() == before
-
-
-def test_futures_cancel_decline_keeps_order_and_money(monkeypatch):
-    import copy
-    world = _world_with_seed(42)
-    vr.buy_futures_contract(world, "food", 2, 5)
-    before = copy.deepcopy(world.save.to_dict())
-    commands = iter("XNB")
-    monkeypatch.setattr(vr, "read_key", lambda: next(commands))
-    with contextlib.redirect_stdout(io.StringIO()):
-        vr._screen_futures_order(vr.Palette(False), world, world.save.active_futures[0])
-    assert world.save.to_dict() == before
-
-
-def test_departure_does_not_teleport_new_pickup_goods(monkeypatch):
-    world = _world_with_seed(42)
-    vr.buy_futures_contract(world, "food", 2, 5)
-    world.save.turn = 4
-    dest = world.here.connections[0]
-    monkeypatch.setattr(vr, "_resolve_random_travel_encounter", lambda *args: None)
-    with contextlib.redirect_stdout(io.StringIO()):
-        vr.screen_travel(vr.Palette(False), world, dest)
-    assert world.save.turn == 5
-    assert not world.save.cargo and len(world.save.active_futures) == 1
-
-
-def test_real_futures_cancellation_survives_forced_termination(tmp_path):
-    world = _world_with_seed(42)
-    before = world.save.pilot.credits
-    vr.buy_futures_contract(world, "food", 2, 5)
-    contract = world.save.active_futures[0]
-    vr.persist(world, tmp_path, 77)
-    index = len(vr.LEGAL_COMMODITIES)
-    commands = b"MX" + b"N" * (index // 4) + str(index % 4 + 1).encode() + b"XY"
-    with _door_stopped_at(tmp_path, commands, b"Order cancelled:"):
-        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
-    assert not saved.active_futures
-    assert saved.pilot.credits == before - (contract.locked_price - contract.principal)
-
-
-@pytest.mark.parametrize("field,value", [("origin_system", "0"), ("principal", -1), ("commodity", [])])
-def test_new_futures_corrupt_metadata_uses_preserving_recovery(field, value):
-    world = _world_with_seed(42)
-    vr.buy_futures_contract(world, "food", 1, 5)
-    data = world.save.to_dict()
-    data["active_futures"][0][field] = value
-    with pytest.raises(vr.ResumeError):
-        vr.SaveData.from_dict(data)
-
-
-def test_ready_pickup_prevents_premature_stranded_tow(monkeypatch):
-    world = _world_with_seed(42)
-    world.save.current_system = world.here.connections[0]
-    vr.buy_futures_contract(world, "food", 2, 5)
-    world.save.turn = 5
-    world.save.ship.fuel = 0
-    world.save.pilot.credits = 0
-    station = world.save.current_system
-    assert vr.is_stranded(world)
-    snapshots = []
-    world._checkpoint = lambda current: snapshots.append(current.save.to_dict())
-    monkeypatch.setattr(vr, "read_key", lambda: "Q")
-    with contextlib.redirect_stdout(io.StringIO()) as output:
-        assert vr.screen_station_menu(vr.Palette(False), world) == "Q"
-    assert world.save.current_system == station
-    assert world.save.cargo == {"food": 2}
-    assert not world.save.active_futures
-    assert snapshots[0]["cargo"] == {"food": 2}
-    assert "tug" not in output.getvalue().lower()
-
-
-@pytest.mark.parametrize("fields", [("origin_system",), ("principal",), ("origin_system", "principal")])
-def test_explicit_null_futures_metadata_preserves_original_save(tmp_path, fields):
-    import json
-
-    world = _world_with_seed(42)
-    vr.buy_futures_contract(world, "food", 1, 5)
-    data = world.save.to_dict()
-    for field in fields:
-        data["active_futures"][0][field] = None
-    path = tmp_path / "77.json"
-    path.write_text(json.dumps(data), encoding="utf-8")
-    before = path.read_bytes()
-    with pytest.raises(vr.ResumeError):
-        vr.load_or_create_save(tmp_path, 77, "Tester")
-    assert path.read_bytes() == before
-
-
 def test_a_futures_order_round_trips_its_whole_shape():
     original = vr.FuturesContract(1, "food", 1, 100, 5, 3, 92, 1)
     data = original.to_dict()
@@ -2526,51 +2092,6 @@ def test_opening_quote_avoids_cargo_already_promised_to_an_earlier_delivery():
     vr.check_mission_completions(world)
     assert world.save.flags["opening_assignment_completed"]
     assert any(m.description == "Earlier order" for m in world.save.active_missions)
-
-
-@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
-@pytest.mark.parametrize("orders", [1, 3])
-def test_cockpit_settlement_results_stay_inside_height_budget(monkeypatch, terminal, width, height, orders):
-    import re
-    terminal(width, height)
-    world = _world_with_seed(42)
-    for commodity in ["food", "textiles", "medicine"][:orders]:
-        vr.buy_futures_contract(world, commodity, 1, 5)
-    world.save.turn = 5
-    settled, calls, snapshots, frames = [], [], [], []
-    real_settle = vr.settle_futures_contracts
-    def settle(current):
-        calls.append(1)
-        result = real_settle(current)
-        settled.extend(result)
-        return result
-    monkeypatch.setattr(vr, "settle_futures_contracts", settle)
-    world._checkpoint = lambda current: snapshots.append(current.save.to_dict())
-    output = io.StringIO()
-    def choose():
-        frame = output.getvalue(); output.seek(0); output.truncate(0)
-        frames.append(frame)
-        assert len(frame.splitlines()) <= height
-        assert all(vr._visible_width(line) <= width for line in frame.splitlines())
-        assert "[Q] Exit:" in page_text(frame)    # a narrow bar wraps (#400)
-        page, count = map(int, re.search(r"Command Deck:.*?(\d+)/(\d+)", frame, re.S).groups())
-        return "Q" if page == count else ">"
-    monkeypatch.setattr(vr, "read_key", choose)
-    with contextlib.redirect_stdout(output):
-        assert vr.screen_station_menu(vr.Palette(False), world) == "Q"
-    assert calls == [1] and len(snapshots) == 1 and len(settled) == orders
-    content = []
-    for frame in frames:
-        plain = vr._ANSI_RE.sub("", frame)
-        assert "Command Deck:" in page_title(frame)
-        rows = page_rows(frame)  # one-page decks drop Prev/Next (#412)
-        title, consumed = page_title(frame), ""
-        while rows and consumed != title and title.startswith(f"{consumed} {rows[0]}".strip()):
-            consumed = f"{consumed} {rows.pop(0)}".strip()  # unframed, the title is a row of its own
-        stop = next((index for index, row in enumerate(rows) if row.startswith(("[<", "[X"))), len(rows))
-        content.append(" ".join(rows[:stop]))
-    text = " ".join(" ".join(content).split())
-    for message in settled: assert text.count(message) == 1
 
 
 @pytest.mark.parametrize("kind", ["derelict", "distress"])
@@ -2922,60 +2443,6 @@ def test_customs_b_is_rejected_as_undisplayed_and_p_bribes(monkeypatch):
     assert "Choose a displayed action" in plain and "[P] Pay bribe" in plain and "changes hands quietly" in plain
 
 
-def test_futures_orders_reserve_station_stock_and_nudge_the_price():
-    world = _world_at_food_producer()
-    world.save.ship.hull_class = "Carrier"; world.save.ship.cargo_tier = vr.UPGRADES["cargo"]["max_tier"]
-    cap = vr.market_depth_limits(world.here.economy, "food")["stock"]
-    assert vr.cargo_capacity(world.save.ship) > cap
-    spot_before = vr.price_for(world, world.here.id, "food")
-    vr.buy_futures_contract(world, "food", 24, 5)
-    contract = world.save.active_futures[0]
-    assert contract.reserved == 24
-    assert vr.market_depth_quote(world, world.here.id, "food")["stock"] == cap - 24
-    assert vr.price_for(world, world.here.id, "food") > spot_before
-    with pytest.raises(vr.TradeError, match="in stock"):
-        vr.trade_cargo(world, "food", cap - 23, buying=True)
-    with pytest.raises(vr.TradeError, match="station stock"):
-        vr.buy_futures_contract(world, "food", cap - 23, 5)
-
-
-def test_spot_and_futures_volume_cannot_exceed_replenished_stock_over_time():
-    world = _world_at_food_producer()
-    limits = vr.market_depth_limits(world.here.economy, "food")
-    taken = 0
-    for day in range(30):
-        world.save.turn = day
-        kind = "futures" if day % 2 else "spot"
-        while True:
-            try:
-                if kind == "futures":
-                    if len(world.save.active_futures) >= vr.MAX_FUTURES_CONTRACTS:
-                        for order in list(world.save.active_futures):
-                            world.save.active_futures.remove(order)  # collected elsewhere; keep the reservation
-                    vr.buy_futures_contract(world, "food", 8, 5)
-                else:
-                    vr.trade_cargo(world, "food", 8, buying=True)
-                    world.save.cargo.clear(); world.save.cargo_basis.clear()
-                taken += 8
-            except vr.TradeError:
-                break
-    assert taken <= limits["stock"] + 29 * limits["stock_rate"]
-    assert taken >= limits["stock"]
-
-
-def test_futures_order_exceeding_stock_is_rejected_before_any_change():
-    import copy
-    world = _world_at_food_producer()
-    cap = vr.market_depth_limits(world.here.economy, "food")["stock"]
-    world.save.ship.cargo_tier = vr.UPGRADES["cargo"]["max_tier"]
-    world.save.ship.hull_class = "Carrier"
-    assert vr.cargo_capacity(world.save.ship) > cap
-    before = copy.deepcopy(world.save.to_dict())
-    with pytest.raises(vr.TradeError, match="station stock"):
-        vr.buy_futures_contract(world, "food", cap + 1, 5)
-    assert world.save.to_dict() == before
-
-
 def test_a_live_pilot_session_refuses_maintenance_and_maintenance_refuses_a_launch(tmp_path):
     """Both directions of the gate, with a real second process holding the lock.
 
@@ -3255,28 +2722,6 @@ def test_an_expired_delivery_is_not_due_anywhere():
     assert not any("due HERE" in row for row in _alerts(world))
 
 
-def test_a_ready_futures_order_says_where_it_waits():
-    world = _world_with_seed(42)
-    there = world.here.connections[0]
-    world.save.active_futures = [
-        vr.FuturesContract(id=3, commodity="food", quantity=18, locked_price=400, settle_turn=0,
-                           origin_system=there, principal=360, reserved=18),
-        vr.FuturesContract(id=4, commodity="food", quantity=6, locked_price=130, settle_turn=9,
-                           origin_system=there, principal=120, reserved=6)]
-    rows = [row for row in _alerts(world) if "Futures" in row]
-    assert len(rows) == 1 and "Futures #3 ready" in rows[0] and "HERE" not in rows[0]
-    assert f"18 Food at {vr._mission_plain(world.by_id[there].name)}, 1 jump" in rows[0] and "[C] chart" in rows[0]
-
-
-def test_a_ready_futures_order_here_says_the_hold_is_too_full():
-    world = _world_with_seed(42)
-    _set_cargo(world, {"machinery": vr.cargo_capacity(world.save.ship) - 6})
-    world.save.active_futures = [vr.FuturesContract(id=3, commodity="food", quantity=18, locked_price=400, settle_turn=0,
-                                                    origin_system=0, principal=360, reserved=18)]
-    rows = [row for row in _alerts(world) if "Futures" in row]
-    assert len(rows) == 1 and "Futures #3 ready HERE" in rows[0] and "18 Food needs 18 hold, 6 free" in rows[0]
-
-
 def test_contract_pages_do_not_count_cargo_another_contract_is_owed():
     world = _world_with_seed(42)
     target = world.here.connections[0]
@@ -3449,7 +2894,6 @@ def test_the_deck_warns_three_days_out_and_folds_a_crowd_of_deadlines_into_one_r
     rows = [row for row in _alerts(world) if "expir" in row]
     assert len(rows) == 3 and "Contract #4 expires in 1 day" in rows[0] and "Contract #3 expires in 2 days" in rows[1]
     assert "+1 more contract expiring #1" in rows[2] and "[B] board" in rows[2]
-
 
 
 def test_every_fuel_figure_follows_the_one_fuel_price(monkeypatch):

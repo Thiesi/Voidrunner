@@ -93,55 +93,12 @@ def test_the_market_marks_every_seasonal_price_and_explains_the_mark():
     assert f"{up}{down} rising or falling for that many more days." in note
 
 
-def test_a_forecast_is_todays_price_carried_along_the_season():
-    world = _world_with_seed(42)
-    world.save.turn = 9
-    for commodity in vr.LEGAL_COMMODITIES:
-        for days in vr.FUTURES_DURATIONS:
-            forecast = vr.season_forecast(world, 0, commodity, days)
-            later = _world_with_seed(42)
-            later.save.turn = 9 + days
-            assert abs(forecast - vr.price_for(later, 0, commodity)) <= 1  # what the market will in fact ask
-
-
-def _order_lines(world, commodity, quantity, duration):
-    return [plain(line) for line in vr.futures_season_lines(world, commodity, quantity, duration)]
-
-
-def test_a_lock_at_the_bottom_is_worth_having_and_one_at_the_top_is_a_loss():
-    world = _world_with_seed(42)
-    commodity = "electronics"
-    swing = _factors(world, 0, commodity, range(0, 81))
-    bottom = min(range(5, 60), key=lambda day: swing[day])
-    top = max(range(5, 60), key=lambda day: swing[day])
-    world.save.turn = bottom + 1  # the day after the lowest: on its way up
-    lines = _order_lines(world, commodity, 10, 10)
-    assert "is rising for" in lines[0] and "this order should save about" in lines[1]
-    saved = int(lines[1].split("save about ")[1].split("cr")[0])
-    principal, fee = vr.futures_quote(world, commodity, 10)
-    assert saved > 0 and saved == (vr.season_forecast(world, 0, commodity, 10) - -(-(principal + fee) // 10)) * 10
-    world.save.turn = top + 1
-    lines = _order_lines(world, commodity, 10, 10)
-    assert "is falling for" in lines[0] and "more than buying then" in lines[1]
-    # The best lock there is: at the bottom, for the term that reaches nearest the top.
-    world.save.turn = bottom
-    best = max(vr.season_forecast(world, 0, commodity, days) for days in vr.FUTURES_DURATIONS)
-    price = vr.price_for(world, 0, commodity)
-    assert 1.10 < best / (price * (1 + vr.FUTURES_FEE_PERCENT / 100)) < 1.25
-
-
-def test_contraband_orders_say_nothing_about_a_season():
-    world = _world_with_seed(42)
-    illegal = next(c for c in vr.COMMODITIES if not vr.COMMODITIES[c]["legal"])
-    assert vr.futures_season_lines(world, illegal, 5, 10) == []
-
-
 def test_nothing_is_saved_for_a_season():
     world = _world_with_seed(42)
     before = world.save.to_dict()
     world.save.turn = 30
     for commodity in vr.LEGAL_COMMODITIES:
-        vr.price_for(world, 0, commodity), vr.season_trend(world, 0, commodity), vr.season_forecast(world, 0, commodity, 20)
+        vr.price_for(world, 0, commodity), vr.season_trend(world, 0, commodity)
     after = world.save.to_dict()
     after["turn"] = before["turn"]
     assert after == before

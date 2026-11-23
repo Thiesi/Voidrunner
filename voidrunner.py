@@ -1929,11 +1929,11 @@ class Mission:
 
 @dataclass
 class FuturesContract:
-    """Prepaid goods for station pickup after maturity.
+    """Prepaid goods for station pickup after maturity, as earlier builds sold them.
 
-    Every order names the station it is collected at, what the goods themselves
-    cost and how much stock it reserved. Orders that predate any of those three
-    were remote-delivery contracts under the retired schema (issue #421).
+    The futures exchange is closed (see `close_futures_desk`). This is the
+    shape of an order in a save one of those builds wrote, kept so that such a
+    save is read and its orders refunded.
     """
     id: int
     commodity: str
@@ -1966,6 +1966,11 @@ class FuturesContract:
 
 class ResumeError(Exception):
     """An interrupted career must be preserved, never reset automatically."""
+
+
+#: Top-level keys of a save from a build that sold futures. They are read, their
+#: orders refunded (`close_futures_desk`), and they are not written again.
+RETIRED_SAVE_FIELDS = {"active_futures", "next_futures_id"}
 
 
 def _reject_unknown_save_fields(value, fields: set[str], label: str) -> None:
@@ -2166,11 +2171,10 @@ class SaveData:
     # Additive field, safe default via from_dict's own .get() below --
     # no SCHEMA_VERSION bump needed.
     active_event: dict | None = None
-    # Outstanding futures contracts (see FuturesContract/settle_futures_
-    # contracts) -- additive field, safe default via from_dict's own
-    # .get() below -- no SCHEMA_VERSION bump needed.
-    active_futures: list[FuturesContract] = field(default_factory=list)
-    next_futures_id: int = 1
+    # Futures orders in a save an earlier build wrote. The exchange is closed:
+    # they are refunded when the career is opened (`close_futures_desk`) and
+    # never written again.
+    closed_futures: list[FuturesContract] = field(default_factory=list)
     # Additive state: old careers start docked, with a fresh event RNG.
     # The galaxy generator has its own independent, unchanged RNG.
     pending_travel: dict | None = None
@@ -2227,8 +2231,6 @@ class SaveData:
             "next_mission_id": self.next_mission_id,
             "flags": self.flags,
             "active_event": self.active_event,
-            "active_futures": [f.to_dict() for f in self.active_futures],
-            "next_futures_id": self.next_futures_id,
             "pending_travel": self.pending_travel,
             "event_rng_state": self.event_rng_state,
             "mission_boards": {str(k): v for k, v in self.mission_boards.items()},
@@ -2272,8 +2274,7 @@ class SaveData:
             next_mission_id=d.get("next_mission_id", 1),
             flags=dict(d.get("flags", {})),
             active_event=d.get("active_event"),
-            active_futures=[FuturesContract.from_dict(f) for f in d.get("active_futures", [])],
-            next_futures_id=d.get("next_futures_id", 1),
+            closed_futures=[FuturesContract.from_dict(f) for f in d.get("active_futures", [])],
             pending_travel=_load_pending_travel(d.get("pending_travel")),
             event_rng_state=d.get("event_rng_state"),
             mission_boards=_validate_mission_boards(d.get("mission_boards", {})),
@@ -2322,6 +2323,10 @@ def _validate_save_document(data: dict) -> None:
     def record(value, cls, field):
         require(isinstance(value, dict), field)
         known = {f.name for f in dataclasses.fields(cls)}
+        if cls is SaveData:
+            # What an earlier build wrote and this one reads once; and what this
+            # one keeps in memory only and never writes.
+            known = (known - {"closed_futures"}) | RETIRED_SAVE_FIELDS
         if set(value) - known:
             raise UnsupportedSave(f"The saved {field} contains unsupported fields.")
         for f in dataclasses.fields(cls):
@@ -2808,6 +2813,8 @@ class World:
         # sales, and the counters as the last commit left them.
         self.dispatch_sales: list[tuple[str, int, int, str]] = []
         self.dispatch_marks = _dispatch_marks(self)
+        # What the first deck says of orders an earlier build's save still held.
+        self.futures_refund: str | None = close_futures_desk(self)
 
     @property
     def here(self) -> GalaxySystem:
@@ -3116,7 +3123,7 @@ SECTOR_STORIES: dict[str, tuple[str, tuple[str, str, str]]] = {
         "Where the sky is never the same color twice.",
         ("Pilots on the Span steer by the lights when the beacons drop out. The lights have not been wrong yet.",
          "A survey crew came to measure the aurora and stayed. Their instruments are in a bar now, still running.",
-         "Traders on the Span swear the lights go green before a season turns. The futures desk does not laugh at them.")),
+         "Traders on the Span swear the lights go green before a season turns. Nobody at the exchange laughs at them.")),
     "Farrider's Edge": (
         "Named for the long-haul crews who mapped it, and did not all come back.",
         ("The Farriders flew out past the last beacon with a year of air. This sector is as far as their names go.",
@@ -3494,15 +3501,13 @@ def dock_rumour(world: World, *, sure: bool = False) -> str | None:
 
 # Seasons (review). A price was its economy's, its trait's and whatever
 # the pilot's own trading and the rare event had done to it: nothing moved that
-# a pilot could see coming, so a futures order -- today's price, held for a
-# fee -- was never worth its fee, and the trade loop had nothing left to read
-# once its lanes were learned. Every legal good now has a season in each
+# a pilot could see coming, and the trade loop had nothing left to read once
+# its lanes were learned. Every legal good now has a season in each
 # sector: a slow swing of about an eighth either way, over 24 to 40 days, the
 # same for every station in the sector. It is the same every time for a
 # career's seed, starts level on day zero, and is shown: the market says
-# whether a price is rising or falling and for how many more days, and a
-# futures order says what the price should be on the day it is collected.
-# Nothing is saved for it; the day and the seed give it.
+# whether a price is rising or falling and for how many more days. Nothing is
+# saved for it; the day and the seed give it.
 SEASON_SWING = 0.12
 SEASON_PERIODS = (24, 40)
 
@@ -3536,16 +3541,6 @@ def season_trend(world: World, system_id: int, commodity: str) -> tuple[bool, in
     rising = step(today)
     days = next(ahead for ahead in range(1, SEASON_PERIODS[1] + 1) if step(today + ahead) != rising)
     return rising, days
-
-
-def season_forecast(world: World, system_id: int, commodity: str, days: int) -> int:
-    """What a station should ask for a unit `days` from now, by the season
-    alone: today's price carried along the swing. An event or the pilot's own
-    buying can still move it."""
-    today = price_for(world, system_id, commodity)
-    now = season_factor(world, system_id, commodity)
-    then = season_factor(world, system_id, commodity, world.save.turn + days)
-    return max(1, round(today * then / now))
 
 
 def _market_rest(world: World, system_id: int, commodity: str) -> float:
@@ -3896,10 +3891,6 @@ def tick_economy_event(world: World) -> str | None:
     return f"Galaxy news: {description} (roughly {turns} turns)."
 
 
-# New orders preserve a goods principal separately from their nonrefundable fee.
-FUTURES_FEE_PERCENT = 8
-FUTURES_DURATIONS = (5, 10, 20)
-MAX_FUTURES_CONTRACTS = 8
 
 
 class TradeError(ValueError):
@@ -4002,84 +3993,36 @@ def trade_cargo(world: World, commodity: str, quantity: int, *, buying: bool) ->
     return f"Sold {quantity}x {label} for {total}cr."
 
 
-def futures_quote(world: World, commodity: str, quantity: int) -> tuple[int, int]:
-    if commodity not in COMMODITIES or type(quantity) is not int or quantity < 1:
-        raise TradeError("Choose a valid commodity and positive whole quantity.")
-    unit = price_for(world, world.save.current_system, commodity)
-    return unit * quantity, max(1, (unit * FUTURES_FEE_PERCENT + 99) // 100) * quantity
-
-
-def buy_futures_contract(world: World, commodity: str, quantity: int, duration: int) -> str:
-    if world.save.pending_travel is not None:
-        raise TradeError("Finish the journey before placing an order.")
-    if type(duration) is not int or duration not in FUTURES_DURATIONS:
-        raise TradeError("Choose a 5, 10 or 20 day term.")
-    principal, fee = futures_quote(world, commodity, quantity)
-    if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
-        raise TradeError("This station does not sell contraband futures.")
-    if quantity > cargo_capacity(world.save.ship):
-        raise TradeError("Order quantity exceeds your ship's cargo capacity.")
-    if len(world.save.active_futures) >= MAX_FUTURES_CONTRACTS:
-        raise TradeError(f"At most {MAX_FUTURES_CONTRACTS} outstanding orders; collect or cancel one first.")
-    total = principal + fee
-    if total > world.save.pilot.credits:
-        raise TradeError(f"Need {total}cr including the nonrefundable {fee}cr fee.")
-    depth = market_depth_quote(world, world.here.id, commodity)
-    if quantity > depth["stock"]:
-        raise TradeError(f"Only {depth['stock']} units in station stock; orders reserve from it and it "
-                         f"replenishes {depth['stock_rate']}/day.")
-    contract = FuturesContract(
-        id=world.save.next_futures_id, commodity=commodity, quantity=quantity,
-        locked_price=total, settle_turn=world.save.turn + duration,
-        origin_system=world.save.current_system, principal=principal, reserved=quantity,
-    )
-    _consume_market_depth(world, commodity, quantity, buying=True)
-    _nudge_drift(world, world.here.id, commodity, min(0.05, quantity * 0.01))
-    world.save.pilot.credits -= total
-    record_contraband_trade(world, commodity, -total)
-    world.save.active_futures.append(contract)
-    world.save.next_futures_id += 1
-    label = COMMODITIES[commodity]["label"]
-    msg = (f"Futures contract: {quantity}x {label}, goods {principal}cr + fee {fee}cr. "
-           f"Pickup at {world.here.name} from day {contract.settle_turn}; {quantity} units reserved from station stock.")
-    world.save.pilot.note(msg)
-    return msg
-
-
-def cancel_futures_contract(world: World, contract_id: int) -> str:
-    if world.save.pending_travel is not None:
-        raise TradeError("Finish the journey before cancelling an order.")
-    contract = next((c for c in world.save.active_futures if c.id == contract_id), None)
-    if contract is None:
-        raise TradeError("That pickup order is no longer active.")
-    world.save.active_futures.remove(contract)
-    world.save.pilot.credits += contract.principal
-    _release_market_depth(world, contract.origin_system, contract.commodity, contract.reserved)
-    record_contraband_trade(world, contract.commodity, contract.principal)
-    fee = contract.locked_price - contract.principal
-    _ledger(world).cancelled_fees += fee
-    msg = (f"Order cancelled: {contract.principal}cr refunded; {fee}cr brokerage fee retained. "
-           f"{contract.reserved} units returned to {world.by_id[contract.origin_system].name} stock.")
-    world.save.pilot.note(msg)
-    return msg
-
-
-def settle_futures_contracts(world: World) -> list[str]:
-    """Deliver ready pickup orders at the station that holds them."""
-    messages = []
-    for contract in list(world.save.active_futures):
-        if world.save.turn < contract.settle_turn or world.save.current_system != contract.origin_system:
-            continue
-        room = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
-        if room < contract.quantity:
-            continue  # Ready goods wait; no automatic refund or lost fee.
-        world.save.active_futures.remove(contract)
-        label = COMMODITIES[contract.commodity]["label"]
-        _acquire_cargo(world, contract.commodity, contract.quantity, contract.locked_price)
-        msg = f"Futures contract settled: {contract.quantity}x {label} delivered to your hold."
-        world.save.pilot.note(msg)
-        messages.append(msg)
-    return messages
+# The futures exchange is closed (review). A futures order held today's price
+# for an 8% fee, to be collected at the same station days later. Seasons were
+# added partly to give it a point: a price that could be seen to rise. Flown
+# through the simulator with pilots that placed an order whenever the season
+# promised more than the fee, every pilot ended poorer -- the careful one by
+# 2.6% -- because a price swings an eighth either way, the fee takes most of
+# that, fewer than half the orders were ever collected, and the credits an
+# order ties up are not trading. It was four screens, a row of the deck's
+# alerts and a line of every recap for something that cost its user money, so
+# it is gone. An order in a save from an earlier build is refunded in full,
+# fee and all, when the career is opened, and its reserved stock goes back to
+# the station.
+def close_futures_desk(world: World) -> str | None:
+    """Refund every futures order an earlier build's save still held, and say so."""
+    save = world.save
+    orders, save.closed_futures = save.closed_futures, []
+    if not orders:
+        return None
+    refund = 0
+    for order in orders:
+        refund += order.locked_price
+        _release_market_depth(world, order.origin_system, order.commodity, order.reserved)
+        if not COMMODITIES[order.commodity]["legal"]:
+            # The purchase was booked against the contraband balance; so is its undoing.
+            save.contraband_trade_balance += order.locked_price
+    save.pilot.credits += refund
+    message = (f"The futures exchange has closed. Your {plural(len(orders), 'open order')} "
+               f"{'was' if len(orders) == 1 else 'were'} refunded in full: +{refund:,}cr.")
+    save.pilot.note(message)
+    return message
 
 
 # ---------------------------------------------------------------------------
@@ -11935,13 +11878,6 @@ def deck_alert_rows(world: World) -> list[str]:
             left = max(0, mission.deadline_turn - world.save.turn)
             detail += f"  {gauge(left, max(1, MISSION_BOARD_DAYS), 6, tone='caution' if left <= 2 else 'good')}"
         rows.append(alert("note", f"Tracked {kind}", detail, key_label("C", "chart")))
-    # The deck replaces the resume banner now that a screen clears (issue #516),
-    # and everything that banner said is on this screen already -- the station,
-    # the day and the credits in the status band, the tracked contract two rows
-    # up -- except a futures order that has come due. That is the one thing on it
-    # a caller had to act on, so it belongs here rather than on a screen wiped
-    # before it can be read.
-    rows += futures_alert_rows(world)
     if world.save.flags.get("archive_v1_started") and not archive_finished(world):
         rows.append(alert("note", "Archive", archive_objective(world), key_label("N", "contacts")))
     if wage and pilot.credits >= wage:
@@ -11983,40 +11919,6 @@ def due_here_alert_rows(world: World) -> list[str]:
     return rows
 
 
-def futures_alert_rows(world: World) -> list[str]:
-    """Each matured futures order: where it waits, and why one here has not loaded.
-
-    One count of "orders ready to settle" pointed at the market even when the
-    goods sat at another station. An order here settles on its own as the ship
-    docks, so one still waiting here means the hold is too full for it, which
-    is the one thing the pilot has to fix (issue #41).
-    """
-    rows = []
-    hops = None
-    free = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
-    for order in world.save.active_futures:
-        if world.save.turn < order.settle_turn:
-            continue
-        goods = f"{order.quantity} {COMMODITIES[order.commodity]['label']}"
-        if order.origin_system == world.here.id:
-            # `settle_futures_contracts` loads a ready order here as the ship
-            # docks unless the hold is too small: that is the only way one waits.
-            rows.append(alert("caution", f"Futures #{order.id} ready HERE",
-                              f"{goods} needs {order.quantity} hold, {max(0, free)} free",
-                              key_label("M", "market")))
-        else:
-            hops = bfs_hops(world.by_id, world.here.id) if hops is None else hops
-            jumps = hops.get(order.origin_system)
-            where = _mission_plain(world.by_id[order.origin_system].name) + (
-                f", {plural(jumps, 'jump')}" if jumps else "")
-            rows.append(alert("note", f"Futures #{order.id} ready", f"{goods} at {where}",
-                              key_label("C", "chart")))
-    return rows
-
-
-# The service menu, as (key, label) with a short "what is in there" tail. The
-# tail is what turns a wall of twelve identical entries into a screen a caller
-# can read: it says how many offers are on the board without opening it.
 def affordable_upgrades(world: World) -> int:
     """Yard upgrades the balance covers now; not "newly", which would need saved state.
     Yard prices only: a workshop's cheaper install also wants materials and a visit."""
@@ -12161,8 +12063,7 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
             "  ".join([chip("charted", f"{charted}/{len(world.galaxy)}"),
                        chip("kills", str(pilot.kills)),
                        chip("contracts", str(pilot.missions_completed)),
-                       chip("open", str(len(world.save.active_missions))),
-                       chip("orders", str(len(world.save.active_futures)))]),
+                       chip("open", str(len(world.save.active_missions)))]),
         ]
         crew = [f"{crew_name(world, role)} ({info['label']}, {CREW_SERVICE_LEVELS[crew_level(ship, role)][1]})"
                 for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
@@ -12171,8 +12072,7 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
 
 
 def screen_station_menu(p: Palette, world: World) -> str:
-    completed = settle_futures_contracts(world)
-    completed += check_mission_completions(world)
+    completed = check_mission_completions(world)
     if completed:
         world.commit()
     if is_stranded(world):
@@ -13972,7 +13872,7 @@ def screen_market(p: Palette, world: World) -> None:
         goods = LEGAL_COMMODITIES + [c for c in CONTRABAND_COMMODITIES if world.here.economy == "Haven" or world.save.cargo.get(c, 0) > 0]
         lines = market_catalog_lines(world, goods)
         if result: set_status(result); result = None  # handed over once (#42 review)
-        footer = f"[<] Prev [>] Next [{letter_span(MARKET_LETTERS[:len(goods)])}] Trade [X] Futures [K] Stake [B] Back: "
+        footer = f"[<] Prev [>] Next [{letter_span(MARKET_LETTERS[:len(goods)])}] Trade [K] Stake [B] Back: "
         key, page, count = _draw_service_page(p, f"Market: {world.save.pilot.credits:,}cr", lines, footer, page)
         if key in ("B", "Q"): return
         if key == "K":
@@ -13982,12 +13882,6 @@ def screen_market(p: Palette, world: World) -> None:
             continue
         if (moved := page_step(key, page, count)) is not None:
             page = moved
-            continue
-        if key == "X":
-            futures_goods = [c for c in goods if COMMODITIES[c]["legal"] or world.here.economy == "Haven"]
-            response = screen_futures(p, world, futures_goods)
-            if response is not None: result = response
-            page = 0
             continue
         idx = MARKET_LETTERS.index(key) if key in MARKET_LETTERS else -1
         if 0 <= idx < len(goods):
@@ -14048,114 +13942,6 @@ def screen_stake(p: Palette, world: World) -> str | None:
         page = 0
 
 
-def screen_futures(p: Palette, world: World, goods: list[str]) -> str | None:
-    result, said, page_state = None, None, {}
-    while True:
-        options = []
-        for commodity in goods:
-            principal, fee = futures_quote(world, commodity, 1)
-            options.append((("goods", commodity), f"Order {COMMODITIES[commodity]['label']}: {principal}+{fee}cr/unit"))
-        for contract in world.save.active_futures:
-            status = "ready" if world.save.turn >= contract.settle_turn else f"day {contract.settle_turn}"
-            place = world.by_id[contract.origin_system].name
-            options.append((("order", contract), f"#{contract.id}: {contract.quantity} {COMMODITIES[contract.commodity]['label']}, {status}; {place}"))
-        notice = ["Wholesale orders reserve station stock at signing; station pickup, 8% nonrefundable fee rounded up per unit.",
-                  f"Outstanding orders: {len(world.save.active_futures)}/{MAX_FUTURES_CONTRACTS}"]
-        if result: set_status(result); said, result = result, None  # handed over once; `said` goes back up (#42 review)
-        selected = _pick_trade_field(f"Futures Exchange: {world.save.pilot.credits:,}cr", options, max_choices=4, notice=notice, page_state=page_state)
-        if selected is None: return said
-        kind, item = selected
-        response = _screen_buy_futures(p, world, item) if kind == "goods" else _screen_futures_order(p, world, item)
-        if response is not None: result, page_state = response, {}
-
-
-def _screen_futures_order(p: Palette, world: World, contract: FuturesContract) -> str | None:
-    page, result = 0, None
-    while True:
-        fee = contract.locked_price - contract.principal
-        lines = [f"Quantity: {contract.quantity} {COMMODITIES[contract.commodity]['label']}.",
-                 f"Pickup: {world.by_id[contract.origin_system].name}, from day {contract.settle_turn}.",
-                 f"Paid {contract.principal}cr for goods + {fee}cr nonrefundable fee.",
-                 "Collected on arrival/station entry when the full order fits; otherwise it waits.",
-                 f"{contract.reserved} units reserved from that station's stock; cancelling returns them.",
-                 f"[X] Cancel: refund {contract.principal}cr, forfeit {fee}cr fee."]
-        if result: set_status(result); result = None  # handed over once (#42 review)
-        footer = "[<>] Page [X] Cancel [B] Back: "
-        key, page, count = _draw_service_page(p, f"Order #{contract.id}: {world.save.pilot.credits:,}cr", lines, footer, page)
-        if key in ("B", "Q"): return None
-        if (moved := page_step(key, page, count)) is not None: page = moved
-        elif key == "X":
-            if confirm(f"Cancel order #{contract.id} for {contract.principal}cr? Fee is not refunded.", p):
-                try: message = cancel_futures_contract(world, contract.id)
-                except TradeError as exc:
-                    result, page = str(exc), 0
-                    continue
-                world.commit()
-                out_line(message)
-                return message
-            result, page = "Cancellation declined; order retained.", 0
-
-
-def futures_season_lines(world: World, commodity: str, quantity: int, duration: int) -> list[str]:
-    """What the order is a bet on: where the season should have the price on
-    the day it can be collected, against what locking today's costs."""
-    trend = season_trend(world, world.here.id, commodity)
-    if trend is None:
-        return []
-    principal, fee = futures_quote(world, commodity, quantity)
-    locked = -(-(principal + fee) // quantity)  # a unit, fee included, rounded against the pilot
-    then = season_forecast(world, world.here.id, commodity, duration)
-    rising, days = trend
-    lines = [f"Season: {COMMODITIES[commodity]['label']} here is {'rising' if rising else 'falling'} for {plural(days, 'more day')}; "
-             f"in {duration} days it should ask about {then} a unit."]
-    if then > locked:
-        lines.append(f"Locked at {locked} a unit with the fee, this order should save about {(then - locked) * quantity}cr.")
-    else:
-        lines.append(f"Locked at {locked} a unit with the fee, this order should cost about "
-                     f"{(locked - then) * quantity}cr more than buying then.")
-    return lines
-
-
-def _screen_buy_futures(p: Palette, world: World, commodity: str) -> str | None:
-    quantity, duration, page, result = 1, FUTURES_DURATIONS[0], 0, None
-    while True:
-        principal, fee = futures_quote(world, commodity, quantity)
-        depth = market_depth_quote(world, world.here.id, commodity)
-        lines = [f"Quantity: {quantity}; term: {duration} days.",
-                 f"Pickup: {world.here.name}, from day {world.save.turn + duration}.",
-                 f"Goods {principal}cr + nonrefundable fee {fee}cr = {principal + fee}cr.",
-                 f"Station stock {depth['stock']} (+{depth['stock_rate']}/day): {max(0, depth['stock'] - quantity)} left after this order."
-                 if quantity <= depth["stock"] else f"Station stock {depth['stock']} (+{depth['stock_rate']}/day): not enough for this order.",
-                 "Full cargo space needed only at pickup. Cancellation refunds goods principal only; full holds leave orders waiting."]
-        lines[3:3] = futures_season_lines(world, commodity, quantity, duration)
-        if result: set_status(result); result = None  # handed over once (#42 review)
-        footer = "[<>] Page [U] Units [T] Term [S] Sign [B] Back: "
-        key, page, count = _draw_service_page(p, f"Order {COMMODITIES[commodity]['label']}: {world.save.pilot.credits:,}cr", lines, footer, page)
-        if key in ("B", "Q"): return None
-        if (moved := page_step(key, page, count)) is not None: page = moved
-        elif key == "U":
-            out_prompt(f"Quantity (1-{cargo_capacity(world.save.ship)}; Enter or Esc keeps {quantity}): ")
-            raw = read_line_raw(max_len=5)
-            if raw:
-                chosen = int(raw) if raw.isascii() and raw.isdigit() else 0
-                if 1 <= chosen <= cargo_capacity(world.save.ship):
-                    quantity, result = chosen, None
-                else: result = "Quantity must fit your ship's cargo capacity."
-                page = 0
-        elif key == "T":
-            duration = FUTURES_DURATIONS[(FUTURES_DURATIONS.index(duration) + 1) % len(FUTURES_DURATIONS)]
-            result, page = None, 0
-        elif key == "S":
-            if confirm(f"Pay {principal + fee}cr now, including the nonrefundable {fee}cr fee?", p):
-                try: message = buy_futures_contract(world, commodity, quantity, duration)
-                except TradeError as exc:
-                    result, page = str(exc), 0
-                    continue
-                world.commit()
-                return set_status(message, "good")
-            result, page = "Signing cancelled; order draft retained.", 0
-
-
 def trading_ledger_lines(world: World) -> list[str]:
     """The ledger as four named groups of figures, not as fifteen sentences.
 
@@ -14201,7 +13987,7 @@ def trading_ledger_lines(world: World) -> list[str]:
         "Mixed delivery payments are divided by cargo quantity. Margins exclude operating costs and other career income or spending.",
         "These totals begin when recorded, exclude earlier activity, repairs, fines and crew hiring, and are not total career profit.",
         section("HOLD"),
-        "Purchases are consumed in order. Futures costs include brokerage.",
+        "Purchases are consumed in order.",
     ]
     if world.save.cargo:
         lines += table(
@@ -16617,9 +16403,10 @@ def _show_tracked_mission(p: Palette, world: World) -> None:
 
 def pilot_recap(world: World) -> list[str]:
     save = world.save
-    ready = sum(1 for order in save.active_futures if save.turn >= order.settle_turn)
     lines = [f"Docked: {world.here.name}. Day {save.turn}; {save.pilot.credits:,} cr.",
-             f"Commitments: {len(save.active_missions)} contract(s), {len(save.active_futures)} futures order(s), {ready} mature."]
+             f"Commitments: {plural(len(save.active_missions), 'contract')}."]
+    # (With nothing committed the line still says so: a returning pilot's first
+    # question is whether anything is waiting on them.)
     mission = tracked_mission(world)
     if mission is not None:
         deadline = "no deadline" if mission.deadline_turn is None else f"due day {mission.deadline_turn}"
@@ -16646,15 +16433,16 @@ def launch_notes(world: World, *, is_new: bool) -> list[str]:
     gets neither here -- that has a screen of its own, and the deck that
     follows it opens on the journey's results.
     """
+    closed = [world.futures_refund] if world.futures_refund else []
     if world.save.pending_travel is not None:
-        return []
+        return closed
     if is_new:
         return [FIRST_FLIGHT_POINTER]
     # Also left out: the recap's advice for a pilot tracking nothing. It is
     # guidance, the guide keeps it, and at forty columns it is three more rows
     # on a page the deck's own header and gauges are waiting behind.
     recap = [line for line in pilot_recap(world)[1:] if not line.startswith("No contract tracked.")]
-    return [_mission_plain(f"Welcome back, {world.save.pilot.handle}.")] + recap
+    return [_mission_plain(f"Welcome back, {world.save.pilot.handle}.")] + closed + recap
 
 
 def journey_resumed_lines(world: World) -> list[str]:
@@ -16737,7 +16525,7 @@ def guide_reference_lines(world: World) -> list[str]:
         "About three systems in five have a market of their own: one good always cheap or always dear. The chart shows "
         "? until you dock; dock talk may mark a system cheap ? or dear ? first.",
         "Prices have seasons: each legal good swings about an eighth either way over a month, the same across a "
-        "sector. The market marks a price rising or falling and for how long. [X] Futures holds today's price for a fee.",
+        "sector. The market marks a price rising or falling and for how long.",
         "[K] Stake in a market buys a share of that station, in three steps at up to three stations: its stock and "
         "demand come back faster for you.",
         section("FLYING"),
@@ -19003,9 +18791,8 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         completed = paid = 0  # contracts this arrival finished, and what they paid
         if not world.ship_destroyed_this_hop:
             world.save.current_system = dest_id
-            lines = settle_futures_contracts(world)
             credits_before = world.save.pilot.credits
-            lines += check_mission_completions(
+            lines = check_mission_completions(
                 world, just_discovered=None if travel["was_discovered"] else dest_id,
             )
             completed = sum(1 for line in lines if line.startswith("Mission complete:"))
