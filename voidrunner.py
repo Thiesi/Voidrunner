@@ -1535,9 +1535,9 @@ UPGRADES: dict[str, dict] = {
 # rather than a tier ladder. Keyed to match Ship's own `has_<role>`
 # fields exactly.
 CREW_ROLES: dict[str, dict] = {
-    "gunner": {"label": "Gunner", "hire_cost": 800, "wage": 15, "effect": "+3 combat damage per hit"},
-    "engineer": {"label": "Engineer", "hire_cost": 200, "wage": 2, "effect": "-25% fuel, round up (min 1)"},
-    "navigator": {"label": "Navigator", "hire_cost": 600, "wage": 10, "effect": "+1 scan range"},
+    "gunner": {"label": "Gunner", "hire_cost": 800, "wage": 15, "effect": "+3 combat damage per hit; one called shot a fight"},
+    "engineer": {"label": "Engineer", "hire_cost": 200, "wage": 2, "effect": "-25% fuel, round up (min 1); one hull patch a fight"},
+    "navigator": {"label": "Navigator", "hire_cost": 600, "wage": 10, "effect": "+1 scan range; one slip a fight"},
 }
 CREW_CANDIDATES = {
     "gunner": [("Nia Voss", "Cool under pressure; remembers every convoy."),
@@ -1966,13 +1966,22 @@ def _validate_versioned(value, fields: set[str], label: str, *, supported=(1,), 
 
 
 def _validate_tactics(value: dict) -> None:
-    _validate_versioned(value, {"version", "profile", "step", "brace_ready"}, "tactical combat",
+    fields = {"version", "profile", "step", "brace_ready"}
+    stations = (isinstance(value, dict) and type(value.get("version")) is int
+                and value["version"] >= CREW_STATION_RULESET_VERSION)
+    if stations:
+        fields |= {"spent"}  # which crew stations this fight has used
+    _validate_versioned(value, fields, "tactical combat",
                         supported=tuple(TACTICAL_THREAT_BONUS_BY_VERSION),
                         unsupported="This fight uses an unsupported tactical ruleset.")
     if (type(value.get("profile")) is not str or value["profile"] not in TACTICAL_PROFILES
             or type(value.get("step")) is not int or not 0 <= value["step"] < 3
             or type(value.get("brace_ready")) is not bool):
         raise ValueError("invalid tactical state")
+    if stations:
+        spent = value.get("spent")
+        if type(spent) is not str or len(set(spent)) != len(spent) or not set(spent) <= set(CREW_STATIONS):
+            raise ValueError("invalid crew stations")
 
 
 def _validate_warrant(value: dict) -> None:
@@ -4419,9 +4428,38 @@ TACTICAL_INTENTS = {"attack": (100, 100), "volley": (100, 160),
 # are read perfectly, so the first fights of a career teach the pattern as they
 # did. Each Long-Range Scanner tier reads a tenth more, which gives the scanner
 # something to do in a fight.
+#
+# Version 5 keeps version 4's damage and puts the crew in the fight. A fight was
+# one resource and two verbs: Guard the volley, Fire the rest, and a specialist
+# was three points of damage or nothing at all. Each specialist aboard now has a
+# station, used once a fight, and when to spend it is the fight's other
+# question. The gunner's called shot is a Fire at half as much again that cover
+# and harrying cannot blunt: best into a recovery, or held to finish. The
+# engineer's patch gives back a quarter of the hull and costs the turn's shot,
+# with the contact still firing: best while it recovers, worst into a volley.
+# The navigator's slip is a Fire at full strength that the contact's own move
+# only grazes: a quarter of it lands. It wants spending on the volley, and a
+# contact that jumps its pattern can make a pilot spend it on a recovery
+# instead -- which is what a better read is worth. A ship without crew fights
+# as it did, and the wages buy something a pilot can feel.
+#
+# The sizes are from fights flown with the door's own functions, a sensible
+# pilot at the keys. A starting Shuttle against tier 3 wins 56 in 100 alone, 98
+# with a gunner, 96 with a navigator. A Shuttle with a tier of weapons, shields
+# and hull against tier 4 wins 19 alone, 64 with a gunner, 57 with a navigator
+# and 97 with all three aboard, and still loses over half its hull doing it. At
+# double strength and a clean miss the same full crew won every time and lost a
+# third: tier 4 has to stay a fight.
 TACTICAL_THREAT_BONUS_BY_VERSION = {1: (0, 3, 6, 20, 55), 2: (0, 3, 6, 8, 34), 3: (0, 3, 6, 8, 34),
-                                    4: (0, 3, 6, 8, 34)}
-TACTICAL_RULESET_VERSION = 4
+                                    4: (0, 3, 6, 8, 34), 5: (0, 3, 6, 8, 34)}
+TACTICAL_RULESET_VERSION = 5
+CREW_STATION_RULESET_VERSION = 5
+#: A station's key in a fight: whose it is, and the verb the action bar names.
+CREW_STATIONS = {"C": ("gunner", "Called shot"), "M": ("engineer", "Mend"), "N": ("navigator", "Slip")}
+CALLED_SHOT_PERCENT = 150
+SLIP_TAKEN_PERCENT = 25    # what a slipped move still lands, of what it would have
+MEND_SHARE = 4       # a patch gives back this share of the hull's maximum,
+MEND_LEAST = 8       # and never less than this
 READ_RULESET_VERSION = 4
 READ_FIRST_TIER = 2                       # the lowest tier that may jump its pattern
 READ_PER_TIER, READ_PER_SCANNER = 0.1, 0.1
@@ -4485,7 +4523,29 @@ def new_tactics(pirate: Pirate, version: int = TACTICAL_RULESET_VERSION) -> dict
     resuming a checkpoint or switching squadron target inside one carries its
     saved `version` rather than adopting the current one (issue #406 review)."""
     # `brace_ready` is the saved field; the player-facing verb is Guard (#400).
-    return {"version": version, "profile": tactical_profile(pirate.name), "step": 0, "brace_ready": True}
+    state = {"version": version, "profile": tactical_profile(pirate.name), "step": 0, "brace_ready": True}
+    if version >= CREW_STATION_RULESET_VERSION:
+        state["spent"] = ""
+    return state
+
+
+def crew_stations(world: World, pirate: Pirate, tactics: dict) -> list[str]:
+    """The stations a pilot can still call on this turn, by key: one for each
+    specialist aboard who has not been used this fight. A patch is offered
+    only to a hull that has something to mend."""
+    if tactics["version"] < CREW_STATION_RULESET_VERSION:
+        return []
+    ship = world.save.ship
+    keys = [key for key, (role, _label) in CREW_STATIONS.items()
+            if getattr(ship, f"has_{role}") and key not in tactics["spent"]]
+    if "M" in keys and ship.hull_hp >= hull_hp_max(ship):
+        keys.remove("M")
+    return keys
+
+
+def mend_amount(ship: Ship) -> int:
+    """The hull an engineer's patch gives back, short of the maximum."""
+    return min(hull_hp_max(ship) - ship.hull_hp, max(MEND_LEAST, hull_hp_max(ship) // MEND_SHARE))
 
 
 def tactical_profile(name: str) -> str:
@@ -4579,10 +4639,15 @@ def _tactical_incoming_damage(ship: Ship, tier: int, intent: str, roll: int, tac
     return (damage + 3) // 4 if braced else damage
 
 
-def _tactical_outgoing_damage(ship: Ship, intent: str, roll: int, *, guarded: bool = False) -> int:
+def _tactical_outgoing_damage(ship: Ship, intent: str, roll: int, *, guarded: bool = False,
+                              called: bool = False) -> int:
     """The pilot's shot for a roll of 9-14: what a round deals and what the
-    combat panel quotes, so the two cannot disagree."""
-    damage = max(1, (roll + ship.weapon_tier * 4 + gunner_bonus(ship)) * TACTICAL_INTENTS[intent][0] // 100)
+    combat panel quotes, so the two cannot disagree. A called shot is half as
+    much again, and the contact's cover or harrying does not blunt it."""
+    percent = TACTICAL_INTENTS[intent][0]
+    if called:
+        percent = max(100, percent) * CALLED_SHOT_PERCENT // 100
+    damage = max(1, (roll + ship.weapon_tier * 4 + gunner_bonus(ship)) * percent // 100)
     return max(1, damage * 55 // 100) if guarded else damage
 
 
@@ -4600,8 +4665,27 @@ def tactical_retaliation(world: World, pirate: Pirate, tactics: dict, *, braced:
     return damage, [f"The {pirate.name} uses {intent} and hits you for {damage} damage."]
 
 
+def tactical_mend(world: World, pirate: Pirate, tactics: dict) -> tuple[int, int, list[str]]:
+    """The engineer's station: a quarter of the hull back for the turn's shot.
+    The contact still makes its move, and nothing is guarding against it."""
+    if "M" not in crew_stations(world, pirate, tactics):
+        raise ValueError("No patch to call on.")
+    if pirate.hp <= 0 or world.save.ship.hull_hp <= 0:
+        raise ValueError("This exchange is already over.")
+    ship = world.save.ship
+    gain = mend_amount(ship)
+    ship.hull_hp += gain
+    tactics["spent"] += "M"
+    received, retaliation = tactical_retaliation(world, pirate, tactics)
+    return gain, received, [f"{crew_name(world, 'engineer')} patches the hull under fire: +{gain} hull."] + retaliation
+
+
 def tactical_round(world: World, pirate: Pirate, tactics: dict, action: str) -> tuple[int, int, list[str]]:
-    if action not in ("F", "G") or (action == "G" and not tactics["brace_ready"]):
+    if action == "C" and "C" not in crew_stations(world, pirate, tactics):
+        raise ValueError("No called shot to call on.")
+    if action == "N" and "N" not in crew_stations(world, pirate, tactics):
+        raise ValueError("No slip to call on.")
+    if action not in ("F", "G", "C", "N") or (action == "G" and not tactics["brace_ready"]):
         raise ValueError("Fire to recharge Guard before using it again.")
     if pirate.hp <= 0 or world.save.ship.hull_hp <= 0:
         raise ValueError("This exchange is already over.")
@@ -4611,11 +4695,28 @@ def tactical_round(world: World, pirate: Pirate, tactics: dict, action: str) -> 
     # the contact up) whether or not the contact lives to make it.
     roll = world.event_rng.randint(9, 14)
     act = _tactical_act(world, pirate, tactics)
-    damage = _tactical_outgoing_damage(ship, act[0], roll, guarded=action == "G")
+    damage = _tactical_outgoing_damage(ship, act[0], roll, guarded=action == "G", called=action == "C")
     pirate.hp = max(0, pirate.hp - damage)
-    tactics["brace_ready"] = action == "F"
-    lines = [f"You hit the {pirate.name} for {damage} damage." + (" Guarding; fire to recharge." if action == "G" else "")]
-    if pirate.hp > 0:
+    tactics["brace_ready"] = action in ("F", "C", "N")
+    if action == "C":
+        tactics["spent"] += "C"
+        lines = [f"{crew_name(world, 'gunner')} calls the shot: you hit the {pirate.name} for {damage} damage."]
+    elif action == "N":
+        tactics["spent"] += "N"
+        lines = [f"You hit the {pirate.name} for {damage} damage."]
+    else:
+        lines = [f"You hit the {pirate.name} for {damage} damage." + (" Guarding; fire to recharge." if action == "G" else "")]
+    if pirate.hp > 0 and action == "N":
+        # The contact makes its move and the ship is not where it was. Its
+        # roll is drawn as always, so a slipped fight stays on its sequence.
+        full = _tactical_incoming_damage(ship, pirate.tier, act[0], world.event_rng.randint(4, 9), tactics,
+                                         cover=squadron_cover(world), jumped=act[1])
+        received = full * SLIP_TAKEN_PERCENT // 100
+        ship.hull_hp = max(0, ship.hull_hp - received)
+        move = f"The {pirate.name} {'jumps its pattern to' if act[1] else 'uses'} {act[0]}"
+        lines.append(f"{move} and hits nothing: {crew_name(world, 'navigator')} had already moved the ship." if not received
+                     else f"{move} and only grazes you for {received}: {crew_name(world, 'navigator')} had already moved the ship.")
+    elif pirate.hp > 0:
         received, retaliation = tactical_retaliation(world, pirate, tactics, braced=action == "G", act=act)
         lines += retaliation
     else:
@@ -15554,6 +15655,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         "[V] Viewport opens on the atlas: the world outside, and with [N] and [P] every system you have charted, each with what you know of it. [1] is your ship and [3] the last site you found.",
         "Prices have seasons: every legal good swings about an eighth either way over a month or so, the same across a sector. The market marks each price as rising or falling and for how many more days. [X] Futures holds today's price for a fee, and says what the price should be on the day you collect.",
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
+        "Crew fight with you. Each specialist aboard has a station, used once a fight: the gunner's [C] Called shot hits half as hard again and cover cannot blunt it, the engineer's [M] Mend gives back a quarter of the hull for the turn's shot, and the navigator's [N] Slip is a full shot that the raider's move only grazes. Spend the slip on the volley.",
         "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
         "Ranks are kept once reached, and each brings something: a fourth contract slot at Independent Trader, half as much again on every contract at Merchant Captain, a fifth slot at Void Baron and double pay at Legend of the Frontier.",
         "Once the ship is built there is something to own: [K] Stake in any market buys a share in that station, in three steps at up to three stations. Its stock and demand come back two, three and four times as fast for you, so a route you fly again and again keeps paying.",
@@ -17878,6 +17980,21 @@ def combat_option_rows(world: World, pirate: Pirate, *, patrol: bool, tactics: d
         rows.append([key_label("G", "Guard"), dealt(True), f"{p.slate}take{RESET} {harm(span(low_g, high_g))}"])
     else:
         rows.append([f"{p.slate}Guard{RESET}", f"{p.slate}recharging{RESET}", f"{p.slate}fire once first{RESET}"])
+    # The crew's stations, each once a fight, between the two verbs every
+    # ship has and the ways out.
+    stations = crew_stations(world, pirate, tactics)
+    if "C" in stations:
+        weak, strong = (_tactical_outgoing_damage(ship, intent, roll, called=True) for roll in (9, 14))
+        shot = [key_label("C", "Called shot"), f"{p.slate}deal{RESET} {cost(span(weak, strong))}", f"{taken}{p.slate}; once{RESET}"]
+        if weak >= pirate.hp:
+            shot[2] = gain("destroys it")
+        rows.append(shot)
+    if "M" in stations:
+        rows.append([key_label("M", "Mend"), f"{gain(f'+{mend_amount(ship)} hull')}", f"{taken}{p.slate}; once, no shot{RESET}"])
+    if "N" in stations:
+        low_n, high_n = (low * SLIP_TAKEN_PERCENT // 100, high * SLIP_TAKEN_PERCENT // 100)
+        rows.append([key_label("N", "Slip"), dealt(False),
+                     f"{p.slate}take{RESET} {harm(span(low_n, high_n))}{p.slate}; once{RESET}"])
     rows.append([key_label("E", "Evade"),
                  escape(combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics, patrol=patrol)), missed])
     if patrol:
@@ -18003,6 +18120,9 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                    if tactical_read(ship, pirate.tier, tactics) < 1.0 else
                    "Read 100%: this contact makes the move shown."),
                   "Fire: one shot; a surviving enemy returns fire. Guard: your shot at 55%, incoming cut to a quarter; Fire recharges Guard.",
+                  "Crew stations, each once a fight: a gunner's Called shot is a Fire at half as much again that cover and harrying "
+                  "do not blunt; an engineer's Mend gives back a quarter of the hull for the turn's shot; a navigator's Slip is a Fire "
+                  "at full strength that the contact's move only grazes, a quarter of it landing.",
                   "Dump jettisons an eighth of the hold, one unit at least, chosen at random. A failed Evade or Dump draws "
                   "enemy fire; a bribe's refusal draws it too. A bribe is charged only if accepted, and earns Blackwake +2."
                   if not patrol else "A failed Evade draws enemy fire. Surrender: pay the fine, clear notoriety, Concord +2 and escape.",
@@ -18025,7 +18145,8 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
 # `B` cannot be Brace, because `B` is Back everywhere and a stray Back must not
 # spend a combat turn -- hence Guard, which the key does spell.
 COMBAT_LABELS = {"F": "Fire", "G": "Guard", "E": "Evade", "D": "Dump", "P": "Pay bribe",
-                 "S": "Surrender", "V": "Verify", "R": "Report", "W": "Withdraw", "T": "Target"}
+                 "S": "Surrender", "V": "Verify", "R": "Report", "W": "Withdraw", "T": "Target",
+                 **{key: label for key, (_role, label) in CREW_STATIONS.items()}}
 
 
 COMBAT_DRAIN_STEPS = 8
@@ -18104,6 +18225,8 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             if cargo_aboard: actions += "/D"  # Dump only means something with cargo aboard (issue #414)
             if can_pay: actions += "/P"
         if tactics["brace_ready"]: actions = actions.replace("F/", "F/G/")
+        stations = crew_stations(world, pirate, tactics)
+        if stations: actions = actions.replace("/E", "/" + "/".join(stations) + "/E", 1)
         if warrant is not None and not warrant["engaged"]:
             if not warrant["checked"] and world.save.ship.fuel >= 1: actions += "/V"
             if warrant["checked"] and not warrant["matches"]: actions += "/R"
@@ -18139,6 +18262,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         opened_at = (pirate.hp, ship.hull_hp)
         was_outclassed = not patrol and outclassed(world, pirate, tactics)
         engaging = (action in ("F", "E") or (action == "G" and tactics["brace_ready"])
+                    or (action in ("C", "M", "N") and action in stations)
                     or (action == "D" and not patrol and cargo_aboard) or (action == "P" and not patrol and can_pay))
         if warrant is not None and engaging: warrant["engaged"] = True
         if formation is not None and engaging: formation["engaged"] = True
@@ -18146,7 +18270,9 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             lines, outcome = ["You withdraw before engaging; the bounty remains active."], "escaped"
         elif action == "R" and warrant is not None and warrant["checked"] and not warrant["matches"] and not warrant["engaged"]:
             lines, outcome = ["Incorrect identity reported; closing this warrant without a fight."], "reported"
-        elif action == "F" or (action == "G" and tactics["brace_ready"]):
+        elif action == "M" and "M" in stations:
+            _, _, lines = tactical_mend(world, pirate, tactics)
+        elif action == "F" or (action == "G" and tactics["brace_ready"]) or (action in ("C", "N") and action in stations):
             _, _, lines = tactical_round(world, pirate, tactics, action)
             if pirate.hp <= 0:
                 if world.save.pilot.kills == 0:

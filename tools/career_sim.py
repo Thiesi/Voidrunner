@@ -48,7 +48,7 @@ KEYS_PER_JOURNEY = 600
 BROKE = 600
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _KEYS = re.compile(r"\[([A-Z])\] ([A-Za-z]+)")
-_INTENT = re.compile(r"([A-Z]{4,})\s*>\s*[a-z]+")
+_INTENT = re.compile(r"([A-Za-z]+) > ([A-Za-z]+) > ([A-Za-z]+)")
 _TIER = re.compile(r"tier (\d)")
 _ACT = re.compile(r"\[([A-Z])/[A-Z]\] Act: $")
 
@@ -131,7 +131,17 @@ class Pilot:
         intent = _INTENT.findall(text)
         if (outclassed or hull < 0.25) and "E" in offered:
             return "E"
-        if intent and intent[-1] == "VOLLEY" and "G" in offered:
+        # The pattern row names all three moves and capitalises the one coming.
+        move = next((step for step in intent[-1] if step.isupper()), "") if intent else ""
+        # The crew's stations, each once a fight: slip the volley, patch a hull
+        # that is half gone while nothing heavy is coming, call the shot into a recovery.
+        if move == "VOLLEY" and offered.get("N") == "Slip":
+            return "N"
+        if hull < 0.5 and move != "VOLLEY" and offered.get("M") == "Mend":
+            return "M"
+        if move == "RECOVER" and offered.get("C") == "Called":
+            return "C"
+        if move == "VOLLEY" and "G" in offered:
             return "G"
         return "F"
 
