@@ -1666,6 +1666,21 @@ how to press Back), and is divided by a rule: a first flight above it, and
 `ONCE YOU HAVE FLOWN A FEW DAYS` below, where the lines about ranks, stakes,
 local markets, a raider's read and the dispatch live.
 
+**Rivals.** A raider was a name from a list of ten, a tier and a hull: met,
+dealt with, gone, and the next one owed nothing to the last. A raider that got
+the better of the pilot -- one they ran from, one they paid off, one that broke
+their ship -- now remembers. From two days later and for forty, one raider
+contact in two turns out to be that ship, a tier stronger for what it took, and
+the fight opens by saying so: "The Ashclaw again. This is the ship that broke
+yours." Destroying it settles the score: its salvage over again, an
+achievement, a line on the board's wire, and it does not come back. Getting the
+worse of it a second time keeps the score open at the tier it has reached. A
+career keeps three scores at most, the newest, and Status lists them with what
+each one did and how long it will remember. Which contact is the rival follows
+from the seed and the day, so the encounter's own draws are what they were. The
+scores are a field of the save (`rivals`), absent until there is one, and a new
+career starts with none.
+
 **The crew take stations (tactical ruleset 5).** A fight was one resource and
 two verbs -- Guard the volley, Fire the rest -- and a specialist was three
 points of damage or nothing at all. Each specialist aboard now has a station,
