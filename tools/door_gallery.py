@@ -209,9 +209,10 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Viewport, ship", b"V1"),
         ("Viewport, discovery", b"V3"),
         ("Display Options", b"O"),
-        ("Archive Contacts", b"N"),
-        ("Concord Contacts", b"P"),
-        ("Blackwake Contacts", b"W"),
+        ("Contacts", b"N"),
+        ("Archive Contacts", b"NA"),
+        ("Concord Contacts", b"NP"),
+        ("Blackwake Contacts", b"NW"),
         # The chart opens as a list; its own [V] is the spatial map, which is a
         # different drawing and the one the 40x12 floor was argued over.
         ("Navigation Chart, map", b"CV"),

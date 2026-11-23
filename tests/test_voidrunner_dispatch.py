@@ -329,7 +329,8 @@ def test_the_deck_says_todays_order_in_one_row_and_the_page_fits(terminal, width
         assert len(pages) == 1 and len(pages[0]) + 3 <= round(24 * 0.58)
         world.save.turn = 3
         full = vr._service_pages(vr.station_deck_lines(world), "Command Deck: 1,200cr", "[X] Expand [Q] Exit: ")
-        assert len(full) == 1 and len(full[0]) + 3 == round(24 * 0.58) + 1
+        # Fourteen rows since the three contacts became one entry: the console's whole part of the screen.
+        assert len(full) == 1 and len(full[0]) + 3 == round(24 * 0.58)
         world.save.turn = 0
         assert vr.menu_columns([f"[{key}] {label}" for key, label in vr.deck_service_entries(world)]) == 3
     for page in vr._service_pages(vr.dispatch_lines(world, [], 1), "Daily Dispatch", "[<>] Page [B] Back: "):

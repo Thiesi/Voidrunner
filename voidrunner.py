@@ -12034,7 +12034,7 @@ def affordable_upgrades(world: World) -> int:
 # books and the views after the first jump, the people after the third. A
 # service that has not arrived yet still answers its key -- the Guide names
 # them all -- and a pilot who has retired once sees everything from day zero.
-DECK_SERVICE_DAY = {"T": 1, "V": 1, "H": 1, "P": 3, "W": 3, "N": 3}
+DECK_SERVICE_DAY = {"T": 1, "V": 1, "H": 1, "N": 3}
 
 
 def deck_service_day(world: World, key: str) -> int:
@@ -12043,15 +12043,14 @@ def deck_service_day(world: World, key: str) -> int:
     if save.pilot.retirements or key not in DECK_SERVICE_DAY:
         return 0
     # Whatever the pilot is already involved with is on the deck, whatever the day.
-    involved = {"P": bool(save.pilot.reputation.get(FACTION_CONCORD)) or FACTION_CONCORD in save.faction_stories,
-                "W": bool(save.pilot.reputation.get(FACTION_BLACKWAKE)) or FACTION_BLACKWAKE in save.faction_stories,
-                "N": bool(save.flags.get("archive_v1_started")),
+    involved = {"N": (any(save.pilot.reputation.get(faction) or faction in save.faction_stories
+                          for faction in (FACTION_CONCORD, FACTION_BLACKWAKE))
+                      or bool(save.flags.get("archive_v1_started")) or bool(save.tales)),
                 "T": save.trading_ledger.since_day is not None}
     return 0 if involved.get(key) else DECK_SERVICE_DAY[key]
 
 
-DECK_SERVICE_NAMES = {"T": "Ledger", "V": "Viewport", "H": "Hall of Fame", "P": "Concord", "W": "Blackwake",
-                      "N": "Archive"}
+DECK_SERVICE_NAMES = {"T": "Ledger", "V": "Viewport", "H": "Hall of Fame", "N": "Contacts"}
 
 
 def deck_services_arriving(world: World) -> list[tuple[str, str]]:
@@ -12080,7 +12079,7 @@ def deck_service_entries(world: World) -> list[tuple[str, str]]:
                ("C", f"Chart: {plural(len(world.here.connections), 'link')}"),
                ("B", f"Board: {plural(offers, 'offer')}"),
                ("Y", yard), ("S", "Status"), ("T", "Ledger"),
-               ("P", "Concord"), ("W", "Blackwake"), ("N", "Archive"),
+               ("N", "Contacts"),
                ("V", "Viewport"), ("H", "Hall of Fame"), ("G", "Guide"),
                ("O", "Display")]
     # Disembark is not in the grid: the action bar under it always says
@@ -12496,7 +12495,7 @@ def investigate_landmark(world: World) -> list[str]:
     if world.save.flags.get("archive_v1_started"):
         world.save.flags["archive_v1_recovered"] = True
         lines += ["Archive record recovered. Return to Mara at Freeport."] + ARCHIVE_RECORDS[landmark["label"]]
-    else: lines.append("An intact record remains. Mara Venn at Freeport may know its value. [N] Archive Contacts.")
+    else: lines.append("An intact record remains. Mara Venn at Freeport may know its value. [N] Contacts.")
     return lines
 
 
@@ -12598,6 +12597,67 @@ def archive_lines(world: World) -> list[str]:
     lines.append(f"{p.slate}[F] Files: what the sectors' docks have told you, {sum(world.save.tales.values())} of "
                  f"{len(SECTOR_NAMES) * len(SECTOR_STORY_AT)} parts.{RESET}")
     return lines
+
+
+# Contacts (review). The deck listed Concord, Blackwake and the Archive as
+# three services among fourteen, at the same weight as the market and the
+# chart, and a pilot opens each perhaps five times in a career. They are three
+# people, and one entry now: Contacts lists each with the one thing a pilot
+# opens their page to learn -- how far the commission or the Cartel's regard is,
+# what Mara's assignment wants next -- and a key to that page. The deck is
+# twelve services and four rows where it was fourteen and five. The pages
+# themselves are what they were, and [P] and [W] still open theirs from the
+# deck for anyone whose fingers know them.
+CONTACT_KEYS = {"P": "Concord", "W": "Blackwake", "A": "Archive"}
+
+
+def contact_lines(world: World) -> list[str]:
+    """Who has work or standing for the pilot, one row each, and the key to their page."""
+    p = pal()
+    save = world.save
+    rows = []
+    for key, faction in (("P", FACTION_CONCORD), ("W", FACTION_BLACKWAKE)):
+        info = FACTION_MEMBERSHIPS[faction]
+        standing = save.pilot.reputation.get(faction, 0)
+        if getattr(save.pilot, info["field"]):
+            active = faction_perk_active(world, faction)
+            status = f"{p.tone('good' if active else 'bad')}member, perk {'active' if active else 'suspended'}{RESET}"
+        else:
+            enough = standing >= info["threshold"]
+            status = (f"{p.tone('good' if enough else 'label')}{standing} of {info['threshold']} standing"
+                      + (", enough to join" if enough else "") + RESET)
+        rows.append([key_label(key, info["contact"]), f"{p.slate}{FACTION_LABEL[faction]}{RESET}", status])
+    # Short enough that the three rows stay a table at 80 columns: where the
+    # record is and what it wants is on Mara's own page.
+    if archive_finished(world):
+        errand = "assignment complete"
+    elif save.flags.get("archive_v1_recovered"):
+        errand = "record aboard"
+    elif save.flags.get("archive_v1_started"):
+        errand = "record to recover"
+    else:
+        errand = "assignment open"
+    files = f"files {sum(save.tales.values())}/{len(SECTOR_NAMES) * len(SECTOR_STORY_AT)}"
+    rows.append([key_label("A", "Mara Venn"), f"{p.slate}Freeport Archive{RESET}", f"{p.ink}{errand}; {files}{RESET}"])
+    return [f"{p.slate}Who has work or standing for you. Each has a page of their own.{RESET}",
+            section("WHO")] + _option_table(rows)
+
+
+def screen_contacts(p: Palette, world: World) -> None:
+    page = 0
+    footer = "".join(f"[{key}] {name} " for key, name in CONTACT_KEYS.items()) + "[B] Back [<>] Page: "
+    while True:
+        key, page, count = _draw_service_page(p, "Contacts", contact_lines(world), footer, page)
+        if key in ("B", "Q"):
+            return
+        if (moved := page_step(key, page, count)) is not None:
+            page = moved
+        elif key == "P":
+            screen_concord_commission(p, world)
+        elif key == "W":
+            screen_blackwake_made(p, world)
+        elif key == "A":
+            screen_archive(p, world)
 
 
 def screen_sector_files(p: Palette, world: World) -> None:
@@ -16567,7 +16627,7 @@ def pilot_recap(world: World) -> list[str]:
     else:
         lines.append("No contract tracked. Use the Mission Board to inspect and track your jobs.")
     if save.flags.get("archive_v1_started") and not archive_finished(world):
-        lines.append(f"Archive: {archive_objective(world)} [N] Archive Contacts.")
+        lines.append(f"Archive: {archive_objective(world)} [N] Contacts.")
     lines += crew_assignment_recap(world)
     lines += faction_story_recap(world)
     return [_mission_plain(line) for line in lines]
@@ -16624,7 +16684,7 @@ def pilot_guide_lines(world: World) -> list[str]:
              "A jump is a turn: trading, upgrades and browsing cost no time. [B] goes back to the station deck from any screen."]
     if not world.save.pilot.retirements and world.save.turn < max(DECK_SERVICE_DAY.values()):
         lines.append("The deck fills in as you fly: [T] Ledger, [V] Viewport and [H] Hall of Fame after your first jump; "
-                     "[P] Concord, [W] Blackwake and [N] Archive after your third. Their keys answer from the start.")
+                     "[N] Contacts after your third. Their keys answer from the start.")
     lines += pilot_recap(world)
     active = next((m for m in world.save.active_missions if m.opening_assignment), None)
     if active is not None:
@@ -16653,7 +16713,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         "About three systems in five have a market of their own: one good in standing surplus, sold cheap, or in standing shortage, bought dear. The chart shows a ? until you have docked there, and the trait after. Now and then the dock talks: it names a system nearby and says whether it has a glut or is short, never of what, and the chart then reads cheap ? or dear ? for it.",
         "[V] Viewport opens on the atlas: the world outside, and with [N] and [P] every system you have charted, each with what you know of it. [1] is your ship and [3] the last site you found.",
         "Every sector has a story its docks tell, in three parts: the first at your first station there, the rest as "
-        "you dock at more. A sector's whole story puts its markets' reputations on your chart. [N] Archive, [F] Files "
+        "you dock at more. A sector's whole story puts its markets' reputations on your chart. [N] Contacts, Mara's [A] Archive, [F] Files "
         "keeps what you have heard.",
         "Prices have seasons: every legal good swings about an eighth either way over a month or so, the same across a sector. The market marks each price as rising or falling and for how many more days. [X] Futures holds today's price for a fee, and says what the price should be on the day you collect.",
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
@@ -19900,7 +19960,7 @@ def _run_game(info: dict) -> int:
                     screen_dispatch(p, world, save_dir, user_id)
                 continue
             elif choice == "N":
-                screen_archive(p, world)
+                screen_contacts(p, world)
                 continue
             elif choice == "L" and landmark_available_here(world):
                 screen_landmark(p, world)

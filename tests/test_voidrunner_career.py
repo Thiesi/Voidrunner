@@ -716,10 +716,11 @@ def test_screen_blackwake_made_grants_perk_and_bonus_on_confirmation(monkeypatch
 
 
 def test_station_menu_always_offers_faction_contacts(monkeypatch):
-    """Whatever the pilot's standing. A first career's deck brings them on its
-    third day (the staged opening); their keys answer from the first."""
+    """Whatever the pilot's standing. A first career's deck brings Contacts on
+    its third day (the staged opening); the keys answer from the first, and
+    [P] and [W] still open their pages from the deck."""
     world = _world_with_seed(189)
-    assert [key for key in "PW" if key in dict(vr.deck_service_entries(world))] == []
+    assert [key for key in "PWN" if key in dict(vr.deck_service_entries(world))] == []
     monkeypatch.setattr(vr, "read_key", lambda: "P")
     with contextlib.redirect_stdout(io.StringIO()):
         assert vr.screen_station_menu(vr.Palette(truecolor=False), world) == "P"
@@ -729,14 +730,21 @@ def test_station_menu_always_offers_faction_contacts(monkeypatch):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_station_menu(vr.Palette(truecolor=False), world)
-    assert "[P]" in buf.getvalue() and "[W]" in buf.getvalue()
+    assert "Contacts" in buf.getvalue() and "[P]" not in buf.getvalue() and "[W]" not in buf.getvalue()
+    # The page behind it names all three, each with where the pilot stands.
+    page = " ".join(vr._ANSI_RE.sub("", " ".join(vr.contact_lines(world))).split())
+    assert "[P] Commander Edda Ro Concord Navy 0 of 75 standing" in page
+    assert "[W] Broker Rook Talan Blackwake Cartel 0 of 75 standing" in page
+    assert "[A] Mara Venn Freeport Archive assignment open; files 0/18" in page
 
     world.save.pilot.reputation[vr.FACTION_CONCORD] = vr.CONCORD_COMMISSION_THRESHOLD
     world.save.pilot.reputation[vr.FACTION_BLACKWAKE] = vr.BLACKWAKE_MADE_THRESHOLD
     buf2 = io.StringIO()
     with contextlib.redirect_stdout(buf2):
         vr.screen_station_menu(vr.Palette(truecolor=False), world)
-    assert "[P]" in buf2.getvalue() and "[W]" in buf2.getvalue()
+    assert "Contacts" in buf2.getvalue()
+    page = " ".join(vr._ANSI_RE.sub("", " ".join(vr.contact_lines(world))).split())
+    assert page.count("75 of 75 standing, enough to join") == 2
 
 
 def test_retiring_resets_faction_arcs():
@@ -1042,7 +1050,7 @@ def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, te
     assert not missing, missing
 
 
-@pytest.mark.parametrize("commands,site", [(b"N", False), (b"N?><BQ", False), (b"NRBBQ", True), (b"L", True), (b"L><BQ", True)])
+@pytest.mark.parametrize("commands,site", [(b"NA", False), (b"NA?><BBQ", False), (b"NARBBBQ", True), (b"L", True), (b"L><BQ", True)])
 def test_real_archive_and_landmark_browsing_preserve_career_bytes(tmp_path, commands, site):
     import json,os,subprocess
     world = _world_with_seed(42)
@@ -1055,7 +1063,7 @@ def test_real_archive_and_landmark_browsing_preserve_career_bytes(tmp_path, comm
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True, timeout=60,
         env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)))
     assert result.returncode == 0 and not result.stderr
-    assert (b"Archive" if commands.startswith(b"N") else b"Unclaimed salvage") in result.stdout
+    assert (b"ASSIGNMENT" if commands.startswith(b"N") else b"Unclaimed salvage") in result.stdout
     assert (tmp_path / "77.json").read_bytes() == before
 
 
@@ -1073,11 +1081,11 @@ def test_real_archive_actions_save_before_ack_and_cannot_replay(tmp_path, stage,
         world.by_id[world.here.id].discovered = True
     world.save.pilot.highest_rank_seen = len(vr.RANKS) - 1
     world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
-    with _door_stopped_at(tmp_path, b"N" + key, ack):
+    with _door_stopped_at(tmp_path, b"NA" + key, ack):
         saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
         assert saved.flags[flag] is True
     before = (tmp_path / "77.json").read_bytes()
-    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"N" + key + b"BQ", capture_output=True, timeout=60,
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"NA" + key + b"BBQ", capture_output=True, timeout=60,
         env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")))
     assert result.returncode == 0 and not result.stderr
     assert (tmp_path / "77.json").read_bytes() == before

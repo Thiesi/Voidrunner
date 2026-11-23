@@ -441,7 +441,7 @@ def test_screen_station_menu_special_ops_fit_the_standard_page(monkeypatch):
     text = vr._ANSI_RE.sub("", buf.getvalue())
     assert all(vr._visible_width(line) <= 80 for line in text.splitlines())
     assert len(text.splitlines()) <= 24
-    for key in ("[L]", "[D]", "[P]", "[W]"):
+    for key in ("[L]", "[D]", "[N]"):
         assert key in text
 
 
