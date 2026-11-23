@@ -60,3 +60,28 @@ jobs:
             python -m pytest -q -n auto -p no:cacheprovider $files
             echo "::endgroup::"
           done
+
+  # Balance and dead ends only show across many careers: seven careers in 800
+  # were towed home for their whole run before #90, and every unit test passed.
+  # Fifty careers per pilot, a hundred days each; tools/check_careers.py fails on
+  # a career that did not fly, one towed home more than twice, or a pilot whose
+  # median day-100 net worth halved or doubled.
+  career-health:
+    name: Career health
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Fly fifty careers per pilot
+        run: python tools/career_sim.py --seeds 50 --json careers.json
+      - name: Check them
+        run: python tools/check_careers.py careers.json
+      - name: Keep the careers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: careers
+          path: careers.json
+          if-no-files-found: ignore
