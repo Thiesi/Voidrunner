@@ -940,6 +940,45 @@ a record written before achievements existed is left out of it rather than
 counted as a pilot who earned nothing.
 
 
+**Whole careers, flown (review, v1.3).** Each rule the review added was
+measured or bounded on its own, and none of that says what they do together:
+what a trait is worth depends on the hold that carries it, which depends on
+what the contracts paid, which depends on the rank. `tools/career_sim.py` flies
+whole careers through the door's own journeys -- `screen_travel` with its
+encounters, fights, customs and completions, and the market, board, yard and
+stake functions -- with a pilot that presses the keys. There are four: a trader,
+a smuggler, a contractor and an explorer. They are plain on purpose. They see
+one jump ahead and a neighbour's prices whether or not they have docked there,
+keep a bare Shuttle out of the most dangerous harbors, and turn to the board
+when they are broke. `--set NAME=VALUE` changes a constant first, which is how
+one rule is switched off, and `--door` flies an older build with the same
+pilots. A career's luck follows its seed, so a run repeats.
+
+Two hundred careers a pilot, a hundred days each, median net worth on day 100
+(credits, cargo at cost, and what went into upgrades, hulls and stakes):
+
+| | trader | smuggler | contractor | explorer |
+| --- | ---: | ---: | ---: | ---: |
+| v1.2, before the review | 313,000 | 307,000 | 159,000 | 289,000 |
+| v1.3, everything on | 347,000 | 375,000 | 180,000 | 331,000 |
+| without system traits | 340,000 | 370,000 | 157,000 | 316,000 |
+| without the contraband premium | 347,000 | 342,000 | 180,000 | 331,000 |
+| without the rank perks | 347,000 | 375,000 | 215,000 | 330,000 |
+| without stakes | 344,000 | 369,000 | 205,000 | 331,000 |
+| without the dispatch | 333,000 | 364,000 | 161,000 | 316,000 |
+
+What it says. The review's rules together make a career a tenth to a fifth
+richer by day 100, and no one of them is worth more than about an eighth, so
+nothing has run away. Ships lost fall from about one a career to one in two,
+and careers still in a Shuttle on day 100 from one in ten to one in thirty:
+those are pilots who lost a ship with everything in the hold and came home to
+no credits and a quarter of a hull, which is a hard place and was a harder one.
+Smuggling is the best living by about a twelfth, where it was level with honest
+trade. A stake neither makes nor loses a trader money inside a hundred days: it
+is a place to put credits, as intended. And contracts are the slow road: a
+contractor ends with about half a trader's worth in either version, and the
+rank's extra slots made this one poorer, because it took the work.
+
 ## Terminal floor and presentation review
 
 **Voidrunner requires a terminal of at least 40 columns by 12 rows, and has
