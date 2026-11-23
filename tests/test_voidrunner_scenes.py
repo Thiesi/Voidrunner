@@ -21,6 +21,7 @@ import pytest
 
 from .support import (_add_cargo, _finale_world, _world_with_exploration_choice, _world_with_pending_fight,
                       _world_with_seed, vr)
+from .support import strip_prizes
 
 CUP = re.compile(r"\x1b\[(\d+);(\d+)H")
 SIZES = [(40, 12), (59, 17), (80, 24), (132, 50)]
@@ -413,6 +414,7 @@ def test_a_payday_leads_the_caption_and_the_economy_goes_first(width, depth):
 
 
 def test_a_fresh_fight_opens_on_contact_and_a_kill_ends_it(scenes_played, monkeypatch):
+    strip_prizes(monkeypatch)
     world, pirate = _world_with_pending_fight()
     played = scenes_played(world)
     world.save.pending_travel["encounter"] = {}
@@ -429,6 +431,7 @@ def test_a_fresh_fight_opens_on_contact_and_a_kill_ends_it(scenes_played, monkey
 
 
 def test_a_resumed_fight_does_not_announce_its_contact_again(scenes_played, monkeypatch):
+    strip_prizes(monkeypatch)
     world, pirate = _world_with_pending_fight()
     played = scenes_played(world)
     world.save.pending_travel["encounter"]["combat"]["pirate"]["hp"] = 1
