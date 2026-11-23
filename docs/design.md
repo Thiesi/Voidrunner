@@ -1324,6 +1324,37 @@ has always had them; and the column keeps the station, the moored ship and the
 name. A long page covers some of it, as a page always may. The pages a pilot
 lives on -- the deck, the market, a fight -- do not.
 
+**The purser's slate (review).** The wide layout's panel is up to 112 columns
+and the deck's cockpit -- the career row, the gauges, the hull beside them --
+used the left sixty: on the screen a pilot looks at most, the right half of the
+console was blank. It now holds a slate, four rows beside the four the cockpit
+already had, so the deck is no taller:
+
+- `CARGO`: each lot in the hold with what it would bring here against what it
+  cost, dearest first. A lot wholly promised to a contract says so instead of
+  showing a price, and contraband where it cannot be sold says `no sale`.
+- `CHEAP`: what this station sells in the bottom third of the galaxy's range
+  for that good, cheapest first, at its asking price.
+- `PAYS`: what it buys in the top third, at what it pays.
+- `LEAD`: the first of the ledger's ranked runs from here, with its margin.
+
+Every figure is one the pilot can already open a page for -- this market,
+their own hold, the ledger -- so the slate tells nobody anything they could not
+know; it saves the three pages a trader opens at every dock. `CHEAP` and `PAYS`
+use the market's own words and thresholds (`price_standing`), and `LEAD` is
+`trade_opportunities`, kept until the day, the station, the credits or the hold
+change, since the deck is redrawn after every action and a long career's ledger
+is forty markets (about 40 ms to rank). A row shows whole items or none, and
+counts the ones it had no room for.
+
+The slate stands where the hull's silhouette stood. Both do not fit beside the
+gauges, and a terminal with room for the slate has the ship itself in its
+window at many times the size. Beside the slate a full crew reads `all aboard`
+rather than its three roles, which the pips and `3/3` already say. Where the
+panel is 80 columns -- every terminal under 130 -- there is no room for a slate
+worth having (`DECK_SLATE_MIN`), and the deck is the deck it was, silhouette
+and all.
+
 Sixteen colors do not get it, and that was tried (review). Read through
 the scenes' own sixteen-color rule the sky's haze and the galaxy's band become
 solid blue and magenta shapes larger than the world they are behind. With

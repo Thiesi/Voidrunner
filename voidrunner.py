@@ -172,7 +172,7 @@ _GLYPHS = {
     # An instrument line (Thiesi/Voidrunner#30): a heavy reading on a light
     # track, with a half step where the reading ends partway through a cell.
     "bar": ("━", "#"), "bar_half": ("╾", "#"), "bar_track": ("─", "."),
-    "beacon": ("◢", ">"),
+    "beacon": ("◢", ">"), "rule_v": ("│", "|"),
 }
 
 
@@ -11251,7 +11251,7 @@ def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str 
     return None
 
 
-def ship_gauge_rows(world: World, lead: list[str] | None = None) -> list[str]:
+def ship_gauge_rows(world: World, lead: list[str] | None = None, *, bare: bool = False) -> list[str]:
     """The cockpit: four gauges, aligned, with the silhouette beside them.
 
     Gauges first, numbers always. The bars are what the cockpit reads as at a
@@ -11262,6 +11262,10 @@ def ship_gauge_rows(world: World, lead: list[str] | None = None) -> list[str]:
     `lead` is rows the silhouette may stand beside as well, above the gauges:
     the deck hands it the career row, so a four-row hull stands beside four
     rows of readings rather than hanging a blank row under three.
+
+    `bare` is the readings alone, as narrow as they go, for a deck that puts
+    its slate where the silhouette stands: no art, and a full crew is `all
+    aboard` rather than its three roles.
     """
     p = pal()
     ship = world.save.ship
@@ -11278,7 +11282,8 @@ def ship_gauge_rows(world: World, lead: list[str] | None = None) -> list[str]:
         pips = "".join(glyph("crew_on") if role in crew else glyph("crew_off") for role in CREW_ROLES)
         rows.append(["CREW", f"{p.mint}{pips}{RESET}",
                      f"{len(crew)}/{len(CREW_ROLES)}",
-                     ", ".join(CREW_ROLES[role]["label"] for role in crew) or "flying alone"])
+                     "all aboard" if bare and len(crew) == len(CREW_ROLES)
+                     else ", ".join(CREW_ROLES[role]["label"] for role in crew) or "flying alone"])
     if world.save.pilot.notoriety:
         # Scaled against the chance the notoriety actually buys, not against the
         # raw count, which has no ceiling: a full bar means a full patrol risk.
@@ -11297,6 +11302,8 @@ def ship_gauge_rows(world: World, lead: list[str] | None = None) -> list[str]:
                   styles=[["label", "value", "value", condition if number == 0 else "text"]
                           for number in range(len(rows))],
                   optional=(3,))[1:]  # the headers are the gauge labels themselves
+    if bare:
+        return list(lead or []) + drawn
     # Tinted before it is laid in: a row that carries the art is already styled,
     # so raw art would be the one thing on the deck with no role (#493 review).
     return beside(list(lead or []) + drawn,
@@ -11304,6 +11311,131 @@ def ship_gauge_rows(world: World, lead: list[str] | None = None) -> list[str]:
                            "danger" if hull_condition(ship) == "Critical" else
                            "caution" if hull_condition(ship) != "Intact" else "info"),
                   overhang=True)
+
+
+# The purser's slate (review). On a wide terminal the deck's panel is 112
+# columns and its cockpit -- the career row, the gauges and the hull beside
+# them -- uses the left sixty: the right half of the screen a pilot looks at
+# most was empty. It now holds what a trader opens three pages to find out,
+# every time they dock: what the hold would bring here against what it cost,
+# what this station sells cheap, what it pays well for, and the best run the
+# ledger knows from here. Four rows beside the four the cockpit already had, so
+# the deck is no taller. Everything on it is on a page the pilot can open --
+# this market, their own hold, the ledger's leads -- so it shows nothing they
+# could not already know. It stands where the hull's silhouette stood: a
+# terminal with room for the slate has the ship itself in its window, drawn
+# many times the size. At 80 columns there is no room for it, and the deck is
+# the deck it was, silhouette and all.
+DECK_SLATE_MIN = 36   # columns of slate worth having
+DECK_SLATE_GAP = 3
+
+
+def _slate_fit(items: list[tuple[str, str]], room: int, empty: str) -> str:
+    """As many whole items as fit in `room`, three spaces apart, and how many
+    did not; never half an item. Each item is (plain text, styled text)."""
+    p = pal()
+    shown, used = [], 0
+    for index, (text, styled) in enumerate(items):
+        more = len(items) - index - 1
+        tail = len(f"   +{more}") if more else 0
+        need = len(text) + (3 if shown else 0)
+        if used + need + tail > room:
+            break
+        shown.append(styled)
+        used += need
+    if not shown:
+        return f"{p.slate}{empty if not items else f'{len(items)} here'}{RESET}"
+    left = len(items) - len(shown)
+    return "   ".join(shown) + (f"   {p.slate}+{left}{RESET}" if left else "")
+
+
+def deck_leads(world: World) -> list[dict]:
+    """The ledger's ranked leads from here, kept until the day, the station,
+    the credits or the hold change: the deck is drawn after every action and a
+    long career's ledger is forty markets."""
+    save = world.save
+    key = (save.turn, save.current_system, save.pilot.credits, tuple(sorted(save.cargo.items())),
+           len(save.market_memory))
+    cached = getattr(world, "_deck_leads", None)
+    if cached is None or cached[0] != key:
+        cached = world._deck_leads = (key, trade_opportunities(world))
+    return cached[1]
+
+
+def deck_slate_rows(world: World, room: int) -> list[str]:
+    """The slate's four rows, each fitted to `room` columns."""
+    p = pal()
+    here, save = world.here, world.save
+    room -= 7  # the label column
+    cargo, cheap, pays = [], [], []
+    promised = contract_cargo(world)
+    for commodity, quantity in sorted(save.cargo.items(), key=lambda item: -item[1] * COMMODITIES[item[0]]["base"]):
+        label = COMMODITIES[commodity]["label"]
+        if commodity in promised and quantity <= promised[commodity][0]:
+            # Every unit of it is promised: what it would sell for is not the question.
+            cargo.append((f"{quantity} {label} for a contract", f"{p.ink}{quantity} {label}{RESET} {p.gold}for a contract{RESET}"))
+            continue
+        if not COMMODITIES[commodity]["legal"] and here.economy != "Haven":
+            cargo.append((f"{quantity} {label} no sale", f"{p.ink}{quantity} {label}{RESET} {p.tone('danger')}no sale{RESET}"))
+            continue
+        delta = sell_price_for(world, here.id, commodity) * quantity - cargo_cost_preview(world, commodity, quantity)
+        cargo.append((f"{quantity} {label} {delta:+,}",
+                      f"{p.ink}{quantity} {label}{RESET} {p.tone('good' if delta > 0 else 'danger' if delta < 0 else 'label')}"
+                      f"{BOLD}{delta:+,}{RESET}"))
+    quotes = []
+    for commodity, info in COMMODITIES.items():
+        if not info["legal"] and here.economy != "Haven":
+            continue
+        ladder = price_ladder(commodity)
+        quote = price_for(world, here.id, commodity)
+        span = max(1, ladder[-1] - ladder[0])
+        quotes.append(((quote - ladder[0]) / span, commodity, quote, price_standing(quote, ladder)[0]))
+    for _, commodity, quote, word in sorted(quotes):
+        if word == "cheap":
+            cheap.append((f"{COMMODITIES[commodity]['label']} {quote}",
+                          f"{p.ink}{COMMODITIES[commodity]['label']}{RESET} {p.tone('good')}{quote}{RESET}"))
+    for _, commodity, quote, word in sorted(quotes, reverse=True):
+        if word == "dear":
+            sale = sell_price_for(world, here.id, commodity)
+            pays.append((f"{COMMODITIES[commodity]['label']} {sale}",
+                         f"{p.ink}{COMMODITIES[commodity]['label']}{RESET} {p.tone('caution')}{sale}{RESET}"))
+    leads = deck_leads(world)
+    if leads:
+        lead = leads[0]
+        what = f"{lead['quantity']} {COMMODITIES[lead['commodity']]['label']}"
+        where = world.by_id[lead["destination"]].name
+        jumps = plural(len(lead["legs"]), "jump")
+        margin = f"+{lead['margin']:,}"
+        forms = [(f"{what} to {where}, {jumps}", margin), (f"{what} to {where}", margin),
+                 (f"{COMMODITIES[lead['commodity']]['label']} to {where}", margin)]
+        text, margin = next((form for form in forms if len(form[0]) + 2 + len(form[1]) <= room), forms[-1])
+        text = _fit_text(text, max(0, room - 2 - len(margin)))
+        run = f"{p.ink}{text}{RESET}  {gain(margin)}"
+    else:
+        run = f"{p.slate}none the ledger knows yet{RESET}"
+
+    def row(label: str, body: str) -> str:
+        return f"{p.slate}{label:<7}{RESET}{body}"
+
+    return [row("CARGO", _slate_fit(cargo, room, "hold empty")),
+            row("CHEAP", _slate_fit(cheap, room, "nothing under the usual price")),
+            row("PAYS", _slate_fit(pays, room, "nothing over the usual price")),
+            row("LEAD", run)]
+
+
+def deck_with_slate(world: World, cockpit: list[str]) -> list[str] | None:
+    """The cockpit's rows with the slate to their right, or None where the
+    panel has no room for a slate worth having."""
+    p = pal()
+    body = max([_visible_width(row) for row in cockpit] or [0])
+    room = _page_content_width() - body - DECK_SLATE_GAP - 3  # a rule and two spaces
+    if room < DECK_SLATE_MIN:
+        return None
+    slate = deck_slate_rows(world, room)
+    rows = list(cockpit) + [""] * max(0, len(slate) - len(cockpit))
+    rule = f"{p.deep}{glyph('rule_v')}{RESET}"
+    return [f"{_pad(row, body + DECK_SLATE_GAP)}{rule}  {slate[index]}" if index < len(slate) else row
+            for index, row in enumerate(rows)]
 
 
 def _gauge_cells() -> int:
@@ -11559,7 +11691,8 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
     # with the hull beside all of it: no rule between them and no blank row
     # under the gauges, which is two rows of window at 80x24.
     station, career = status_band(world)
-    lines = [station] + ship_gauge_rows(world, lead=[career])
+    lines = [station] + (deck_with_slate(world, ship_gauge_rows(world, lead=[career], bare=True))
+                         or ship_gauge_rows(world, lead=[career]))
     if (wire := deck_wire_row(world)) is not None:
         lines.append(wire)
     alerts = deck_alert_rows(world)
