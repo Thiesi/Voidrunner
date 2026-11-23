@@ -1639,6 +1639,22 @@ how to press Back), and is divided by a rule: a first flight above it, and
 `ONCE YOU HAVE FLOWN A FEW DAYS` below, where the lines about ranks, stakes,
 local markets, a raider's read and the dispatch live.
 
+**The far site (review, v1.3).** A galaxy had one landmark, found by chance or
+on Mara's errand, and once its salvage was claimed exploration had nothing left
+that was a place. The first site's record now carries a bearing to a second:
+another of the four sites, never the same kind as the first, in another sector,
+worth 8,000 where the first is worth 3,000. It is not there to be stumbled on --
+without the bearing a pilot docking in that system finds nothing -- so the first
+find is what opens the second. The bearing is said when the first is
+investigated, stays on the Discovery view until it has been followed, and is a
+destination in the route planner (`Site bearing (x,y)`) whether or not the
+system is charted, as Mara's bearing and a workshop's are. It is deliberately
+not drawn on the star map: known space would stretch to hold it. The second
+site pays its salvage and gives its own record, in the place's words, and there
+is an achievement for following the record there. Its system and kind come from
+the seed through their own generator, as the first's do; what is saved is one
+more flag (`landmark2_investigated`).
+
 **Dockside talk (review, v1.3).** A trait is found by docking, and until then
 the chart says `?` for every system alike, so the only way to look for one was
 to go everywhere. About one docking in three -- fewer once the neighbourhood is

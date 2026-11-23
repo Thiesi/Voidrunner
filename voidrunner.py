@@ -2684,6 +2684,7 @@ class World:
             if sid in self.by_id:
                 self.by_id[sid].discovered = True
         self.landmark: dict = generate_landmark(save.seed, self.galaxy)
+        self.far_site: dict = generate_far_site(save.seed, self.galaxy, self.landmark)
         self.traits: dict[int, dict] = system_traits(save.seed, self.galaxy)
         self.event_rng = random.Random()
         if save.event_rng_state is not None:
@@ -2938,6 +2939,30 @@ def generate_landmark(seed: int, galaxy: list[GalaxySystem]) -> dict:
     system_id = rng.choice(candidates)
     flavor = rng.choice(LANDMARK_FLAVORS)
     return {"system_id": system_id, **flavor}
+
+
+# The far site (review, v1.3). A galaxy had one landmark, found by chance or by
+# Mara's errand, and once its salvage was claimed exploration had nothing left
+# that was a place. The first site's record now carries a bearing to a second:
+# another of the four, in another sector, worth more. It is not there to be
+# stumbled on -- without the bearing a pilot docking in that system finds
+# nothing -- so the first find is what opens the second, and the route planner
+# takes the bearing whether or not the system is charted.
+FAR_SITE_REWARD = 8000
+
+
+def generate_far_site(seed: int, galaxy: list[GalaxySystem], first: dict) -> dict:
+    """The second site of a galaxy: its own `random.Random`, like the first's,
+    so neither the galaxy's nor the event RNG's sequence is touched. Never home,
+    never the first site's system, in another sector where there is one, and
+    never the same kind of place as the first."""
+    rng = random.Random((seed ^ _LANDMARK_SEED_OFFSET) + 0x46415253)  # ASCII "FARS"
+    by_id = {system.id: system for system in galaxy}
+    elsewhere = [s.id for s in galaxy if s.id not in (0, first["system_id"])]
+    sector = sector_for(by_id[first["system_id"]])
+    candidates = [sid for sid in elsewhere if sector_for(by_id[sid]) != sector] or elsewhere
+    flavor = rng.choice([flavor for flavor in LANDMARK_FLAVORS if flavor["label"] != first["label"]])
+    return {"system_id": rng.choice(candidates), **flavor, "reward_credits": FAR_SITE_REWARD}
 
 
 # A purely positional grouping of the galaxy's own 100x50 coordinate
@@ -5246,6 +5271,8 @@ ACCOLADES: tuple[Accolade, ...] = tuple([
                                                   (24, "Pathfinder", "Chart half the galaxy, {n} systems, in one career."),
                                                   (48, "Atlas Complete", "Chart all {n} systems in one career.")), ""),
     Accolade("landmark", "Exploration", "Into the Silence", "Investigate a landmark.", "landmark", tier=2),
+    Accolade("far_site", "Exploration", "Where the Record Led", "Follow a landmark's record to the second site.",
+             "far_site", tier=3),
     *_ladder("kills", "Combat", "kills", ((1, "First Blood", "Win your first fight."),
                                           (10, "Raider Bane", "Win {n} fights."),
                                           (50, "Warden of the Lanes", "Win {n} fights."),
@@ -5364,6 +5391,7 @@ def accolade_metrics(save: SaveData) -> dict[str, int]:
         retirements=pilot.retirements,
         contraband=save.contraband_trade_milestones,
         landmark=int(bool(save.flags.get("landmark_investigated"))),
+        far_site=int(bool(save.flags.get("landmark2_investigated"))),
         concord=int(pilot.has_concord_commission),
         blackwake=int(pilot.has_blackwake_made),
         story_concord=int(stories.get(FACTION_CONCORD, {}).get("stage") == "complete"),
@@ -10853,7 +10881,7 @@ def deck_service_entries(world: World) -> list[tuple[str, str]]:
     day = world.save.turn
     entries = [(key, label) for key, label in entries if deck_service_day(world, key) <= day]
     if landmark_available_here(world):
-        label = world.landmark["label"].removeprefix("the ")
+        label = landmark_here(world)["label"].removeprefix("the ")
         entries.append(("L", label[:1].upper() + label[1:]))
     return entries
 
@@ -11133,9 +11161,47 @@ def screen_display_options(p: Palette, world: World) -> None:
             result, page = f"{label}: {DISPLAY_STYLES[style]}.", 0
 
 
+def far_site_bearing(world: World) -> int | None:
+    """The system the first site's record points to, while that is still worth
+    going to: after the first is investigated and until the second is."""
+    flags = world.save.flags
+    known = flags.get("landmark_investigated") and not flags.get("landmark2_investigated")
+    return world.far_site["system_id"] if known else None
+
+
+def landmark_here(world: World) -> dict | None:
+    """The site with unclaimed salvage at this system, if there is one."""
+    if world.here.id == world.landmark["system_id"] and not world.save.flags.get("landmark_investigated"):
+        return world.landmark
+    if world.here.id == far_site_bearing(world):
+        return world.far_site
+    return None
+
+
 def landmark_available_here(world: World) -> bool:
-    return (world.here.id == world.landmark["system_id"]
-            and not world.save.flags.get("landmark_investigated"))
+    return landmark_here(world) is not None
+
+
+def discovery_site(world: World) -> tuple[dict, bool] | None:
+    """The site the Discovery view shows and whether its salvage is claimed:
+    the one here, else the last one the pilot investigated."""
+    here = landmark_here(world)
+    if here is not None:
+        return here, False
+    if world.save.flags.get("landmark2_investigated"):
+        return world.far_site, True
+    if world.save.flags.get("landmark_investigated"):
+        return world.landmark, True
+    return None
+
+
+def far_site_lead(world: World) -> str | None:
+    """Where the first site's record says to go, for as long as it matters."""
+    bearing = far_site_bearing(world)
+    if bearing is None:
+        return None
+    system = world.by_id[bearing]
+    return f"Its record carries a second bearing: {system.x},{system.y} in {sector_for(system)}. The route planner will take it."
 
 
 def screen_dump_contraband(p: Palette, world: World) -> None:
@@ -11187,12 +11253,17 @@ def archive_destination(world: World) -> int:
 def investigate_landmark(world: World) -> list[str]:
     if world.save.pending_travel is not None: raise ValueError("Finish the current journey first.")
     if not landmark_available_here(world): raise ValueError("This site has no unclaimed salvage here.")
-    landmark = world.landmark
-    world.save.flags["landmark_investigated"] = True
+    landmark = landmark_here(world)
+    far = landmark is world.far_site
+    world.save.flags["landmark2_investigated" if far else "landmark_investigated"] = True
     world.save.pilot.credits += landmark["reward_credits"]
     world.save.pilot.note(f"Investigated {landmark['label']} (+{landmark['reward_credits']}cr)")
     world.save.pilot.highlight(f"Investigated {landmark['label']} (+{landmark['reward_credits']}cr).")
     lines = [f"Salvage recovered: +{landmark['reward_credits']}cr."]
+    if far:
+        # The second site keeps its own record: what happened here, in the place's own words.
+        return lines + [ARCHIVE_RECORDS[landmark["label"]][0]]
+    lines.append(far_site_lead(world))
     if world.save.flags.get("archive_v1_started"):
         world.save.flags["archive_v1_recovered"] = True
         lines += ["Archive record recovered. Return to Mara at Freeport."] + ARCHIVE_RECORDS[landmark["label"]]
@@ -11634,10 +11705,12 @@ def viewport_content(world: World, view: str) -> tuple[list[str],list[str],list[
             if sid==here.id:
                 info=WORKSHOPS[module];details.append(f"Specialist: {info['name']}; {info['owner']}.")
         return art["large"],art["compact"],details,here.economy
-    if world.here.id==world.landmark["system_id"] or world.save.flags.get("landmark_investigated"):
-        art=PORTRAITS["site"][world.landmark["label"]]
-        details=[world.landmark["label"],world.landmark["flavor"],
-                 "Salvage already claimed." if world.save.flags.get("landmark_investigated") else f"Unclaimed salvage: {world.landmark['reward_credits']:,}cr."]
+    if (shown := discovery_site(world)) is not None:
+        site, claimed = shown
+        art=PORTRAITS["site"][site["label"]]
+        details=[site["label"],site["flavor"],
+                 "Salvage already claimed." if claimed else f"Unclaimed salvage: {site['reward_credits']:,}cr."]
+        if far_site_lead(world): details.append(far_site_lead(world))
         return art["large"],art["compact"],details,"Discovery"
     return [],[],["No discovery portrait recorded. Visit a landmark to see its portrait."],"Discovery"
 
@@ -12144,13 +12217,19 @@ def viewport_scene(world: World, view: str, width: int, height: int) -> _Viewpor
                               ("; ", _SCENE_SLATE), (_scene_text(info["owner"]), _VIEWPORT_TEXT)])
         return _ViewportStation(width, height, station=here.station_name, items=items, economy=here.economy,
                                 seed=seed, world=here.name)
-    if here.id == world.landmark["system_id"] or world.save.flags.get("landmark_investigated"):
-        if world.save.flags.get("landmark_investigated"):
+    if (shown := discovery_site(world)) is not None:
+        site, claimed = shown
+        if claimed:
             status = [("Salvage already claimed.", _SCENE_SLATE)]
         else:
-            status = [("Unclaimed salvage: ", _SCENE_SLATE), (f"{world.landmark['reward_credits']:,}cr", _SPLASH_GOLD)]
-        return _ViewportSite(width, height, site=world.landmark["label"], items=[status],
-                             prose=world.landmark["flavor"], seed=seed)
+            status = [("Unclaimed salvage: ", _SCENE_SLATE), (f"{site['reward_credits']:,}cr", _SPLASH_GOLD)]
+        items = [status]
+        if (bearing := far_site_bearing(world)) is not None:
+            far = world.by_id[bearing]
+            items.append([("Second bearing: ", _SCENE_SLATE), (f"{far.x},{far.y}", _SCENE_INK),
+                          (f" in {_scene_text(sector_for(far))}", _SCENE_SLATE)])
+        return _ViewportSite(width, height, site=site["label"], items=items,
+                             prose=site["flavor"], seed=seed)
     return _ViewportSite(width, height, site=None, items=[],
                          prose="No discovery portrait recorded. Visit a landmark to see its portrait.", seed=seed)
 
@@ -12218,11 +12297,13 @@ def screen_landmark(p: Palette, world: World) -> None:
     page, result = 0, []
     while True:
         available = landmark_available_here(world)
-        status = f"Unclaimed salvage: {world.landmark['reward_credits']}cr." if available else "Salvage already claimed or unavailable here."
+        # The site here while its salvage is unclaimed; after, the one just investigated.
+        site = (discovery_site(world) or (world.landmark, True))[0]
+        status = f"Unclaimed salvage: {site['reward_credits']}cr." if available else "Salvage already claimed or unavailable here."
         footer = "[I] Investigate [B] Back [<>] Page: " if available else "[B] Back [<>] Page: "
         large,compact,_,_=viewport_content(world,"3")
-        pages=portrait_pages(p,large,compact,[world.landmark["flavor"]],world.landmark["label"],footer,leading=result + [status])
-        action,page,count=_draw_service_page(p,world.landmark["label"],[],footer,page,pages=pages)
+        pages=portrait_pages(p,large,compact,[site["flavor"]],site["label"],footer,leading=result + [status])
+        action,page,count=_draw_service_page(p,site["label"],[],footer,page,pages=pages)
         if action in ("B", "Q"): return
         if (moved := page_step(action, page, count)) is not None:
             page = moved
@@ -12231,7 +12312,7 @@ def screen_landmark(p: Palette, world: World) -> None:
             result = investigate_landmark(world)
             world.commit()
             play_scene(lambda w, h: _SalvageScene(w, h, hull=world.save.ship.hull_class,
-                                                  credits=world.landmark["reward_credits"], site=world.landmark["label"],
+                                                  credits=site["reward_credits"], site=site["label"],
                                                   seed=_scene_seed(world, "landmark")))
             page = 0
 
@@ -16675,7 +16756,9 @@ def prepare_route_jump(world: World, destination: int) -> int:
     archive_bearing = world.save.flags.get("archive_v1_started") and destination == world.landmark["system_id"]
     workshop_bearing = destination in specialist_stations(world).values()
     case_bearing = destination in faction_story_bearings(world)
-    if not world.by_id[destination].discovered and not archive_bearing and not workshop_bearing and not case_bearing:
+    site_bearing = destination == far_site_bearing(world)
+    if (not world.by_id[destination].discovered and not archive_bearing and not workshop_bearing
+            and not case_bearing and not site_bearing):
         raise MissionError("Choose a charted destination first.")
     if world.save.pending_travel is not None:
         raise MissionError("Finish the interrupted journey first.")
@@ -16797,14 +16880,24 @@ def navigation_route_lines(world: World, destination: int | None) -> list[str]:
     return lines
 
 
+def route_choices(world: World) -> list[tuple[int, str]]:
+    """Where the route planner can be pointed: every charted system but this
+    one, by name, and the far site's bearing while a record has given it."""
+    choices = sorted(((station.id, station.name) for station in world.galaxy
+                      if station.discovered and station.id != world.here.id), key=lambda item: item[1])
+    bearing = far_site_bearing(world)
+    if bearing is not None and bearing != world.here.id and not world.by_id[bearing].discovered:
+        far = world.by_id[bearing]
+        choices.append((bearing, f"Site bearing ({far.x},{far.y})"))
+    return choices
+
+
 def screen_auto_route(p: Palette, world: World, *, destination: int | None = None) -> None:
     """Screen-first route planner; each deliberate command flies one ordinary hop."""
     page, result, pages, flown = 0, None, None, False
     if destination is None:
         # Nothing to plan without a destination: open the picker at once; Back leaves.
-        choices = sorted(((station.id, station.name) for station in world.galaxy
-                          if station.discovered and station.id != world.here.id), key=lambda item: item[1])
-        destination = _pick_trade_field("Charted Destination", choices)
+        destination = _pick_trade_field("Charted Destination", route_choices(world))
         if destination is None:
             return
     while True:
@@ -16825,9 +16918,7 @@ def screen_auto_route(p: Palette, world: World, *, destination: int | None = Non
         if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
             page = moved
         elif key == "D":
-            choices = sorted(((station.id, station.name) for station in world.galaxy
-                              if station.discovered and station.id != world.here.id), key=lambda item: item[1])
-            selected = _pick_trade_field("Charted Destination", choices)
+            selected = _pick_trade_field("Charted Destination", route_choices(world))
             if selected is not None:
                 destination, result, page, pages = selected, None, 0, None
         elif key == "V":
