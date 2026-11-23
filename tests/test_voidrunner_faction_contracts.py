@@ -3,7 +3,7 @@
 Membership gave a perk and a story and then nothing. These pin the work a
 faction now posts: who sees it and where, what a warrant and a run are, what
 each pays in standing and what it does not, that the board's ordinary offers
-are untouched, and that a faction's contract is an ordinary one in a save.
+are untouched, and that whose work a contract is is a field a save keeps.
 """
 
 from __future__ import annotations
@@ -139,7 +139,8 @@ def test_a_warrant_served_on_the_right_ship_is_worth_standing(monkeypatch, warra
     target = sorted(world.here.connections)[0]
     tag = vr.FACTION_CONTRACT_TAGS[vr.FACTION_CONCORD] if warrant else ""
     bounty = vr.Mission(id=5, kind="bounty", description=f"{tag}hunt down a raider reported near X", reward=1100,
-                        origin_system=0, target_system=target, pirate_tier=1, deadline_turn=40)
+                        origin_system=0, target_system=target, pirate_tier=1, deadline_turn=40,
+                        faction=vr.FACTION_CONCORD if warrant else None)
     world.save.active_missions = [bounty]
     world.save.pilot.credits = 5_000
     monkeypatch.setattr(vr, "screen_combat", lambda p, w, pirate: "won")
@@ -162,7 +163,7 @@ def test_the_contracts_sheet_and_the_factions_screen_say_what_the_work_is_worth(
     assert f"+{vr.FACTION_CONTRACT_STANDING} for a warrant the Navy posts for its own" in vr.faction_standing_route(vr.FACTION_CONCORD)
 
 
-def test_a_factions_contract_is_an_ordinary_one_in_a_save_that_still_loads():
+def test_whose_work_a_contract_is_is_a_field_a_save_keeps():
     world = _member(_charted(), vr.FACTION_CONCORD)
     day = next(day for day in range(0, 40) if _offers(world, vr.FACTION_CONCORD, [day]))
     world.save.turn = day
@@ -170,5 +171,4 @@ def test_a_factions_contract_is_an_ordinary_one_in_a_save_that_still_loads():
     warrant = next(m for m in posted if vr.faction_contract(m) == vr.FACTION_CONCORD)
     vr.accept_mission(world, warrant)
     again = vr.SaveData.from_dict(world.save.to_dict())
-    assert [m.description for m in again.active_missions] == [warrant.description]
-    assert set(warrant.to_dict()) <= {field.name for field in vr.dataclasses.fields(vr.Mission)}
+    assert again.active_missions == [warrant] and warrant.to_dict()["faction"] == vr.FACTION_CONCORD
