@@ -3160,10 +3160,12 @@ def test_new_fights_use_the_current_ruleset_and_cached_fights_keep_their_curve()
     tactics = vr.new_tactics(pirate)
     # Version 3 (issue #647) is version 2's damage with a way out of a fight the
     # ship cannot win, and version 4 is version 3's with a contact that may jump
-    # its pattern; the curve #406 settled is unchanged through both.
-    assert tactics["version"] == 4 and vr.tactical_threat_bonus(tactics) == (0, 3, 6, 8, 34)
+    # its pattern, and version 5 is version 4's with the crew at stations; the
+    # curve #406 settled is unchanged through all three.
+    assert tactics["version"] == 5 and vr.tactical_threat_bonus(tactics) == (0, 3, 6, 8, 34)
     assert vr.tactical_threat_bonus({"version": 2}) == vr.tactical_threat_bonus({"version": 3})
     assert vr.tactical_threat_bonus({"version": 3}) == vr.tactical_threat_bonus({"version": 4})
+    assert vr.tactical_threat_bonus({"version": 4}) == vr.tactical_threat_bonus({"version": 5})
     assert vr.tactical_threat_bonus({"version": 1}) == (0, 3, 6, 20, 55)
     ship = world.save.ship
     v1 = vr._tactical_incoming_damage(ship, 3, "volley", 9, {"version": 1})
@@ -3177,7 +3179,10 @@ def test_every_tactical_version_loads_and_others_are_unsupported():
     for version in (2, 3, 4):
         world.save.pending_travel["encounter"]["combat"]["tactics"]["version"] = version
         vr.SaveData.from_dict(world.save.to_dict())
-    world.save.pending_travel["encounter"]["combat"]["tactics"]["version"] = 5
+    # Ruleset 5 keeps which crew stations a fight has used, and a fight under it must say so.
+    world.save.pending_travel["encounter"]["combat"]["tactics"].update(version=5, spent="")
+    vr.SaveData.from_dict(world.save.to_dict())
+    world.save.pending_travel["encounter"]["combat"]["tactics"]["version"] = 6
     with pytest.raises(vr.UnsupportedSave): vr.SaveData.from_dict(world.save.to_dict())
 
 

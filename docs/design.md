@@ -1652,6 +1652,32 @@ how to press Back), and is divided by a rule: a first flight above it, and
 `ONCE YOU HAVE FLOWN A FEW DAYS` below, where the lines about ranks, stakes,
 local markets, a raider's read and the dispatch live.
 
+**The crew take stations (tactical ruleset 5).** A fight was one resource and
+two verbs -- Guard the volley, Fire the rest -- and a specialist was three
+points of damage or nothing at all. Each specialist aboard now has a station,
+used once a fight, and when to spend it is the fight's other question. The
+gunner's Called shot is a Fire at half as much again that cover and harrying
+cannot blunt: best into a recovery, or held to finish. The engineer's Mend
+gives back a quarter of the hull for the turn's shot, with the contact still
+firing: best while it recovers, worst into a volley. The navigator's Slip is a
+Fire at full strength that the contact's own move only grazes, a quarter of it
+landing: it wants spending on the volley, and a contact that jumps its pattern
+can make a pilot spend it on a recovery instead, which is what a better read
+is worth. The panel has a row for each station still to hand, quoting what it
+deals and takes like every other option, and the exchange names who did it.
+A ship without crew fights exchange for exchange as it did, and a fight begun
+under ruleset 4 keeps that ruleset to its end. What a fight has spent is in
+its saved state (`tactics["spent"]`).
+
+The sizes are from fights flown with the door's own functions and a sensible
+pilot at the keys. A starting Shuttle against tier 3 wins 56 in 100 alone, 98
+with a gunner and 96 with a navigator. A Shuttle with one tier of weapons,
+shields and hull against tier 4 wins 19 alone, 64 with a gunner, 57 with a
+navigator and 97 with all three aboard, losing over half its hull doing it. At
+double strength and a clean miss the same full crew won every time and lost a
+third, and tier 4 has to stay a fight. Whole careers do not move: ships are
+lost in a career's first days, before there is a crew to lose them with.
+
 **Faction contracts (review, v1.3).** Joining a faction gave a perk and a
 story, and after the story nothing: membership never again put anything in
 front of a pilot. A member in good standing -- the same test the perk uses --
