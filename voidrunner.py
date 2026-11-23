@@ -3163,6 +3163,73 @@ def trait_sentence(trait: dict) -> str:
     return f"a standing shortage of {label}, bought about {round((TRAIT_PRICE['shortage'] - 1) * 100)}% over its usual price"
 
 
+# Dockside talk (review, v1.3). A trait is found by docking, and until then the
+# chart says `?` for every system alike, so the only way to look for one was to
+# go everywhere. About one docking in three, somebody on the dock now says
+# where one is: a system one jump out, or two by way of a charted one, that
+# the pilot has not docked at, and whether it has too much of something or too
+# little -- never what. The talk is always true. It is written on the chart,
+# where that system's MARKET says `cheap ?` or `dear ?` until the pilot has
+# been and seen. Who is talking depends on the station; which docking, and
+# which system, follow from the seed and the day and draw nothing from the
+# event RNG. What is heard is kept as a flag, so older builds load the save.
+RUMOUR_ONE_IN = 3
+RUMOUR_VOICES: dict[str, tuple[str, str]] = {
+    "Agricultural": ("A grain factor says", "Talk at the scales:"),
+    "Industrial": ("A foreman swears", "Word on the gantry:"),
+    "Mining": ("An ore pilot says", "Chalked on the assay door:"),
+    "Tech": ("A broker's feed, half heard:", "A courier says"),
+    "Haven": ("Somebody who should not know says", "Paid for with a drink:"),
+}
+RUMOUR_WHAT = {"surplus": "has a glut of something", "shortage": "is short of something"}
+
+
+def rumoured_trait(world: World, system_id: int) -> str | None:
+    """`surplus` or `shortage` for a system the pilot has heard about and not
+    yet docked at; None otherwise. The good is not part of what was heard."""
+    if not world.save.flags.get(f"rumour_{system_id}") or system_visited(world, system_id):
+        return None
+    trait = world.traits.get(system_id)
+    return trait["kind"] if trait else None
+
+
+def rumour_candidates(world: World) -> list[tuple[int, int | None]]:
+    """Systems the dock could talk about, nearest first, each with the charted
+    system it is reached by way of (None for the next jump out)."""
+    here = world.here
+
+    def fresh(system_id: int) -> bool:
+        return (system_id != here.id and system_id in world.traits and not system_visited(world, system_id)
+                and not world.save.flags.get(f"rumour_{system_id}"))
+
+    found: dict[int, int | None] = {sid: None for sid in sorted(here.connections) if fresh(sid)}
+    for first in sorted(here.connections):
+        if world.by_id[first].discovered:
+            for second in sorted(world.by_id[first].connections):
+                if fresh(second) and second not in found:
+                    found[second] = first
+    return sorted(found.items(), key=lambda item: (item[1] is not None, item[0]))
+
+
+def dock_rumour(world: World) -> str | None:
+    """What the dock says on this arrival, if anything, and note it on the chart."""
+    here, day = world.here, world.save.turn
+    if zlib.crc32(f"rumour:{world.save.seed}:{day}:{here.id}".encode("utf-8")) % RUMOUR_ONE_IN:
+        return None
+    candidates = rumour_candidates(world)
+    if not candidates:
+        return None
+    nearest = [item for item in candidates if (item[1] is None) == (candidates[0][1] is None)]
+    system_id, via = nearest[zlib.crc32(f"rumour-pick:{world.save.seed}:{day}".encode("utf-8")) % len(nearest)]
+    system = world.by_id[system_id]
+    name = system.name if system.discovered else f"the bearing at {system.x},{system.y}"
+    where = "the next jump out" if via is None else f"two jumps out via {world.by_id[via].name}"
+    voices = RUMOUR_VOICES[here.economy]
+    voice = voices[zlib.crc32(f"rumour-voice:{world.save.seed}:{day}".encode("utf-8")) % len(voices)]
+    world.save.flags[f"rumour_{system_id}"] = True
+    return f"{voice} {name}, {where}, {RUMOUR_WHAT[world.traits[system_id]['kind']]}."
+
+
 def _market_rest(world: World, system_id: int, commodity: str) -> float:
     """The drift a quote rests at with the pilot's own trading taken out of it:
     1.0, or the level an active economy event holds this station at."""
@@ -15054,7 +15121,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         # days after it, and says so: the guide was one undivided run of rules.
         section("ONCE YOU HAVE FLOWN A FEW DAYS"),
         "Danger is a risk rating, not a guarantee you can win a fight. Evasion can fail; bribes cost credits and can be refused. Read the encounter choices before acting.",
-        "About three systems in five have a market of their own: one good in standing surplus, sold cheap, or in standing shortage, bought dear. The chart shows a ? until you have docked there, and the trait after.",
+        "About three systems in five have a market of their own: one good in standing surplus, sold cheap, or in standing shortage, bought dear. The chart shows a ? until you have docked there, and the trait after. Now and then the dock talks: it names a system nearby and says whether it has a glut or is short, never of what, and the chart then reads cheap ? or dear ? for it.",
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
         "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
         "Ranks are kept once reached, and each brings something: a fourth contract slot at Independent Trader, half as much again on every contract at Merchant Captain, a fifth slot at Void Baron and double pay at Legend of the Frontier.",
@@ -16079,9 +16146,10 @@ def chart_entries(world: World) -> list[tuple[int | None, str]]:
         # What the market there is known for: its trait once the pilot has
         # docked, nothing if it has none, and a question mark until then --
         # which is the one column on the chart that says "go and look".
-        trait = known_trait(world, sid)
+        trait, heard = known_trait(world, sid), rumoured_trait(world, sid)
         market = (f"{p.tone('good' if trait['kind'] == 'surplus' else 'caution')}{trait_label(trait)}{RESET}" if trait
-                  else "" if system_visited(world, sid) else f"{p.slate}?{RESET}")
+                  else f"{p.tone('good' if heard == 'surplus' else 'caution')}{'cheap' if heard == 'surplus' else 'dear'} ?{RESET}"
+                  if heard else "" if system_visited(world, sid) else f"{p.slate}?{RESET}")
         rows.append([
             dest.name if dest.discovered else "Uncharted Bearing",
             f"{dest.x},{dest.y}",
@@ -17239,6 +17307,9 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
             voice = crew_voice(world, new_system=not travel["was_discovered"], kills_before=world.hop_kills)
             if voice:
                 lines.append(voice)
+            rumour = dock_rumour(world)
+            if rumour:
+                lines.append(rumour)
             if has_contraband(world) and dest.economy != "Haven":
                 chance = customs_risk_for(world, dest)
                 inspect = world.event_rng.random() < chance
