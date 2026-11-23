@@ -1639,6 +1639,24 @@ how to press Back), and is divided by a rule: a first flight above it, and
 `ONCE YOU HAVE FLOWN A FEW DAYS` below, where the lines about ranks, stakes,
 local markets, a raider's read and the dispatch live.
 
+**Faction contracts (review, v1.3).** Joining a faction gave a perk and a
+story, and after the story nothing: membership never again put anything in
+front of a pilot. A member in good standing -- the same test the perk uses --
+now finds the faction's own work on about one board in two. The Concord Navy
+posts a warrant wherever its writ runs, which is every station but a Haven: a
+bounty at the usual pay, on a raider of at least tier 1 near a charted system
+within three jumps, worth 3 Concord standing when the ship destroyed is the
+right one. An ordinary bounty is worth none, and a wrong kill still costs what
+it always did. The Blackwake Cartel posts a run at a Haven, where its goods are
+sold: contraband to a station that is not a Haven, two to four jumps out, for
+half as much again as a delivery of that value, and 3 Blackwake standing. A run
+earns nothing with Concord, where every other contract earns 1. The goods are
+handed over before the far station's customs look, so it is the harbors on the
+way that make it a run, which is why it is never the next jump out. A faction's
+offer comes from its own draw and takes a full board's last place; it is known
+by how its description begins (`Concord warrant:`, `Cartel run:`), and never
+starts a chain. No contract gains a field.
+
 **Contract chains (review, v1.3).** Every contract was a single errand: taken,
 flown, paid, forgotten, and the next had nothing to do with it. One delivery in
 three is now the first of three. On the dock where it is handed over the client
