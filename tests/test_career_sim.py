@@ -41,7 +41,7 @@ def test_a_career_flies_the_same_way_twice(sim):
     assert set(first["marks"]) == {10, 20} and first["marks"][20]["worth"] > 1_200  # it traded up from the start
 
 
-@pytest.mark.parametrize("kind", ["trader", "smuggler", "contractor", "explorer"])
+@pytest.mark.parametrize("kind", ["trader", "smuggler", "contractor", "explorer", "careful"])
 def test_every_pilot_answers_every_prompt_a_month_of_journeys_raises(sim, kind):
     for seed in (1001, 1007, 1014):
         career = _fly(sim, kind, seed, days=30)
@@ -125,7 +125,7 @@ def test_the_career_check_fails_a_rule_that_halves_or_doubles_a_career(check, fa
 
 def test_the_career_check_lets_ordinary_tuning_through(check):
     careers = [_career(pilot, baseline * factor)
-               for (pilot, baseline), factor in zip(check.BASELINE.items(), (0.8, 1.2, 0.9, 1.3))]
+               for (pilot, baseline), factor in zip(check.BASELINE.items(), (0.8, 1.2, 0.9, 1.3, 1.1), strict=True)]
     assert check.problems(careers) == []
 
 
@@ -135,7 +135,8 @@ def test_the_career_check_reads_a_simulated_career(sim, check):
     found = check.problems([career], mark=10)
     assert found[:3] == [f"{pilot}: no careers flown" for pilot in ("trader", "smuggler", "contractor")]
     # Day 10 is far below the day-100 band, which says the worth was read.
-    assert len(found) == 4 and found[3].startswith("explorer: median day-10 net worth ")
+    assert len(found) == 5 and found[3].startswith("explorer: median day-10 net worth ")
+    assert found[4] == "careful: no careers flown"
 
 
 def test_the_summary_says_when_each_milestone_is_first_reached(sim):
@@ -164,3 +165,28 @@ def test_jumps_per_real_day_turn_the_dispatch_over_and_translate_the_days(sim):
     assert "At 4 jumps a real day these 40 days are 10.0 real days." in sim.summarize([slow], 40)[-1]
     # Left out, a job flies at the module's own figure, as every older caller of fly_one does.
     assert sim.fly_one((DOOR, "trader", 1003, 10, {}, True, True))["jumps_per_day"] == sim.JUMPS_PER_REAL_DAY
+
+
+def test_every_pilot_has_a_baseline_the_career_check_holds_it_to(sim, check):
+    assert set(check.BASELINE) == set(sim.PILOTS)
+
+
+def test_the_careful_pilot_leaves_a_lane_that_has_run_dry(sim):
+    """A plain pilot shuttles between two drained markets for good; the careful
+    one sets out for a station it has not seen lately, and gets somewhere."""
+    career = sim.fly_one((DOOR, "careful", 1173, 60, {}, True, True))
+    plain = sim.fly_one((DOOR, "smuggler", 1173, 60, {}, True, True))
+    assert career["roamed"] >= 1 and plain["roamed"] == 0
+    assert career["outcome"] == "flew" and career["hull"] != "Shuttle" and plain["hull"] == "Shuttle"
+    assert career["marks"][60]["worth"] > 5 * plain["marks"][60]["worth"]
+
+
+def test_a_leg_between_two_stations_is_the_plan_from_the_dock(sim):
+    """The careful pilot prices the leg after next with the rule every pilot plans the next with."""
+    vr = sim.load_door(DOOR)
+    pilot = sim.Pilot(vr, "careful", 1003)
+    world = pilot.world
+    room = vr.cargo_capacity(world.save.ship)
+    for sid in world.here.connections:
+        dest = world.by_id[sid]
+        assert pilot.plan(dest) == pilot.leg(world.here, dest, room, world.save.pilot.credits)
