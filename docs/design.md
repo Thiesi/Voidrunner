@@ -1695,6 +1695,31 @@ from the seed and the day, so the encounter's own draws are what they were. The
 scores are a field of the save (`rivals`), absent until there is one, and a new
 career starts with none.
 
+**Dock work (review).** Losing a ship was never a dead end, and for a few
+careers it was the next thing to it. The tug takes its fee out of whatever is
+on hand, so a pilot wakes at Freeport with nothing, a quarter of a hull and an
+empty hold. Trading wants capital and a delivery wants its goods bought; what
+is left is to fly the quarter-hull out for a survey or a bounty, lose it, and
+wake at Freeport with nothing. Flown through the simulator, seven careers in
+eight hundred were in that loop for most of their hundred days, towed home
+twenty-six to fifty-six times each. Freeport's foreman now has a shift for any pilot there
+with less than 600cr, the price of a Shuttle's hold: `[F]` on the deck, named
+by an alert while it is open. A shift costs the day -- contracts run down,
+prices and seasons move, the crew is not charged -- and gives three things:
+200cr, a hull patched to half by the yard hands (never past it), and what the
+dockers were saying, which is a rumour whenever there is one left to tell.
+Three shifts are a hold of cargo, a ship that can take a hit and a lead on
+where to carry it. It is a floor and not a wage: a Shuttle's ordinary day of
+trading pays several times as much and a day is the one thing a door game
+rations, so nobody who can fly does this instead; and it closes the moment a
+pilot can trade. With the simulator's pilots taking the shift when they have
+nothing, no career is towed home at all, every trader and explorer ends in a
+Carrier, ships lost per career fall from 0.59 to 0.51, about one career in ten works the docks at
+some point, and none works them more than seven times. The wreck's own message
+says where the work is when it leaves a pilot under the line, the guide has a
+line for it, and a first shift is a hidden achievement. Nothing is added to
+the save but the counter that achievement reads.
+
 **The crew take stations (tactical ruleset 5).** A fight was one resource and
 two verbs -- Guard the volley, Fire the rest -- and a specialist was three
 points of damage or nothing at all. Each specialist aboard now has a station,
