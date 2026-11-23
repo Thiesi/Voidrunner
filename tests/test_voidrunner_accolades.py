@@ -17,6 +17,7 @@ import pytest
 
 from .support import (_add_cargo, _finale_world, _world_with_exploration_choice, _world_with_pending_fight,
                       _world_with_seed, plain, vr)
+from .support import strip_prizes
 
 
 def unlocked(save) -> set[str]:
@@ -179,6 +180,7 @@ def test_a_newer_record_version_belongs_to_a_newer_build():
 # --- What only a counter can know -------------------------------------------------
 
 def _fight_won_in_one_shot(monkeypatch, world, pirate):
+    strip_prizes(monkeypatch)
     world.save.pending_travel["encounter"]["combat"]["pirate"]["hp"] = 1
     monkeypatch.setattr(vr, "read_key", lambda: "F")
     with contextlib.redirect_stdout(io.StringIO()):

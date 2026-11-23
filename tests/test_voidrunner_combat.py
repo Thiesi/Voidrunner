@@ -13,6 +13,7 @@ import random
 import pytest
 
 from .support import RESUME, plain, plain as plainly, _add_cargo, _box_rows, _door_stopped_at, _mission_details_world, _set_cargo, _world_at_food_producer, _world_with_exploration_choice, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
+from .support import strip_prizes
 
 
 def test_fire_damages_both_sides_and_is_driven_by_world_event_rng():
@@ -145,6 +146,7 @@ def test_destroy_ship_clears_cargo_and_returns_player_to_freeport_with_full_hull
 
 @pytest.mark.parametrize("commands", [b"CAYF", b"CRJF", b"CGD1JF"])
 def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkeypatch, commands):
+    strip_prizes(monkeypatch)
     import json
 
     world = _world_with_seed(42)
@@ -328,6 +330,7 @@ def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch,
 
 @pytest.mark.parametrize("patrol", [False, True])
 def test_combat_telemetry_browsing_does_not_change_fight_result(monkeypatch, patrol):
+    strip_prizes(monkeypatch)
     worlds = [_world_with_seed(42), _world_with_seed(42)]
     results = []
     for index, world in enumerate(worlds):
@@ -583,6 +586,7 @@ def test_bounty_identification_risk_is_visible_and_paging_is_read_only(monkeypat
 
 @pytest.mark.parametrize("matches,commands", [(False, "VR"), (False, "W"), (True, "VF"), (False, "VF"), (False, "F")])
 def test_bounty_identification_choices_resolve_contract_with_explicit_consequences(monkeypatch, matches, commands):
+    strip_prizes(monkeypatch)
     world, pirate, warrant = _world_with_bounty_warrant(matches=matches)
     world.save.ship.hull_class = "Carrier"; world.save.ship.hull_hp = vr.hull_hp_max(world.save.ship)
     world.save.ship.weapon_tier = 4; world.save.ship.has_gunner = True
@@ -685,6 +689,7 @@ def test_bounty_verification_and_report_survive_real_kills_without_duplicate_eff
 
 
 def test_preexisting_bounty_target_has_no_new_controls_or_undisclosed_penalty(monkeypatch):
+    strip_prizes(monkeypatch)
     world, pirate = _world_with_pending_fight()
     world.save.pending_travel["encounter"]["pirate"] = vr.dataclasses.asdict(pirate)
     world.save.ship.hull_class = "Carrier"; world.save.ship.hull_hp = vr.hull_hp_max(world.save.ship)
@@ -870,6 +875,7 @@ def test_target_switch_survives_real_disconnect_before_acknowledgement(tmp_path)
 def _squadron_damage(monkeypatch, lead: str) -> list[int]:
     """Hull lost over 32 seeded fights against a tier-4 `lead` and its tier-2
     partner, fire only: [the lead first, the partner first]."""
+    strip_prizes(monkeypatch)
     damage = []
     for switch in (False, True):
         total = 0
@@ -951,9 +957,11 @@ def test_review_combat_low_hull_warning_does_not_invent_one_hit_risk(hull):
 def test_review_combat_kill_terms_name_both_factions_and_notoriety(patrol):
     world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 2, 50, 50)
     lines = " ".join(vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True, tactics=vr.new_tactics(pirate)))
-    assert ("Concord -10" if patrol else "Concord +2") in lines
-    assert ("Blackwake +3" if patrol else "Blackwake -1") in lines
-    if patrol: assert "notoriety +3" in lines
+    if patrol:
+        assert "Concord -10" in lines and "Blackwake +3" in lines and "notoriety +3" in lines
+    else:
+        # A beaten raider is a choice now; what each choice is worth is on the page that asks.
+        assert "strip it, take its cargo, hand it to the Navy or let it limp home" in " ".join(lines.split())
 
 
 @pytest.mark.parametrize("cargo", [0, 1])
@@ -1029,6 +1037,7 @@ def test_bounty_combat_risk_terms_match_identification_state_without_rng(identit
 
 
 def test_personal_gunner_task_counts_actual_combat_once_after_reload(monkeypatch, tmp_path):
+    strip_prizes(monkeypatch)
     world, pirate = _world_with_pending_fight()
     pending = world.save.pending_travel; world.save.pending_travel = None
     world.save.pilot.credits = 100000
@@ -1047,6 +1056,7 @@ def test_personal_gunner_task_counts_actual_combat_once_after_reload(monkeypatch
 
 @pytest.mark.parametrize("standing", [-53, -52, -51, -50, -49])
 def test_faction_commission_uses_actual_post_combat_standing_at_bounty_payout(monkeypatch, tmp_path, standing):
+    strip_prizes(monkeypatch)
     world, pirate = _world_with_pending_fight()
     world.save.pilot.has_concord_commission = True; world.save.pilot.reputation[vr.FACTION_CONCORD] = standing
     pirate.hp = 1
