@@ -207,12 +207,14 @@ class Walk:
 
     # --- a journey ---------------------------------------------------------------
 
-    def fly(self, destination: str, day: int, *, or_first: bool = False) -> None:
+    def fly(self, destination: str | None, day: int, *, or_first: bool = False) -> None:
         """Chart, the destination's letter, yes, and a key per page until the
-        next day's deck, wherever the journey ended."""
+        next day's deck, wherever the journey ended. No destination, or one
+        not listed with `or_first`, is the first station the chart lists."""
         self.press("C", "Chart")
         self.expect("Navigation")
-        if or_first and not re.search(r"\[[A-Z]\]\s+" + re.escape(destination) + r"\b", self.text()):
+        if destination is None or (
+                or_first and not re.search(r"\[[A-Z]\]\s+" + re.escape(destination) + r"\b", self.text())):
             first = re.search(r"\[([A-Z])\]\s+([A-Z][\w' ]*?)\s{2}", self.text().split("DEPARTURES", 1)[-1])
             if not first:
                 self.fail("the chart lists no departure")
@@ -239,6 +241,10 @@ class Walk:
         for _ in range(turned):
             self.press("<", "the deck's previous page")
         for key in sorted(services - {"Q", "X", "<", ">"}):
+            # A deck that a busy arrival pushed onto two pages offers its
+            # services on page two; turn to it, as a caller would.
+            while key not in _advertised(self.rows()) and (self.page() or (1, 1))[0] < (self.page() or (1, 1))[1]:
+                self.press(">", "the deck's next page")
             self.press(key, f"deck [{key}]")
             if "Command Deck" in self.title():
                 self.fail(f"the deck's [{key}] drew the deck again")
@@ -302,7 +308,6 @@ def test_a_new_career_plays_its_first_days_on_square_screens(gallery, tmp_path, 
         walk.expect("Yard")
         walk.press("B", "back to the deck")
         walk.deck_is_one_page(1)
-        walk.every_service_and_back()
 
         # Day two, home to Freeport -- or, for a career towed there already,
         # to the first station the chart lists.
@@ -312,6 +317,24 @@ def test_a_new_career_plays_its_first_days_on_square_screens(gallery, tmp_path, 
         walk.door.kill()
     if walk.known:
         pytest.xfail("; ".join(walk.known))
+
+
+def test_every_service_on_the_day_one_deck_opens_and_comes_back(gallery, tmp_path):
+    """Every key the deck offers after the first jump -- the Ledger, the
+    Viewport and the Hall join it then -- opens a screen of its own, square at
+    80x24, and Back comes home from it.
+
+    Its own career rather than a stop on the walk above, so that the two run
+    side by side on a parallel suite instead of one after the other."""
+    walk = Walk(gallery, tmp_path, 80, 24)
+    try:
+        walk.start()
+        walk.press("\r", "callsign", advertised=False)
+        walk.press("Y", "launch")
+        walk.fly(None, 1)
+        walk.every_service_and_back()
+    finally:
+        walk.door.kill()
 
 
 @pytest.mark.parametrize(("bar", "key"), [
