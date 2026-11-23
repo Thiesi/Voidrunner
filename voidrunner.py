@@ -2089,7 +2089,7 @@ def _load_pending_travel(value: dict | None) -> dict | None:
             raise ValueError("invalid inspection")
         if "done" in state and not isinstance(state["done"], bool):
             raise ValueError("invalid completion")
-        if "kind" in state and state["kind"] not in ("none", "pirate", "derelict", "distress", "tip"):
+        if "kind" in state and state["kind"] not in ("none", "pirate", "derelict", "distress", "tip", "waved"):
             raise ValueError("invalid encounter")
         pirates = []
         if "pirates" in state:
@@ -2105,7 +2105,9 @@ def _load_pending_travel(value: dict | None) -> dict | None:
                 pirates.append(state[key])
         if "combat" in state:
             combat = state["combat"]
-            _reject_unknown_save_fields(combat, {"pirate", "outcome", "lines", "tactics", "hull_before"}, "combat")
+            _reject_unknown_save_fields(combat, {"pirate", "outcome", "lines", "tactics", "hull_before", "prize"}, "combat")
+            if "prize" in combat and (combat["prize"] not in ("open", *PRIZE_KEYS) or combat["outcome"] != "won"):
+                raise ValueError("invalid prize")
             _validate_tactics(combat["tactics"])
             if type(combat["hull_before"]) is not int or combat["hull_before"] <= 0:
                 raise ValueError("invalid combat")
@@ -2203,6 +2205,9 @@ class SaveData:
     # How many parts of each sector's story this career has heard; see
     # `sector_tale`. Absent until there is one.
     tales: dict[str, int] = field(default_factory=dict)
+    # Raiders this career let limp home, each owing one favour; see `take_prize`.
+    # Absent until there is one.
+    favours: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -2241,6 +2246,7 @@ class SaveData:
             **({"accolades": self.accolades} if self.accolades else {}),
             **({"rivals": self.rivals} if self.rivals else {}),
             **({"tales": self.tales} if self.tales else {}),
+            **({"favours": self.favours} if self.favours else {}),
         }
 
     @classmethod
@@ -2286,6 +2292,7 @@ class SaveData:
             accolades=_copy_accolades(d.get("accolades", {})),
             rivals=[dict(item) for item in d.get("rivals", [])],
             tales=dict(d.get("tales", {})),
+            favours=[dict(item) for item in d.get("favours", [])],
         )
 
 
@@ -2516,6 +2523,12 @@ def _validate_save_document(data: dict) -> None:
     require(isinstance(tales, dict) and set(tales) <= set(SECTOR_NAMES), "sector stories")
     for told in tales.values():
         integer(told, "sector story", minimum=1, maximum=len(SECTOR_STORY_AT))
+    favours = data.get("favours", [])
+    require(isinstance(favours, list) and len(favours) <= FAVOUR_MAX, "favours")
+    for item in favours:
+        require(isinstance(item, dict) and set(item) == {"name", "day"}, "favour")
+        require(isinstance(item["name"], str) and 0 < len(item["name"]) <= 40, "favour name")
+        integer(item["day"], "favour day", maximum=data["turn"])
     dossiers = data.get("retired_careers", [])
     require(isinstance(dossiers, list) and len(dossiers) <= MAX_RETIRED_CAREERS, "retired careers")
     previous_number = 0
@@ -4651,6 +4664,170 @@ def settle_rival(world: World, pirate: Pirate) -> list[str]:
     return [f"A score settled: the {pirate.name} will not be back. Its hold was full of other people's cargo: +{bonus}cr."]
 
 
+# The prize (review). Winning a fight ended it: the raider blew up, a sum of
+# credits appeared, and the one moment in a fight when the pilot holds every
+# card had nothing in it to decide. A beaten raider is now dead in space, and
+# what becomes of it is the pilot's choice, each paid in a different coin:
+#
+#   strip it        the scrap's credits, as a kill always paid;
+#   take its cargo  what it was carrying instead -- worth two and a half times
+#                   the scrap at usual prices, if there is hold for it and a
+#                   market to sell it in, and one hold in five is contraband;
+#   hand it over    marked for the Navy: no credits, Concord standing in place
+#                   of a kill's token, and a point of notoriety forgiven;
+#   let it go       it limps home owing a favour: Blackwake standing, and the
+#                   next raiders the pilot meets are waved off without a shot.
+#
+# A trader with a full hold strips it; one with room takes the cargo and
+# carries the risk; a pilot working toward the commission or shedding a wanted
+# flag hands it over; one hauling something precious through bad space buys
+# the next passage. A bounty's target cannot be let go or handed over twice --
+# the warrant is the handing over -- so it is stripped or emptied. A squadron's
+# first ship is stripped as it always was: its wingman is still shooting. A
+# patrol is no prize at all.
+#
+# The choice is part of the fight's saved record (`prize`), so a dropped
+# connection comes back to the question and never to a second answer. Favours
+# are a field of the save (`favours`): three at most, kept forty days.
+PRIZE_KEYS = ("S", "C", "H", "L")
+PRIZE_CARGO_WORTH = 2.5        # a raider's hold against its scrap, at usual prices
+PRIZE_CONCORD_STANDING = 5     # for a wreck handed over; a kill is worth 2
+PRIZE_BLACKWAKE_STANDING = 3   # for a raider let go; a kill costs 1
+FAVOUR_MAX = 3
+FAVOUR_MEMORY_DAYS = 40
+
+
+def prize_loot(pirate: Pirate) -> int:
+    """What a beaten raider's scrap is worth."""
+    return 40 + pirate.tier * 60
+
+
+def prize_cargo(world: World, pirate: Pirate) -> tuple[str, int]:
+    """What a beaten raider was carrying: one good, by the seed, the day and
+    its name, and as many units as come to `PRIZE_CARGO_WORTH` times its scrap
+    at the good's usual price. Nothing is drawn from the event RNG."""
+    goods = sorted(COMMODITIES)
+    commodity = goods[zlib.crc32(f"prize:{world.save.seed}:{world.save.turn}:{pirate.name}".encode("utf-8")) % len(goods)]
+    return commodity, max(1, round(prize_loot(pirate) * PRIZE_CARGO_WORTH / COMMODITIES[commodity]["base"]))
+
+
+def prize_actions(world: World, pirate: Pirate, *, bounty: bool = False) -> str:
+    """The choices a beaten raider leaves, as the keys that make them."""
+    free = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
+    keys = ["S"] + (["C"] if free > 0 else []) + ([] if bounty else ["H", "L"])
+    return "/".join(keys)
+
+
+PRIZE_LABELS = {"S": "Strip it", "C": "Take cargo", "H": "Hand over", "L": "Let go"}
+
+
+def prize_terms(world: World, pirate: Pirate, actions: str) -> list[str]:
+    """The prize page: one row a choice, what it pays and what it costs, laid
+    out and colored like a fight's own options."""
+    p = pal()
+    save = world.save
+    offered = actions.split("/")
+    free = cargo_capacity(save.ship) - sum(save.cargo.values())
+    commodity, quantity = prize_cargo(world, pirate)
+    info = COMMODITIES[commodity]
+    hold = f"{quantity} {info['label']}"
+    worth = f"about {quantity * info['base']:,}cr"
+    rows = [[key_label("S", PRIZE_LABELS["S"]), gain(f"+{prize_loot(pirate)}cr"), f"{p.slate}its scrap{RESET}"]]
+    if "C" in offered:
+        room = (f"{p.slate}{worth}; hold has {free} free{RESET}" if free >= quantity
+                else f"{p.slate}{worth}; room for{RESET} {harm(str(free))}")
+        rows.append([key_label("C", PRIZE_LABELS["C"]), gain(hold),
+                     room + ("" if info["legal"] else f" {badge('Illegal', 'danger')}")])
+    else:
+        rows.append([f"{p.slate}{PRIZE_LABELS['C']}{RESET}", f"{p.slate}{hold}{RESET}", harm("no room in the hold")])
+    if "H" in offered:
+        forgiven = "; notoriety -1" if save.pilot.notoriety else ""
+        rows.append([key_label("H", PRIZE_LABELS["H"]), gain(f"Concord +{PRIZE_CONCORD_STANDING}"),
+                     f"{p.slate}to the Navy; no credits{forgiven}{RESET}"])
+        rows.append([key_label("L", PRIZE_LABELS["L"]), gain("a favour owed"),
+                     f"{p.slate}next raiders waved off; Blackwake +{PRIZE_BLACKWAKE_STANDING}{RESET}"])
+    owed = f" {p.deep}{glyph('dot')}{RESET} {p.slate}{plural(len(save.favours), 'favour')} owed to you{RESET}" if save.favours else ""
+    lines = [f"{p.ink}{BOLD}The {_mission_plain(pirate.name)} is dead in space{RESET} {p.deep}{glyph('dot')}{RESET} "
+             f"{p.slate}tier {pirate.tier} {tactical_profile(pirate.name)}{RESET}{owed}",
+             section("WHAT BECOMES OF IT")]
+    lines += _option_table(rows)
+    if "H" not in offered:
+        lines.append(f"{p.slate}A warrant's target is the Navy's already: it is stripped or emptied.{RESET}")
+    return lines
+
+
+def prize_action_bar(actions: str) -> str:
+    """Every choice named, as a fight's bar names its verbs. There is no Back: the wreck is waiting."""
+    return "".join(f"[{key}] {PRIZE_LABELS[key]} " for key in actions.split("/")) + "[<>] Page: "
+
+
+def prize_choice(p: Palette, world: World, pirate: Pirate, actions: str) -> str:
+    """Show the prize page until one of its choices is made."""
+    page = 0
+    while True:
+        action, page, count = _draw_service_page(p, f"Prize {world.save.pilot.credits:,}cr", prize_terms(world, pirate, actions),
+                                                 prize_action_bar(actions), page)
+        if (moved := page_step(action, page, count)) is not None:
+            page = moved
+        elif action in actions.split("/"):
+            return action
+
+
+def take_prize(world: World, pirate: Pirate, choice: str) -> list[str]:
+    """Do what the pilot chose with a beaten raider. Every choice but letting
+    it go is a kill as a kill always was: Concord +2, Blackwake -1."""
+    save = world.save
+    if choice not in PRIZE_KEYS:
+        raise ValueError("No such thing to do with a wreck.")
+    if choice == "L":
+        adjust_reputation(world, FACTION_BLACKWAKE, PRIZE_BLACKWAKE_STANDING)
+        save.favours = [item for item in save.favours if item["name"] != pirate.name]
+        save.favours.append({"name": pirate.name, "day": save.turn})
+        del save.favours[:-FAVOUR_MAX]
+        bump_accolade(save, "spared")
+        save.pilot.note(f"Let the {pirate.name} limp home. It owes a favour.")
+        return [f"The {pirate.name} limps home. It owes you one: the next raiders you meet will be waved off."]
+    adjust_reputation(world, FACTION_BLACKWAKE, -1)
+    if choice == "H":
+        adjust_reputation(world, FACTION_CONCORD, PRIZE_CONCORD_STANDING)
+        forgiven = save.pilot.notoriety > 0
+        save.pilot.notoriety = max(0, save.pilot.notoriety - 1)
+        save.pilot.note(f"Marked the wreck of the {pirate.name} for the Navy.")
+        return [f"The wreck is marked for the Navy: Concord standing +{PRIZE_CONCORD_STANDING}"
+                + (", notoriety -1." if forgiven else ".")]
+    adjust_reputation(world, FACTION_CONCORD, 2)
+    if choice == "C":
+        commodity, quantity = prize_cargo(world, pirate)
+        taken = min(quantity, cargo_capacity(save.ship) - sum(save.cargo.values()))
+        if taken <= 0:
+            raise ValueError("No room in the hold.")
+        _acquire_cargo(world, commodity, taken, 0)
+        label = COMMODITIES[commodity]["label"]
+        save.pilot.note(f"Took {taken} {label} from the {pirate.name}.")
+        return [f"Taken from the {pirate.name}'s hold: {taken} {label}"
+                + (f" of {quantity}; the rest would not fit." if taken < quantity else ".")]
+    loot = prize_loot(pirate)
+    save.pilot.credits += loot
+    return [f"Salvage recovered: {loot}cr."]
+
+
+def favour_owed(world: World) -> dict | None:
+    """The oldest favour a raider still owes this career, forgetting those too old to call in."""
+    save = world.save
+    save.favours = [item for item in save.favours if save.turn - item["day"] <= FAVOUR_MEMORY_DAYS]
+    return min(save.favours, key=lambda item: (item["day"], item["name"])) if save.favours else None
+
+
+def repay_favour(world: World, owed: dict, ships: int) -> str:
+    """A raider the pilot let go is with the raiders now closing: they are waved off."""
+    world.save.favours = [item for item in world.save.favours if item is not owed]
+    bump_accolade(world.save, "favours")
+    world.save.pilot.note(f"The {owed['name']} repaid its favour: raiders waved off.")
+    pack = f"A squadron of {ships} closes in" if ships > 1 else "A raider closes in"
+    return (f"{pack}, and the {owed['name']} is with it. It knows this ship. "
+            "They peel away without a shot: a favour repaid.")
+
+
 # Squadron fights: only at the two highest danger tiers, and even then
 # not guaranteed -- most raider encounters stay a single ship. Scoped
 # to the ordinary random "pirate" travel encounter only, not a bounty
@@ -5949,7 +6126,7 @@ ACCOLADE_VERSION = 1
 ACCOLADE_COUNTERS = ("squadrons", "flawless", "giant_slayer", "close_calls", "escapes", "raider_bribes", "scores",
                      "patrol_kills", "wrong_bounties", "deliveries", "surveys", "bounties", "escorts",
                      "distress", "derelicts", "ships_lost", "tows", "shifts", "busts", "customs_bribes",
-                     "dispatches", "dispatch_best", "chains", "sector_tales")
+                     "dispatches", "dispatch_best", "chains", "sector_tales", "spared", "favours")
 ACCOLADE_GROUPS = ("Travel", "Exploration", "Combat", "Contracts", "Dispatch", "Encounters", "Trading", "Wealth",
                    "Ranks", "Factions", "Ship", "Legacy", "Misfortune")
 # The id pattern a newer build's accolade may use; this build keeps those it
@@ -5999,6 +6176,9 @@ ACCOLADES: tuple[Accolade, ...] = tuple([
     Accolade("flawless", "Combat", "Untouched", "Win a fight without taking hull damage.", "flawless", tier=2),
     Accolade("giant_slayer", "Combat", "Giant Slayer", "Destroy a raider that outclassed your ship.", "giant_slayer"),
     Accolade("score", "Combat", "Unfinished Business", "Destroy a raider that got the better of you before.", "scores",
+             tier=2),
+    Accolade("mercy", "Combat", "Quarter Given", "Let a beaten raider limp home.", "spared", tier=1),
+    Accolade("favour", "Encounters", "A Debt Repaid", "Have raiders waved off by a ship you once spared.", "favours",
              tier=2),
     Accolade("close_call", "Combat", "Hanging by a Thread", "Win a fight with under 5% of your hull left.", "close_calls"),
     Accolade("escapes_10", "Combat", "Slippery", "Break contact 10 times by evading or dumping cargo.",
@@ -9602,7 +9782,9 @@ class _ContactScene(_Scene):
 
 
 class _KillScene(_Scene):
-    """A kill: two bolts cross the gap and the target comes apart."""
+    """A kill: two bolts cross the gap and the target comes apart. A raider
+    left as a prize (no `loot` yet) is broken and not blown apart: the blast is
+    smaller and its hull is still there when the light goes, dark."""
 
     frames = 26
 
@@ -9615,13 +9797,17 @@ class _KillScene(_Scene):
         ew, eh = self.sprite_size(self.enemy)
         self.ex, self.ey = width * 0.68 - ew / 2, self.mid - eh // 2
         palette = ("w", "b", "o") if patrol else ("r", "k", "s")
-        self.blast = _Blast(width * 0.68, self.mid, max(4.0, min(self.sky_px * 0.42, width * 0.16)), seed,
+        self.wreck = not patrol and not loot
+        reach = max(4.0, min(self.sky_px * 0.42, width * 0.16)) * (0.55 if self.wreck else 1.0)
+        self.blast = _Blast(width * 0.68, self.mid, reach, seed,
                             chunks=tuple(_SCENE_COLORS[key] for key in palette * 3))
         self.patrol = patrol
         name = _scene_text(name)
-        self.title = "CONCORD VESSEL DESTROYED" if patrol else "TARGET DESTROYED"
+        self.title = ("CONCORD VESSEL DESTROYED" if patrol else
+                      "TARGET DISABLED" if self.wreck else "TARGET DESTROYED")
         self.detail = ([(name, _SCENE_INK), ("  ·  ", _SCENE_SLATE), ("Concord will not forget this", _SCENE_ALARM)]
-                       if patrol else [(name, _SCENE_INK), ("  ·  ", _SCENE_SLATE), (f"salvage +{loot:,}cr", _SPLASH_GOLD)])
+                       if patrol else [(name, _SCENE_INK), ("  ·  ", _SCENE_SLATE),
+                                       (f"salvage +{loot:,}cr" if loot else "dead in space", _SPLASH_GOLD)])
 
     def draw(self, stage: _Stage, index: int, t: float) -> None:
         w = self.width
@@ -9638,6 +9824,10 @@ class _KillScene(_Scene):
         if boom <= 0.04:
             _scene_sprite(stage, self.enemy, self.ex, self.ey, zoom=self.zoom,
                           tint=(255, 255, 255), amount=0.7 if 0.2 < t < 0.24 else 0.0)
+        elif self.wreck:
+            # Its lights go out as the blast fades; the hull stays.
+            _scene_sprite(stage, self.enemy, self.ex, self.ey, zoom=self.zoom,
+                          tint=(96, 94, 112), amount=0.7 * min(1.0, boom * 2))
         for shot, lane in ((0.04, -1), (0.14, 1)):
             flight = _span(t, shot, shot + 0.1)
             if 0 < flight < 1:
@@ -10693,6 +10883,12 @@ def canopy_scene(world) -> dict:
             name = _scene_text(combat.get("pirate", {}).get("name", ""))
             return {"kind": "combat", "sky": "alert", "hull": hull, "enemy": "patrol" if patrol else "raider",
                     "name": name, "seed": f"combat:{name}"}
+        if combat is not None and combat.get("prize") == "open":
+            # The fight is won and the question open: the same two ships, the
+            # alert over, the contact dark and adrift.
+            name = _scene_text(combat.get("pirate", {}).get("name", ""))
+            return {"kind": "combat", "sky": "caution", "hull": hull, "enemy": "raider", "name": name,
+                    "wreck": True, "seed": f"wreck:{name}"}
         return {"kind": "transit", "sky": "transit", "hull": hull, "seed": f"transit:{world.save.turn}"}
     here = world.here
     sky = DANGER_SKIES[danger_tone(here.danger)]
@@ -10828,8 +11024,10 @@ class _Canopy:
             if color is not None:
                 self.put(x, y, color)
 
-    def sprite(self, art: tuple[str, ...], cx: float, cy: float, size: float, *, flip: bool = False) -> None:
-        """Pixel art centred on (cx, cy), each of its pixels `size` square units."""
+    def sprite(self, art: tuple[str, ...], cx: float, cy: float, size: float, *, flip: bool = False,
+               dark: float = 0.0) -> None:
+        """Pixel art centred on (cx, cy), each of its pixels `size` square units.
+        `dark` is how far its lights are out: a hull with no power, toward a cold grey."""
         rows, cols = len(art), len(art[0])
         left, top = cx - cols * size / 2, cy - rows * size / 2
         for x, y, sx, sy in self.each(left, top, left + cols * size, top + rows * size):
@@ -10837,7 +11035,7 @@ class _Canopy:
             if 0 <= row < rows and 0 <= column < cols:
                 key = art[row][cols - 1 - column if flip else column]
                 if key != ".":
-                    self.put(x, y, _SCENE_COLORS[key])
+                    self.put(x, y, _mix(_SCENE_COLORS[key], (96, 94, 112), dark) if dark else _SCENE_COLORS[key])
 
     def line(self, x0: float, y0: float, x1: float, y1: float, color: tuple, amount: float = 1.0) -> None:
         steps = max(1, int(max(abs(x1 - x0) * self.across, abs(y1 - y0)) * 1.5))
@@ -11045,18 +11243,33 @@ def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
         (ex, ey, _half_w, _half_h), size = points["enemy"], points["enemy_size"]
         (sx, sy, _own_w, _own_h), own_size = points["own"], points["own_size"]
         canopy.sprite(own, sx, sy, own_size)
-        canopy.sprite(enemy, ex, ey, size)
-        # The lock: four red corners around the contact, and the line to it.
         half_w, half_h = len(enemy[0]) * size / 2 + 1.5, len(enemy) * size / 2 + 1.5
-        arm_w, arm_h = half_w * 0.35, half_h * 0.35
-        for fx in (-1, 1):
-            for fy in (-1, 1):
-                corner_x, corner_y = ex + fx * half_w, ey + fy * half_h
-                canopy.line(corner_x, corner_y, corner_x - fx * arm_w, corner_y, _SCENE_ALARM)
-                canopy.line(corner_x, corner_y, corner_x, corner_y - fy * arm_h, _SCENE_ALARM)
-        if side:
-            canopy.label(1, side_left + 2, [("▲ ", _SCENE_ALARM), ("RED ALERT", _SCENE_ALARM)], side - 3)
-            canopy.label(2, side_left + 4, [(scene["name"], _SCENE_INK)], side - 5)
+        if scene.get("wreck"):
+            # Beaten and adrift: its lights out, a few embers still falling
+            # away from it, and no lock -- there is nothing left to lock.
+            canopy.sprite(enemy, ex, ey, size, dark=0.7)
+            embers = random.Random(scene["seed"])
+            for _ in range(10):
+                x = math.floor((ex + embers.uniform(-half_w, half_w) * 1.5) * canopy.across)
+                y = math.floor(ey + embers.uniform(-half_h, half_h) * 1.6)
+                glow = _mix((255, 150, 70), (120, 40, 30), embers.random())
+                if 0 <= x < canopy.pw and 0 <= y < canopy.ph:  # the band is shallow: an ember may fall outside it
+                    canopy.put(x, y, glow)
+            if side:
+                canopy.label(1, side_left + 2, [("◆ ", _SPLASH_GOLD), ("DEAD IN SPACE", _SPLASH_GOLD)], side - 3)
+                canopy.label(2, side_left + 4, [(scene["name"], _SCENE_INK)], side - 5)
+        else:
+            canopy.sprite(enemy, ex, ey, size)
+            # The lock: four red corners around the contact, and the line to it.
+            arm_w, arm_h = half_w * 0.35, half_h * 0.35
+            for fx in (-1, 1):
+                for fy in (-1, 1):
+                    corner_x, corner_y = ex + fx * half_w, ey + fy * half_h
+                    canopy.line(corner_x, corner_y, corner_x - fx * arm_w, corner_y, _SCENE_ALARM)
+                    canopy.line(corner_x, corner_y, corner_x, corner_y - fy * arm_h, _SCENE_ALARM)
+            if side:
+                canopy.label(1, side_left + 2, [("▲ ", _SCENE_ALARM), ("RED ALERT", _SCENE_ALARM)], side - 3)
+                canopy.label(2, side_left + 4, [(scene["name"], _SCENE_INK)], side - 5)
     elif kind == "void" and (side or band):
         # Before there is a career: the title's violet world. The Shuttle every
         # career starts in is on the commission card in front of it, beside
@@ -16392,6 +16605,9 @@ def pilot_guide_lines(world: World) -> list[str]:
         "Prices have seasons: every legal good swings about an eighth either way over a month or so, the same across a sector. The market marks each price as rising or falling and for how many more days. [X] Futures holds today's price for a fee, and says what the price should be on the day you collect.",
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
         "Crew fight with you. Each specialist aboard has a station, used once a fight: the gunner's [C] Called shot hits half as hard again and cover cannot blunt it, the engineer's [M] Mend gives back a quarter of the hull for the turn's shot, and the navigator's [N] Slip is a full shot that the raider's move only grazes. Spend the slip on the volley.",
+        "A beaten raider is yours to decide about. [S] strips it for credits; [C] takes its cargo, worth more if you "
+        "have the hold and a market; [H] hands it to the Navy for Concord standing and a point of notoriety forgiven; "
+        "[L] lets it limp home owing a favour, and the next raiders you meet are waved off. [S] Status lists favours owed.",
         "Raiders remember. One you ran from, paid off or lost a ship to may be the next raider you meet, a tier stronger. Destroy it and the score is settled: its salvage twice over. [S] Status lists the scores still open.",
         f"Lose everything and Freeport still has work: with less than {DOCK_WORK_BELOW}cr, [F] on Freeport's deck is a "
         f"day on the docks for {DOCK_WORK_PAY}cr, a hull patched to half, and whatever the dockers were saying.",
@@ -16978,6 +17194,13 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
             lines.append(f"{p.alarm}{glyph('danger')}{RESET} {p.ink}{BOLD}{_mission_plain(item['name'])}{RESET}  "
                          f"{p.slate}tier {item['tier']}; {RIVAL_HOW[item['how']]} on day {item['day']}; "
                          f"it remembers for {plural(max(0, left), 'more day')}{RESET}")
+    if world.save.favours:
+        lines.append(section("FAVOURS OWED TO YOU"))
+        for item in world.save.favours:
+            left = FAVOUR_MEMORY_DAYS - (world.save.turn - item["day"])
+            lines.append(f"{p.mint}{glyph('note')}{RESET} {p.ink}{BOLD}{_mission_plain(item['name'])}{RESET}  "
+                         f"{p.slate}let go on day {item['day']}; it will turn raiders away once, within "
+                         f"{plural(max(0, left), 'more day')}{RESET}")
     lines.append(section("RECORD"))
     discovered = sum(system.discovered for system in world.galaxy)
     lines.append(f"{p.slate}charted{RESET} {gauge(discovered, len(world.galaxy), cells, tone='info')} "
@@ -18193,6 +18416,17 @@ def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySyste
                 # The contact turns out to be a ship the pilot knows. Drawn as
                 # any raider was, so the encounter's own draws are unchanged.
                 state["pirates"][0] = dataclasses.asdict(rival_ship(back))
+            owed = None if back is not None else favour_owed(world)
+            if owed is not None:
+                # A ship the pilot let go is with them. Drawn as any raiders
+                # were, so the encounter's own draws are unchanged; a rival
+                # with a score to settle is not turned by anyone's debt.
+                line = repay_favour(world, owed, len(state.pop("pirates")))
+                state.update(kind="waved", done=True, result=[line])
+                world.commit()
+                out_line(f"{p.wrong}Raider contact!{RESET}")
+                _show_result(p, world, [line])
+                return
             state["index"] = 0
             if len(state["pirates"]) == 2:
                 state["formation"] = {"version": 1, "engaged": False}
@@ -18895,7 +19129,8 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                   f"Shields Tier {ship.shield_tier}: reduce incoming damage by {ship.shield_tier * 3}, minimum 1.",
                   f"Weapons Tier {ship.weapon_tier}: +{ship.weapon_tier * 4} damage; gunner bonus +{gunner_bonus(ship)}.",
                   f"Notoriety {pilot.notoriety}. " + ("Destroying this patrol: notoriety +3, Concord -10, Blackwake +3; no salvage."
-                  if patrol else "Destroying this pirate earns salvage; Concord +2, Blackwake -1.")]
+                  if patrol else "Beating this raider leaves you its wreck: strip it, take its cargo, hand it to the "
+                                 "Navy or let it limp home.")]
     return lines
 
 
@@ -18946,6 +19181,20 @@ def combat_action_bar(actions: str) -> str:
     return "".join(f"[{key}] {COMBAT_LABELS[key]} " for key in keys) + "[I] Info [<>] Page: "
 
 
+def _screen_prize(p: Palette, world: World, pirate: Pirate, combat: dict) -> None:
+    """Ask what becomes of a beaten raider, do it, and keep the answer with the fight."""
+    travel = world.save.pending_travel
+    # A warrant's target, met on the way to where the warrant said it would be.
+    bounty = travel is not None and travel["phase"] == "primary" and travel["primary"] == "bounty"
+    choice = prize_choice(p, world, pirate, prize_actions(world, pirate, bounty=bounty))
+    lines = take_prize(world, pirate, choice)
+    combat["prize"] = choice
+    combat["lines"] = combat["lines"] + lines
+    world.commit()
+    report_hop(world, lines)
+    for line in lines: out_line(f"  {line}")
+
+
 def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: bool) -> str:
     """Commit each decision's full effects and opponent HP before narration.
 
@@ -18969,6 +19218,8 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         if combat["outcome"] is not None:
             report_hop(world, combat["lines"])
             for line in combat["lines"]: out_line(f"  {line}")
+            if combat.get("prize") == "open":
+                _screen_prize(p, world, pirate, combat)
             return combat["outcome"]
     warrant = encounter.get("warrant")
     formation = encounter.get("formation")
@@ -19018,6 +19269,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             continue
         lines = []
         outcome, loot = None, 0
+        prize = False  # whether this turn's win leaves a wreck to decide about
         shot = False  # whether the pilot fired this turn; what came back is read off the hull
         # What the two hulls read before the exchange, so the bars can be walked
         # to their new readings afterwards -- after the commit, never before it.
@@ -19048,12 +19300,17 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
                     adjust_reputation(world, FACTION_BLACKWAKE, 3)
                     world.save.pilot.note("Destroyed a Concord patrol vessel -- notoriety rises further.")
                     lines.append(f"The {pirate.name} is destroyed -- Concord will not forget this.")
+                elif formation is not None and encounter["index"] + 1 < len(encounter["pirates"]):
+                    # A squadron's first ship: its wingman is still shooting,
+                    # so it is stripped as a kill always was.
+                    loot = prize_loot(pirate)
+                    lines += take_prize(world, pirate, "S")
                 else:
-                    loot = 40 + pirate.tier * 60
-                    world.save.pilot.credits += loot
-                    adjust_reputation(world, FACTION_CONCORD, 2)
-                    adjust_reputation(world, FACTION_BLACKWAKE, -1)
-                    lines.append(f"Salvage recovered: {loot}cr.")
+                    # Beaten, not blown apart: the exchange says so in place of
+                    # the line a kill has always ended on.
+                    prize = True
+                    lines = [line for line in lines if line != f"The {pirate.name} is destroyed!"]
+                    lines.append(f"The {pirate.name} is dead in space.")
                 outcome = "won"
                 # Counted with the kill, in the commit below: a resumed fight
                 # returns its kept outcome and never reaches here again.
@@ -19123,6 +19380,8 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             elif outcome == "escaped" and action in ("E", "D", "P"):
                 remember_rival(world, pirate, "paid" if action == "P" else "ran")
         combat.update(pirate=dataclasses.asdict(pirate), outcome=outcome, lines=lines)
+        if prize:
+            combat["prize"] = "open"  # kept with the win: a resumed fight comes back to the question
         world.commit()
         closed_at = (max(0, pirate.hp), lethal if lethal is not None else max(0, ship.hull_hp))
         page = 0
@@ -19144,6 +19403,8 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             play_combat_outcome_scene(world, pirate, outcome, action, patrol=patrol, loot=loot)
             report_hop(world, lines)
             for line in lines: out_line(f"  {line}")
+            if prize:
+                _screen_prize(p, world, pirate, combat)
             return outcome
 
 

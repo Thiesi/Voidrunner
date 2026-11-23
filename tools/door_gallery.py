@@ -152,6 +152,9 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # The same fight against a raider the ship cannot beat (issue #647): the
         # OUTCLASSED row, and a Dump priced at half the hold.
         ("Combat, outclassed", b" ", "outclassed"),
+        # The fight won and the raider dead in space: what becomes of it is a
+        # choice, and the question is part of the saved fight.
+        ("Prize", b" ", "prize"),
         # The first deck of a session carries a returning pilot's welcome and
         # recap above its gauges (issue #641), which at forty columns is most of
         # page one. It is reviewed as itself; the deck a pilot sees for the rest
@@ -843,11 +846,38 @@ def build_voidrunner_played(door_name: str, door: pathlib.Path, state: pathlib.P
             rows = _screen_rows(running)
             if any("STATION SERVICES" in row for row in rows):
                 break  # the fight is over, one way or the other, and we are docked
-            running.press(b"F" if "[F] Fire" in " ".join(rows) else b"\r", expect=False)
+            shown = " ".join(rows)
+            # Fire while there is a fight, strip the wreck it leaves, and
+            # acknowledge everything else.
+            running.press(b"F" if "[F] Fire" in shown else b"S" if "[S] Strip it" in shown else b"\r", expect=False)
     except BaseException:
         running.kill()
         raise
     running.kill()  # the career on disk is what the panels copy
+
+
+def build_voidrunner_prize(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
+    """The combat fixture's fight, won and not yet decided.
+
+    The door keeps the question with the fight it won, so a career left at the
+    prize page comes back to it: the fixture is that career, and the panel is
+    the page a resumed journey opens on.
+    """
+    build_voidrunner_combat(door_name, door, state)
+    running = Door(door, state, 80, 24, {})
+    try:
+        running.settle()
+        for _ in range(20):
+            shown = " ".join(_screen_rows(running))
+            if "[S] Strip it" in shown:
+                break
+            running.press(b"F" if "[F] Fire" in shown else b"\r", expect=False)
+        else:
+            raise SystemExit("the combat fixture's fight did not end in a prize")
+    except BaseException:
+        running.kill()
+        raise
+    running.kill()  # mid-question on purpose: a clean exit would be a career that had answered
 
 
 def build_voidrunner_retiring(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
@@ -875,6 +905,7 @@ FIXTURE_BUILDERS = {
     ("voidrunner", "outclassed"): build_voidrunner_outclassed,
     ("voidrunner", "combat"): build_voidrunner_combat,
     ("voidrunner", "played"): build_voidrunner_played,
+    ("voidrunner", "prize"): build_voidrunner_prize,
     ("voidrunner", "retiring"): build_voidrunner_retiring,
 }
 

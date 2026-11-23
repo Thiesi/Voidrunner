@@ -74,3 +74,13 @@ def test_the_summary_has_a_row_for_each_pilot_flown(sim):
     assert lines[0].split()[:4] == ["pilot", "day", "10", "day"]
     assert [line.split()[0] for line in lines[1:3]] == ["trader", "explorer"]
     assert not any(line.startswith("smuggler") for line in lines)
+
+
+def test_a_pilot_does_with_a_beaten_raider_what_it_was_told_to(sim):
+    """`--prize` is each pilot's way with a wreck; where that is not offered -- a
+    warrant's target, a full hold -- it takes the scrap."""
+    stripped = sim.fly_one((DOOR, "contractor", 1003, 40, {}, True, True))
+    assert stripped["prizes"] and set(stripped["prizes"]) == {"S"}
+    spared = sim.fly_one((DOOR, "contractor", 1003, 40, {}, True, True, "L"))
+    assert spared["prizes"].get("L", 0) > 0 and set(spared["prizes"]) <= {"L", "S"}
+    assert spared["outcome"] == stripped["outcome"] == "flew"

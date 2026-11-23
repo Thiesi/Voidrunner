@@ -1613,7 +1613,7 @@ def test_screen_naming_says_what_a_caller_can_navigate_to():
     helpers = {name for name, value in vars(vr).items()
                if name.startswith("_screen_") and inspect.isfunction(value)}
     assert helpers == {"_screen_combat_session", "_screen_faction_contact", "_screen_buy_futures",
-                       "_screen_futures_order", "_screen_map_info", "_screen_opening_offer"}
+                       "_screen_futures_order", "_screen_map_info", "_screen_opening_offer", "_screen_prize"}
     # Each of those is called only from another screen, never from the outer loop.
     outer = inspect.getsource(vr.main) if hasattr(vr, "main") else ""
     assert not any(name in outer for name in helpers)

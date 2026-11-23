@@ -15,6 +15,7 @@ import io
 import pytest
 
 from .support import _world_with_seed, plain, vr
+from .support import strip_prizes
 
 
 def _pirate(name="Ashclaw", tier=1):
@@ -92,6 +93,7 @@ def _travel(world, target, name, tier, hull=None):
 
 
 def _play(world, keys, monkeypatch, pirate):
+    strip_prizes(monkeypatch)
     typed = iter(keys)
     monkeypatch.setattr(vr, "read_key", lambda: next(typed))
     monkeypatch.setattr(vr, "play_scene", lambda make: True)

@@ -14,6 +14,7 @@ import sys
 import pytest
 
 from .support import RESUME, plain, plain_bytes, _Sys, _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_exploration_choice, _world_with_seed, page_text, page_title, vr
+from .support import strip_prizes
 
 
 # leave the bounty active forever, turning its target system into a
@@ -1278,6 +1279,7 @@ def test_auto_route_checkpoints_each_completed_hop_before_next_hop(tmp_path, mon
 def test_every_travel_checkpoint_resumes_to_the_same_career(
     tmp_path, monkeypatch, scenario, seed, keys, evidence,
 ):
+    strip_prizes(monkeypatch)
     import json
 
     world = _world_with_seed(42)
