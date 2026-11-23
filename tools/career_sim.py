@@ -30,6 +30,13 @@ The summary ends with when each thing a career works toward is first reached
 `--jumps-per-day` says how many jumps a caller flies in a real day: it turns
 the daily dispatch over and translates the days into real ones.
 
+`--factions` has the pilots work toward a faction and join it the day the door
+lets them: a contractor and the traders hand beaten raiders to the Navy for
+Concord's commission, a smuggler lets them go for the Cartel's, and each takes
+the work its faction then posts. `--futures` has them hold today's price, at a
+station they have been to before, on a good the season will make dearer. Both
+are off by default, so the four plain pilots stay what they were.
+
 `--set NAME=VALUE` changes a module constant before each career, which is how
 one rule is switched off to see what it was contributing. `--prize` is what
 every pilot does with a beaten raider (strip it, by default, which is what a
@@ -59,7 +66,12 @@ DRAINED_PER_UNIT = 8
 SECOND_LEG_WEIGHT = 0.5
 CHECKPOINTS = (10, 20, 40, 60, 80, 100, 150, 200, 300)
 #: What a career works toward, in the order the summary lists them: the day each is first reached.
-MILESTONES = ("Freighter", "Cutter", "Carrier", "fitted", "rank 2", "rank 3", "rank 4", "stake", "all stakes")
+MILESTONES = ("Freighter", "Cutter", "Carrier", "fitted", "rank 2", "rank 3", "rank 4", "stake", "all stakes",
+              "Concord", "Blackwake")
+#: A futures order is placed when the season will carry the price up by more than this by the day it is collected.
+FUTURES_WORTH_IT = 0.14
+#: Orders a pilot keeps open at once, each at a different station.
+FUTURES_OPEN = 2
 #: Careers are flown to a real day: the dispatch changes once for every this many jumps.
 JUMPS_PER_REAL_DAY = 8
 #: More keys than any one journey needs; past it the pilot has met a prompt it cannot read.
@@ -97,8 +109,12 @@ class Pilot:
     """One career: the keys a journey asks for, and what to do at a station."""
 
     def __init__(self, vr, kind: str, seed: int, *, dispatch: bool = True, stakes: bool = True, prize: str = "S",
-                 jumps_per_day: int = JUMPS_PER_REAL_DAY):
+                 jumps_per_day: int = JUMPS_PER_REAL_DAY, factions: bool = False, futures: bool = False):
         self.vr, self.kind, self.buy_stakes = vr, kind, stakes
+        self.factions, self.futures = factions, futures
+        self.joined = {}            # the day each faction was joined
+        self.orders = Counter()     # futures orders placed and collected, and what collecting saved
+        self.keep = Counter()       # goods a journey put aboard that are for the next market, not this one
         self.jumps_per_day = max(1, jumps_per_day)
         self.prize = prize          # what to do with a beaten raider, where that is offered
         self.prizes = Counter()     # what was done with each
@@ -142,7 +158,8 @@ class Pilot:
             return choice
         if offered.get("S") == "Strip":
             # A beaten raider: this pilot's way with one, or its scrap where that is not offered.
-            choice = self.prize if self.prize in offered else "S"
+            want = self.courting() or self.prize
+            choice = want if want in offered else "S"
             self.prizes[choice] += 1
             return choice
         act = _ACT.search(text[-40:])
@@ -205,7 +222,7 @@ class Pilot:
 
     def sell_hold(self) -> None:
         world, vr = self.world, self.vr
-        reserved = self.reserved()
+        reserved = self.reserved() + self.keep
         for commodity, held in list(world.save.cargo.items()):
             free = held - reserved[commodity]
             quantity = min(free, vr.market_depth_quote(world, world.here.id, commodity)["demand"])
@@ -275,9 +292,64 @@ class Pilot:
             self.spent[what] += before - pilot.credits
             world.commit()
 
+    def faction(self) -> str:
+        """The faction this pilot works toward: the Cartel for a smuggler, the Navy for the rest."""
+        return self.vr.FACTION_BLACKWAKE if self.kind == "smuggler" else self.vr.FACTION_CONCORD
+
+    def courting(self) -> str | None:
+        """What to do with a beaten raider while a membership is still to be
+        earned: hand it to the Navy, or let it go for the Cartel's regard."""
+        if not self.factions or self.faction() in self.joined:
+            return None
+        return "L" if self.faction() == self.vr.FACTION_BLACKWAKE else "H"
+
+    def join(self) -> None:
+        """Take a membership the day the door offers it."""
+        world, vr = self.world, self.vr
+        if not self.factions:
+            return
+        for faction in (vr.FACTION_CONCORD, vr.FACTION_BLACKWAKE):
+            if faction not in self.joined and vr.faction_join_blocker(world, faction) is None:
+                credits = world.save.pilot.credits
+                vr.join_faction(world, faction)
+                self.earned["grants"] += world.save.pilot.credits - credits
+                self.joined[faction] = world.save.turn
+                world.commit()
+
+    def order_futures(self) -> None:
+        """Hold today's price, at a station the pilot has been to before, on the
+        good the season will carry furthest up by the day it is collected."""
+        world, vr = self.world, self.vr
+        here, ship, save = world.here, world.save.ship, world.save
+        if (not self.futures or here.id not in self.docked or len(save.active_futures) >= FUTURES_OPEN
+                or any(order.origin_system == here.id for order in save.active_futures)):
+            return
+        spare = save.pilot.credits - vr.cargo_capacity(ship) * 60
+        best = None
+        for commodity in vr.LEGAL_COMMODITIES:
+            price = vr.price_for(world, here.id, commodity)
+            for days in vr.FUTURES_DURATIONS:
+                rise = vr.season_forecast(world, here.id, commodity, days) / price - 1
+                if rise > FUTURES_WORTH_IT and (best is None or rise > best[0]):
+                    best = (rise, commodity, days, price)
+        if best is None:
+            return
+        _rise, commodity, days, price = best
+        stock = vr.market_depth_quote(world, here.id, commodity)["stock"]
+        quantity = min(vr.cargo_capacity(ship), stock, spare * 100 // max(1, price * (100 + vr.FUTURES_FEE_PERCENT)))
+        if quantity < max(4, vr.cargo_capacity(ship) // 4):
+            return
+        try:
+            vr.buy_futures_contract(world, commodity, quantity, days)
+        except vr.TradeError:
+            return
+        self.orders["placed"] += 1
+        world.commit()
+
     def take_contracts(self) -> None:
         world, vr = self.world, self.vr
-        if self.kind != "contractor" and world.save.pilot.credits >= BROKE:
+        mine = self.factions and self.faction() in self.joined
+        if self.kind != "contractor" and world.save.pilot.credits >= BROKE and not mine:
             return  # the others turn to the board only when there is nothing to trade with
         slots = vr.contract_slots(world.save) if hasattr(vr, "contract_slots") else vr.MAX_ACTIVE_MISSIONS
         hops = vr.bfs_hops(world.by_id, world.here.id)
@@ -285,6 +357,9 @@ class Pilot:
         for mission in vr.generate_mission_board(world):
             if len(world.save.active_missions) >= slots:
                 break
+            if (self.kind != "contractor" and world.save.pilot.credits >= BROKE
+                    and vr.faction_contract(mission) != self.faction()):
+                continue  # a member with a hold to fill takes its faction's work and leaves the rest
             away = hops.get(mission.target_system, 99)
             if world.by_id[mission.target_system].danger > self.nerve():
                 continue
@@ -464,6 +539,7 @@ class Pilot:
     def worth(self) -> int:
         world = self.world
         cargo = sum(paid for lots in world.save.cargo_basis.values() for _units, paid in lots)
+        cargo += sum(order.principal for order in world.save.active_futures)  # goods paid for and not yet collected
         sunk = sum(self.spent[what] for what in ("upgrade", "refit", "stake"))
         return world.save.pilot.credits + cargo + sunk
 
@@ -480,7 +556,9 @@ class Pilot:
                 self.earned["shifts"] += vr.DOCK_WORK_PAY
                 world.commit()
             self.maintain()
+            self.join()
             self.invest()
+            self.order_futures()
             self.drop_lost_causes()
             self.take_contracts()
             dest, buys = self.next_stop()
@@ -497,6 +575,8 @@ class Pilot:
             world.commit()
             self.docked[world.here.id] = world.save.turn
             credits, self.keys = world.save.pilot.credits, 0
+            aboard, open_orders = Counter(world.save.cargo), {order.id: order for order in world.save.active_futures}
+            self.keep = Counter()
             try:
                 with contextlib.redirect_stdout(self.screen):
                     vr.screen_travel(self.palette, world, dest.id)
@@ -505,16 +585,29 @@ class Pilot:
                 break
             self.earned["journeys"] += world.save.pilot.credits - credits
             self.lost += bool(world.ship_destroyed_this_hop)
+            # An order collected on arrival was bought at an old price to be
+            # carried on: it is the next leg's cargo, not something to sell here.
+            still = {order.id for order in world.save.active_futures}
+            for order in (order for key, order in open_orders.items() if key not in still):
+                gained = world.save.cargo.get(order.commodity, 0) - aboard[order.commodity]
+                if gained > 0:
+                    self.keep[order.commodity] += min(gained, order.quantity)
+                    self.orders["collected"] += 1
+                    today = vr.price_for(world, world.here.id, order.commodity) * order.quantity
+                    self.orders["saved"] += today - order.locked_price
             rank = vr.career_rank_index(world.save.pilot)
             for label in (f"rank {rank}", world.save.ship.hull_class, *self.reached()):
                 firsts.setdefault(label, world.save.turn)
+            for faction, joined_on in self.joined.items():
+                firsts.setdefault("Concord" if faction == vr.FACTION_CONCORD else "Blackwake", joined_on)
             for mark in CHECKPOINTS:
                 if day < mark <= world.save.turn:
                     marks[mark] = {"credits": world.save.pilot.credits, "worth": self.worth()}
         save = world.save
         return {
             "outcome": outcome, "days": save.turn, "marks": marks, "firsts": firsts, "lost": self.lost, "towed": self.towed,
-            "shifts": self.shifts, "prizes": dict(self.prizes), "roamed": self.roamed,
+            "shifts": self.shifts, "prizes": dict(self.prizes), "roamed": self.roamed, "orders": dict(self.orders),
+            "standing": dict(save.pilot.reputation),
             "kills": save.pilot.kills, "contracts": save.pilot.missions_completed,
             "failed": save.pilot.missions_failed + save.pilot.missions_expired,
             "charted": sum(1 for system in world.galaxy if system.discovered),
@@ -529,9 +622,11 @@ def fly_one(job: tuple) -> dict:
     door, kind, seed, days, settings, dispatch, stakes, *more = job
     prize = more[0] if more else "S"
     jumps_per_day = more[1] if len(more) > 1 else JUMPS_PER_REAL_DAY
+    ways = more[2] if len(more) > 2 else {}
     vr = load_door(door)
     apply_settings(vr, settings)
-    result = Pilot(vr, kind, seed, dispatch=dispatch, stakes=stakes, prize=prize, jumps_per_day=jumps_per_day).fly(days)
+    result = Pilot(vr, kind, seed, dispatch=dispatch, stakes=stakes, prize=prize, jumps_per_day=jumps_per_day,
+                   factions=bool(ways.get("factions")), futures=bool(ways.get("futures"))).fly(days)
     result.update(pilot=kind, seed=seed, jumps_per_day=jumps_per_day)
     return result
 
@@ -580,6 +675,11 @@ def summarize(results: list[dict], days: int) -> list[str]:
         ended = Counter(r["outcome"].split(":")[0] for r in flown if r["outcome"] != "flew")
         if ended:
             lines.append(f"{'':<11}did not finish: " + ", ".join(f"{count} {what}" for what, count in ended.items()))
+        ordered = [r["orders"] for r in flown if r.get("orders", {}).get("placed")]
+        if ordered:
+            lines.append(f"{'':<11}futures: {sum(o['placed'] for o in ordered)} orders in {len(ordered)} of {len(flown)} "
+                         f"careers, {sum(o.get('collected', 0) for o in ordered)} collected, "
+                         f"{sum(o.get('saved', 0) for o in ordered):,}cr under the day's price in all")
         worked = [r["shifts"] for r in flown if r.get("shifts")]
         if worked:
             lines.append(f"{'':<11}dock work: {len(worked)} of {len(flown)} careers, {sum(worked)} shifts in all, "
@@ -611,6 +711,10 @@ def main() -> None:
     parser.add_argument("--prize", choices=("S", "C", "H", "L"), default="S",
                         help="what the pilots do with a beaten raider: strip it (the default), take its "
                              "cargo, hand it to the Navy or let it go")
+    parser.add_argument("--factions", action="store_true",
+                        help="the pilots work toward a faction, join it and take its work")
+    parser.add_argument("--futures", action="store_true",
+                        help="the pilots hold today's price on what the season will make dearer")
     parser.add_argument("--jumps-per-day", type=int, default=JUMPS_PER_REAL_DAY,
                         help="jumps flown in one real day: it turns the dispatch over, and the summary's "
                              "days into real days")
@@ -619,7 +723,7 @@ def main() -> None:
     args = parser.parse_args()
     settings = dict(item.split("=", 1) for item in args.set)
     jobs = [(args.door, kind, 1000 + seed, args.days, settings, not args.no_dispatch, not args.no_stakes, args.prize,
-             args.jumps_per_day)
+             args.jumps_per_day, {"factions": args.factions, "futures": args.futures})
             for kind in args.pilots for seed in range(args.seeds)]
     if args.jobs > 1:
         with multiprocessing.Pool(args.jobs) as pool:
