@@ -1,4 +1,4 @@
-"""A system's own market: standing surpluses and shortages (review, v1.3).
+"""A system's own market: standing surpluses and shortages (review).
 
 Forty-eight systems were five price tables. These pin that a trait is drawn
 from the seed and the system alone and saves nothing, that it is only ever a

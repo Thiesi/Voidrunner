@@ -1,4 +1,4 @@
-"""Dockside talk points at a market worth finding (review, v1.3).
+"""Dockside talk points at a market worth finding (review).
 
 A trait was found only by docking, so the way to look for one was to go
 everywhere. These pin what the dock may say: only true things, only about

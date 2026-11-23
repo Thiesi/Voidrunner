@@ -1,4 +1,4 @@
-"""Station stakes: something to own once everything is bought (review, v1.3).
+"""Station stakes: something to own once everything is bought (review).
 
 By day 45 of a trading career there is nothing left to buy. A stake is a share
 in a station's yards, three steps at up to three stations, and what it buys is

@@ -1,4 +1,4 @@
-"""The Viewport's station view is an atlas of every charted world (review, v1.3).
+"""The Viewport's station view is an atlas of every charted world (review).
 
 The Viewport showed three pictures of things already on the deck. These pin the
 atlas: which systems it turns through and in what order, what it says of each

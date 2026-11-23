@@ -1,4 +1,4 @@
-"""Scenes with presence, one Shuttle at the commission, and a chart with a frontier (review, v1.3).
+"""Scenes with presence, one Shuttle at the commission, and a chart with a frontier (review).
 
 At 80x24 a seven-pixel ship was three and a half rows of a twenty-row sky, the
 commission screen drew the starting Shuttle twice, and the star map showed

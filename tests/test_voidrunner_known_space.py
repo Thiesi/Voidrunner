@@ -1,4 +1,4 @@
-"""The star map opens on known space (review, v1.3).
+"""The star map opens on known space (review).
 
 The map framed a fixed sixth of the galaxy, so a new career's chart was three
 stars in a corner. These pin the frame it opens on now: that it holds everything

@@ -1,4 +1,4 @@
-"""A faction posts work for its own (review, v1.3).
+"""A faction posts work for its own (review).
 
 Membership gave a perk and a story and then nothing. These pin the work a
 faction now posts: who sees it and where, what a warrant and a run are, what

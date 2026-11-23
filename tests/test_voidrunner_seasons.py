@@ -1,4 +1,4 @@
-"""Prices have seasons, and a futures order says what it bets on (review, v1.3).
+"""Prices have seasons, and a futures order says what it bets on (review).
 
 Nothing in a price moved that a pilot could see coming, so a futures order was
 never worth its fee. These pin the season: how far and how slowly it swings,

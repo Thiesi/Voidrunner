@@ -1,4 +1,4 @@
-"""A landmark's record leads to a second site (review, v1.3).
+"""A landmark's record leads to a second site (review).
 
 A galaxy had one landmark, and exploration had nothing left that was a place
 once it was claimed. These pin the second: where it may be, that it cannot be

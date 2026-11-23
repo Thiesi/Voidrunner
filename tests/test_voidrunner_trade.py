@@ -3476,7 +3476,7 @@ def test_every_fuel_figure_follows_the_one_fuel_price(monkeypatch):
     assert "7cr/unit" in plain(output.getvalue()) and world.save.ship.fuel == 10 and world.save.pilot.credits == 0
 
 
-# --- a pilot's own trading never moves a price in the pilot's favor (review, v1.3) ---
+# --- a pilot's own trading never moves a price in the pilot's favor (review) ---
 
 @pytest.mark.parametrize("commodity", ["machinery", "electronics", "medicine", "food"])
 @pytest.mark.parametrize("lot", [1, 5, 12])
