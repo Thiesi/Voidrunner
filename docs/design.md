@@ -1726,7 +1726,9 @@ same for every station in the sector, so a lane inside a sector keeps its shape
 and what changes is when a good is worth carrying and which sector to carry it
 to. It starts level on day zero, so a first day is what it was. It is the same
 every time for a career's seed, and it is shown: the market marks each price as
-rising or falling and for how many more days, and a futures order says what
+rising or falling and for how many more days (a TREND column of its own, the
+first to give way on a narrow page: inside the SPREAD cell it cost a pilot with
+a contract's NEED showing the whole spread at 80 columns), and a futures order says what
 the season should have the price at on the day it can be collected, and whether
 locking saves or costs against buying then. A lock at the bottom of a swing for
 ten or twenty days is now worth having -- up to about a fifth of the goods'

@@ -145,3 +145,24 @@ def test_nothing_is_saved_for_a_season():
     after = world.save.to_dict()
     after["turn"] = before["turn"]
     assert after == before
+
+
+def test_the_mark_is_its_own_column_and_never_costs_the_spread_its_place():
+    """Inside the SPREAD cell the mark widened that column, and on a day a
+    contract's NEED was also showing the whole spread was dropped at 80 columns."""
+    world = _world_with_seed(42)
+    world.save.turn = 9
+    goods = list(vr.LEGAL_COMMODITIES)
+    free = [plain(row) for row in vr.market_catalog_lines(world, goods)]
+    assert "SPREAD" in free[1] and free[1].rstrip().endswith("TREND")
+    target = sorted(world.here.connections)[0]
+    world.save.active_missions = [vr.Mission(id=4, kind="delivery", description="Deliver 3x Machinery", reward=300,
+                                             origin_system=0, target_system=target, commodity="machinery", quantity=3)]
+    needed = [plain(row) for row in vr.market_catalog_lines(world, goods)]
+    heading = next(row for row in needed if row.startswith("COMMODITY"))
+    assert "NEED" in heading and "SPREAD" in heading and "TREND" not in heading
+    words = {"cheap", "typical", "dear"}
+    assert all(row.split()[-1] in words for row in needed if row.startswith("["))  # every row keeps its word
+    # The note explains the marks only where the table has room to show them.
+    assert "rising or falling" not in next(row for row in needed if row.startswith("Prices per unit."))
+    assert "rising or falling" in next(row for row in free if row.startswith("Prices per unit."))
