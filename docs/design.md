@@ -1666,6 +1666,20 @@ how to press Back), and is divided by a rule: a first flight above it, and
 `ONCE YOU HAVE FLOWN A FEW DAYS` below, where the lines about ranks, stakes,
 local markets, a raider's read and the dispatch live.
 
+**The exchange, seen.** A fight's picture was still: two hulls and a lock, the
+same from the first turn to the last, while everything that happened was a
+sentence and two bars. The shots now cross the window. The pilot's bolt goes
+out and the contact flares white where it lands; then the contact's comes back
+and the pilot's own hull takes it. Only what happened is shown: a guard that
+took nothing draws no return, a failed escape draws only the one that came
+back. It is drawn over the canopy cell by cell and every cell is put back as it
+was, so the place is still one picture painted once, and never on the console,
+its action bar or the bottom-right cell. It plays on the next page, before the
+bars drain, under the rules every effect keeps: `auto` only, any key ends it at
+once with the window restored, and all of it is under half a second. The
+picture and the shots ask one function where the two ships are
+(`combat_stage_points`), in all three layouts.
+
 **Rivals.** A raider was a name from a list of ten, a tier and a hull: met,
 dealt with, gone, and the next one owed nothing to the last. A raider that got
 the better of the pilot -- one they ran from, one they paid off, one that broke

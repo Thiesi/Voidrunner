@@ -10596,6 +10596,43 @@ def canopy_key(scene: dict, width: int | None = None, height: int | None = None)
             _OUTPUT_HEIGHT if height is None else height, canopy_across(), _PALETTE._truecolor)
 
 
+def combat_stage_points(scene: dict, width: int, height: int) -> dict | None:
+    """Where a fight's two ships are in the window and how large: centre and
+    half-extents of the pilot's hull and of the contact, x in columns and y in
+    half rows, as the canopy draws them. None where the window has no room for
+    a fight. The picture and the shots that cross it both ask here."""
+    panel_w = min(width, _box_outer_width())
+    h2 = height * 2
+    side_left = panel_w + 1
+    side = width - side_left if width - side_left >= 22 else 0
+    band_top = max(1, round(height * 0.58))
+    band = height - band_top if not side and height - band_top >= 4 else 0
+    if not (side or band):
+        return None
+    enemy = _hostile_art(scene["name"], scene["enemy"] == "patrol")
+    own = _SCENE_HULLS.get(scene["hull"], _SPLASH_SHIP)
+    if side and height >= CANOPY_STAGE_HEIGHT:
+        # Across the lower screen, the pilot's hull on the left and the
+        # contact on the right, as the band of a smaller terminal has them.
+        depth = h2 * 0.45
+        size = max(1.0, min(width * 0.26 / len(enemy[0]), depth * 0.5 / len(enemy)))
+        ex, ey = width * 0.66, h2 * 0.76
+        sx, sy, own_size = width * 0.24, h2 * 0.78, max(0.5, size * 0.6)
+    elif side:
+        size = max(1.0, min(side * 0.62 / len(enemy[0]), h2 * 0.26 / len(enemy)))
+        ex, ey = side_left + side * 0.60, h2 * 0.40
+        sx, sy, own_size = side_left + side * 0.22, h2 * 0.70, max(0.5, size * 0.45)
+    else:
+        # Low in the band: a turn's page is two rows taller than the first
+        # (its last exchange), and the contact's lock must clear it.
+        top, depth = band_top * 2, band * 2
+        size = max(1.0, depth * 0.5 / len(enemy))
+        ex, ey = width * 0.72, top + depth * 0.62
+        sx, sy, own_size = width * 0.24, top + depth * 0.66, max(0.5, size * 0.6)
+    return {"enemy": (ex, ey, len(enemy[0]) * size / 2, len(enemy) * size / 2), "enemy_size": size,
+            "own": (sx, sy, len(own[0]) * own_size / 2, len(own) * own_size / 2), "own_size": own_size}
+
+
 def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
     """The whole canopy for a `width` x `height` terminal. The console covers
     the top left, `_box_outer_width()` across and as many rows as its page
@@ -10681,24 +10718,9 @@ def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
     elif kind == "combat" and (side or band):
         enemy = _hostile_art(scene["name"], scene["enemy"] == "patrol")
         own = _SCENE_HULLS.get(scene["hull"], _SPLASH_SHIP)
-        if stage:
-            # Across the lower screen, the pilot's hull on the left and the
-            # contact on the right, as the band of a smaller terminal has them.
-            depth = h2 * 0.45
-            size = max(1.0, min(width * 0.26 / len(enemy[0]), depth * 0.5 / len(enemy)))
-            ex, ey = width * 0.66, h2 * 0.76
-            sx, sy, own_size = width * 0.24, h2 * 0.78, max(0.5, size * 0.6)
-        elif side:
-            size = max(1.0, min(side * 0.62 / len(enemy[0]), h2 * 0.26 / len(enemy)))
-            ex, ey = side_left + side * 0.60, h2 * 0.40
-            sx, sy, own_size = side_left + side * 0.22, h2 * 0.70, max(0.5, size * 0.45)
-        else:
-            # Low in the band: a turn's page is two rows taller than the first
-            # (its last exchange), and the contact's lock must clear it.
-            top, depth = band_top * 2, band * 2
-            size = max(1.0, depth * 0.5 / len(enemy))
-            ex, ey = width * 0.72, top + depth * 0.62
-            sx, sy, own_size = width * 0.24, top + depth * 0.66, max(0.5, size * 0.6)
+        points = combat_stage_points(scene, width, height)
+        (ex, ey, _half_w, _half_h), size = points["enemy"], points["enemy_size"]
+        (sx, sy, _own_w, _own_h), own_size = points["own"], points["own_size"]
         canopy.sprite(own, sx, sy, own_size)
         canopy.sprite(enemy, ex, ey, size)
         # The lock: four red corners around the contact, and the line to it.
@@ -14594,6 +14616,8 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
             pace = 0.0
         out_line(line)
     if canopy:
+        if _PENDING_VOLLEY is not None:
+            _volley_in_place(scene, len(lines))
         if _PENDING_DRAIN is not None:
             _drain_in_place(p, sources, inner, tint, len(lines))
         # Until the action bar is down this page covers its own rows; the bar
@@ -14609,6 +14633,106 @@ def _box_body_row(p: Palette, row: str, inner: int) -> str:
 #: A drain the next canopy page performs in place (issue #39): `render(*values)`
 #: gives the rows to animate, from `start` to `end` readings.
 _PENDING_DRAIN: dict | None = None
+
+# The exchange, seen (review). A fight's picture was still: two hulls and a
+# lock, the same from the first turn to the last, while everything that
+# happened was a sentence and two bars. The shots now cross the window: the
+# pilot's bolt goes out and the contact flares where it lands, then the
+# contact's comes back and the pilot's own hull takes it. It is drawn over the
+# canopy cell by cell and every cell is put back as it was, so the picture is
+# still one picture painted once; it plays before the bars drain, under the
+# same rules as every effect -- `auto` only, any key ends it, and it is under
+# half a second.
+_PENDING_VOLLEY: dict | None = None
+VOLLEY_BOLT_STEPS = 5
+VOLLEY_BOLT_SECONDS = 0.028
+VOLLEY_FLASH_SECONDS = 0.07
+VOLLEY_OUT, VOLLEY_BACK = (150, 230, 255), (255, 120, 70)
+
+
+def volley_in_place_next(dealt: bool, received: bool) -> None:
+    """Have the next page drawn on the canopy show the exchange that just happened."""
+    global _PENDING_VOLLEY
+    _PENDING_VOLLEY = {"dealt": dealt, "received": received} if dealt or received else None
+
+
+def _volley_in_place(scene: dict, drawn: int) -> None:
+    """Play the pending exchange across the window, and leave the window as it was."""
+    global _PENDING_VOLLEY
+    volley, _PENDING_VOLLEY = _PENDING_VOLLEY, None
+    if scene["kind"] != "combat" or _OUTPUT_STYLE != "auto" or motion_interrupted():
+        return
+    width, height = _OUTPUT_WIDTH, _OUTPUT_HEIGHT
+    points = combat_stage_points(scene, width, height)
+    if points is None:
+        return
+    cells = canopy_cells(scene, width, height)
+    panel_w = _box_outer_width()
+
+    def free(row: int, column: int) -> bool:
+        # Never the console or its action bar, and never the bottom-right cell.
+        return (0 <= row < height and 0 <= column < width and not (row < drawn + 2 and column < panel_w)
+                and not (row == height - 1 and column == width - 1))
+
+    def original(row: int, column: int) -> str:
+        ch, fg, bg = cells[row][column]
+        return f"{ESC}[{row + 1};{column + 1}H{RESET}{_canopy_sgr(fg if ch != ' ' else None, bg)}{ch}"
+
+    def ground(row: int, column: int) -> tuple:
+        ch, fg, bg = cells[row][column]
+        return bg or fg or (8, 8, 16)
+
+    def bolt(start: tuple, end: tuple, color: tuple) -> bool:
+        (ax, ay), (bx, by) = start, end
+        steps = max(2, int(abs(bx - ax)))
+        path = []
+        for index in range(steps + 1):
+            x, y = ax + (bx - ax) * index / steps, ay + (by - ay) * index / steps
+            cell = (int(y) // 2, int(x), int(y) % 2 == 0)
+            if free(cell[0], cell[1]) and (not path or path[-1][:2] != cell[:2]):
+                path.append(cell)
+        if not path:
+            return True
+        length = max(3, len(path) // 5)
+        lit: list[tuple] = []
+        alive = True
+        for step in range(1, VOLLEY_BOLT_STEPS + 1):
+            head = len(path) * step // VOLLEY_BOLT_STEPS
+            now = path[max(0, head - length):head]
+            parts = [original(row, column) for row, column, _upper in lit if (row, column) not in {c[:2] for c in now}]
+            parts += [f"{ESC}[{row + 1};{column + 1}H{_canopy_sgr(color, ground(row, column))}{'▀' if upper else '▄'}"
+                      for row, column, upper in now]
+            out("".join(parts) + RESET)
+            lit = now
+            if not motion_pause(VOLLEY_BOLT_SECONDS):
+                alive = False
+                break
+        out("".join(original(row, column) for row, column, _upper in lit) + RESET)
+        return alive
+
+    def flash(target: tuple, color: tuple) -> bool:
+        cx, cy, half_w, half_h = target
+        box = [(row, column) for row in range(int(cy - half_h) // 2, int(cy + half_h) // 2 + 1)
+               for column in range(int(cx - half_w), int(cx + half_w) + 1)
+               if free(row, column) and cells[row][column][0] != " "]
+        parts = []
+        for row, column in box:
+            ch, fg, bg = cells[row][column]
+            parts.append(f"{ESC}[{row + 1};{column + 1}H"
+                         f"{_canopy_sgr(_mix(fg, color, 0.6) if fg else None, _mix(bg, color, 0.6) if bg else None)}{ch}")
+        out("".join(parts) + RESET)
+        alive = motion_pause(VOLLEY_FLASH_SECONDS)
+        out("".join(original(row, column) for row, column in box) + RESET)
+        return alive
+
+    (sx, sy, own_w, _own_h), (ex, ey, enemy_w, _enemy_h) = points["own"], points["enemy"]
+    nose, bow = (sx + own_w + 1, sy), (ex - enemy_w - 1, ey)
+    alive = True
+    if volley["dealt"]:
+        alive = bolt(nose, bow, VOLLEY_OUT) and flash(points["enemy"], (255, 255, 255))
+    if alive and volley["received"]:
+        bolt(bow, nose, VOLLEY_BACK) and flash(points["own"], (255, 90, 60))
+    out(f"{RESET}{ESC}[{drawn + 1};1H")
 
 
 def drain_in_place_next(render, start: tuple, end: tuple) -> None:
@@ -18386,6 +18510,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             continue
         lines = []
         outcome, loot = None, 0
+        shot = False  # whether the pilot fired this turn; what came back is read off the hull
         # What the two hulls read before the exchange, so the bars can be walked
         # to their new readings afterwards -- after the commit, never before it.
         opened_at = (pirate.hp, ship.hull_hp)
@@ -18403,6 +18528,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             _, _, lines = tactical_mend(world, pirate, tactics)
         elif action == "F" or (action == "G" and tactics["brace_ready"]) or (action in ("C", "N") and action in stations):
             _, _, lines = tactical_round(world, pirate, tactics, action)
+            shot = True
             if pirate.hp <= 0:
                 if world.save.pilot.kills == 0:
                     label = "Concord patrol vessel " if patrol else ""
@@ -18493,8 +18619,10 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
         closed_at = (max(0, pirate.hp), lethal if lethal is not None else max(0, ship.hull_hp))
         page = 0
         if canopy_active():
-            # The next combat page drains its own bars; a fight that just ended
-            # draws that page once more, so its last exchange is seen there too.
+            # The next combat page shows the shots cross and then drains its own
+            # bars; a fight that just ended draws that page once more, so its
+            # last exchange is seen there too.
+            volley_in_place_next(shot, lethal is not None or ship.hull_hp < opened_at[1])
             drain_in_place_next(lambda enemy, hull: combat_contact_rows(world, pirate, enemy, hull), opened_at, closed_at)
             if outcome is not None:
                 shown = combat_display_lines(world, pirate, lines, patrol=patrol, details=details, tactics=tactics,
