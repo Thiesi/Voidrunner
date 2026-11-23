@@ -1865,16 +1865,32 @@ class Mission:
     deadline_turn: int | None = None
     pirate_tier: int | None = None
     opening_assignment: bool = False
+    # A later leg of a chain (see `chain_offer`): which leg, 2 or 3, and the
+    # number of the contract the chain began with, which names its client.
+    leg: int = 0
+    chain: int = 0
+    # The faction whose own work this is (see `faction_offer`).
+    faction: str | None = None
 
     def to_dict(self) -> dict:
         data = dataclasses.asdict(self)
         if self.opening_assignment is False:
             del data["opening_assignment"]
+        for name in ("leg", "chain", "faction"):
+            if not data[name]:
+                del data[name]
         return data
 
     @classmethod
     def from_dict(cls, d: dict) -> "Mission":
-        return cls(**{f.name: d[f.name] for f in dataclasses.fields(cls) if f.name in d})
+        mission = cls(**{f.name: d[f.name] for f in dataclasses.fields(cls) if f.name in d})
+        if "leg" not in d and "faction" not in d and isinstance(mission.description, str):
+            # A contract posted before these were fields said both in how its
+            # description begins, and is read that way once.
+            mission.leg = next((leg for leg in (2, 3) if mission.description.startswith(CHAIN_LEGS[leg])), 0)
+            mission.faction = next((faction for faction, tag in FACTION_CONTRACT_TAGS.items()
+                                    if mission.description.startswith(tag)), None)
+        return mission
 
 
 @dataclass
@@ -1947,6 +1963,13 @@ def _validate_combat_mission_snapshot(data: dict, kind: str) -> None:
     for number in (mission.quantity, mission.deadline_turn):
         if number is not None and (type(number) is not int or number < 0):
             raise ValueError("invalid mission quantity or deadline")
+    if (type(mission.leg) is not int or mission.leg not in (0, 2, 3) or (mission.leg and kind != "delivery")
+            or type(mission.chain) is not int or mission.chain < 0 or (mission.chain and not mission.leg)):
+        raise ValueError("invalid mission chain")
+    if mission.faction is not None and (
+            mission.leg or mission.opening_assignment
+            or {FACTION_CONCORD: "bounty", FACTION_BLACKWAKE: "delivery"}.get(mission.faction) != kind):
+        raise ValueError("invalid mission faction")
 
 
 def _validate_versioned(value, fields: set[str], label: str, *, supported=(1,), unsupported: str) -> None:
@@ -3938,16 +3961,36 @@ def _advance_mission_ids(save: SaveData) -> None:
 # something this station makes where it makes anything, and pays a quarter more
 # than a delivery of its size, then half as much again. It is an offer like any
 # other -- it wants a free slot, it can be left, it goes when the board turns
-# over -- and carrying all three is an achievement. A leg is known by how its
-# description begins, so no contract gains a field and older builds load it.
+# over -- and carrying all three is an achievement.
+#
+# A leg is a field of the contract (`Mission.leg`), and so is the contract the
+# chain began with (`Mission.chain`). The first build of this knew a leg by how
+# its description began, which kept the save's shape and gave the game nothing
+# to hold on to; with the chain's first contract on record, the chain has a
+# client. Each is a freight house with a name, the same one on all three legs:
+# it is who has more work, who is on the contract's sheet, and who remembers
+# the ship that carried all three.
 CHAIN_ONE_IN = 3
 CHAIN_LEGS = ("", "", "Second leg: ", "Final leg: ")
 CHAIN_PREMIUM = {2: 1.25, 3: 1.5}
+CHAIN_CLIENTS = (
+    "Ostrander & Vale", "Halloran Freight", "the Tamsin Line", "Kessler Brothers", "Meridian Forwarding",
+    "the Yarrow Combine", "Dace & Daughters", "Northlight Haulage", "the Brandt Agency", "Coppergate Shipping",
+    "Lindqvist Cargo", "the Ashby Concern", "Farrow & Pell", "Threshold Lines", "the Okonjo Exchange",
+    "Marlow Consolidated",
+)
 
 
 def chain_leg(mission: Mission) -> int:
     """Which leg of a chain a delivery is: 1 for an ordinary one, 2 or 3 for a posted follow-up."""
-    return next((leg for leg in (2, 3) if mission.description.startswith(CHAIN_LEGS[leg])), 1)
+    return mission.leg or 1
+
+
+def chain_client(world: World, mission: Mission) -> str:
+    """The freight house a chain is flown for: by the career's seed and the
+    number of the chain's first contract, so all three legs name the same one."""
+    first = mission.chain or mission.id
+    return CHAIN_CLIENTS[zlib.crc32(f"client:{world.save.seed}:{first}".encode("utf-8")) % len(CHAIN_CLIENTS)]
 
 
 def chain_continues(world: World, mission: Mission) -> bool:
@@ -3962,9 +4005,10 @@ def chain_continues(world: World, mission: Mission) -> bool:
     return leg == 1 and zlib.crc32(f"chain:{world.save.seed}:{mission.id}".encode("utf-8")) % CHAIN_ONE_IN == 0
 
 
-def chain_offer(world: World, system_id: int, leg: int, after: int) -> Mission | None:
-    """The leg a client posts at `system_id` after contract number `after`: its
-    own draw, so the board's ordinary offers are what they would have been."""
+def chain_offer(world: World, system_id: int, leg: int, after: int, first: int = 0) -> Mission | None:
+    """The leg a client posts at `system_id` after contract number `after`, of
+    the chain that began with contract number `first`: its own draw, so the
+    board's ordinary offers are what they would have been."""
     rng = random.Random(f"voidrunner-chain-v1:{world.save.seed}:{system_id}:{after}:{leg}")
     station = world.by_id[system_id]
     hops = bfs_hops(world.by_id, system_id)
@@ -3983,7 +4027,7 @@ def chain_offer(world: World, system_id: int, leg: int, after: int) -> Mission |
                    f"to {world.by_id[target].name}")
     return Mission(id=world.save.next_mission_id, kind="delivery", description=description, reward=reward,
                    origin_system=system_id, target_system=target, commodity=commodity, quantity=quantity,
-                   deadline_turn=world.save.turn + 10 + 4 * hops[target])
+                   deadline_turn=world.save.turn + 10 + 4 * hops[target], leg=leg, chain=first or after)
 
 
 def post_chain_legs(world: World, board: dict) -> None:
@@ -3993,8 +4037,10 @@ def post_chain_legs(world: World, board: dict) -> None:
     prefix = f"chain_{here}_"
     for key in sorted(key for key in world.save.flags if key.startswith(prefix)):
         del world.save.flags[key]
-        leg, after = (int(part) for part in key[len(prefix):].split("_"))
-        offer = chain_offer(world, here, leg, after)
+        # Leg, the contract just handed over and the chain's first; a promise
+        # made before a chain kept its first contract has only the first two.
+        leg, after, *first = (int(part) for part in key[len(prefix):].split("_"))
+        offer = chain_offer(world, here, leg, after, *first)
         if offer is None:
             continue
         ordinary = [item for item in board["offers"] if chain_leg(Mission.from_dict(item)) == 1]
@@ -4014,8 +4060,8 @@ def post_chain_legs(world: World, board: dict) -> None:
 # runs at Havens, where its goods are sold: contraband, to a station that is
 # not a Haven, past its customs, for half as much again as a delivery of that
 # value. Each pays standing with its own faction where ordinary work pays
-# little or none, and a cartel run pays none with Concord. A faction's offer is
-# known by how its description begins, so no contract gains a field.
+# little or none, and a cartel run pays none with Concord. Whose work a
+# contract is is a field of the contract (`Mission.faction`).
 FACTION_CONTRACT_ONE_IN = 2
 FACTION_CONTRACT_STANDING = 3
 FACTION_CONTRACT_TAGS = {FACTION_CONCORD: "Concord warrant: ", FACTION_BLACKWAKE: "Cartel run: "}
@@ -4024,7 +4070,7 @@ CARTEL_RUN_PREMIUM = 1.5
 
 def faction_contract(mission: Mission) -> str | None:
     """The faction whose own work this contract is, or None for the board's ordinary offers."""
-    return next((faction for faction, tag in FACTION_CONTRACT_TAGS.items() if mission.description.startswith(tag)), None)
+    return mission.faction
 
 
 def faction_offer(world: World, system_id: int) -> Mission | None:
@@ -4048,7 +4094,7 @@ def faction_offer(world: World, system_id: int) -> Mission | None:
         return Mission(id=save.next_mission_id, kind="bounty", reward=BOUNTY_PAY[0] + tier * BOUNTY_PAY[1],
                        description=f"{tag}hunt down a raider reported near {world.by_id[target].name}",
                        origin_system=system_id, target_system=target, pirate_tier=tier,
-                       deadline_turn=save.turn + rng.randint(15, 30))
+                       deadline_turn=save.turn + rng.randint(15, 30), faction=faction)
     # Two jumps at least: the goods are handed over before the far station's
     # customs look, so it is the harbors on the way that make it a run.
     candidates = sorted(sid for sid, away in hops.items() if 2 <= away <= 4 and world.by_id[sid].economy != "Haven")
@@ -4063,7 +4109,7 @@ def faction_offer(world: World, system_id: int) -> Mission | None:
     return Mission(id=save.next_mission_id, kind="delivery", reward=reward,
                    description=f"{tag}deliver {quantity}x {COMMODITIES[commodity]['label']} to {world.by_id[target].name}",
                    origin_system=system_id, target_system=target, commodity=commodity, quantity=quantity,
-                   deadline_turn=save.turn + rng.randint(15, 30))
+                   deadline_turn=save.turn + rng.randint(15, 30), faction=faction)
 
 
 def generate_mission_board(world: World) -> list[Mission]:
@@ -4322,12 +4368,13 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
             world.save.pilot.note(msg)
             msgs.append(msg)
             if chain_continues(world, m):
-                leg = chain_leg(m) + 1
-                world.save.flags[f"chain_{m.target_system}_{leg}_{m.id}"] = True
-                msgs.append(f"The client has more work: a {'second' if leg == 2 else 'final'} leg is on this station's board.")
+                leg, client = chain_leg(m) + 1, chain_client(world, m)
+                world.save.flags[f"chain_{m.target_system}_{leg}_{m.id}_{m.chain or m.id}"] = True
+                msgs.append(f"{client[0].upper()}{client[1:]} has more work: a {'second' if leg == 2 else 'final'} leg "
+                            "is on this station's board.")
             elif m.kind == "delivery" and chain_leg(m) == 3:
                 bump_accolade(world.save, "chains")
-                msgs.append("All three legs carried: the client will remember this ship.")
+                msgs.append(f"All three legs carried: {chain_client(world, m)} will remember this ship.")
         else:
             still_active.append(m)
     world.save.active_missions = still_active
@@ -15661,6 +15708,8 @@ def mission_details(world: World, mission: Mission) -> list[str]:
     wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
     wages = wage * len(path)
     checks: list[tuple[str, str, str]] = []
+    if mission.leg:
+        checks.append(("CLIENT", f"{chain_client(world, mission)}, leg {mission.leg} of 3", "info"))
     money: list[tuple[str, int | None, str]] = [("Payout", reward, "good")]
     procurement = 0
     held = False

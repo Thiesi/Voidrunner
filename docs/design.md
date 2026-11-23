@@ -1735,9 +1735,9 @@ half as much again as a delivery of that value, and 3 Blackwake standing. A run
 earns nothing with Concord, where every other contract earns 1. The goods are
 handed over before the far station's customs look, so it is the harbors on the
 way that make it a run, which is why it is never the next jump out. A faction's
-offer comes from its own draw and takes a full board's last place; it is known
-by how its description begins (`Concord warrant:`, `Cartel run:`), and never
-starts a chain. No contract gains a field.
+offer comes from its own draw and takes a full board's last place, and never
+starts a chain. Whose work a contract is is a field of the contract
+(`Mission.faction`); see the next paragraph for why it was not one at first.
 
 **Contract chains (review).** Every contract was a single errand: taken,
 flown, paid, forgotten, and the next had nothing to do with it. One delivery in
@@ -1750,11 +1750,29 @@ delivery of its size, then half as much again. It is an offer like any other:
 it wants a free slot, it can be left, and it goes when the board turns over.
 Carrying all three is an achievement. A leg is drawn by its own generator, so a
 board's ordinary offers are what they would have been, and it takes a full
-board's last place. A leg is known by how its description begins (`Second
-leg:`, `Final leg:`) and a promised one is a flag until the board is next
-prepared, which is the same docking: no contract gains a field. Flown through
-the simulator, chains leave a contractor's worth where it was, to within 1%:
-they are something to follow, not a raise.
+board's last place. A promised leg is a flag until the board is next
+prepared, which is the same docking. Flown through the simulator, chains leave
+a contractor's worth where it was, to within 1%: they are something to follow,
+not a raise.
+
+**A chain has a client, and a contract says what it is (review).** Chains and
+faction work were first built so that no contract gained a field: a leg was
+known by how its description began (`Second leg:`), and so was a warrant or a
+run. That kept the save's shape for the sake of an older build reading a newer
+save, which is not something this door supports or needs -- a SysOp replaces
+the file and the new build reads the old saves -- and it cost the game
+something real: a rule that reads prose cannot be validated, and a chain that
+does not know where it began cannot be anyone's. A contract now carries `leg`
+(2 or 3), `chain` (the number of the contract the chain began with) and
+`faction`, each absent from the record of a contract that has none, and each
+checked when a save is read: a leg is a delivery, a warrant a bounty, a run a
+delivery, and no contract is two of them. With the chain's first contract on
+record the chain has a client -- one of sixteen freight houses, by the career's
+seed and that contract's number, the same on all three legs. It is who "has
+more work" on the dock, it is on the contract's sheet (`CLIENT Halloran
+Freight, leg 2 of 3`), and it is who remembers the ship that carried all three.
+A contract posted by the builds in between has no fields and is read by its
+description once, when it is loaded.
 
 **The jump is its destination's (review).** Every jump was the same
 violet tunnel, and a career plays it every turn. A charted destination now
