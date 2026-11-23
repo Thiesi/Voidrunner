@@ -25,6 +25,7 @@ def _fight(*roles, tier=2, name="Hollow Fang", version=None, hull=None, **ship):
     for key, value in ship.items():
         setattr(world.save.ship, key, value)
     world.save.ship.hull_hp = vr.hull_hp_max(world.save.ship) if hull is None else hull
+    world.event_rng.seed(1)  # a career's luck is drawn fresh; a test's is fixed
     hp = 20 + 15 * tier
     pirate = vr.Pirate(name, tier, hp, hp)
     tactics = vr.new_tactics(pirate) if version is None else vr.new_tactics(pirate, version)
@@ -89,7 +90,8 @@ def test_a_called_shot_is_half_as_much_again_and_cover_does_not_blunt_it(name):
 
 
 def test_a_patch_gives_back_a_quarter_of_the_hull_for_the_turns_shot():
-    world, pirate, tactics = _fight("engineer", hull=20)
+    # Tier 1 is read perfectly: the contact makes the move shown and its cycle moves on by one.
+    world, pirate, tactics = _fight("engineer", hull=20, tier=1)
     ship = world.save.ship
     full = vr.hull_hp_max(ship)
     gain = vr.mend_amount(ship)
