@@ -1,4 +1,4 @@
-"""What a rank brings besides its title (review, v1.3).
+"""What a rank brings besides its title (review).
 
 A rank was a title, a scene and a chat line. Each now brings one thing, all of
 them about contracts: a fourth and a fifth slot, and a premium on every

@@ -1,4 +1,4 @@
-"""The crew say a line when something happens (review, v1.3).
+"""The crew say a line when something happens (review).
 
 A specialist was a name, a line of character on the roster, a bonus and a
 wage. These pin that every one of the nine has something to say at the moments

@@ -1,4 +1,4 @@
-"""The window at 80x24: the rows the deck and a fight may take (review, v1.3).
+"""The window at 80x24: the rows the deck and a fight may take (review).
 
 At 80x24 the canopy's picture is the bottom ten rows of the screen, and the two
 screens a pilot looks at most -- the Command Deck and a fight -- used to cover

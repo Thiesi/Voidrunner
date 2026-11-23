@@ -940,7 +940,7 @@ a record written before achievements existed is left out of it rather than
 counted as a pilot who earned nothing.
 
 
-**Whole careers, flown (review, v1.3).** Each rule the review added was
+**Whole careers, flown (review).** Each rule the review added was
 measured or bounded on its own, and none of that says what they do together:
 what a trait is worth depends on the hold that carries it, which depends on
 what the contracts paid, which depends on the rank. `tools/career_sim.py` flies
@@ -979,7 +979,7 @@ is a place to put credits, as intended. And contracts are the slow road: a
 contractor ends with about half a trader's worth in either version, and the
 rank's extra slots made this one poorer, because it took the work.
 
-**What a contract pays (review, v1.3).** The careers flown above put a pilot
+**What a contract pays (review).** The careers flown above put a pilot
 who lives off the board at about half the worth of one who trades, in v1.7.2 and
 after the review alike, and from the first week on: a hold's margin grows with
 the hold, and a contract's sum did not grow at all. A survey paid 200 and 80 a
@@ -1324,7 +1324,7 @@ has always had them; and the column keeps the station, the moored ship and the
 name. A long page covers some of it, as a page always may. The pages a pilot
 lives on -- the deck, the market, a fight -- do not.
 
-Sixteen colors do not get it, and that was tried (review, v1.3). Read through
+Sixteen colors do not get it, and that was tried (review). Read through
 the scenes' own sixteen-color rule the sky's haze and the galaxy's band become
 solid blue and magenta shapes larger than the world they are behind. With
 everything dark dropped to black first -- sky, band, the fade at a world's limb
@@ -1354,7 +1354,7 @@ the terminal is sent UTF-8 and NetBBS has not said the caller's font lacks them
 always over CP437. A SysOp can switch it off for everyone with `DOOR_CANOPY=0`,
 or keep everyone to half blocks with `DOOR_PIXELS=half`.
 
-**The window is budgeted, not left over (review, v1.3).** At 80x24 the canopy's
+**The window is budgeted, not left over (review).** At 80x24 the canopy's
 picture is a band along the bottom ten rows, and "whatever the console leaves
 uncovered" had come to mean four of them on the two screens a pilot looks at
 most: the Command Deck was nineteen rows and a fight nineteen or twenty-two, so
@@ -1381,7 +1381,7 @@ page for every two. The contact is composed low in the band so its lock clears
 a turn's page. The same budget is a rule for any screen a pilot sits on: a new
 row on the deck or in a fight is paid for with a row of window.
 
-**Scenes have presence at 80x24 (review, v1.3).** A scene's sprites were drawn
+**Scenes have presence at 80x24 (review).** A scene's sprites were drawn
 one pixel to an art pixel below a 52-pixel sky, which is every terminal under
 about thirty rows: at 80x24 a seven-pixel ship was three and a half rows of a
 twenty-row sky, and the quieter scenes -- a salvage, a distress call, a tow, a
@@ -1406,7 +1406,7 @@ room. It is the grid's projection under the grid's rules -- an uncharted system
 gives away no name (a contract's target excepted), no economy and no danger --
 and the grid remains for every terminal the canopy is not drawn on.
 
-The chart also draws the way on (review, v1.3). It showed charted systems and
+The chart also draws the way on (review). It showed charted systems and
 the lanes between two of them, so a career's first chart was two or three
 stars with nothing to say there was anywhere to go, and a destination one jump
 away in the next sector was simply off the picture. A lane that leaves the
@@ -1418,7 +1418,7 @@ never a name, an economy or a danger. Ordinary names keep off a bearing's
 mark; the ship, the objective and the route's end are named regardless. The
 lanes are a shade brighter.
 
-And it opens on known space (review, v1.3). The map framed a fixed sixth of
+And it opens on known space (review). The map framed a fixed sixth of
 the galaxy, the sector the ship was in, so a career's first chart was three
 stars in a corner of an empty picture, and the text grid every other terminal
 gets was the same three marks in the same corner. It opens instead on a frame
@@ -1488,7 +1488,7 @@ recovery uses the default presentation until a valid career is available. Motion
 is on in `auto` and `basic` and off in the other three, under the conditions in
 the Voidrunner presentation contract above.
 
-A pilot's own trading never moves a price in the pilot's favor (review, v1.3).
+A pilot's own trading never moves a price in the pilot's favor (review).
 A station's drift rises as the pilot buys there and falls as they sell, and it
 used to be one price for both sides of the counter. Every order moved it by up
 to 5% however small the order, and a whole lot traded at the price before it,
@@ -1507,7 +1507,7 @@ take, as Return already buys a full tank at the fuel prompt: selling the hold
 is what a trader docks to do, and it took six keys. Cargo a delivery is waiting
 for is never part of it and still has to be typed and confirmed.
 
-**Tactical ruleset 4: a contact may jump its pattern (review, v1.3).** A
+**Tactical ruleset 4: a contact may jump its pattern (review).** A
 contact's pattern, the move it makes next and that move's exact damage were all
 on the panel, so one rule solved every fight: Guard on a volley unless the shot
 kills, otherwise Fire. The telegraph is the right idea for a door -- readable,
@@ -1540,7 +1540,7 @@ win for a starting ship and hull lost by an upgraded one is within a few points
 of what it was. The contact's pattern is named beside its tier on its own row
 (`Ashclaw ... tier 3 Skirmisher`), and the pattern row is the cycle alone.
 
-**A system's own market (review, v1.3).** A price was the commodity's base and
+**A system's own market (review).** A price was the commodity's base and
 the economy's two multipliers and nothing else, so forty-eight systems were
 five price tables: a pilot who had seen one Tech station had seen them all, and
 charting a system told them nothing a trader could use. About three systems in
@@ -1567,7 +1567,7 @@ simply finds its systems have traits; its remembered quotes are as stale as
 any others. The chart's MARKET column takes the SECTOR column's room at eighty
 columns; the sector is on the star map's Info.
 
-**What a rank brings (review, v1.3).** A rank was a title, a scene and a chat
+**What a rank brings (review).** A rank was a title, a scene and a chat
 line: none unlocked a ship, a contract or a price, so the ladder a career is
 measured by changed nothing a pilot could do. Each rank above the first now
 brings one thing, and all of them are about contracts, which is where a rich
@@ -1584,7 +1584,7 @@ as nothing but the commission (bounties and escorts) changed it. A promotion's
 scene, its result line and the Pilot Record's next-rank row say what the rank
 brings.
 
-**Station stakes (review, v1.3).** By about day 45 of a trading career every
+**Station stakes (review).** By about day 45 of a trading career every
 upgrade and both refits are bought, and the top rank is another seventy-five
 jumps of the same runs with nothing to work toward (issue #405 lowered the top
 rank for this reason and left the sink open). A stake is something to own: a
@@ -1610,7 +1610,7 @@ belong to the career and end with it. The market's header wears `STAKE 2/3`,
 the exchange quotes the faster pace, two achievements count the steps held,
 and buying in is news on the wire.
 
-**Options that were never the right key (review, v1.3).** Five rules had an
+**Options that were never the right key (review).** Five rules had an
 option on screen that no pilot should have chosen, and an option nobody should
 choose is noise on a small screen.
 
@@ -1642,7 +1642,7 @@ choose is noise on a small screen.
 judged against both use. Futures remain what they were: a price lock in a
 market whose prices do not move on their own.
 
-**The staged opening (review, v1.3).** A first career's first deck listed
+**The staged opening (review).** A first career's first deck listed
 fourteen services at one weight: a ledger with nothing in it, an archive, two
 factions and a hall of fame beside the four things a first flight is made of.
 The rules are gentle -- losing the ship is a tow, the first contract is
@@ -1721,7 +1721,7 @@ double strength and a clean miss the same full crew won every time and lost a
 third, and tier 4 has to stay a fight. Whole careers do not move: ships are
 lost in a career's first days, before there is a crew to lose them with.
 
-**Faction contracts (review, v1.3).** Joining a faction gave a perk and a
+**Faction contracts (review).** Joining a faction gave a perk and a
 story, and after the story nothing: membership never again put anything in
 front of a pilot. A member in good standing -- the same test the perk uses --
 now finds the faction's own work on about one board in two. The Concord Navy
@@ -1739,7 +1739,7 @@ offer comes from its own draw and takes a full board's last place; it is known
 by how its description begins (`Concord warrant:`, `Cartel run:`), and never
 starts a chain. No contract gains a field.
 
-**Contract chains (review, v1.3).** Every contract was a single errand: taken,
+**Contract chains (review).** Every contract was a single errand: taken,
 flown, paid, forgotten, and the next had nothing to do with it. One delivery in
 three is now the first of three. On the dock where it is handed over the client
 posts a second leg on that station's board, and after the second a final one.
@@ -1756,7 +1756,7 @@ prepared, which is the same docking: no contract gains a field. Flown through
 the simulator, chains leave a contractor's worth where it was, to within 1%:
 they are something to follow, not a raise.
 
-**The jump is its destination's (review, v1.3).** Every jump was the same
+**The jump is its destination's (review).** Every jump was the same
 violet tunnel, and a career plays it every turn. A charted destination now
 lights the tunnel in its own trade's light -- the core, the streams and the
 hoops take half of it -- and its world, the one its dock and its atlas page
@@ -1769,7 +1769,7 @@ streams, so the middle of the tunnel is still once it has arrived. At 80x24 in
 truecolor a charted jump is about 83 KB where an uncharted one is 79, inside
 the budget every scene is held to, and a one-unit hop is 64.
 
-**The atlas (review, v1.3).** The Viewport showed the ship, the station the
+**The atlas (review).** The Viewport showed the ship, the station the
 pilot was docked at and one landmark: three pictures of things already on the
 deck, and nothing to come back for. Every system has had a world of its own
 since the review's first pass, and each was seen only from its own dock. The
@@ -1785,7 +1785,7 @@ it. The same facts are the text portrait's sentences in `mono` and `plain`
 opens. Two achievements count the harbors of one career, at twelve and at
 thirty-six. Nothing is saved for any of it.
 
-**Seasons, and what a futures order bets on (review, v1.3).** A price was its
+**Seasons, and what a futures order bets on (review).** A price was its
 economy's, its trait's, and whatever the pilot's own trading or the rare event
 had done to it. Nothing moved that a pilot could see coming, so a futures order
 -- today's price, held for an 8% fee -- was never worth its fee, and the trade
@@ -1806,7 +1806,7 @@ says before it is signed. Contraband has no season; its price rules are its
 own. Nothing is saved: the seed and the day give it (`season_factor`). Flown
 through the career simulator, seasons move a career's worth by about 2%.
 
-**The far site (review, v1.3).** A galaxy had one landmark, found by chance or
+**The far site (review).** A galaxy had one landmark, found by chance or
 on Mara's errand, and once its salvage was claimed exploration had nothing left
 that was a place. The first site's record now carries a bearing to a second:
 another of the four sites, never the same kind as the first, in another sector,
@@ -1822,7 +1822,7 @@ is an achievement for following the record there. Its system and kind come from
 the seed through their own generator, as the first's do; what is saved is one
 more flag (`landmark2_investigated`).
 
-**Dockside talk (review, v1.3).** A trait is found by docking, and until then
+**Dockside talk (review).** A trait is found by docking, and until then
 the chart says `?` for every system alike, so the only way to look for one was
 to go everywhere. About one docking in three -- fewer once the neighbourhood is
 known -- somebody on the dock says where one is: a system one jump out, or two
@@ -1837,7 +1837,7 @@ the seed and the day, with no draw from the event RNG, and what was heard is a
 flag (`rumour_<system>`), so an older build loads the save and merely forgets
 the talk.
 
-**The crew speak (review, v1.3).** A specialist was a name, one line of
+**The crew speak (review).** A specialist was a name, one line of
 character on the roster, a bonus and a wage, and the whole game held about
 eight hundred words of authored text. Aboard, a specialist now says one line
 when something happens on a hop, in the voice the roster gives them, among the
@@ -1851,7 +1851,7 @@ a common moment is spoken at all, follow from the day: the talk draws nothing
 from the event RNG, so a crew changes no encounter by talking, and nothing a
 pilot needs is only in a line.
 
-**The daily dispatch (review, v1.3).** Nothing in the game was different
+**The daily dispatch (review).** Nothing in the game was different
 tomorrow: no turn limit, no calendar, and a private galaxy for every career, so
 two callers had nothing to compare and neither had a reason to dial in again.
 The dispatch is one order a real day, the same for every pilot on every board,
@@ -1889,7 +1889,7 @@ one row with no rule, under the gauges: what it asks and what it pays while it
 is open, the streak once it is flown. That row is paid for with a row of
 window, which leaves nine of ten at 80x24.
 
-**The wire (review, v1.3).** A board's pilots could not see each other except
+**The wire (review).** A board's pilots could not see each other except
 as rows in the Hall, and only NetBBS with game events on said anything aloud.
 The wire is what the pilots of one board have lately done, one line of it on
 the deck: a promotion, a silver or gold achievement, a retirement, a lost ship,

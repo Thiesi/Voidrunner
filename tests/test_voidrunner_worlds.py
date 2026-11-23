@@ -1,4 +1,4 @@
-"""Every system's own world, and the hulls in the picture (review, v1.3).
+"""Every system's own world, and the hulls in the picture (review).
 
 Forty-eight systems shared five pictures, one per economy. A world is now made
 from its economy and the system's name alone, the pilot's own hull is moored at

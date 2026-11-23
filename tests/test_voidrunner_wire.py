@@ -1,4 +1,4 @@
-"""The wire: what the pilots of one board have lately done (review, v1.3).
+"""The wire: what the pilots of one board have lately done (review).
 
 Each pilot's last few events live in that pilot's own score record, written
 only by their own session, and a reader merges every record it can read. These

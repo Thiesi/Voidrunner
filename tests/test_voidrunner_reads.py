@@ -1,4 +1,4 @@
-"""Tactical ruleset 4: a contact that may jump its pattern (review, v1.3).
+"""Tactical ruleset 4: a contact that may jump its pattern (review).
 
 A contact's pattern, its next move and that move's exact damage were all on the
 panel, so one rule solved every fight. From tier 2 a contact may now make the

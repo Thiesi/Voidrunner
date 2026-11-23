@@ -693,7 +693,7 @@ def _screen_rows(running: "Door") -> list[str]:
     it replaced with nothing to say where one ends: a walk looking for the
     chart's letter for a system found the board's digit for a contract there
     first, pressed it at the chart, and left a "combat" fixture with no fight
-    in it (review, v1.3).
+    in it (review).
     """
     width, height = (int(side) for side in running.size.split("x"))
     canvas = term.Screen(width, height)
@@ -797,7 +797,7 @@ def build_voidrunner_combat(door_name: str, door: pathlib.Path, state: pathlib.P
             # on the board it returns to (issue #38), where this used to press
             # Back twice for a contract page and a board -- and the deck's own
             # `B` opens the board, so the second one went straight back in and
-            # the chart's key was typed at a list of contracts (review, v1.3).
+            # the chart's key was typed at a list of contracts (review).
             for _ in range(3):
                 if "Command Deck" in _screen_rows(running)[0]:
                     break

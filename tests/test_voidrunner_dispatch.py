@@ -1,4 +1,4 @@
-"""The daily dispatch: one order a real day, the same for every pilot (review, v1.3).
+"""The daily dispatch: one order a real day, the same for every pilot (review).
 
 What these pin: the order comes from the date alone and comes round fairly; it
 exists only where a calendar is bound, so no other test depends on the day it

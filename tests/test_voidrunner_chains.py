@@ -1,4 +1,4 @@
-"""A delivery's client may have more work at the far end (review, v1.3).
+"""A delivery's client may have more work at the far end (review).
 
 Every contract was a single errand. These pin the chain: which deliveries start
 one, that the next leg is posted on the board of the station the last was

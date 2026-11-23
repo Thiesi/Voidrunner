@@ -1488,7 +1488,7 @@ ECONOMY_DEMANDS = {
     "Agricultural": ["machinery", "electronics"],
     "Industrial": ["food", "electronics"],
     "Mining": ["food", "machinery"],
-    # Textiles too (review, v1.3): no economy wanted them, so the cheapest good
+    # Textiles too (review): no economy wanted them, so the cheapest good
     # in the galaxy could be bought on any farm world and sold nowhere.
     "Tech": ["ore", "metals", "textiles"],
     "Haven": ["food", "medicine"],
@@ -1497,7 +1497,7 @@ ECONOMY_DEMANDS = {
 #: base, which left a unit of Narcotics 64cr of margin against 96cr on a unit
 #: of legal Electronics with no customs to pass: the risk was all cost. At
 #: half as much again it is the best margin in the galaxy, 156cr a unit, for a
-#: pilot who gets it past an inspection (review, v1.3).
+#: pilot who gets it past an inspection (review).
 CONTRABAND_STREET_PREMIUM = 1.5
 
 
@@ -1550,7 +1550,7 @@ CREW_CANDIDATES = {
                   ("Sana Reed", "Finds patterns in noise and stories in empty sectors."),
                   ("Noor Ash", "Marks safe harbors first and distant mysteries second.")],
 }
-# What each specialist says when something happens on a hop (review, v1.3).
+# What each specialist says when something happens on a hop (review).
 # They had a name, one line of character on the roster and a task; aboard, they
 # were a bonus and a wage. One line now and then, in the voice the roster gives
 # them, on the deck that follows the hop: a kill, a hull in a bad way, a system
@@ -1641,7 +1641,7 @@ RANKS = [
     # only promotes; it never demotes an existing career.
     (150_000, "Legend of the Frontier"),
 ]
-# What a rank is worth besides its title (review, v1.3). A rank was a title, a
+# What a rank is worth besides its title (review). A rank was a title, a
 # scene and a chat line: none unlocked a ship, a contract or a price, so the
 # ladder a career is measured by changed nothing a pilot could do. Each now
 # brings one thing, and all of them are about contracts, which is where a
@@ -2964,7 +2964,7 @@ def generate_landmark(seed: int, galaxy: list[GalaxySystem]) -> dict:
     return {"system_id": system_id, **flavor}
 
 
-# The far site (review, v1.3). A galaxy had one landmark, found by chance or by
+# The far site (review). A galaxy had one landmark, found by chance or by
 # Mara's errand, and once its salvage was claimed exploration had nothing left
 # that was a place. The first site's record now carries a bearing to a second:
 # another of the four, in another sector, worth more. It is not there to be
@@ -3146,7 +3146,7 @@ def bfs_path(by_id: dict[int, GalaxySystem], start_id: int, dest_id: int) -> lis
 
 
 # ---------------------------------------------------------------------------
-# A system's own market (review, v1.3). A price was the commodity's base and
+# A system's own market (review). A price was the commodity's base and
 # the economy's two multipliers and nothing else, so forty-eight systems were
 # five price tables: a pilot who had seen one Tech station had seen them all,
 # and charting a system told them nothing a trader could use.
@@ -3211,7 +3211,7 @@ def trait_sentence(trait: dict) -> str:
     return f"a standing shortage of {label}, bought about {round((TRAIT_PRICE['shortage'] - 1) * 100)}% over its usual price"
 
 
-# Dockside talk (review, v1.3). A trait is found by docking, and until then the
+# Dockside talk (review). A trait is found by docking, and until then the
 # chart says `?` for every system alike, so the only way to look for one was to
 # go everywhere. About one docking in three, somebody on the dock now says
 # where one is: a system one jump out, or two by way of a charted one, that
@@ -3278,7 +3278,7 @@ def dock_rumour(world: World) -> str | None:
     return f"{voice} {name}, {where}, {RUMOUR_WHAT[world.traits[system_id]['kind']]}."
 
 
-# Seasons (review, v1.3). A price was its economy's, its trait's and whatever
+# Seasons (review). A price was its economy's, its trait's and whatever
 # the pilot's own trading and the rare event had done to it: nothing moved that
 # a pilot could see coming, so a futures order -- today's price, held for a
 # fee -- was never worth its fee, and the trade loop had nothing left to read
@@ -3354,7 +3354,7 @@ def _quote(world: World, system_id: int, commodity: str, *, selling: bool) -> in
     One shared price let a pilot walk it: every order moved the quote by up to
     5% however small it was, and a whole lot traded at the price before it, so
     five five-unit purchases and one sale of the lot paid a profit without
-    leaving the dock (review, v1.3). An economy event moves both sides, since
+    leaving the dock (review). An economy event moves both sides, since
     that is the market and not the pilot.
     """
     system = world.by_id[system_id]
@@ -3386,7 +3386,7 @@ def _nudge_drift(world: World, system_id: int, commodity: str, delta: float) -> 
 
 
 # ---------------------------------------------------------------------------
-# Station stakes (review, v1.3). By about day 45 of a trading career every
+# Station stakes (review). By about day 45 of a trading career every
 # upgrade and both refits are bought, and the top rank is another seventy-five
 # jumps of the same runs with nothing to work toward (the #405 note above
 # `RANKS` says as much). A stake is something to own: a share in a station's
@@ -3875,7 +3875,7 @@ def settle_futures_contracts(world: World) -> list[str]:
 
 MISSION_BOARD_DAYS = 3
 MAX_ACTIVE_MISSIONS = 3
-# What a contract pays (review, v1.3). Every figure here is twice what it was.
+# What a contract pays (review). Every figure here is twice what it was.
 # Whole careers flown by `tools/career_sim.py` put a pilot who lives off the
 # board at about half the worth of one who trades, from the first week on: a
 # hold's margin grows with the hold and a contract's sum did not grow at all.
@@ -3930,7 +3930,7 @@ def _advance_mission_ids(save: SaveData) -> None:
     save.next_mission_id = max([save.next_mission_id, 1] + [value + 1 for value in ids])
 
 
-# Contract chains (review, v1.3). Every contract was a single errand: taken,
+# Contract chains (review). Every contract was a single errand: taken,
 # flown, paid, forgotten, and the next one had nothing to do with it. One
 # delivery in three now turns out to be the first of three: on the dock where
 # it is handed over, the client posts a second leg on that station's board, and
@@ -4005,7 +4005,7 @@ def post_chain_legs(world: World, board: dict) -> None:
             world.save.next_mission_id += 1
 
 
-# Faction contracts (review, v1.3). Joining a faction gave a perk and a
+# Faction contracts (review). Joining a faction gave a perk and a
 # story, and after the story nothing: membership never again put anything in
 # front of a pilot. A member in good standing now finds the faction's own work
 # on about one board in two. The Concord Navy posts warrants -- a bounty, at the
@@ -4498,7 +4498,7 @@ TACTICAL_INTENTS = {"attack": (100, 100), "volley": (100, 160),
 # contact three times in four, and Evade has a floor. Escape costs a trader what
 # they came for; it no longer costs the ship as a matter of course.
 #
-# Version 4 (review, v1.3) keeps version 3's damage and takes away a certainty.
+# Version 4 (review) keeps version 3's damage and takes away a certainty.
 # A contact's pattern, its next move and that move's exact damage were all on
 # the panel, so one rule solved every fight: Guard on a volley, otherwise Fire.
 # From tier 2 a contact may *jump its pattern*: the panel shows the move it is
@@ -4577,7 +4577,7 @@ def outclassed(world: "World", pirate: "Pirate", tactics: dict) -> bool:
 
 #: The share of the hold a Dump jettisons against a raider the ship can fight.
 #: It was one unit whatever the hold held, for twenty points of escape over an
-#: Evade, so with cargo aboard Evade was never the right key (review, v1.3).
+#: Evade, so with cargo aboard Evade was never the right key (review).
 DUMP_HOLD_SHARE = 8
 
 
@@ -5864,7 +5864,7 @@ def _validate_accolades(value, retirements: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The daily dispatch (review, v1.3). One order a real day, the same for every
+# The daily dispatch (review). One order a real day, the same for every
 # pilot on every board, drawn from the date alone: sell this at that kind of
 # station, win a fight, finish a contract, chart a system. It is the one thing
 # two callers with two private galaxies can both be asked, and the first thing
@@ -6614,7 +6614,7 @@ def _score_entry(data, user_id: int | None = None) -> dict | None:
     return entry
 
 
-#: The wire (review, v1.3): what the pilots of one board have lately done, a
+#: The wire (review): what the pilots of one board have lately done, a
 #: line of it on the deck. Each pilot's last few events are kept in that
 #: pilot's own score record and written only by their own session, under their
 #: own session lock, so there is no file two sessions write. A reader merges
@@ -9079,7 +9079,7 @@ class _JumpScene(_Scene):
     is gone in a flash, and the tunnel's hoops rush past under the
     destination's name.
 
-    The tunnel is the destination's (review, v1.3). Every jump was the same
+    The tunnel is the destination's (review). Every jump was the same
     violet tunnel, played every turn of a career. A charted destination now
     lights it in its own trade's light, and its world -- the one its dock and
     its atlas page show -- rises at the far end; an uncharted one keeps the
@@ -11303,7 +11303,7 @@ def affordable_upgrades(world: World) -> int:
                and upgrade["cost"](getattr(ship, f"{key}_tier")) <= credits)
 
 
-# The staged opening (review, v1.3). A first career's first deck listed
+# The staged opening (review). A first career's first deck listed
 # fourteen services at one weight: a ledger with nothing in it, an archive, two
 # factions and a hall of fame beside the four things a first flight is made of.
 # The rules are gentle; that screen was not. A pilot's first career now opens
@@ -12176,7 +12176,7 @@ def _portrait_pages_for(p: Palette, large: list[str], compact: list[str], detail
                     render=lambda row, index: f"{color or p.accent}{row}{RESET}" if index == illustrated else row)
 
 
-# The atlas (review, v1.3). The Viewport showed the ship, the station the pilot
+# The atlas (review). The Viewport showed the ship, the station the pilot
 # was docked at and one landmark: three pictures of things already on the deck,
 # and nothing to come back for. Every system has had a world of its own since
 # the review's first pass, seen only from its dock. The station view is now an
@@ -17156,7 +17156,7 @@ def map_bounds(sector: int | None) -> tuple[int, int, int, int]:
             ((row + 1) * 50 + SECTOR_ROWS - 1) // SECTOR_ROWS - 1)
 
 
-# Known space (review, v1.3). The map framed a fixed sixth of the galaxy, so a
+# Known space (review). The map framed a fixed sixth of the galaxy, so a
 # career's first chart was three stars in a corner of an empty picture, and the
 # text grid for every other terminal was the same three marks in the same
 # corner. It opens on what the pilot knows instead: every charted system, the
@@ -18674,7 +18674,7 @@ def customs_display_lines(world: World) -> list[str]:
 #: surrendering whatever was in the hold: it risks the cargo, a fine of the
 #: cargo's value and more, standing and notoriety to save half the cargo's
 #: value three times in five. At 75% it is the better bet for a hold worth
-#: more than about 900cr and still the worse one for a few units (review, v1.3).
+#: more than about 900cr and still the worse one for a few units (review).
 CUSTOMS_BRIBE_CHANCE = 0.75
 
 

@@ -1,4 +1,4 @@
-"""The jump's tunnel is its destination's (review, v1.3).
+"""The jump's tunnel is its destination's (review).
 
 Every jump was the same violet tunnel, played every turn of a career. These
 pin what a destination now brings to it: its trade's light and its own world at

@@ -1,4 +1,4 @@
-"""Options no pilot should ever have chosen, made into choices (review, v1.3).
+"""Options no pilot should ever have chosen, made into choices (review).
 
 Evade was never right with cargo aboard, the customs bribe always lost to
 surrendering, contraband earned less than legal Electronics with risk on top,

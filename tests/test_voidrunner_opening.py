@@ -1,4 +1,4 @@
-"""The staged opening: a first career's first decks (review, v1.3).
+"""The staged opening: a first career's first decks (review).
 
 A first career's first deck listed fourteen services at one weight. It now
 opens on what a first turn needs and the rest arrives as it starts to matter.
