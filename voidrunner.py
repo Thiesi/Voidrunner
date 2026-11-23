@@ -8736,19 +8736,45 @@ def _scene_text(text: str) -> str:
 class _JumpScene(_Scene):
     """The jump: the drive spools, the stars stretch into streaks, the ship
     is gone in a flash, and the tunnel's hoops rush past under the
-    destination's name."""
+    destination's name.
+
+    The tunnel is the destination's (review, v1.3). Every jump was the same
+    violet tunnel, played every turn of a career. A charted destination now
+    lights it in its own trade's light, and its world -- the one its dock and
+    its atlas page show -- rises at the far end; an uncharted one keeps the
+    violet and shows a dark disc with nothing on it, which is all a pilot
+    knows of it. A one-unit hop is a shorter scene than a long burn."""
 
     frames = 26
+    SHORT_FRAMES = 20
 
     sky = "transit"
 
     def __init__(self, width: int, height: int, *, hull: str, destination: str | None,
-                 burn: int, fuel: int, day: int, seed: str):
+                 burn: int, fuel: int, day: int, seed: str, economy: str | None = None,
+                 world: str | None = None):
         super().__init__(width, height, seed)
         self.art = _SCENE_HULLS.get(hull, _SPLASH_SHIP)
         self.destination = destination
         self.detail = [(f"Day {day}", _SCENE_INK), ("  ·  ", _SCENE_SLATE),
                        (f"{burn} fuel burned, {fuel} left", _SCENE_SLATE)]
+        if burn <= 1:
+            self.frames = self.SHORT_FRAMES
+        charted = destination is not None and economy in _SCENE_LIGHTS
+        self.light = _SCENE_LIGHTS[economy] if charted else None
+        # The far end: the destination's own world, small and dead ahead; or a
+        # disc of nothing where the chart is blank. Composed once.
+        radius = max(2.5, min(self.sky_px * 0.2, width * 0.075))
+        if charted:
+            self.far = _scene_planet(width, self.sky_px, economy, width / 2, self.mid, radius, world_look(economy, world))
+        else:
+            self.far = {(x, y): (14, 10, 30)
+                        for y in range(self.sky_px) for x in range(width)
+                        if math.hypot(x + 0.5 - width / 2, y + 0.5 - self.mid) <= radius}
+
+    def tint(self, color: tuple, amount: float = 0.5) -> tuple:
+        """`color` in the destination's light, where there is one to take."""
+        return _mix(color, self.light, amount) if self.light else color
 
     def draw(self, stage: _Stage, index: int, t: float) -> None:
         w, mid, sky = self.width, self.mid, self.sky_px
@@ -8773,7 +8799,7 @@ class _JumpScene(_Scene):
                 for px in range(w):
                     d = math.hypot((px - w / 2) / (w * 0.5), (py - mid) / (sky * 0.5))
                     if d < 0.35:
-                        stage.plot(px, py, _mix((120, 60, 200), (20, 10, 50), d / 0.35))
+                        stage.plot(px, py, _mix(self.tint((120, 60, 200)), (20, 10, 50), d / 0.35))
             for number, (x0, row, near) in enumerate(self.stars[::2]):
                 angle = x0 / w * 2 * math.pi + row
                 phase = (tunnel * (1.4 if near else 0.9) + number * 2 / len(self.stars)) % 1.0
@@ -8782,12 +8808,20 @@ class _JumpScene(_Scene):
                 steps = int((outer - inner) * w * 0.6) + 2
                 for step in range(steps):
                     r = inner + (outer - inner) * step / steps
-                    color = _mix((90, 70, 200), (230, 220, 255) if near else (200, 140, 255), math.ceil(step / steps * 3) / 3)
+                    color = _mix((90, 70, 200), (230, 220, 255) if near else self.tint((200, 140, 255)),
+                                 math.ceil(step / steps * 3) / 3)
                     stage.plot(w / 2 + math.cos(angle) * r * w * 0.5, mid + math.sin(angle) * r * sky * 0.5, color)
             for hoop in range(2):
                 phase = (tunnel * 1.2 + hoop / 2) % 1.0
-                _scene_ring(stage, w / 2, mid, 2 + phase ** 2 * w * 0.55, _mix((90, 70, 220), (255, 120, 220), phase),
-                            0.7 * (1 - phase), squash=0.5)
+                _scene_ring(stage, w / 2, mid, 2 + phase ** 2 * w * 0.55,
+                            _mix((90, 70, 220), self.tint((255, 120, 220)), phase), 0.7 * (1 - phase), squash=0.5)
+            # The far end comes up out of the core in three steps and then
+            # holds: drawn over the streams, so the middle of the tunnel is still.
+            arrive = math.ceil(_span(tunnel, 0.35, 0.8) * 3) / 3
+            if arrive > 0:
+                core = self.tint((120, 60, 200))
+                for (px, py), color in self.far.items():
+                    stage.plot(px, py, _mix(core, color, arrive))
         # The ship holds on the left third, shivering as the drive charges, then goes.
         launch = _ease_in(_span(t, 0.38, 0.56))
         art_w, art_h = self.sprite_size(self.art)
@@ -17503,7 +17537,8 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
         world.hop_report = []
         play_scene(lambda w, h: _JumpScene(
             w, h, hull=world.save.ship.hull_class, destination=dest.name if was_discovered else None,
-            burn=burn, fuel=world.save.ship.fuel, day=world.save.turn, seed=_scene_seed(world, "jump")))
+            burn=burn, fuel=world.save.ship.fuel, day=world.save.turn, seed=_scene_seed(world, "jump"),
+            economy=dest.economy if was_discovered else None, world=dest.name if was_discovered else None))
         out_line(f"{p.gold}{jumping}{RESET}")
         _show_result(p, world, lines)
     dest_id = travel["destination"]
