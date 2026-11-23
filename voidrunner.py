@@ -2140,6 +2140,9 @@ class SaveData:
     # Absent until something is earned or counted, so a save with none of it
     # is the document it always was.
     accolades: dict = field(default_factory=dict)
+    # Raiders with a score open against this career; see `remember_rival`.
+    # Absent until there is one.
+    rivals: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -2176,6 +2179,7 @@ class SaveData:
             **({"faction_stories": self.faction_stories} if self.faction_stories else {}),
             **({"retired_careers": self.retired_careers} if self.retired_careers else {}),
             **({"accolades": self.accolades} if self.accolades else {}),
+            **({"rivals": self.rivals} if self.rivals else {}),
         }
 
     @classmethod
@@ -2219,6 +2223,7 @@ class SaveData:
             faction_stories={faction: dict(story) for faction, story in d.get("faction_stories", {}).items()},
             retired_careers=[dict(item, highlights=list(item["highlights"])) for item in d.get("retired_careers", [])],
             accolades=_copy_accolades(d.get("accolades", {})),
+            rivals=[dict(item) for item in d.get("rivals", [])],
         )
 
 
@@ -2436,6 +2441,15 @@ def _validate_save_document(data: dict) -> None:
         else: require("choice" not in story, "premature faction story choice")
     if "accolades" in data:
         _validate_accolades(data["accolades"], pilot.get("retirements", 0))
+    rivals = data.get("rivals", [])
+    require(isinstance(rivals, list) and len(rivals) <= RIVAL_MAX, "rivals")
+    for item in rivals:
+        require(isinstance(item, dict) and set(item) == {"name", "tier", "day", "how"}, "rival")
+        require(isinstance(item["name"], str) and 0 < len(item["name"]) <= 40, "rival name")
+        integer(item["tier"], "rival tier", maximum=4)
+        integer(item["day"], "rival day", maximum=data["turn"])
+        require(item["how"] in RIVAL_HOW, "rival history")
+    require(len({item["name"] for item in rivals}) == len(rivals), "rivals")
     dossiers = data.get("retired_careers", [])
     require(isinstance(dossiers, list) and len(dossiers) <= MAX_RETIRED_CAREERS, "retired careers")
     previous_number = 0
@@ -4343,6 +4357,72 @@ def generate_pirate(world: World, tier: int | None = None, *, danger: int | None
     return Pirate(name=rng.choice(PIRATE_NAMES), tier=t, hp=hp, hp_max=hp)
 
 
+# Rivals (review). A raider was a name from a list of ten, a tier and a hull:
+# met, dealt with, gone, and the next one owed nothing to the last. A raider
+# that got the better of the pilot -- one they ran from, one they paid off, one
+# that broke their ship -- now remembers. Inside forty days it may be the next
+# raider the pilot meets, a tier stronger for what it took, and it says so.
+# Destroying it settles the score: its salvage twice over, an achievement, a
+# line on the board's wire, and it does not come back. A career keeps three
+# scores open at most, the newest; an old one is forgotten.
+RIVAL_MAX = 3
+RIVAL_MEMORY_DAYS = 40
+RIVAL_REST_DAYS = 2          # a raider is not back the day after
+RIVAL_RETURN_ONE_IN = 2      # of the raider contacts in that time, how many are the rival
+RIVAL_HOW = {"ran": "you ran from it", "paid": "it took your credits", "wreck": "it broke your ship"}
+RIVAL_GREETING = {"ran": "It has not forgotten the ship that ran.",
+                  "paid": "It was paid once and has come for more.",
+                  "wreck": "This is the ship that broke yours."}
+
+
+def rival(save: SaveData, name: str) -> dict | None:
+    """The score open against a raider of this name, if there is one."""
+    return next((item for item in save.rivals if item["name"] == name), None)
+
+
+def remember_rival(world: World, pirate: Pirate, how: str) -> None:
+    """Open a score against a raider, or add to the one already open: it keeps
+    its highest tier and the latest thing it did."""
+    save = world.save
+    known = rival(save, pirate.name)
+    tier = max(pirate.tier, known["tier"]) if known else pirate.tier
+    save.rivals = [item for item in save.rivals if item["name"] != pirate.name]
+    save.rivals.append({"name": pirate.name, "tier": tier, "day": save.turn, "how": how})
+    del save.rivals[:-RIVAL_MAX]
+    save.pilot.note(f"The {pirate.name} will know this ship again: {RIVAL_HOW[how]}.")
+
+
+def returning_rival(world: World) -> dict | None:
+    """The rival that turns up as the raider the pilot has just met, if one
+    does: rested, not yet forgotten, and one contact in two. By the seed and
+    the day, so the event RNG's sequence is what it was."""
+    save = world.save
+    save.rivals = [item for item in save.rivals if save.turn - item["day"] <= RIVAL_MEMORY_DAYS]
+    due = [item for item in save.rivals if save.turn - item["day"] >= RIVAL_REST_DAYS]
+    if not due or zlib.crc32(f"rival:{save.seed}:{save.turn}".encode("utf-8")) % RIVAL_RETURN_ONE_IN:
+        return None
+    return min(due, key=lambda item: (item["day"], item["name"]))
+
+
+def rival_ship(item: dict) -> Pirate:
+    """The rival as it comes back: a tier stronger, up to the strongest there is."""
+    tier = min(4, item["tier"] + 1)
+    hull = 20 + tier * 15
+    return Pirate(name=item["name"], tier=tier, hp=hull, hp_max=hull)
+
+
+def settle_rival(world: World, pirate: Pirate) -> list[str]:
+    """Close the score against a raider just destroyed: its salvage over again."""
+    save = world.save
+    save.rivals = [item for item in save.rivals if item["name"] != pirate.name]
+    bonus = 40 + pirate.tier * 60
+    save.pilot.credits += bonus
+    bump_accolade(save, "scores")
+    save.pilot.highlight(f"Settled a score with the {pirate.name}.")
+    world.wire("score", f"settled a score with the {pirate.name}")
+    return [f"A score settled: the {pirate.name} will not be back. Its hold was full of other people's cargo: +{bonus}cr."]
+
+
 # Squadron fights: only at the two highest danger tiers, and even then
 # not guaranteed -- most raider encounters stay a single ship. Scoped
 # to the ordinary random "pirate" travel encounter only, not a bounty
@@ -5547,7 +5627,7 @@ def check_rank_up(world: World) -> str | None:
 ACCOLADE_VERSION = 1
 # What only an accolade needs counted. Each is bumped beside the effect it
 # counts and committed with it, so a resumed hop cannot count it twice.
-ACCOLADE_COUNTERS = ("squadrons", "flawless", "giant_slayer", "close_calls", "escapes", "raider_bribes",
+ACCOLADE_COUNTERS = ("squadrons", "flawless", "giant_slayer", "close_calls", "escapes", "raider_bribes", "scores",
                      "patrol_kills", "wrong_bounties", "deliveries", "surveys", "bounties", "escorts",
                      "distress", "derelicts", "ships_lost", "tows", "busts", "customs_bribes",
                      "dispatches", "dispatch_best", "chains")
@@ -5596,6 +5676,8 @@ ACCOLADES: tuple[Accolade, ...] = tuple([
     Accolade("squadron", "Combat", "Two for One", "Destroy both ships of a raider squadron.", "squadrons", tier=2),
     Accolade("flawless", "Combat", "Untouched", "Win a fight without taking hull damage.", "flawless", tier=2),
     Accolade("giant_slayer", "Combat", "Giant Slayer", "Destroy a raider that outclassed your ship.", "giant_slayer"),
+    Accolade("score", "Combat", "Unfinished Business", "Destroy a raider that got the better of you before.", "scores",
+             tier=2),
     Accolade("close_call", "Combat", "Hanging by a Thread", "Win a fight with under 5% of your hull left.", "close_calls"),
     Accolade("escapes_10", "Combat", "Slippery", "Break contact 10 times by evading or dumping cargo.",
              "escapes", 10, tier=2),
@@ -6542,7 +6624,7 @@ WIRE_TEXT_MAX = 60          # a predicate, not a paragraph
 WIRE_DECK_DAYS = 14         # older than this is not news for the deck
 WIRE_REFRESH_SECONDS = 60
 WIRE_PAGE_ITEMS = 8         # what the Dispatch page lists
-WIRE_KINDS = ("rank", "award", "retired", "dispatch", "lost", "stake")
+WIRE_KINDS = ("rank", "award", "retired", "dispatch", "lost", "stake", "score")
 
 
 def _score_wire(data) -> list[dict] | None:
@@ -15686,6 +15768,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         "Prices have seasons: every legal good swings about an eighth either way over a month or so, the same across a sector. The market marks each price as rising or falling and for how many more days. [X] Futures holds today's price for a fee, and says what the price should be on the day you collect.",
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
         "Crew fight with you. Each specialist aboard has a station, used once a fight: the gunner's [C] Called shot hits half as hard again and cover cannot blunt it, the engineer's [M] Mend gives back a quarter of the hull for the turn's shot, and the navigator's [N] Slip is a full shot that the raider's move only grazes. Spend the slip on the volley.",
+        "Raiders remember. One you ran from, paid off or lost a ship to may be the next raider you meet, a tier stronger. Destroy it and the score is settled: its salvage twice over. [S] Status lists the scores still open.",
         "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
         "Ranks are kept once reached, and each brings something: a fourth contract slot at Independent Trader, half as much again on every contract at Merchant Captain, a fifth slot at Void Baron and double pay at Legend of the Frontier.",
         "Once the ship is built there is something to own: [K] Stake in any market buys a share in that station, in three steps at up to three stations. Its stock and demand come back two, three and four times as fast for you, so a route you fly again and again keeps paying.",
@@ -16260,6 +16343,15 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
                    # The word repeats the number and its tone; the membership
                    # state is the only thing on the row nothing else says.
                    optional=(4, 3), repeat_header=False)[1:]
+    if world.save.rivals:
+        # Scores open against this career: who, what they did, and how long
+        # they will remember it.
+        lines.append(section("SCORES TO SETTLE"))
+        for item in world.save.rivals:
+            left = RIVAL_MEMORY_DAYS - (world.save.turn - item["day"])
+            lines.append(f"{p.alarm}{glyph('danger')}{RESET} {p.ink}{BOLD}{_mission_plain(item['name'])}{RESET}  "
+                         f"{p.slate}tier {item['tier']}; {RIVAL_HOW[item['how']]} on day {item['day']}; "
+                         f"it remembers for {plural(max(0, left), 'more day')}{RESET}")
     lines.append(section("RECORD"))
     discovered = sum(system.discovered for system in world.galaxy)
     lines.append(f"{p.slate}charted{RESET} {gauge(discovered, len(world.galaxy), cells, tone='info')} "
@@ -17470,6 +17562,11 @@ def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySyste
         state["kind"] = kind
         if kind == "pirate":
             state["pirates"] = [dataclasses.asdict(ship) for ship in generate_pirate_squadron(world, dest)]
+            back = returning_rival(world)
+            if back is not None:
+                # The contact turns out to be a ship the pilot knows. Drawn as
+                # any raider was, so the encounter's own draws are unchanged.
+                state["pirates"][0] = dataclasses.asdict(rival_ship(back))
             state["index"] = 0
             if len(state["pirates"]) == 2:
                 state["formation"] = {"version": 1, "engaged": False}
@@ -18227,8 +18324,10 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
     encounter = _travel_encounter(world)
     combat = encounter.get("combat")
     if combat is None:
+        known = None if patrol else rival(world.save, pirate.name)
         combat = encounter["combat"] = {
-            "pirate": dataclasses.asdict(pirate), "outcome": None, "lines": [], "tactics": new_tactics(pirate),
+            "pirate": dataclasses.asdict(pirate), "outcome": None, "tactics": new_tactics(pirate),
+            "lines": [f"The {pirate.name} again. {RIVAL_GREETING[known['how']]}"] if known else [],
             "hull_before": world.save.ship.hull_hp,
         }
         world.commit()
@@ -18380,6 +18479,15 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             lethal = 0
             lines.append(destroy_ship(world, patrol=patrol, hull_before=hull_before))
             outcome = "destroyed"
+        if not patrol:
+            # A raider that got the better of the pilot remembers; one that is
+            # destroyed with a score open against it settles that score.
+            if outcome == "won" and rival(world.save, pirate.name) is not None:
+                lines += settle_rival(world, pirate)
+            elif outcome == "destroyed":
+                remember_rival(world, pirate, "wreck")
+            elif outcome == "escaped" and action in ("E", "D", "P"):
+                remember_rival(world, pirate, "paid" if action == "P" else "ran")
         combat.update(pirate=dataclasses.asdict(pirate), outcome=outcome, lines=lines)
         world.commit()
         closed_at = (max(0, pirate.hp), lethal if lethal is not None else max(0, ship.hull_hp))
