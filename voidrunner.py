@@ -3552,6 +3552,49 @@ def price_for(world: World, system_id: int, commodity: str) -> int:
     return _quote(world, system_id, commodity, selling=False)
 
 
+# Why a price is what it is (review). A price is a good's usual price moved by
+# up to four things -- what this kind of station makes or wants, a standing
+# glut or shortage of its own, the sector's season, and the pilot's own buying
+# -- and the market showed only their product, with a word (`cheap`, `dear`)
+# for where it fell. A newcomer could not tell a bargain that will last from
+# one the season is about to take away. The commodity's own page now names each
+# thing that is moving the price and by how much, in the order `_quote`
+# applies them, and nothing that is not moving it.
+def price_reasons(world: World, system_id: int, commodity: str) -> list[tuple[str, float]]:
+    """What moves the asking price of a good here away from its usual price, as
+    (words, factor) in the order they apply. Their product, times the usual
+    price, is the quote. A factor of exactly one is left out."""
+    system = world.by_id[system_id]
+    reasons = []
+    economy = economy_price_factor(system.economy, commodity)
+    if economy != 1.0:
+        reasons.append((f"{system.economy} stations {'make' if economy < 1 else 'want'} it", economy))
+    trait = world.traits.get(system_id)
+    if trait is not None and trait["commodity"] == commodity:
+        reasons.append((f"a standing {'glut' if trait['kind'] == 'surplus' else 'shortage'} here", TRAIT_PRICE[trait["kind"]]))
+    season = season_factor(world, system_id, commodity)
+    if round(season, 3) != 1.0:
+        reasons.append(("the season", season))
+    drift = max(world.save.market_drift.get(system_id, {}).get(commodity, 1.0), _market_rest(world, system_id, commodity))
+    if round(drift, 3) != 1.0:
+        reasons.append(("your own buying", drift))
+    return reasons
+
+
+def price_reason_line(world: World, system_id: int, commodity: str) -> str:
+    """`Why 48cr: usually 65cr; Industrial stations make it -28%; the season +3%.`"""
+    p = pal()
+    usual = COMMODITIES[commodity]["base"]
+    quote = price_for(world, system_id, commodity)
+    reasons = price_reasons(world, system_id, commodity)
+    if not reasons:
+        return f"{p.slate}Why {quote}cr: its usual price; nothing here is moving it.{RESET}"
+    parts = [f"{p.slate}{words}{RESET} {p.tone('good' if factor < 1 else 'caution')}{round((factor - 1) * 100):+d}%{RESET}"
+             for words, factor in reasons]
+    return (f"{p.slate}Why{RESET} {p.ink}{quote}cr{RESET}{p.slate}: usually {usual}cr;{RESET} "
+            + f"{p.slate};{RESET} ".join(parts) + f"{p.slate}.{RESET}")
+
+
 def sell_price_for(world: World, system_id: int, commodity: str) -> int:
     """What a station pays for a unit: its own side of the quote, less the spread."""
     return round(_quote(world, system_id, commodity, selling=True) * SELL_SPREAD)
@@ -14553,6 +14596,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
     prohibited = not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven"
     purchase = "Buy prohibited at this station" if prohibited else f"Buy {buy}cr/unit"
     lines = [f"{purchase}; sell {sell}cr/unit.",
+             price_reason_line(world, world.here.id, commodity),
              f"Credits: {world.save.pilot.credits:,}cr. Hold: {world.save.cargo.get(commodity, 0)} units.",
              f"Stock {depth['stock']} (+{depth['stock_rate']}/day); station buys {depth['demand']} (+{depth['demand_rate']}/day)."]
     footer = ("" if prohibited else "[P] Purchase ") + "[S] Sell [<>] Page [B] Back: "
