@@ -46,10 +46,9 @@ JOURNEY_KEYS = 40
 #: finding listed here is noted and the walk goes on; a walk that met one ends
 #: as an expected failure naming the issue, and passes once it is fixed. The
 #: galaxy is new every run, so whether a run meets one is chance: these are
-#: never strict.
-KNOWN = {
-    "day-one deck": "#95",  # First Flight's arrival results push the day-1 deck to two pages at 80x24
-}
+#: never strict. Keyed by the finding, as `deck_is_one_page` names it
+#: (`"day-1 deck"`); #95, the first, was fixed and taken out again.
+KNOWN: dict[str, str] = {}
 
 
 @pytest.fixture(scope="module")
@@ -166,8 +165,8 @@ class Walk:
     def press(self, key: str, stop: str, *, advertised: bool = True) -> None:
         """Press `key`, which the screen must offer, and check what it draws."""
         if advertised and key not in _advertised(self.rows()):
-            # A deck #95 pushed onto two pages shows its services on page two;
-            # the door takes their keys on either page, as a caller finds.
+            # A deck a known finding pushed onto two pages shows its services
+            # on page two; the door takes their keys on either page.
             if not (self.known and "Command Deck" in self.title() and (self.page() or (1, 1))[1] > 1):
                 self.fail(f"{key!r} is not offered for {stop}")
         try:
@@ -192,8 +191,8 @@ class Walk:
             self.fail(f"expected the day-{day} deck")
         if (self.width, self.height) == (80, 24) and self.page() != (1, 1):
             finding = f"the day-{day} deck is page {self.page()} at 80x24, not 1/1"
-            if day == 1:
-                self.known.append(f"{finding} ({KNOWN['day-one deck']})")
+            if f"day-{day} deck" in KNOWN:
+                self.known.append(f"{finding} ({KNOWN[f'day-{day} deck']})")
             else:
                 self.fail(finding)
 
