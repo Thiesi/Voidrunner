@@ -1987,6 +1987,34 @@ took is still drawn, so a day on which no event would have begun leads to the
 encounters it led to before. From the first day one would have begun -- about
 one day in twenty -- a seed's luck differs, as it does after any rule change.
 
+**Danger pays (review).** A system's danger was a cost and nothing else: more
+raiders, of higher tiers, for the same prices and the same contract pay as calm
+space. The right way to play was to stay out of it, and the handful of
+dangerous systems in a galaxy -- about four of forty-eight are danger 4 or 5 --
+were places a career went by accident. They now pay, in two ways. Whatever a
+danger-4 station does not make itself it asks and pays a quarter more for, and
+a danger-5 station half as much again, on both sides of the counter, so there
+is nothing in selling back across it. And a contract that ends at one carries
+hazard pay on top of its reward: 25% at danger 4, 50% at danger 5, on every
+kind of contract, chained legs and faction work included. Both are said where
+the decision is made: the price's own reasons name `dangerous space`, and a
+contract's sheet has a `HAZARD` row. Danger 0 to 3 is exactly what it was.
+
+Flown through the simulator with every pilot's nerve fixed (`--nerve 3`
+against `--nerve 5`, 200 careers each), a bold trader ends 9.1% richer than a
+cautious one for twice the ships lost (0.6 against 0.3), and a bold careful
+pilot 17.2% richer for about a third more (0.4 against 0.3). Before the change
+the same comparison gave a trader 4.4%. The plan asked for 10% to 20% at two
+to three times the ships: the pay is there, most of all for the pilot who
+plans, and the risk is at the low end of what was asked because a finished
+ship beats most of what danger 5 sends -- which is what the elite raiders of
+3.3 are for. Stronger premiums (40% and 80% on prices) bought the trader two
+more points and were not worth what they would do to a market's sense of
+proportion. Left to choose by their ship, as they do by default, the pilots
+end 2% to 4% richer than before.
+Nothing is saved; a contract's reward is fixed when it is posted, so one
+already on a board keeps the figure it was posted at.
+
 **Why a price is what it is (review).** A price is a good's usual price moved
 by up to four things: what this kind of station makes or wants, a standing glut
 or shortage of its own, the sector's season, and the pilot's own buying. The

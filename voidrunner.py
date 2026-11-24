@@ -3361,6 +3361,31 @@ def bfs_path(by_id: dict[int, GalaxySystem], start_id: int, dest_id: int) -> lis
 TRAIT_CHANCE = {"surplus": 0.3, "shortage": 0.3}
 TRAIT_PRICE = {"surplus": 0.7, "shortage": 1.4}
 
+# Danger pays (review). A system's danger was a cost and nothing else: more
+# raiders, of higher tiers, for the same prices and the same contract pay as
+# calm space. So the right way to play was to stay out of it, and the handful
+# of dangerous systems in a galaxy -- about four of forty-eight -- were places
+# a career went only by accident. They now pay. Whatever a danger-4 or danger-5
+# station does not make itself it asks and pays more for, since fewer ships
+# bring it; and a contract that ends in one carries hazard pay on top of its
+# reward. Both are said where the decision is made: the price's own reasons
+# name `dangerous space`, and a contract's sheet has a HAZARD row. Calm space
+# is exactly what it was.
+HAZARD_PRICE = {4: 1.25, 5: 1.5}   # what a dangerous station asks and pays for a good it does not make
+HAZARD_PAY = {4: 25, 5: 50}        # per cent on a contract that ends there
+
+
+def hazard_price_factor(system: GalaxySystem, commodity: str) -> float:
+    """How much dearer an import is at a dangerous station; 1.0 anywhere calm, and for what a station makes."""
+    if economy_price_factor(system.economy, commodity) < 1.0:
+        return 1.0
+    return HAZARD_PRICE.get(system.danger, 1.0)
+
+
+def hazard_pay(world: World, target_system: int, reward: int) -> int:
+    """A contract's reward with the hazard pay its destination carries."""
+    return reward * (100 + HAZARD_PAY.get(world.by_id[target_system].danger, 0)) // 100
+
 
 def system_traits(seed: int, galaxy: list[GalaxySystem]) -> dict[int, dict]:
     """Each system's own market trait, by system id; a system without one is absent.
@@ -3541,6 +3566,7 @@ def _quote(world: World, system_id: int, commodity: str, *, selling: bool) -> in
     if trait is not None and trait["commodity"] == commodity:
         mult *= TRAIT_PRICE[trait["kind"]]
     mult *= season_factor(world, system_id, commodity)
+    mult *= hazard_price_factor(system, commodity)
     drift = world.save.market_drift.get(system_id, {}).get(commodity, 1.0)
     rest = _market_rest(world, system_id, commodity)
     drift = min(drift, rest) if selling else max(drift, rest)
@@ -3575,6 +3601,9 @@ def price_reasons(world: World, system_id: int, commodity: str) -> list[tuple[st
     season = season_factor(world, system_id, commodity)
     if round(season, 3) != 1.0:
         reasons.append(("the season", season))
+    hazard = hazard_price_factor(system, commodity)
+    if hazard != 1.0:
+        reasons.append(("dangerous space", hazard))
     drift = max(world.save.market_drift.get(system_id, {}).get(commodity, 1.0), _market_rest(world, system_id, commodity))
     if round(drift, 3) != 1.0:
         reasons.append(("your own buying", drift))
@@ -4123,6 +4152,7 @@ def post_chain_legs(world: World, board: dict) -> None:
         offer = chain_offer(world, here, leg, after, *first)
         if offer is None:
             continue
+        offer.reward = hazard_pay(world, offer.target_system, offer.reward)
         ordinary = [item for item in board["offers"] if chain_leg(Mission.from_dict(item)) == 1]
         if len(board["offers"]) >= 4 and ordinary:
             board["offers"].remove(ordinary[-1])
@@ -4204,10 +4234,12 @@ def generate_mission_board(world: World) -> list[Mission]:
         for kind in rng.sample(["delivery", "delivery", "bounty", "scan", "escort"], k=rng.randint(3, 4)):
             mission = _generate_mission(world, kind, hops, rng=rng)
             if mission is not None:
+                mission.reward = hazard_pay(world, mission.target_system, mission.reward)
                 offers.append(mission.to_dict())
                 world.save.next_mission_id += 1
         special = faction_offer(world, sid)
         if special is not None:
+            special.reward = hazard_pay(world, special.target_system, special.reward)
             del offers[3:]  # a full board gives up its last place
             offers.append(special.to_dict())
             world.save.next_mission_id += 1
@@ -16248,6 +16280,8 @@ def mission_details(world: World, mission: Mission) -> list[str]:
         else:
             checks.append(("DEADLINE", f"{plural(len(path), 'jump')} in {plural(max(0, remaining), 'day')}", "good"))
     if target.discovered:
+        if target.danger in HAZARD_PAY:
+            checks.append(("HAZARD", f"+{HAZARD_PAY[target.danger]}% hazard pay, in the payout", "good"))
         checks.append(("DANGER", f"danger {target.danger}",
                        {"good": "good", "caution": "info", "danger": "bad"}[danger_tone(target.danger)]))
     else:
@@ -16463,7 +16497,8 @@ def guide_reference_lines(world: World) -> list[str]:
         "demand come back faster for you.",
         section("FLYING"),
         "Danger is a risk rating, not a guarantee you can win a fight. The chart warns before a jump that could meet "
-        "a raider your hull cannot take.",
+        "a raider your hull cannot take. Danger 4 and 5 pay for it: what such a station does not make sells dearer "
+        "there, and a contract that ends there carries hazard pay.",
         "[V] Viewport is the atlas: every system you have charted, and what you know of each.",
         "Every sector's docks tell its story in three parts, as you dock at more of its stations. The whole story "
         "marks that sector's markets on your chart. [N] Contacts, [A] Archive, [F] Files keeps what you have heard.",
