@@ -12,11 +12,17 @@ depends on the rank. This flies the door's own journeys (`screen_travel`, with
 its encounters, fights, customs and contract completions) and its own market,
 board, yard and stake functions, with a pilot that presses the keys.
 
-The pilots are deliberately plain. They see one jump ahead, and they see a
-neighbouring market's prices whether or not they have docked there, so a
-trader here is a little better informed than a caller. None of them is a
-ceiling: they say how the game's parts weigh against each other, not how
-fast a careful caller can go.
+The first four pilots are deliberately plain. They see one jump ahead, and
+they see a neighbouring market's prices whether or not they have docked there,
+so a trader here is a little better informed than a caller. None of them is a
+ceiling: they say how the game's parts weigh against each other.
+
+The fifth, `careful`, is nearer to a caller who thinks. It trades as the
+trader does, but it weighs the leg after next -- only between stations it has
+docked at, which is what a caller's ledger knows -- and when the lane it is on
+stops paying it leaves for the nearest station it has not seen lately, where a
+plain pilot shuttles between two markets it has drained for the rest of its
+career. It is still no ceiling, but it is the better bound on one.
 
 The summary ends with when each thing a career works toward is first reached
 -- each hull, every upgrade, each rank, the first stake and the last -- because
@@ -46,7 +52,11 @@ import sys
 from collections import Counter
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-PILOTS = ("trader", "smuggler", "contractor", "explorer")
+PILOTS = ("trader", "smuggler", "contractor", "explorer", "careful")
+#: A hold that clears less than this a unit is a lane run dry: time to look elsewhere.
+DRAINED_PER_UNIT = 8
+#: What the careful pilot thinks the leg after next is worth, against the leg in hand.
+SECOND_LEG_WEIGHT = 0.5
 CHECKPOINTS = (10, 20, 40, 60, 80, 100, 150, 200, 300)
 #: What a career works toward, in the order the summary lists them: the day each is first reached.
 MILESTONES = ("Freighter", "Cutter", "Carrier", "fitted", "rank 2", "rank 3", "rank 4", "stake", "all stakes")
@@ -109,6 +119,10 @@ class Pilot:
         self.towed = 0              # times a tug brought a dry, broke ship home
         self.shifts = 0             # days worked on Freeport's docks
         self.docked = {}            # the day each station was last left
+        self.roam = None            # the station a careful pilot has set out for, off a lane run dry
+        self.roam_steps = 0         # jumps it will still spend getting there
+        self.gave_up = {}           # the day it last stopped making for each station
+        self.roamed = 0             # times it did
         self.fights = Counter()     # keys pressed in a fight, by key
         vr.read_key = self.key
 
@@ -324,10 +338,14 @@ class Pilot:
 
     def plan(self, dest) -> tuple[int, list[tuple[str, int]]]:
         """What a hold bought here would clear at `dest`, and what to buy."""
+        world, ship = self.world, self.world.save.ship
+        room = self.vr.cargo_capacity(ship) - sum(world.save.cargo.values())
+        return self.leg(world.here, dest, room, world.save.pilot.credits)
+
+    def leg(self, here, dest, room: int, credits: int) -> tuple[int, list[tuple[str, int]]]:
+        """What `room` units bought at `here` with `credits` would clear at `dest`, and what to buy."""
         world, vr = self.world, self.vr
-        ship, here = world.save.ship, world.here
-        room = vr.cargo_capacity(ship) - sum(world.save.cargo.values())
-        credits = world.save.pilot.credits
+        ship = world.save.ship
         goods = list(vr.COMMODITIES) if self.kind == "smuggler" else list(vr.LEGAL_COMMODITIES)
         margins = sorted(((self.sell_price(dest.id, c) - vr.price_for(world, here.id, c), c) for c in goods), reverse=True)
         profit, buys = 0, []
@@ -370,6 +388,8 @@ class Pilot:
                     best = (away, dest)
             return best[1], self.plan(best[1])[1]
         plans = [(self.plan(dest), dest) for dest in reach]
+        if self.kind == "careful":
+            return self.careful_stop(reach, plans)
         if self.kind == "explorer":
             new = [(plan, dest) for plan, dest in plans if not dest.discovered]
             if new:
@@ -379,6 +399,50 @@ class Pilot:
         hold, today = vr.cargo_capacity(ship), world.save.turn
         (_profit, buys), dest = max(plans, key=lambda item: (
             item[0][0] + hold * 2 * min(10, today - self.docked.get(item[1].id, today - 10)), -item[1].id))
+        return dest, buys
+
+    def careful_stop(self, reach, plans):
+        """The careful pilot's choice: the leg in hand plus half the best leg
+        after it, and off the lane altogether once a full hold stops paying."""
+        world, vr = self.world, self.vr
+        here, ship = world.here, world.save.ship
+        hold, today = vr.cargo_capacity(ship), world.save.turn
+        best_now = max(profit for (profit, _buys), _dest in plans)
+        if self.roam is not None:
+            self.roam_steps -= 1
+            if self.roam == here.id or best_now >= hold * DRAINED_PER_UNIT * 3 or self.roam_steps < 0:
+                # Arrived, or the lane pays again, or the way there is shut (a
+                # dangerous harbor between, or more fuel than the tank holds):
+                # either way that station is not set out for again soon.
+                self.gave_up[self.roam] = today
+                self.roam = None
+        if self.roam is None and best_now < hold * DRAINED_PER_UNIT and world.save.pilot.credits >= BROKE:
+            # Nothing here is worth a hold: make for the nearest station not seen
+            # lately, a never-docked one for choice, inside the pilot's nerve.
+            hops = vr.bfs_hops(world.by_id, here.id)
+            fresh = [(sid in self.docked, away, sid) for sid, away in hops.items()
+                     if sid != here.id and away <= 4 and world.by_id[sid].danger <= self.nerve()
+                     and self.docked.get(sid, -99) <= today - 20 and self.gave_up.get(sid, -99) <= today - 30]
+            if fresh:
+                _seen, away, self.roam = min(fresh)
+                self.roam_steps = away + 2
+                self.roamed += 1
+        if self.roam is not None:
+            toward = min(reach, key=lambda dest: (vr.bfs_hops(world.by_id, dest.id).get(self.roam, 99), dest.id))
+            return toward, self.plan(toward)[1]
+
+        def after(dest, credits: int) -> int:
+            """The best leg out of `dest` that the ledger could plan: both ends docked at before."""
+            if not vr.system_visited(world, dest.id):
+                return 0
+            onward = [world.by_id[sid] for sid in dest.connections
+                      if sid != here.id and vr.system_visited(world, sid) and world.by_id[sid].danger <= self.nerve()]
+            return max((self.leg(dest, far, hold, credits)[0] for far in onward), default=0)
+
+        credits = world.save.pilot.credits
+        (_profit, buys), dest = max(plans, key=lambda item: (
+            item[0][0] + SECOND_LEG_WEIGHT * after(item[1], credits + item[0][0])
+            + hold * 2 * min(10, today - self.docked.get(item[1].id, today - 10)), -item[1].id))
         return dest, buys
 
     # --- the career --------------------------------------------------------------
@@ -450,7 +514,7 @@ class Pilot:
         save = world.save
         return {
             "outcome": outcome, "days": save.turn, "marks": marks, "firsts": firsts, "lost": self.lost, "towed": self.towed,
-            "shifts": self.shifts, "prizes": dict(self.prizes),
+            "shifts": self.shifts, "prizes": dict(self.prizes), "roamed": self.roamed,
             "kills": save.pilot.kills, "contracts": save.pilot.missions_completed,
             "failed": save.pilot.missions_failed + save.pilot.missions_expired,
             "charted": sum(1 for system in world.galaxy if system.discovered),
