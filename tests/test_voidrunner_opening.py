@@ -31,7 +31,7 @@ def test_a_first_career_opens_on_what_a_first_turn_needs():
     world.save.turn = 2
     assert _keys(world) == FIRST_DAY | {"T", "V", "H"}
     world.save.turn = 3
-    assert _keys(world) == FIRST_DAY | {"T", "V", "H", "P", "W", "N"}
+    assert _keys(world) == FIRST_DAY | {"T", "V", "H", "N"}
     # The order is the deck's own, whatever has arrived.
     assert [key for key, _ in vr.deck_service_entries(world)][:6] == ["M", "C", "B", "Y", "S", "T"]
 
@@ -46,9 +46,10 @@ def test_a_first_deck_is_three_rows_of_services_at_80x24(terminal):
 
 
 @pytest.mark.parametrize("key,involve", [
-    ("P", lambda save: save.pilot.reputation.__setitem__(vr.FACTION_CONCORD, 1)),
-    ("W", lambda save: save.pilot.reputation.__setitem__(vr.FACTION_BLACKWAKE, -2)),
+    ("N", lambda save: save.pilot.reputation.__setitem__(vr.FACTION_CONCORD, 1)),
+    ("N", lambda save: save.pilot.reputation.__setitem__(vr.FACTION_BLACKWAKE, -2)),
     ("N", lambda save: save.flags.__setitem__("archive_v1_started", True)),
+    ("N", lambda save: save.tales.__setitem__("Hollow Reach", 1)),
     ("T", lambda save: setattr(save.trading_ledger, "since_day", 0)),
 ])
 def test_whatever_a_pilot_is_already_involved_with_is_on_the_deck(key, involve):
@@ -62,7 +63,7 @@ def test_a_pilot_who_has_retired_sees_everything_from_day_zero():
     world = _finale_world("legend")
     fresh = vr.World(vr.finish_career(world.save, "legend"))
     assert fresh.save.turn == 0 and fresh.save.pilot.retirements == 1
-    assert _keys(fresh) >= FIRST_DAY | {"T", "V", "H", "P", "W", "N"}
+    assert _keys(fresh) >= FIRST_DAY | {"T", "V", "H", "N"}
     assert not vr.deck_services_arriving(fresh)
 
 
@@ -85,7 +86,7 @@ def test_the_arrival_that_brings_a_service_says_so_once():
     world.save.turn = 2
     assert vr.deck_services_arriving(world) == []
     world.save.turn = 3
-    assert [key for key, _ in vr.deck_services_arriving(world)] == ["P", "W", "N"]
+    assert vr.deck_services_arriving(world) == [("N", "Contacts")]
 
 
 def test_a_jump_reports_what_it_brought_to_the_deck(monkeypatch):
@@ -103,7 +104,7 @@ def test_the_guide_opens_on_the_game_and_says_what_arrives_later(terminal):
     world = _world_with_seed(42)
     rows = [plain(row) for row in vr.pilot_guide_lines(world)]
     assert rows[0].startswith("Your ship is your livelihood.") and "[B] goes back" in rows[1]
-    assert any("The deck fills in as you fly" in row and "[N] Archive after your third" in row for row in rows)
+    assert any("The deck fills in as you fly" in row and "[N] Contacts after your third" in row for row in rows)
     # First flight above the rule, reference below it.
     later = next(number for number, row in enumerate(rows) if "ONCE YOU HAVE FLOWN A FEW DAYS" in row)
     assert any(row.startswith("5. First upgrade") for row in rows[:later])

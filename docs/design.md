@@ -583,8 +583,8 @@ rejected input. Draft edits write nothing; signing and cancellation retain their
 existing final confirmations, fees, pickup behavior and legacy-order terms. Their
 durable results remain visible in the futures catalog and on return to the market.
 
-Faction contacts remain accessible at every station through [P] Concord and
-[W] Blackwake, before and after membership. These are read-only, paginated screens
+Faction contacts remain accessible at every station through [N] Contacts (and
+directly by [P] Concord and [W] Blackwake), before and after membership. These are read-only, paginated screens
 until a deliberate Join action and final confirmation. Each shows current standing,
 joining requirements, the once-only 2,000-credit grant and exact perk conditions.
 Joining validates eligibility before mutation and checkpoints before acknowledgement.
@@ -1688,9 +1688,8 @@ The rules are gentle -- losing the ship is a tow, the first contract is
 hand-held, nothing is permanent -- and that screen was not. A first career now
 opens on Market, Chart, Board, Yard, Status, Guide and Display, three rows of
 services and twelve rows of deck at 80x24. The Ledger, the Viewport and
-the Hall of Fame arrive after the first jump, and Concord, Blackwake and the
-Archive after the third; the arrival that brings them says `New on the deck:`
-among its results. Whatever a pilot is already involved with is on the deck
+the Hall of Fame arrive after the first jump, and Contacts (below) after the
+third; the arrival that brings them says `New on the deck:` among its results. Whatever a pilot is already involved with is on the deck
 whatever the day -- a faction they have standing with, an archive errand begun,
 a ledger with a trade in it. A service that has not arrived still answers its
 key, and the Pilot Guide names them all, so nothing is locked. A pilot who has
@@ -1699,6 +1698,21 @@ and what it already records; nothing is saved for it. Disembark is not in the
 grid at all: the action bar under it always says `[Q] Exit`, and as the grid's
 last entry it was, on the days the count came out one over a multiple of
 three, a row of window to itself.
+
+**Contacts (review).** The deck listed Concord, Blackwake and the Archive as
+three services among fourteen, at the weight of the market and the chart, and
+a pilot opens each perhaps five times in a career. They are three people, and
+one entry now. `[N] Contacts` lists each with the one thing a pilot opens their
+page to learn -- how far the commission or the Cartel's regard is, or whether
+the membership's perk is active; what stage Mara's assignment is at and how
+full the sector files are -- and a key to that page: `[P]`, `[W]`, `[A]`. The
+three rows are a table at 80 columns, which is why the Archive's row says
+`record to recover` and leaves where to Mara's own page. The pages themselves
+are unchanged, and `[P]` and `[W]` still open theirs from the deck for fingers
+that know them. The deck is twelve services in four rows where it was fourteen
+in five: a full deck on day three is fourteen rows at 80x24, which is exactly
+the console's part of the screen. Contacts arrives on the third day, or sooner
+for a pilot with any standing, an errand begun or a sector's story heard.
 
 The Pilot Guide opens on what the game is and how a turn works (it opened on
 how to press Back), and is divided by a rule: a first flight above it, and
