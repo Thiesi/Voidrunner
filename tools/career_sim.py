@@ -114,8 +114,10 @@ class Pilot:
     """One career: the keys a journey asks for, and what to do at a station."""
 
     def __init__(self, vr, kind: str, seed: int, *, dispatch: bool = True, stakes: bool = True, prize: str = "S",
-                 jumps_per_day: int = JUMPS_PER_REAL_DAY, factions: bool = False, futures: bool = False):
+                 jumps_per_day: int = JUMPS_PER_REAL_DAY, factions: bool = False, futures: bool = False,
+                 nerve: int | None = None):
         self.vr, self.kind, self.buy_stakes = vr, kind, stakes
+        self.fixed_nerve = nerve    # the most dangerous harbor flown to by choice, whatever the ship; None is by the ship
         self.factions, self.futures = factions, futures
         self.joined = {}            # the day each faction was joined
         self.orders = Counter()     # futures orders placed and collected, and what collecting saved
@@ -412,6 +414,8 @@ class Pilot:
         """The most dangerous harbor this ship is taken to by choice: a caller
         reads the danger column, and a bare or battered Shuttle keeps to calm space."""
         ship, vr = self.world.save.ship, self.vr
+        if self.fixed_nerve is not None:
+            return self.fixed_nerve
         if ship.hull_hp * 2 < vr.hull_hp_max(ship):
             return 2
         if ship.hull_class == "Shuttle":
@@ -635,7 +639,8 @@ def fly_one(job: tuple) -> dict:
     vr = load_door(door)
     apply_settings(vr, settings)
     result = Pilot(vr, kind, seed, dispatch=dispatch, stakes=stakes, prize=prize, jumps_per_day=jumps_per_day,
-                   factions=bool(ways.get("factions")), futures=bool(ways.get("futures"))).fly(days)
+                   factions=bool(ways.get("factions")), futures=bool(ways.get("futures")),
+                   nerve=ways.get("nerve")).fly(days)
     result.update(pilot=kind, seed=seed, jumps_per_day=jumps_per_day)
     return result
 
@@ -724,6 +729,9 @@ def main() -> None:
                         help="the pilots work toward a faction, join it and take its work")
     parser.add_argument("--futures", action="store_true",
                         help="with --door and a build that still has a futures exchange: the pilots use it")
+    parser.add_argument("--nerve", type=int, choices=range(0, 6), metavar="0-5",
+                        help="the most dangerous harbor every pilot flies to by choice, whatever its ship: "
+                             "2 is a cautious caller, 5 a bold one; left out, a pilot's nerve follows its ship")
     parser.add_argument("--jumps-per-day", type=int, default=JUMPS_PER_REAL_DAY,
                         help="jumps flown in one real day: it turns the dispatch over, and the summary's "
                              "days into real days")
@@ -732,7 +740,7 @@ def main() -> None:
     args = parser.parse_args()
     settings = dict(item.split("=", 1) for item in args.set)
     jobs = [(args.door, kind, 1000 + seed, args.days, settings, not args.no_dispatch, not args.no_stakes, args.prize,
-             args.jumps_per_day, {"factions": args.factions, "futures": args.futures})
+             args.jumps_per_day, {"factions": args.factions, "futures": args.futures, "nerve": args.nerve})
             for kind in args.pilots for seed in range(args.seeds)]
     if args.jobs > 1:
         with multiprocessing.Pool(args.jobs) as pool:

@@ -118,17 +118,22 @@ def test_every_offer_on_a_board_is_priced_by_the_named_figures():
         hops = vr.bfs_hops(world.by_id, world.here.id)
         for mission in vr.generate_mission_board(world):
             away = hops[mission.target_system]
+
+            def paid(figure: int) -> int:
+                """The named figure, with the hazard pay a dangerous destination carries on top."""
+                return vr.hazard_pay(world, mission.target_system, figure)
+
             if mission.kind == "scan":
-                assert mission.reward == vr.SURVEY_PAY[0] + away * vr.SURVEY_PAY[1]
+                assert mission.reward == paid(vr.SURVEY_PAY[0] + away * vr.SURVEY_PAY[1])
             elif mission.kind == "bounty":
-                assert mission.reward == vr.BOUNTY_PAY[0] + mission.pirate_tier * vr.BOUNTY_PAY[1]
+                assert mission.reward == paid(vr.BOUNTY_PAY[0] + mission.pirate_tier * vr.BOUNTY_PAY[1])
             elif mission.kind == "escort":
-                assert mission.reward == (vr.ESCORT_PAY[0] + away * vr.ESCORT_PAY[1]
-                                          + mission.pirate_tier * vr.ESCORT_PAY[2])
+                assert mission.reward == paid(vr.ESCORT_PAY[0] + away * vr.ESCORT_PAY[1]
+                                              + mission.pirate_tier * vr.ESCORT_PAY[2])
             else:
                 value = mission.quantity * vr.COMMODITIES[mission.commodity]["base"]
                 at_origin, per_jump, flat = vr.DELIVERY_PAY
-                assert mission.reward == round(value * (at_origin + per_jump * away)) + flat
+                assert mission.reward == paid(round(value * (at_origin + per_jump * away)) + flat)
                 assert mission.reward > value  # carrying the goods there is never a loss at their base price
             seen.add(mission.kind)
     assert seen == {"delivery", "scan", "bounty", "escort"}

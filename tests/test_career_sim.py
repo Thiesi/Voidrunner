@@ -221,3 +221,13 @@ def test_checkpoints_are_each_taken_on_their_own_day(sim):
     career = sim.fly_one((DOOR, "smuggler", 1012, 60, {}, True, True, "S", 8, {"factions": True}))
     worths = [career["marks"][mark]["worth"] for mark in (20, 40, 60)]
     assert len(set(worths)) == 3
+
+
+def test_a_fixed_nerve_keeps_a_pilot_out_of_or_sends_it_into_dangerous_space(sim):
+    """`--nerve`: 2 is a cautious caller and 5 a bold one, whatever the ship; left out, nerve follows the ship."""
+    vr = sim.load_door(DOOR)
+    timid, bold, plain_pilot = (sim.Pilot(vr, "trader", 1005, nerve=n) for n in (2, 5, None))
+    assert (timid.nerve(), bold.nerve()) == (2, 5) and plain_pilot.nerve() in (3, 4)  # a bare Shuttle
+    cautious = sim.fly_one((DOOR, "trader", 1005, 40, {}, True, True, "S", 8, {"nerve": 2}))
+    daring = sim.fly_one((DOOR, "trader", 1005, 40, {}, True, True, "S", 8, {"nerve": 5}))
+    assert cautious["charted"] <= daring["charted"] and cautious["outcome"] == daring["outcome"] == "flew"
