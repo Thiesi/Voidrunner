@@ -1987,6 +1987,43 @@ took is still drawn, so a day on which no event would have begun leads to the
 encounters it led to before. From the first day one would have begun -- about
 one day in twenty -- a seed's luck differs, as it does after any rule change.
 
+**The flight allowance (review).** A jump cost fuel and nothing else, so a
+career was as long as an evening. The simulator's trader has bought everything
+the game sells by day 138, and nothing stopped a caller flying those 138 jumps
+in one sitting and having no reason to call again. A door game is paced by
+what it rations, and this one rationed nothing.
+
+A caller now has twelve jumps a real day (`FLIGHT_PER_DAY`). Unflown jumps
+carry over up to two days of them (`FLIGHT_BANK_DAYS`), so a missed day is
+not lost and a weekend can be saved for; a new pilot starts with one day. At
+twelve a day the 138 jumps to everything are about eleven and a half days of
+calls, and a career to day 300 is twenty-five.
+
+What it rations is the jump and only the jump. Trading, the yard, the board,
+the ledger and every page of reading cost nothing, so a caller with no jumps
+left can still sell, buy, take a contract and plan the route for tomorrow. A
+shift on Freeport's docks is a day, and spends a jump like one. A journey that
+was interrupted after its jump was spent is finished without a second.
+
+It is said where it matters. The deck's career row carries `Jumps N`, the
+chart's header carries the same figure beside the day and the fuel, the
+departure question adds `Your last jump today.` to the last one, and with none left the deck has an alert and the
+chart refuses before it asks, both with the time until midnight on the node's
+calendar. The Reference has one sentence on it. Where flying is not rationed
+none of this is drawn.
+
+The allowance belongs to the caller, not the career: it is one small save
+field, `flight` (the calendar day it was last reckoned on and the jumps left
+then), and retiring carries it into the next career, so retiring refills
+nothing. A clock that runs backwards earns nothing. A save without the field
+is a caller with one full day. A SysOp sets the figure with `DOOR_JUMPS` (1 to
+999), and `DOOR_JUMPS=0` is no limit, which is also what a domain-only world
+has: the executable binds the calendar (`World.flight_clock`) and the figure,
+as it does the dispatch's. `DOOR_JUMPS_DAY` pins the day for the gallery, whose
+cached careers would otherwise have more jumps to show tomorrow. The suite's
+launched doors run with the allowance on, as a caller's does; a walk that
+needs more than twelve jumps has to set `DOOR_JUMPS=0`.
+
 **Danger pays (review).** A system's danger was a cost and nothing else: more
 raiders, of higher tiers, for the same prices and the same contract pay as calm
 space. The right way to play was to stay out of it, and the handful of
