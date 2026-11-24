@@ -136,3 +136,31 @@ def test_the_career_check_reads_a_simulated_career(sim, check):
     assert found[:3] == [f"{pilot}: no careers flown" for pilot in ("trader", "smuggler", "contractor")]
     # Day 10 is far below the day-100 band, which says the worth was read.
     assert len(found) == 4 and found[3].startswith("explorer: median day-10 net worth ")
+
+
+def test_the_summary_says_when_each_milestone_is_first_reached(sim):
+    """How long the game lasts is asked in days to a hull, a rank and a stake, not in credits."""
+    careers = [sim.fly_one((DOOR, "trader", seed, 60, {}, True, True)) for seed in (1003, 1004)]
+    for career in careers:
+        firsts = career["firsts"]
+        assert firsts["Shuttle"] == 1 and firsts["rank 0"] == 1
+        assert "Freighter" in firsts and firsts["Freighter"] <= firsts.get("Carrier", 60)
+        assert set(firsts) <= {"Shuttle", "rank 0", "rank 1", *sim.MILESTONES}
+    rows = sim.milestone_rows(careers)
+    assert rows[0].split()[0] == "pilot" and "Freighter" in rows[0] and "Cutter" not in rows[0]
+    day = sim.statistics.median(career["firsts"]["Freighter"] for career in careers)
+    assert rows[1].split()[:3] == ["trader", f"{day:.0f}", "(2)"]
+    lines = sim.summarize(careers, 60)
+    assert rows[0] in lines and "these 60 days are 7.5 real days" in lines[-1]
+    assert sim.milestone_rows([dict(career, firsts={}) for career in careers]) == []
+
+
+def test_jumps_per_real_day_turn_the_dispatch_over_and_translate_the_days(sim):
+    slow = sim.fly_one((DOOR, "trader", 1003, 40, {}, True, True, "S", 4))
+    fast = sim.fly_one((DOOR, "trader", 1003, 40, {}, True, True, "S", 40))
+    assert (slow["jumps_per_day"], fast["jumps_per_day"]) == (4, 40)
+    # Forty jumps at four a day are ten dispatches to fly; at forty a day there is one.
+    assert slow["dispatches"] >= fast["dispatches"] and fast["dispatches"] <= 1
+    assert "At 4 jumps a real day these 40 days are 10.0 real days." in sim.summarize([slow], 40)[-1]
+    # Left out, a job flies at the module's own figure, as every older caller of fly_one does.
+    assert sim.fly_one((DOOR, "trader", 1003, 10, {}, True, True))["jumps_per_day"] == sim.JUMPS_PER_REAL_DAY
