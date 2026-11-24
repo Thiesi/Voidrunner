@@ -190,3 +190,37 @@ def test_a_leg_between_two_stations_is_the_plan_from_the_dock(sim):
     for sid in world.here.connections:
         dest = world.by_id[sid]
         assert pilot.plan(dest) == pilot.leg(world.here, dest, room, world.save.pilot.credits)
+
+
+def test_a_pilot_told_to_works_toward_a_faction_and_joins_it(sim):
+    """`--factions`: a smuggler lets beaten raiders go for the Cartel, a
+    contractor hands them to the Navy, and each joins the day the door allows."""
+    ways = {"factions": True}
+    smuggler = sim.fly_one((DOOR, "smuggler", 1012, 30, {}, True, True, "S", 8, ways))
+    assert smuggler["firsts"]["Blackwake"] <= 30 and "Concord" not in smuggler["firsts"]
+    assert smuggler["earned"]["grants"] == 2000 and smuggler["standing"]["blackwake"] >= 75
+    contractor = sim.fly_one((DOOR, "contractor", 1119, 45, {}, True, True, "S", 8, ways))
+    assert contractor["firsts"]["Concord"] <= 45 and contractor["prizes"].get("H", 0) > 0
+    # Left alone, nobody joins anything and every wreck is stripped: the plain pilots are what they were.
+    plain = sim.fly_one((DOOR, "contractor", 1119, 45, {}, True, True))
+    assert "Concord" not in plain["firsts"] and set(plain["prizes"]) <= {"S"} and "grants" not in plain["earned"]
+
+
+def test_a_pilot_told_to_holds_a_price_the_season_will_raise(sim):
+    """`--futures`: orders are placed only at a station seen before, their goods
+    count toward worth while they wait, and a collected order is the next leg's cargo."""
+    career = sim.fly_one((DOOR, "careful", 1001, 60, {}, True, True, "S", 8, {"futures": True}))
+    orders = career["orders"]
+    assert orders["placed"] >= 1 and orders.get("collected", 0) <= orders["placed"]
+    assert career["outcome"] == "flew"
+    lines = sim.summarize([career], 60)
+    assert any(line.strip().startswith(f"futures: {orders['placed']} orders in 1 of 1 careers") for line in lines)
+    assert "orders" in sim.fly_one((DOOR, "careful", 1001, 10, {}, True, True)) and not sim.fly_one(
+        (DOOR, "careful", 1001, 10, {}, True, True))["orders"]
+
+
+def test_checkpoints_are_each_taken_on_their_own_day(sim):
+    """A faction's joining day once overwrote every later checkpoint with the last day's worth."""
+    career = sim.fly_one((DOOR, "smuggler", 1012, 60, {}, True, True, "S", 8, {"factions": True}))
+    worths = [career["marks"][mark]["worth"] for mark in (20, 40, 60)]
+    assert len(set(worths)) == 3
