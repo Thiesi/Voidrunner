@@ -2204,6 +2204,10 @@ class SaveData:
     # How many parts of each sector's story this career has heard; see
     # `sector_tale`. Absent until there is one.
     tales: dict[str, int] = field(default_factory=dict)
+    # The flight allowance as it last stood: the node's calendar day it was
+    # reckoned on and the jumps left then; see `flight_left`. Absent until a
+    # jump is flown on a board that rations them.
+    flight: dict = field(default_factory=dict)
     # Raiders this career let limp home, each owing one favour; see `take_prize`.
     # Absent until there is one.
     favours: list[dict] = field(default_factory=list)
@@ -2242,6 +2246,7 @@ class SaveData:
             **({"accolades": self.accolades} if self.accolades else {}),
             **({"rivals": self.rivals} if self.rivals else {}),
             **({"tales": self.tales} if self.tales else {}),
+            **({"flight": self.flight} if self.flight else {}),
             **({"favours": self.favours} if self.favours else {}),
         }
 
@@ -2286,6 +2291,7 @@ class SaveData:
             accolades=_copy_accolades(d.get("accolades", {})),
             rivals=[dict(item) for item in d.get("rivals", [])],
             tales=dict(d.get("tales", {})),
+            flight=dict(d.get("flight", {})),
             favours=[dict(item) for item in d.get("favours", [])],
         )
 
@@ -2517,6 +2523,11 @@ def _validate_save_document(data: dict) -> None:
         integer(item["day"], "rival day", maximum=data["turn"])
         require(item["how"] in RIVAL_HOW, "rival history")
     require(len({item["name"] for item in rivals}) == len(rivals), "rivals")
+    flight = data.get("flight", {})
+    require(isinstance(flight, dict) and (not flight or set(flight) == {"day", "left"}), "flight allowance")
+    if flight:
+        integer(flight["day"], "flight day", maximum=10_000_000)
+        integer(flight["left"], "flight allowance", maximum=FLIGHT_MOST * FLIGHT_BANK_DAYS)
     tales = data.get("tales", {})
     require(isinstance(tales, dict) and set(tales) <= set(SECTOR_NAMES), "sector stories")
     for told in tales.values():
@@ -2635,6 +2646,11 @@ class World:
         # The calendar the daily dispatch reads, bound by the executable like
         # the reporter. None, as in every domain-only world, is no dispatch.
         self.dispatch_clock: Callable[[], int | None] | None = None
+        # The calendar and the figure the flight allowance reads, bound by the
+        # executable the same way. No clock, or a figure of zero, is no limit:
+        # every domain-only world, and a board whose SysOp switched it off.
+        self.flight_clock: Callable[[], int] | None = None
+        self.flight_per_day: int = 0
         # What this session did that the board's wire should carry; written
         # into the pilot's own score record by the save that follows. Live only
         # once the executable says so, after the launch tick: a career first
@@ -5738,7 +5754,9 @@ DOCK_WORK_STORIES = (
 def dock_work_open(world: World) -> bool:
     """Whether Freeport's foreman has a shift for this pilot today."""
     save = world.save
-    return save.current_system == 0 and save.pending_travel is None and save.pilot.credits < DOCK_WORK_BELOW
+    # A shift is a day, and a day is a jump's worth of the allowance.
+    return (save.current_system == 0 and save.pending_travel is None and save.pilot.credits < DOCK_WORK_BELOW
+            and flight_left(world) != 0)
 
 
 def dock_work_hull(ship: Ship) -> int:
@@ -5753,6 +5771,7 @@ def work_dock_shift(world: World) -> list[str]:
         raise ValueError("The foreman has no shift for you today.")
     save, ship = world.save, world.save.ship
     save.turn += 1
+    spend_jump(world)
     lines = expire_missions(world)
     tick_price_reversion(world)
     world.event_rng.random()  # the draw an economy event's chance took each day, kept: a quiet day's luck is what it was
@@ -6366,6 +6385,96 @@ def dispatch_text(order: dict, *, short: bool = False) -> str:
             "contract": "Complete a contract", "chart": "Chart a new system"}[kind]
 
 
+# The flight allowance (review). A jump was free of everything but fuel, so a
+# career was as long as an evening: a simulated trader has bought everything
+# in the game by day 138, and nothing stopped a caller flying those 138 jumps
+# in one sitting and having no reason to call again. A door game is paced by
+# what it rations, and this one rationed nothing. A caller now has twelve
+# jumps a real day. Unflown jumps carry over, up to two days' worth, so a
+# missed day is not lost and a weekend can be saved for. Everything that is
+# not a jump -- trading, the yard, the board, the ledger, reading -- costs
+# nothing, as before: a caller out of jumps can still plan tomorrow. The day
+# turns at midnight on the node's calendar, like the dispatch's. A SysOp sets
+# the figure with `DOOR_JUMPS` in the door's environment, and 0 is no limit.
+# At twelve a day, the 138 jumps to everything are about eleven and a half
+# days of play.
+FLIGHT_PER_DAY = 12
+FLIGHT_BANK_DAYS = 2
+FLIGHT_MOST = 999            # the largest figure a SysOp may set
+
+
+def flight_setting() -> int:
+    """`DOOR_JUMPS`: the jumps a caller may fly in a real day. 0 (or `off`) is
+    no limit; unset or unreadable is the door's own figure."""
+    value = os.environ.get("DOOR_JUMPS", "").strip().lower()
+    if value in ("0", "off", "no", "false", "unlimited"):
+        return 0
+    try:
+        figure = int(value)
+    except ValueError:
+        return FLIGHT_PER_DAY
+    return figure if 1 <= figure <= FLIGHT_MOST else FLIGHT_PER_DAY
+
+
+def _node_now() -> datetime:
+    return datetime.now(_NODE_ZONE) if _NODE_ZONE is not None else datetime.now()
+
+
+def flight_day() -> int:
+    """Today on the node's calendar as a date's ordinal. Not the dispatch's day:
+    a pinned or switched-off dispatch does not stop the allowance turning over.
+    `DOOR_JUMPS_DAY` pins it to an ISO date, which the gallery does so that a
+    cached career shows the same figure tomorrow; a board has no use for it."""
+    pinned = os.environ.get("DOOR_JUMPS_DAY", "").strip()
+    if pinned:
+        try:
+            return datetime.strptime(pinned, "%Y-%m-%d").date().toordinal()
+        except ValueError:
+            pass  # an unreadable pin is no pin
+    return _node_now().date().toordinal()
+
+
+def flight_wait() -> str:
+    """How long until the node's midnight, as a caller would say it: `5h 12m`."""
+    now = _node_now()
+    seconds = 86_400 - (now.hour * 3600 + now.minute * 60 + now.second)
+    hours, minutes = seconds // 3600, max(1, seconds % 3600 // 60)
+    return f"{hours}h {minutes}m" if hours else f"{minutes}m"
+
+
+def flight_left(world: "World") -> int | None:
+    """Jumps this caller may still fly today: what was left when last reckoned,
+    plus a day's worth for every day since, up to the bank. None where flying
+    is not rationed. A new pilot starts with one day's worth."""
+    per_day = world.flight_per_day
+    if not per_day or world.flight_clock is None:
+        return None
+    record = world.save.flight
+    if not record:
+        return per_day
+    days = max(0, world.flight_clock() - record["day"])
+    return min(per_day * FLIGHT_BANK_DAYS, record["left"] + days * per_day)
+
+
+def spend_jump(world: "World") -> None:
+    """Take one jump from the allowance, on the day it is flown. A clock that
+    ran backwards earns nothing: the record keeps the latest day it has seen."""
+    left = flight_left(world)
+    if left is None:
+        return
+    today = world.flight_clock()
+    day = max(today, world.save.flight.get("day", today))
+    world.save.flight = {"day": day, "left": max(0, left - 1)}
+
+
+def flight_blocker(world: "World") -> str | None:
+    """Why this caller cannot fly another jump today, or None."""
+    if flight_left(world) == 0:
+        return (f"No jumps left today. {plural(world.flight_per_day, 'more jump')} at midnight, in {flight_wait()}. "
+                "Trading and planning cost nothing.")
+    return None
+
+
 def dispatch_setting() -> str:
     """`DOOR_DISPATCH`: "" (live), "off", or a pinned ISO date."""
     value = os.environ.get("DOOR_DISPATCH", "").strip().lower()
@@ -6632,6 +6741,7 @@ def retire_pilot(old_save: SaveData) -> SaveData:
     new_save.retired_careers = [dict(item, highlights=list(item["highlights"])) for item in old_save.retired_careers]
     new_save.accolades = _copy_accolades(old_save.accolades)  # the account's, not the career's
     new_save.best_credits = max(old_save.best_credits, old_save.pilot.credits)
+    new_save.flight = dict(old_save.flight)  # the caller's, not the career's: retiring refills nothing
     new_save.pilot.retirements = retirements
     new_save.pilot.credits += retirements * RETIREMENT_STARTING_CREDITS_BONUS
     new_save.pilot.note(f"Retired as a {RANKS[-1][1]} (retirement #{retirements}) -- a new career begins.")
@@ -8203,12 +8313,17 @@ def status_band(world: "World") -> list[str]:
     first = (f"{beacon}{glyph('beacon')}{RESET} {p.hull}{BOLD}{here.station_name.upper()}{RESET}  "
              f"{p.slate}{here.economy}{RESET} {p.deep}{glyph('dot')}{RESET} {p.slate}{sector_for(here)}{RESET}  "
              + badge(f"{DANGER_WORDS[tone]} {here.danger}", tone) + " " + danger_dots(here.danger))
-    second = "  ".join([
+    career = [
         f"{p.slate}Day{RESET} {p.ink}{world.save.turn}{RESET}",
         f"{p.slate}Rank{RESET} {p.plasma}{career_rank(pilot)}{RESET}",
         f"{p.gold}{glyph('credits')} {pilot.credits:,}cr{RESET}",
-    ])
-    return [first, second]
+    ]
+    left = flight_left(world)
+    if left is not None:
+        # What a session is measured in, beside what a career is measured in.
+        tone = "danger" if left == 0 else "caution" if left <= 2 else "value"
+        career.append(f"{p.slate}Jumps{RESET} {p.tone(tone) if tone != 'value' else p.ink}{left}{RESET}")
+    return [first, "  ".join(career)]
 
 
 # Words a body row carries that mean something stronger than prose. Matched
@@ -11829,6 +11944,9 @@ def deck_alert_rows(world: World) -> list[str]:
     if costs and ship.fuel < min(costs):
         rows.append(alert("danger", "LOW FUEL", f"cheapest jump needs {min(costs)}",
                           key_label("Y", f"refuel {FUEL_PRICE}cr/unit")))
+    if (blocker := flight_blocker(world)) is not None:
+        rows.append(alert("caution", "No jumps left today",
+                          f"{world.flight_per_day} more at midnight, in {flight_wait()}; trading is free"))
     if dock_work_open(world):
         rows.append(alert("note", "Dock work", f"a day's shift pays {DOCK_WORK_PAY}cr and patches the hull",
                           key_label("F", "foreman")))
@@ -16496,6 +16614,9 @@ def guide_reference_lines(world: World) -> list[str]:
         "[K] Stake in a market buys a share of that station, in three steps at up to three stations: its stock and "
         "demand come back faster for you.",
         section("FLYING"),
+        *([f"You have {plural(world.flight_per_day, 'jump')} a real day. Unflown jumps carry over, up to "
+           f"{world.flight_per_day * FLIGHT_BANK_DAYS}; the deck's Jumps figure says how many are left. Everything "
+           "but a jump is free."] if flight_left(world) is not None else []),
         "Danger is a risk rating, not a guarantee you can win a fight. The chart warns before a jump that could meet "
         "a raider your hull cannot take. Danger 4 and 5 pay for it: what such a station does not make sells dearer "
         "there, and a contract that ends there carries hazard pay.",
@@ -17541,7 +17662,8 @@ def chart_entries(world: World) -> list[tuple[int | None, str]]:
     entries.append((None, f"{p.hull}{BOLD}{here.name.upper()}{RESET} {p.slate}({here.x},{here.y}){RESET}  "
                           f"{p.slate}{sector_for(here)}{RESET}  "
                           + "  ".join([chip("day", str(world.save.turn)),
-                                       chip("fuel", f"{world.save.ship.fuel}/{fuel_capacity(world.save.ship)}")])))
+                                       chip("fuel", f"{world.save.ship.fuel}/{fuel_capacity(world.save.ship)}"),
+                                       *([chip("jumps", str(left))] if (left := flight_left(world)) is not None else [])])))
     mission = tracked_mission(world)
     route = mission_route(world, mission) if mission and not (mission.kind == "scan" and world.by_id[mission.target_system].discovered) else []
     if mission:
@@ -17663,7 +17785,9 @@ def departure_terms(world: World, dest_id: int) -> str:
     # there is what the warning is about.
     outmatched = dest.discovered and raider_outclasses(world.save.ship, min(4, dest.danger + 1))
     warning = " Raiders there can outclass this hull." if outmatched else ""
-    return f"Depart for {name}? {cost} fuel, {danger}, one day passes.{warning}"
+    # The chart's own header carries the count; the question speaks up only when it is the last one.
+    last = " Your last jump today." if flight_left(world) == 1 else ""
+    return f"Depart for {name}? {cost} fuel, {danger}, one day passes.{last}{warning}"
 
 
 def screen_chart(p: Palette, world: World) -> int | None:
@@ -17703,6 +17827,9 @@ def screen_chart(p: Palette, world: World) -> int | None:
         cost = fuel_cost_for_jump(world.here, world.by_id[dest_id], world.save.ship)
         if world.save.ship.fuel < cost:
             result, page = f"Not enough fuel ({cost} needed, have {world.save.ship.fuel}).", 0
+            continue
+        if (blocker := flight_blocker(world)) is not None:
+            result, page = blocker, 0
             continue
         if not confirm(departure_terms(world, dest_id), p):
             result, page = "Departure cancelled; still docked.", 0
@@ -18669,11 +18796,16 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
     """
     travel = world.save.pending_travel
     if travel is None:
+        if (blocker := flight_blocker(world)) is not None:
+            # Every way to a departure asks first; this is the lock on the door.
+            set_status(blocker, "bad")
+            return
         origin = world.here
         dest = world.by_id[dest_id]
         burn = fuel_cost_for_jump(origin, dest, world.save.ship)
         world.save.ship.fuel -= burn
         world.save.turn += 1
+        spend_jump(world)
         world.ship_destroyed_this_hop = False
         world.hop_kills = world.save.pilot.kills
         world.hop_events = set()
@@ -19697,6 +19829,7 @@ def _run_game(info: dict) -> int:
                 replace_unsupported_career(save_dir, user_id, save)
         world = World(save, checkpoint=lambda current: persist(current, save_dir, user_id))
         world.dispatch_clock = dispatch_day
+        world.flight_clock, world.flight_per_day = flight_day, flight_setting()
         set_canopy_world(world)
         world.checkpoint()  # the launch tick prepares the station this career opens at
         # After that tick, never before: it is where a career first opened by

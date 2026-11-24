@@ -119,6 +119,16 @@ the board has flown it. The day changes at midnight on the node's calendar.
 The Hall of Fame ranks the longest runs, read from `scores/` like the rest. A
 SysOp can switch the dispatch off with `DOOR_DISPATCH=0`.
 
+A caller has **twelve jumps a real day**. Unflown jumps carry over, up to
+twenty-four, so a missed day is not lost. Everything that is not a jump --
+trading, the yard, the contract board, the ledger -- costs nothing, and a
+caller who is out of jumps can still plan the next day. The deck shows the
+jumps left, the chart says when the last one is being flown, and with none
+left it says how long until midnight on the node's calendar. A SysOp sets the
+figure with `DOOR_JUMPS` in the door's environment: `DOOR_JUMPS=20` for twenty a
+day, `DOOR_JUMPS=0` for no limit. The allowance belongs to the caller, not the
+career, so retiring does not refill it.
+
 Once a pilot has flown the day's order, that deck row carries **the wire**
 instead: the newest thing another pilot on the board did, such as a promotion,
 a silver or gold achievement, a retirement or a lost ship. Each pilot's last

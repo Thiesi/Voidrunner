@@ -186,7 +186,10 @@ def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkey
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_travel(vr.Palette(False), expected, destination)
         vr.screen_travel(vr.Palette(False), resumed, 0)
-    assert resumed.save.to_dict() == expected.save.to_dict()
+    career = resumed.save.to_dict()
+    # The real door flew that jump on a calendar: it is off the allowance, and nothing else differs.
+    assert career.pop("flight")["left"] == vr.FLIGHT_PER_DAY - 1
+    assert career == expected.save.to_dict()
     assert resumed.save.pending_travel is None
     assert resumed.save.current_system == destination
     assert resumed.save.pilot.kills == 1

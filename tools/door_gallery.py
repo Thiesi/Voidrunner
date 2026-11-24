@@ -325,6 +325,9 @@ class Door:
                    # One fixed day's dispatch: the order changes at midnight,
                    # and a panel has to compare with yesterday's run of it.
                    DOOR_DISPATCH="2026-11-22",
+                   # And one fixed day's flight allowance, for the same reason:
+                   # a cached career would have more jumps to show tomorrow.
+                   DOOR_JUMPS_DAY="2026-11-22",
                    PYTHONIOENCODING="utf-8")
         self.encoding = GALLERY_ENCODING
         command = [sys.executable, str(door)]
