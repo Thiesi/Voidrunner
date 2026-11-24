@@ -574,6 +574,7 @@ unadvertised buy key still rejects without changing state. Completed/rejected tr
 return a retained result to the catalog; cancelled quantities preserve its prior
 result. Existing checkpoint-before-acknowledgement and trade rules remain unchanged.
 
+(The futures exchange was removed in the review; see "The futures exchange is closed". This paragraph is how it worked.)
 Futures catalogs use complete-choice pagination with up to four selections per
 page, read-through continuation for oversized labels, and nonselectable fee/limit
 notices. Returning from inspection preserves the list page; a completed action
@@ -1678,8 +1679,7 @@ choose is noise on a small screen.
   outclasses a hull that two volleys would leave under a twentieth.
 
 `economy_price_factor` is the one rule a quote and the price ladder it is
-judged against both use. Futures remain what they were: a price lock in a
-market whose prices do not move on their own.
+judged against both use.
 
 **The staged opening (review).** A first career's first deck listed
 fourteen services at one weight: a ledger with nothing in it, an archive, two
@@ -1939,10 +1939,37 @@ it. The same facts are the text portrait's sentences in `mono` and `plain`
 opens. Two achievements count the harbors of one career, at twelve and at
 thirty-six. Nothing is saved for any of it.
 
-**Seasons, and what a futures order bets on (review).** A price was its
+**The futures exchange is closed (review).** A futures order held today's
+price for an 8% fee, to be collected at the same station five, ten or twenty
+days later. Seasons (the next paragraph) were added partly to give it a point:
+a price a pilot could see rising. Then the simulator's pilots were taught to
+use it -- an order at a station they had docked at before, whenever the season
+promised more than 14% by collection day -- and every one of them ended a
+hundred days poorer:
+
+| Pilot | Without futures | With | Orders collected | Saved per career |
+| --- | --- | --- | --- | --- |
+| trader | 355,028 | 348,591 (-1.8%) | 299 of 678 | 128cr |
+| contractor | 256,709 | 243,070 (-5.3%) | 210 of 587 | 85cr |
+| careful | 357,552 | 348,273 (-2.6%) | 281 of 662 | 119cr |
+
+A price swings an eighth either way and the fee takes most of that; fewer than
+half the orders were ever collected, because a pilot's route moves on; and the
+credits an order ties up are not trading. The best a perfectly timed order can
+do is about a fifth of the goods' price, on one hold, every few weeks. It was
+four screens, a row of the deck's alerts and a clause of every recap for
+something that cost its user money, so it is gone: `[X]` is no longer on the
+market, and seasons remain as what they are for the spot trader. An order in a
+save from an earlier build is refunded in full, fee and all, the moment the
+career is opened (`close_futures_desk`); its reserved stock goes back to the
+station; the first deck says so once; and the save's futures keys
+(`active_futures`, `next_futures_id`) are read and never written again. The
+measurement can be repeated against an older build:
+`python tools/career_sim.py --door <v1.7.2 voidrunner.py> --futures`.
+
+**Seasons (review).** A price was its
 economy's, its trait's, and whatever the pilot's own trading or the rare event
-had done to it. Nothing moved that a pilot could see coming, so a futures order
--- today's price, held for an 8% fee -- was never worth its fee, and the trade
+had done to it. Nothing moved that a pilot could see coming, and the trade
 loop had nothing left to read once its lanes were learned. Every legal good now
 has a season in each sector: a swing of 12% either way over 24 to 40 days, the
 same for every station in the sector, so a lane inside a sector keeps its shape
@@ -1951,12 +1978,7 @@ to. It starts level on day zero, so a first day is what it was. It is the same
 every time for a career's seed, and it is shown: the market marks each price as
 rising or falling and for how many more days (a TREND column of its own, the
 first to give way on a narrow page: inside the SPREAD cell it cost a pilot with
-a contract's NEED showing the whole spread at 80 columns), and a futures order says what
-the season should have the price at on the day it can be collected, and whether
-locking saves or costs against buying then. A lock at the bottom of a swing for
-ten or twenty days is now worth having -- up to about a fifth of the goods'
-price after the fee -- and a lock at the top is a plain loss, which the order
-says before it is signed. Contraband has no season; its price rules are its
+a contract's NEED showing the whole spread at 80 columns). Contraband has no season; its price rules are its
 own. Nothing is saved: the seed and the day give it (`season_factor`). Flown
 through the career simulator, seasons move a career's worth by about 2%.
 
@@ -2184,6 +2206,7 @@ and daily replenishment. Remembered quantities are timestamped observations,
 never live remote availability; a route cannot promise sale of a load exceeding
 observed demand. First Flight must quote immediately available procurement.
 
+(The futures exchange was removed in the review; see "The futures exchange is closed". This paragraph is how it worked.)
 Futures remain separately scheduled wholesale consignments with their existing
 fee, term, issuing-station pickup and hold-space requirements. A new order
 reserves its quantity from the issuing station's spot stock pool at signing and
@@ -2242,10 +2265,7 @@ The ship's computer also keeps track of what the pilot has promised (issue #41):
   leaves. Its procurement and hold checks follow from that.
 - **Due here:** the deck alerts when a delivery is due at this station and the
   hold is short, with the shortfall and this market's stock.
-- **Futures:** each matured futures order gets its own alert. An order at another
-  station gives its station and jump count. An order waiting here, which can only
-  mean the hold is too full to load it, gives the hold it needs and the space
-  free.
+- **Futures:** removed with the exchange. Each matured order had its own alert.
 - **Selling promised cargo:** the sell prompt splits the cargo aboard into
   promised and spare. Selling into a promise asks first, naming the
   destinations that cargo is promised to.
@@ -2263,6 +2283,7 @@ fuel alone was worth under a credit per jump (issue #409), so the engineer also
 cuts yard repairs from 4 credits per hull point to 3 (Recruit and Seasoned) and
 2 (Veteran and Ace); the yard and crew screens show the current rate.
 
+(The futures exchange was removed in the review; see "The futures exchange is closed". This paragraph is how it worked.)
 New futures orders lock goods for pickup at their issuing station after maturity.
 Up to eight orders may be active; insufficient hold space leaves a ready order
 waiting. Orders can be cancelled remotely for their recorded goods principal;

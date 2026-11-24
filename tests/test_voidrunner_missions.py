@@ -923,8 +923,7 @@ def test_optional_fields_default_and_an_over_limit_career_keeps_every_contract()
                                   for i in range(1, 6)]
     world.save.next_mission_id = 6
     data = world.save.to_dict()
-    for key in ("galaxy_version", "mission_boards", "best_credits", "active_futures", "pending_travel",
-                "event_rng_state"):
+    for key in ("galaxy_version", "mission_boards", "best_credits", "pending_travel", "event_rng_state"):
         data.pop(key)
     loaded = vr._decode_career(json.dumps(data).encode())
     assert loaded.galaxy_version == 1 and len(loaded.active_missions) == 5

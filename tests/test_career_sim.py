@@ -206,17 +206,14 @@ def test_a_pilot_told_to_works_toward_a_faction_and_joins_it(sim):
     assert "Concord" not in plain["firsts"] and set(plain["prizes"]) <= {"S"} and "grants" not in plain["earned"]
 
 
-def test_a_pilot_told_to_holds_a_price_the_season_will_raise(sim):
-    """`--futures`: orders are placed only at a station seen before, their goods
-    count toward worth while they wait, and a collected order is the next leg's cargo."""
-    career = sim.fly_one((DOOR, "careful", 1001, 60, {}, True, True, "S", 8, {"futures": True}))
-    orders = career["orders"]
-    assert orders["placed"] >= 1 and orders.get("collected", 0) <= orders["placed"]
-    assert career["outcome"] == "flew"
-    lines = sim.summarize([career], 60)
-    assert any(line.strip().startswith(f"futures: {orders['placed']} orders in 1 of 1 careers") for line in lines)
-    assert "orders" in sim.fly_one((DOOR, "careful", 1001, 10, {}, True, True)) and not sim.fly_one(
-        (DOOR, "careful", 1001, 10, {}, True, True))["orders"]
+def test_futures_are_for_an_older_build_and_do_nothing_on_this_one(sim):
+    """`--futures` measured the exchange before it closed: every pilot ended
+    poorer. This build has none, so the switch changes nothing; with `--door`
+    and a build that still has one, the pilots use it."""
+    with_it = sim.fly_one((DOOR, "careful", 1001, 30, {}, True, True, "S", 8, {"futures": True}))
+    without = sim.fly_one((DOOR, "careful", 1001, 30, {}, True, True))
+    assert with_it["orders"] == {} and with_it["marks"] == without["marks"] and with_it["outcome"] == "flew"
+    assert not any("futures:" in line for line in sim.summarize([with_it], 30))
 
 
 def test_checkpoints_are_each_taken_on_their_own_day(sim):

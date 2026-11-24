@@ -259,7 +259,7 @@ def test_market_catalog_pages_preserve_goods_quotes_and_telemetry(monkeypatch, t
         assert len(frame.splitlines())<=height
         assert all(vr._visible_width(line)<=width for line in frame.splitlines())
         plain=page_text(frame)
-        assert "[B] Back:" in plain and "[X] Futures" in plain and "1,200cr" in page_title(frame)
+        assert "[B] Back:" in plain and "Futures" not in plain and "1,200cr" in page_title(frame)
         page,count=map(int,re.search(r"(\d+)/(\d+)",frame).groups())
         return "Q" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
@@ -414,17 +414,6 @@ def test_real_cockpit_paging_toggle_and_exit_preserve_career(tmp_path,commands):
     if b"M" in commands:
         assert b"COMMODITY" in plain_bytes(result.stdout) and b"Engineering Yard:" in plain_bytes(result.stdout)
     assert (tmp_path/"77.json").read_bytes()==original
-
-
-def test_station_retained_settlement_result_is_durable_before_disconnect(tmp_path):
-    world=_world_with_seed(42)
-    vr.buy_futures_contract(world,"food",2,5)
-    world.save.turn=5
-    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
-    with _door_stopped_at(tmp_path,b"",b"Result:"):
-        saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
-        assert not saved.active_futures
-        assert saved.cargo=={"food":2}
 
 
 def test_screen_station_menu_special_ops_fit_the_standard_page(monkeypatch):
@@ -1612,8 +1601,8 @@ def test_screen_naming_says_what_a_caller_can_navigate_to():
     import inspect
     helpers = {name for name, value in vars(vr).items()
                if name.startswith("_screen_") and inspect.isfunction(value)}
-    assert helpers == {"_screen_combat_session", "_screen_faction_contact", "_screen_buy_futures",
-                       "_screen_futures_order", "_screen_map_info", "_screen_opening_offer", "_screen_prize"}
+    assert helpers == {"_screen_combat_session", "_screen_faction_contact", 
+                       "_screen_map_info", "_screen_opening_offer", "_screen_prize"}
     # Each of those is called only from another screen, never from the outer loop.
     outer = inspect.getsource(vr.main) if hasattr(vr, "main") else ""
     assert not any(name in outer for name in helpers)
@@ -1683,7 +1672,7 @@ def test_a_returning_pilot_reads_the_recap_on_the_deck(monkeypatch, terminal):
     world.save.pilot.handle = "Tester"
     world.launch_notes = vr.launch_notes(world, is_new=False)
     page = " ".join(_deck_page(world, monkeypatch, terminal).split())
-    assert "Welcome back, Tester." in page and "Commitments: 0 contract(s)" in page
+    assert "Welcome back, Tester." in page and "Commitments: 0 contracts." in page
     # The recap's own first line repeats the three things the deck prints under it.
     assert "Docked:" not in page
 
@@ -1732,7 +1721,6 @@ def test_the_real_door_holds_the_resume_notice_until_a_key(tmp_path):
     screen = " ".join(final_screen(result.stdout).split())
     assert "Journey Resumed" in screen and "Resuming your interrupted journey" in screen
     assert "Press any key to continue" in screen and "Combat" not in screen
-
 
 
 # ---------------------------------------------------------------------------
@@ -1875,22 +1863,6 @@ def test_a_result_handed_up_keeps_its_tone_and_shows_on_the_caller(terminal):
     # The exchange returns it to the market, which says it again, still green.
     vr.set_status("Futures contract: 1x Food.")
     assert vr._STATUS["tone"] == "good" and _drawn("Market: 1,180cr")[-1].startswith("╰─ ● Futures contract")
-
-
-def test_signing_a_futures_order_is_reported_on_the_market_it_returns_to(monkeypatch):
-    world = _world_with_seed(42)
-    keys = iter(["X", "1", "S", "Y", "B", "B"])
-    frames, output = [], io.StringIO()
-    def key():
-        frames.append(plain(output.getvalue())); output.seek(0); output.truncate(0)
-        return next(keys)
-    monkeypatch.setattr(vr, "read_key", key)
-    with contextlib.redirect_stdout(output):
-        vr.screen_market(vr.Palette(False), world)
-    assert world.save.active_futures
-    # The order's terms are too long for the border: they take the rows above it.
-    market = [frame for frame in frames if "Market: " in frame][-1]
-    assert "│  ● Futures contract: 1x Food" in market
 
 
 def test_a_long_result_takes_reserved_rows_above_the_border(terminal):

@@ -33,9 +33,14 @@ the daily dispatch over and translates the days into real ones.
 `--factions` has the pilots work toward a faction and join it the day the door
 lets them: a contractor and the traders hand beaten raiders to the Navy for
 Concord's commission, a smuggler lets them go for the Cartel's, and each takes
-the work its faction then posts. `--futures` has them hold today's price, at a
-station they have been to before, on a good the season will make dearer. Both
-are off by default, so the four plain pilots stay what they were.
+the work its faction then posts. It is off by default, so the plain pilots
+stay what they were.
+
+`--futures` is for an older build flown with `--door`: the futures exchange
+was removed after these pilots showed that using it cost a career money, and
+on a build without one the switch does nothing. There, a pilot holds today's
+price, at a station it has been to before, on a good the season will make
+dearer.
 
 `--set NAME=VALUE` changes a module constant before each career, which is how
 one rule is switched off to see what it was contributing. `--prize` is what
@@ -321,7 +326,9 @@ class Pilot:
         good the season will carry furthest up by the day it is collected."""
         world, vr = self.world, self.vr
         here, ship, save = world.here, world.save.ship, world.save
-        if (not self.futures or here.id not in self.docked or len(save.active_futures) >= FUTURES_OPEN
+        if not self.futures or not hasattr(vr, "buy_futures_contract"):
+            return  # the exchange closed after v1.7.2; with --door, an older build still has one
+        if (here.id not in self.docked or len(save.active_futures) >= FUTURES_OPEN
                 or any(order.origin_system == here.id for order in save.active_futures)):
             return
         spare = save.pilot.credits - vr.cargo_capacity(ship) * 60
@@ -539,7 +546,8 @@ class Pilot:
     def worth(self) -> int:
         world = self.world
         cargo = sum(paid for lots in world.save.cargo_basis.values() for _units, paid in lots)
-        cargo += sum(order.principal for order in world.save.active_futures)  # goods paid for and not yet collected
+        # Goods paid for and not yet collected, on a build that still sells futures.
+        cargo += sum(order.principal for order in getattr(world.save, "active_futures", []))
         sunk = sum(self.spent[what] for what in ("upgrade", "refit", "stake"))
         return world.save.pilot.credits + cargo + sunk
 
@@ -575,7 +583,8 @@ class Pilot:
             world.commit()
             self.docked[world.here.id] = world.save.turn
             credits, self.keys = world.save.pilot.credits, 0
-            aboard, open_orders = Counter(world.save.cargo), {order.id: order for order in world.save.active_futures}
+            aboard = Counter(world.save.cargo)
+            open_orders = {order.id: order for order in getattr(world.save, "active_futures", [])}
             self.keep = Counter()
             try:
                 with contextlib.redirect_stdout(self.screen):
@@ -587,7 +596,7 @@ class Pilot:
             self.lost += bool(world.ship_destroyed_this_hop)
             # An order collected on arrival was bought at an old price to be
             # carried on: it is the next leg's cargo, not something to sell here.
-            still = {order.id for order in world.save.active_futures}
+            still = {order.id for order in getattr(world.save, "active_futures", [])}
             for order in (order for key, order in open_orders.items() if key not in still):
                 gained = world.save.cargo.get(order.commodity, 0) - aboard[order.commodity]
                 if gained > 0:
@@ -714,7 +723,7 @@ def main() -> None:
     parser.add_argument("--factions", action="store_true",
                         help="the pilots work toward a faction, join it and take its work")
     parser.add_argument("--futures", action="store_true",
-                        help="the pilots hold today's price on what the season will make dearer")
+                        help="with --door and a build that still has a futures exchange: the pilots use it")
     parser.add_argument("--jumps-per-day", type=int, default=JUMPS_PER_REAL_DAY,
                         help="jumps flown in one real day: it turns the dispatch over, and the summary's "
                              "days into real days")
