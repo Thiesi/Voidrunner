@@ -1967,6 +1967,26 @@ station; the first deck says so once; and the save's futures keys
 measurement can be repeated against an older build:
 `python tools/career_sim.py --door <v1.7.2 voidrunner.py> --futures`.
 
+**Economy events are folded into seasons (review).** An event was a boom or a
+crash in one good at up to three stations of one economy: 30% either way for
+eight to fifteen days, with one running about a third of the time. It was the
+fourth thing moving a price -- after the economy, a system's own trait and the
+season -- and the only one a pilot could not see coming or plan for: a price
+that was simply wrong for a fortnight, with a badge on it. Switched off in the
+simulator (`--set ECONOMY_EVENT_CHANCE_PER_TURN=0`, 200 careers a pilot) it
+moved no pilot's median by more than 1.4%, the careful pilot's by 0.3%.
+Seasons do the same job on a calendar a pilot can read, so the event is gone:
+no badge on the market, no alert on the deck, no line in Status, nothing in
+the save. The ledger's bulletin, which reported the event, now reports the
+seasons of the sector the pilot is in -- each legal good rising or falling,
+for how many more days, and how far from its usual level -- which is what the
+market's TREND column says of one station, said once for the sector. A save
+with an event running is read and simply has none; the prices it held drift
+back to rest like any other. The one random draw a day that the event's chance
+took is still drawn, so a day on which no event would have begun leads to the
+encounters it led to before. From the first day one would have begun -- about
+one day in twenty -- a seed's luck differs, as it does after any rule change.
+
 **Seasons (review).** A price was its
 economy's, its trait's, and whatever the pilot's own trading or the rare event
 had done to it. Nothing moved that a pilot could see coming, and the trade
@@ -2218,6 +2238,7 @@ keep their terms, as do legacy remote-delivery orders. Unloading collected goods
 still uses the destination's buying demand. Contract deliveries consume their
 contracted cargo independently of spot demand.
 
+(Economy events were removed in the review; see "Economy events are folded into seasons". This paragraph is how they worked.)
 New economy events affect a bounded region: an anchor station plus up to two
 same-economy stations within two jumps. A deterministic selection from the
 existing seed/day/event terms chooses the region without RNG calls or changes to

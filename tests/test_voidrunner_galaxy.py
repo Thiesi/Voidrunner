@@ -431,9 +431,6 @@ def test_a_commit_generates_no_galaxy_once_the_seed_is_known(monkeypatch, tmp_pa
     """
     world = _world_with_seed(42)
     world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
-    world.save.active_event = {"economy": world.here.economy, "commodity": "food", "direction": "boom",
-                               "turns_remaining": 2, "description": "Prices spike across the region",
-                               "system_ids": [world.here.id]}
     generated = []
     real = vr.generate_galaxy
     vr.galaxy_economies.cache_clear(); vr.galaxy_hops.cache_clear()
@@ -445,7 +442,6 @@ def test_a_commit_generates_no_galaxy_once_the_seed_is_known(monkeypatch, tmp_pa
     world.save.pilot.credits += 1
     world.commit()
     assert generated == []  # and never again for this seed
-    world.save.active_event = None
     world.save.pilot.credits += 1
     world.commit()
     assert generated == []

@@ -957,79 +957,10 @@ def test_trade_opportunities_reserve_travel_cash_and_exclude_contract_consumptio
     assert all((q["destination"], q["commodity"]) != (first["destination"], first["commodity"]) for q in vr.trade_opportunities(world))
 
 
-def test_regional_economy_selects_local_bounded_regions_without_new_rng_calls():
-    import random
-    world = _world_with_seed(42); world.event_rng.seed(31)
-    expected = random.Random(31)
-    assert expected.random() < vr.ECONOMY_EVENT_CHANCE_PER_TURN
-    economy = expected.choice(vr.ECONOMIES)
-    expected.choice(sorted(set(vr.ECONOMY_PRODUCES[economy]) | set(vr.ECONOMY_DEMANDS[economy])))
-    expected.choice(["crash", "boom"]); expected.randint(vr.ECONOMY_EVENT_MIN_TURNS, vr.ECONOMY_EVENT_MAX_TURNS)
-    vr.tick_economy_event(world)
-    event = world.save.active_event; ids = event["system_ids"]
-    assert 1 <= len(ids) <= 3 and len(ids) == len(set(ids))
-    hops = vr.bfs_hops(world.by_id, ids[0])
-    assert all(world.by_id[sid].economy == event["economy"] and hops[sid] <= 2 for sid in ids)
-    assert world.event_rng.getstate() == expected.getstate()
-    assert set(world.save.market_drift) == set(ids)
-    assert world.save.market_depth == {} and world.save.market_memory == {}
-
-
-def test_regional_economy_saved_scope_survives_a_restart(tmp_path):
-    world = _world_with_seed(42); world.event_rng.seed(31); vr.tick_economy_event(world)
-    ids = list(world.save.active_event["system_ids"]); vr.persist(world, tmp_path, 77)
-    restored = vr.World(vr.load_or_create_save(tmp_path, 77, "Tester")[0])
-    remaining = restored.save.active_event["turns_remaining"]; rng = restored.event_rng.getstate()
-    vr.tick_economy_event(restored)
-    assert restored.save.active_event["system_ids"] == ids and restored.save.active_event["turns_remaining"] == remaining - 1
-    assert restored.event_rng.getstate() == rng
-    # An event with no region was economy-wide under the retired schema (#421).
-    without_region = dict(restored.save.active_event); del without_region["system_ids"]
-    restored.save.active_event = without_region
-    with pytest.raises(vr.ResumeError): vr.SaveData.from_dict(restored.save.to_dict())
-
-
-@pytest.mark.parametrize("ids", [[], [True], [99], [1, 1], [1, 2, 3, 4], "1", [0]])
-def test_regional_economy_rejects_invalid_saved_regions_without_rewriting(tmp_path, ids):
-    import json
-    world = _world_with_seed(42)
-    world.save.active_event = dict(economy="Agricultural", commodity="food", direction="boom", turns_remaining=3, description="News", system_ids=ids)
-    raw = json.dumps(world.save.to_dict()).encode(); (tmp_path / "77.json").write_bytes(raw)
-    with pytest.raises(vr.ResumeError): vr.load_or_create_save(tmp_path, 77, "Tester")
-    assert (tmp_path / "77.json").read_bytes() == raw
-
-
-def test_regional_economy_bulletin_names_targets_without_charting_or_revealing_other_threats():
-    import copy
-    world = _world_with_seed(42)
-    anchor = next(s for s in world.galaxy if not s.discovered)
-    world.save.active_event = dict(economy=anchor.economy, commodity="food", direction="boom", turns_remaining=1,
-        description="Regional shortage", system_ids=[anchor.id])
-    before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
-    text = plain(" ".join(vr.economy_opportunity_lines(world, [])))
-    assert anchor.name in text and "danger unknown" in text and "event ends by arrival" in text
-    assert "Lead: bring Food" in text and not world.save.market_memory
-    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
-
-
-def test_regional_economy_market_tags_only_affected_stations_and_preserves_legality(monkeypatch):
-    world = _world_with_seed(0)
-    havens = [s for s in world.galaxy if s.economy == "Haven"]
-    assert len(havens) > 1
-    world.save.active_event = dict(economy="Haven", commodity="weapons", direction="boom", turns_remaining=3,
-        description="Regional shortage", system_ids=[havens[0].id])
-    monkeypatch.setattr(vr, "read_key", lambda: "Q")
-    for index, station in enumerate(havens[:2]):
-        world.save.current_system = station.id
-        with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_market(vr.Palette(False), world)
-        text = output.getvalue()
-        assert "Illegal" in text and ("BOOM" in text) == (index == 0)
-
-
 @pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_economy_opportunity_pages_reach_all_candidates_within_terminal_size(monkeypatch, terminal, width, height):
     import copy, re
-    world = _world_with_trade_opportunities(); world.event_rng.seed(31); vr.tick_economy_event(world)
+    world = _world_with_trade_opportunities(); world.event_rng.seed(31)
     before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
     terminal(width, height)
     output = io.StringIO(); frames = []
@@ -1063,7 +994,7 @@ def test_real_economy_opportunity_back_eof_and_route_selection_leave_career_unch
     world = _world_with_trade_opportunities()
     world.save.pilot.credits = 2500
     assert vr.trade_opportunities(world)
-    world.event_rng.seed(31); vr.tick_economy_event(world)
+    world.event_rng.seed(31)
     world._checkpoint = lambda current: vr.persist(current, tmp_path, 77); world.checkpoint()
     original = (tmp_path / "77.json").read_bytes()
     info = tmp_path / "door_info.json"; info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
@@ -1072,42 +1003,6 @@ def test_real_economy_opportunity_back_eof_and_route_selection_leave_career_unch
     assert result.returncode == 0 and not result.stderr and shows_page(result.stdout, "Opportunities")
     if b"1" in commands: assert shows_page(result.stdout, "Trade Route")
     assert (tmp_path / "77.json").read_bytes() == original
-
-
-def test_real_regional_news_is_saved_before_announcement_and_survives_kill(tmp_path):
-    world = _world_with_seed(42); world.event_rng.seed(31)
-    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77); world.checkpoint()
-    with _door_stopped_at(tmp_path, b"C" + vr.CHART_CONNECTION_LETTERS[0].encode() + b"Y", b"Galaxy news:"):
-        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
-        assert saved.active_event and 1 <= len(saved.active_event["system_ids"]) <= 3
-        event = dict(saved.active_event)
-    restored = vr.World(vr.load_or_create_save(tmp_path, 77, "Tester")[0])
-    assert restored.save.active_event == event
-
-
-def test_regional_economy_absent_industry_falls_back_without_extra_random_choices(monkeypatch):
-    world = _world_with_seed(1)
-    assert not any(s.economy == "Haven" for s in world.galaxy)
-    choices = iter(["Haven", "narcotics", "boom"])
-    monkeypatch.setattr(world.event_rng, "random", lambda: 0)
-    monkeypatch.setattr(world.event_rng, "choice", lambda seq: next(choices))
-    monkeypatch.setattr(world.event_rng, "randint", lambda a, b: a)
-    assert vr.tick_economy_event(world)
-    event = world.save.active_event
-    assert event["economy"] == world.here.economy and event["system_ids"]
-    assert event["commodity"] in set(vr.ECONOMY_PRODUCES[event["economy"]]) | set(vr.ECONOMY_DEMANDS[event["economy"]])
-    with pytest.raises(StopIteration): next(choices)
-
-
-def test_regional_economy_rejects_distant_stations_even_with_matching_economy():
-    world = _world_with_seed(0)
-    pairs = [(a, b) for a in world.galaxy for b in world.galaxy
-             if a.economy == b.economy and vr.bfs_hops(world.by_id, a.id)[b.id] > 2]
-    assert pairs
-    a, b = pairs[0]
-    world.save.active_event = dict(economy=a.economy, commodity="food", direction="boom", turns_remaining=3,
-        description="News", system_ids=[a.id, b.id])
-    with pytest.raises(vr.ResumeError, match="event region"): vr.SaveData.from_dict(world.save.to_dict())
 
 
 def test_trade_opportunities_label_legacy_unobserved_demand_without_inventing_it():
@@ -1374,140 +1269,6 @@ def test_station_menu_offers_dump_only_with_contraband_aboard(monkeypatch):
     with contextlib.redirect_stdout(buf2):
         vr.screen_station_menu(vr.Palette(truecolor=False), world)
     assert "[D]" in buf2.getvalue()
-
-
-def test_save_from_dict_defaults_active_event_to_none_for_old_saves():
-    save = vr._new_career("Legacy")
-    d = save.to_dict()
-    del d["active_event"]
-
-    loaded = vr.SaveData.from_dict(d)
-
-    assert loaded.active_event is None
-
-
-def test_tick_economy_event_does_not_start_one_when_roll_fails():
-    world = _world_with_seed(162)
-    world.event_rng.random = lambda: 1.0  # always fails the trigger roll
-
-    msg = vr.tick_economy_event(world)
-
-    assert msg is None
-    assert world.save.active_event is None
-
-
-def test_tick_economy_event_starts_one_and_applies_drift_immediately(monkeypatch):
-    world = _world_with_seed(163)
-    world.event_rng.random = lambda: 0.0  # always triggers
-    world.event_rng.choice = lambda seq: seq[0]
-    world.event_rng.randint = lambda a, b: a
-
-    msg = vr.tick_economy_event(world)
-
-    assert msg is not None
-    assert world.save.active_event is not None
-    event = world.save.active_event
-    affected = [world.by_id[sid] for sid in event["system_ids"]]
-    assert 1 <= len(affected) <= 3
-    assert all(system.economy == event["economy"] for system in affected)
-    assert set(world.save.market_drift) == set(event["system_ids"])
-    for system in affected:
-        assert world.save.market_drift[system.id][event["commodity"]] in (
-            vr.ECONOMY_EVENT_CRASH_LEVEL, vr.ECONOMY_EVENT_BOOM_LEVEL)
-
-
-def test_tick_economy_event_reasserts_drift_level_each_turn_while_active():
-    world = _world_with_seed(164)
-    system = next(s for s in world.galaxy if s.economy == "Agricultural")
-    world.save.active_event = {
-        "economy": "Agricultural", "commodity": "food", "direction": "crash",
-        "turns_remaining": 3, "description": "Food prices crash across every Agricultural system",
-        "system_ids": [system.id],
-    }
-
-    vr.tick_economy_event(world)
-    world.save.market_drift[system.id]["food"] = 1.0  # simulate reversion trying to pull it back
-    vr.tick_economy_event(world)
-
-    assert world.save.market_drift[system.id]["food"] == vr.ECONOMY_EVENT_CRASH_LEVEL
-
-
-def test_tick_economy_event_counts_down_and_ends():
-    world = _world_with_seed(165)
-    world.save.active_event = {
-        "economy": "Agricultural", "commodity": "food", "direction": "crash",
-        "turns_remaining": 1, "description": "Food prices crash across every Agricultural system",
-        "system_ids": [next(s.id for s in world.galaxy if s.economy == "Agricultural")],
-    }
-
-    msg = vr.tick_economy_event(world)
-
-    assert msg is not None
-    assert "ended" in msg
-    assert world.save.active_event is None
-
-
-def test_tick_economy_event_never_starts_a_second_one_while_active():
-    world = _world_with_seed(166)
-    world.save.active_event = {
-        "economy": "Mining", "commodity": "ore", "direction": "boom",
-        "turns_remaining": 5, "description": "Raw Ore prices spike across every Mining system",
-        "system_ids": [next(s.id for s in world.galaxy if s.economy == "Mining")],
-    }
-    world.event_rng.random = lambda: 0.0  # would otherwise always trigger a new one
-
-    vr.tick_economy_event(world)
-
-    assert world.save.active_event["economy"] == "Mining"
-    assert world.save.active_event["turns_remaining"] == 4
-
-
-def test_screen_market_tags_the_affected_commodity(monkeypatch):
-    world = _world_with_seed(167)
-    system = world.here
-    system.economy = "Agricultural"
-    world.save.active_event = {
-        "economy": "Agricultural", "commodity": "food", "direction": "crash",
-        "turns_remaining": 5, "description": "Food prices crash across every Agricultural system",
-        "system_ids": [system.id],
-    }
-    monkeypatch.setattr(vr, "read_key", lambda: "Q")
-
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr.screen_market(vr.Palette(truecolor=False), world)
-
-    assert "CRASH" in buf.getvalue()
-
-
-def test_screen_status_shows_active_economy_event(monkeypatch):
-    world = _world_with_seed(168)
-    world.save.active_event = {
-        "economy": "Tech", "commodity": "electronics", "direction": "boom",
-        "turns_remaining": 4, "description": "Electronics prices spike across every Tech system",
-    }
-    monkeypatch.setattr(vr, "read_key", lambda: "B")  # whitespace is absorbed at the prompt (#416)
-
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr.screen_status(vr.Palette(truecolor=False), world)
-
-    visible = vr._ANSI_RE.sub("", buf.getvalue())
-    normalized = " ".join(visible.replace("│", " ").split())
-    assert "Economy event" in normalized
-    assert "4 day(s) left" in normalized
-
-
-def test_retiring_resets_active_economy_event():
-    old_save = vr._new_career("Vet")
-    old_save.active_event = {
-        "economy": "Haven", "commodity": "weapons", "direction": "crash",
-        "turns_remaining": 5, "description": "Weapons prices crash across every Haven system",
-    }
-
-    new_save = vr.retire_pilot(old_save)
-
-    assert new_save.active_event is None
 
 
 @pytest.mark.parametrize("count",[0,1,3])
@@ -1959,7 +1720,7 @@ def test_the_import_never_replaces_a_record_it_could_not_read(tmp_path, monkeypa
     ("discovered", [0, 0]), ("discovered", [True]), ("discovered", [49]),
     ("market_drift", {"0": {"food": float("nan")}}),
     ("market_drift", {"0": {"food": -1}}), ("market_drift", {"48": {}}),
-    ("flags", {"landmark_investigated": "no"}), ("active_event", []),
+    ("flags", {"landmark_investigated": "no"}), 
     ("active_missions", "bad"), ("active_futures", {}), ("future_field", {}),
 ])
 def test_invalid_career_fields_preserve_original_bytes(tmp_path, field, value):
@@ -2956,22 +2717,6 @@ def test_selling_in_small_lots_and_buying_the_lot_back_never_pays():
     assert vr.price_for(world, 0, "electronics") == asked
     vr.trade_cargo(world, "electronics", 40, buying=True)
     assert world.save.pilot.credits < start and world.save.cargo["electronics"] == 40
-
-
-def test_an_untouched_market_and_an_event_price_both_sides_alike():
-    world = _world_with_seed(42)
-    for commodity in vr.LEGAL_COMMODITIES:
-        assert vr.sell_price_for(world, 0, commodity) == round(vr.price_for(world, 0, commodity) * vr.SELL_SPREAD)
-    calm = vr.price_for(world, 0, "food")
-    world.save.active_event = {"economy": "Industrial", "commodity": "food", "direction": "boom", "turns_remaining": 5,
-                               "description": "Food prices spike", "system_ids": [0]}
-    world.save.market_drift.setdefault(0, {})["food"] = vr.ECONOMY_EVENT_BOOM_LEVEL
-    assert vr.price_for(world, 0, "food") > calm
-    assert vr.sell_price_for(world, 0, "food") == round(vr.price_for(world, 0, "food") * vr.SELL_SPREAD)
-    world.save.active_event["direction"] = "crash"
-    world.save.market_drift[0]["food"] = vr.ECONOMY_EVENT_CRASH_LEVEL
-    assert vr.price_for(world, 0, "food") < calm
-    assert vr.sell_price_for(world, 0, "food") == round(vr.price_for(world, 0, "food") * vr.SELL_SPREAD)
 
 
 def _typed(monkeypatch, *keys: str) -> None:
