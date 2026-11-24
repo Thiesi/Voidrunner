@@ -1987,6 +1987,20 @@ took is still drawn, so a day on which no event would have begun leads to the
 encounters it led to before. From the first day one would have begun -- about
 one day in twenty -- a seed's luck differs, as it does after any rule change.
 
+**Why a price is what it is (review).** A price is a good's usual price moved
+by up to four things: what this kind of station makes or wants, a standing glut
+or shortage of its own, the sector's season, and the pilot's own buying. The
+market showed only their product, with a word (`cheap`, `dear`) for where it
+fell, so a newcomer could not tell a bargain that will last from one the
+season is about to take away. A commodity's own page now has one row that
+names each thing moving its price and by how much, in the order the quote
+applies them: `Why 48cr: usually 65cr; Industrial stations make it -28%; the
+season +3%.` A thing that is not moving the price is not named, and a price
+nothing is moving says so. The percentages multiply rather than add, and
+their product times the usual price is the quote to within a credit
+(`price_reasons`). It is the asking side: selling into a market lowers what
+it pays, which the row above already shows.
+
 **Seasons (review).** A price was its
 economy's, its trait's, and whatever the pilot's own trading or the rare event
 had done to it. Nothing moved that a pilot could see coming, and the trade
