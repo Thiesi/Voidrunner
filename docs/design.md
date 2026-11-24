@@ -1714,10 +1714,21 @@ in five: a full deck on day three is fourteen rows at 80x24, which is exactly
 the console's part of the screen. Contacts arrives on the third day, or sooner
 for a pilot with any standing, an errand begun or a sector's story heard.
 
-The Pilot Guide opens on what the game is and how a turn works (it opened on
-how to press Back), and is divided by a rule: a first flight above it, and
-`ONCE YOU HAVE FLOWN A FEW DAYS` below, where the lines about ranks, stakes,
-local markets, a raider's read and the dispatch live.
+**The guide in two (review).** The Pilot Guide opened on how to press Back
+and was then rewritten to open on what the game is; after that it grew a
+paragraph for every rule this review added, to thirty paragraphs and about
+1,070 words, met all at once behind `[G]`. It is two things now. **First
+Flight** is what a first turn needs and nothing else: what the game is, the
+optional first delivery, the five steps of a trade (buy, fuel, fly, sell,
+upgrade) and where the rest is -- about 170 words, one page at 80x24 whatever
+stage the first delivery is at, and what `[G]` opens on for a career's first
+five days. The **Reference** is what a pilot looks up later, a few lines to a
+topic under five headings (trading, flying, fighting, work, trouble): about
+500 words on three pages at 80x24, and what `[G]` opens on after day five or
+for any pilot who has retired once. `[R]` and `[F]` turn between them; the
+First Flight offer is on First Flight only. The whole guide is about 680 words.
+Nothing a pilot needs is only in the guide: each rule is also on the screen it
+governs, which is what let two thirds of the old sentences go.
 
 **The exchange, seen.** A fight's picture was still: two hulls and a lock, the
 same from the first turn to the last, while everything that happened was a

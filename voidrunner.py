@@ -16677,64 +16677,109 @@ def journey_resumed_lines(world: World) -> list[str]:
     return rows
 
 
-def pilot_guide_lines(world: World) -> list[str]:
-    # What the game is, then how a turn works; it used to open on how to press Back.
+# The guide in two (review). The Pilot Guide had grown to thirty paragraphs
+# and about a thousand words, a third of it added by this review a rule at a
+# time, and a new caller met all of it at once behind [G]. It is two things
+# now. First Flight is what a first turn needs and nothing else: what the game
+# is, the five steps of a trade, the optional first delivery -- one page at
+# 80x24, and what [G] opens on for a career's first days. The Reference is
+# everything a pilot looks up later, a few lines to a topic under its own
+# heading, about four hundred words where there were nine hundred. Nothing a
+# pilot needs is only in the guide: every rule is also on the screen it
+# governs.
+GUIDE_FIRST_DAYS = 5   # days for which [G] opens on First Flight; after, on the Reference
+
+
+def first_flight_lines(world: World) -> list[str]:
+    """What a first turn needs, and nothing else: one page at 80x24."""
+    save = world.save
     lines = ["Your ship is your livelihood. Buy where a thing is made, fly a day, sell where it is wanted, and build the "
              "ship and the career you want.",
-             "A jump is a turn: trading, upgrades and browsing cost no time. [B] goes back to the station deck from any screen."]
-    if not world.save.pilot.retirements and world.save.turn < max(DECK_SERVICE_DAY.values()):
-        lines.append("The deck fills in as you fly: [T] Ledger, [V] Viewport and [H] Hall of Fame after your first jump; "
-                     "[N] Contacts after your third. Their keys answer from the start.")
-    lines += pilot_recap(world)
-    active = next((m for m in world.save.active_missions if m.opening_assignment), None)
+             "A jump is a turn; trading, upgrades and browsing cost no time. [B] is Back on every screen."]
+    active = next((m for m in save.active_missions if m.opening_assignment), None)
     if active is not None:
-        have = world.save.cargo.get(active.commodity, 0)
-        lines += [f"First Flight: {have}/{active.quantity} {COMMODITIES[active.commodity]['label']} aboard.",
-                  f"Deliver at {world.by_id[active.target_system].name}. Docking with the full load completes it automatically; delivery consumes those goods."]
-    elif world.save.flags.get("opening_assignment_completed"):
-        lines.append("First Flight complete. Your next goal: a first ship upgrade, then choose a regular trade or contract route.")
-    elif world.save.flags.get("opening_assignment_taken"):
+        have = save.cargo.get(active.commodity, 0)
+        lines.append(f"First Flight: {have}/{active.quantity} {COMMODITIES[active.commodity]['label']} aboard. Deliver at "
+                     f"{world.by_id[active.target_system].name}: docking with the full load completes it.")
+    elif save.flags.get("opening_assignment_completed"):
+        lines.append("First Flight complete. Next: a first ship upgrade, then a regular trade or contract route.")
+    elif save.flags.get("opening_assignment_taken"):
         lines.append("First Flight is closed. An abandoned introductory job cannot be taken again this career.")
     elif opening_assignment_offer(world) is not None:
-        lines.append("Optional First Flight: Freeport merchants will sponsor one local delivery. [O] Offer shows all terms before acceptance.")
+        lines.append("Optional First Flight: Freeport merchants will sponsor one local delivery. [O] Offer shows all "
+                     "terms before acceptance.")
     else:
-        lines.append("First Flight needs an affordable cargo and return-fuel budget while still at Freeport on day zero. The guide remains available anywhere.")
+        lines.append("First Flight needs an affordable cargo and return fuel while still at Freeport on day zero.")
+    cargo = UPGRADES["cargo"]
     lines += [
-        "1. Buy cargo: [M] Market, choose the commodity's letter, [P] Purchase, enter a quantity. Buying spends credits and needs free hold space. Enter with no quantity cancels.",
-        f"2. Keep fuel: [Y] Yard, [R] Refuel. Each fuel unit costs {FUEL_PRICE} cr. Reserve enough for the outward and return jumps; keep credits for repairs and crew wages too.",
-        "3. Depart: [C] Chart, select the destination's letter, then confirm its fuel cost and danger. A jump advances one day, uses fuel and charges wages. Browsing, trading and upgrades do not advance the day.",
-        "4. Deliver a contract by docking with its full cargo. Ordinary trading instead uses [M] Market, commodity letter, [S] Sell, and Enter sells all your spare cargo. Sales pay less than the local buy quote, and your own buying never raises what a station pays; distant prices can change.",
-        f"5. First upgrade: [Y] Yard, [{YARD_LETTERS[list(UPGRADES).index('cargo')]}] Cargo Bay Expansion adds 8 cargo spaces. [{YARD_LETTERS[list(UPGRADES).index('hull')]}] Hull Reinforcement adds 35 maximum hull. Keep travel money before investing.",
-        f"Your next cargo tier costs {UPGRADES['cargo']['cost'](world.save.ship.cargo_tier):,} cr." if world.save.ship.cargo_tier < UPGRADES['cargo']['max_tier'] else "Your cargo upgrades are complete.",
-        # Everything above is a first flight. What follows is reference for the
-        # days after it, and says so: the guide was one undivided run of rules.
-        section("ONCE YOU HAVE FLOWN A FEW DAYS"),
-        "Danger is a risk rating, not a guarantee you can win a fight. Evasion can fail; bribes cost credits and can be refused. Read the encounter choices before acting.",
-        "About three systems in five have a market of their own: one good in standing surplus, sold cheap, or in standing shortage, bought dear. The chart shows a ? until you have docked there, and the trait after. Now and then the dock talks: it names a system nearby and says whether it has a glut or is short, never of what, and the chart then reads cheap ? or dear ? for it.",
-        "[V] Viewport opens on the atlas: the world outside, and with [N] and [P] every system you have charted, each with what you know of it. [1] is your ship and [3] the last site you found.",
-        "Every sector has a story its docks tell, in three parts: the first at your first station there, the rest as "
-        "you dock at more. A sector's whole story puts its markets' reputations on your chart. [N] Contacts, Mara's [A] Archive, [F] Files "
-        "keeps what you have heard.",
-        "Prices have seasons: every legal good swings about an eighth either way over a month or so, the same across a sector. The market marks each price as rising or falling and for how many more days. [X] Futures holds today's price for a fee, and says what the price should be on the day you collect.",
-        "A raider shows the move it is set up for. From tier 2 it may jump its pattern and make the next move instead; the panel says how likely and what that is worth. A Long-Range Scanner reads it more surely.",
-        "Crew fight with you. Each specialist aboard has a station, used once a fight: the gunner's [C] Called shot hits half as hard again and cover cannot blunt it, the engineer's [M] Mend gives back a quarter of the hull for the turn's shot, and the navigator's [N] Slip is a full shot that the raider's move only grazes. Spend the slip on the volley.",
-        "A beaten raider is yours to decide about. [S] strips it for credits; [C] takes its cargo, worth more if you "
-        "have the hold and a market; [H] hands it to the Navy for Concord standing and a point of notoriety forgiven; "
-        "[L] lets it limp home owing a favour, and the next raiders you meet are waved off. [S] Status lists favours owed.",
-        "Raiders remember. One you ran from, paid off or lost a ship to may be the next raider you meet, a tier stronger. Destroy it and the score is settled: its salvage twice over. [S] Status lists the scores still open.",
-        f"Lose everything and Freeport still has work: with less than {DOCK_WORK_BELOW}cr, [F] on Freeport's deck is a "
-        f"day on the docks for {DOCK_WORK_PAY}cr, a hull patched to half, and whatever the dockers were saying.",
-        "A raider marked OUTCLASSED can break your hull in two hits and is after your cargo: [D] Dump gives up half the hold and usually ends it. The chart's departure prompt warns you before you jump somewhere that can happen.",
-        "Ranks are kept once reached, and each brings something: a fourth contract slot at Independent Trader, half as much again on every contract at Merchant Captain, a fifth slot at Void Baron and double pay at Legend of the Frontier.",
-        "Once the ship is built there is something to own: [K] Stake in any market buys a share in that station, in three steps at up to three stations. Its stock and demand come back two, three and four times as fast for you, so a route you fly again and again keeps paying.",
-        "One delivery in three is the first of three: where you hand it over, the client posts a second leg on that station's board, then a final one, each a jump or two on and paying a quarter and then half as much again over a delivery of its size.",
-        "A faction posts work for its own: once you hold the Concord commission, a warrant on about one board in two, worth standing for the right ship; once the Cartel has made you, a contraband run from a Haven, at half as much again and worth standing with them.",
-        "The Mission Board ([B] on the station deck) shows full contract terms, tracking and abandonment. [G] Guide keeps this recap available. On every other screen [B] is Back; [Q] on the station deck saves and leaves the game.",
+        "1. Buy: [M] Market, a good's letter, [P] Purchase, a quantity.",
+        f"2. Fuel: [Y] Yard, [R] Refuel. Each fuel unit costs {FUEL_PRICE} cr.",
+        "3. Fly: [C] Chart, a destination's letter, confirm. One jump is one day.",
+        "4. Sell: [M] Market, the good's letter, [S] Sell; Enter sells all of it. A contract's cargo is delivered "
+        "by docking with it.",
+        (f"5. Upgrade: [Y] Yard, [{YARD_LETTERS[list(UPGRADES).index('cargo')]}] Cargo Bay Expansion: 8 more hold for "
+         f"{cargo['cost'](save.ship.cargo_tier):,} cr." if save.ship.cargo_tier < cargo["max_tier"]
+         else "5. Upgrade: [Y] Yard. Your cargo upgrades are complete."),
+    ]
+    if not save.pilot.retirements and save.turn < max(DECK_SERVICE_DAY.values()):
+        lines.append("The deck fills in as you fly: Ledger, Viewport and Hall of Fame after your first jump, [N] Contacts "
+                     "after your third. Their keys answer from the start.")
+    lines.append("[R] Reference has the rest, a topic at a time.")
+    return lines
+
+
+def guide_reference_lines(world: World) -> list[str]:
+    """What a pilot looks up later: a few lines to a topic, each under its heading."""
+    lines = [
+        section("TRADING"),
+        "Sales pay a little under the buy price. Your own trading drains a market for a few days; other stations' "
+        "prices can change while you fly.",
+        "About three systems in five have a market of their own: one good always cheap or always dear. The chart shows "
+        "? until you dock; dock talk may mark a system cheap ? or dear ? first.",
+        "Prices have seasons: each legal good swings about an eighth either way over a month, the same across a "
+        "sector. The market marks a price rising or falling and for how long. [X] Futures holds today's price for a fee.",
+        "[K] Stake in a market buys a share of that station, in three steps at up to three stations: its stock and "
+        "demand come back faster for you.",
+        section("FLYING"),
+        "Danger is a risk rating, not a guarantee you can win a fight. The chart warns before a jump that could meet "
+        "a raider your hull cannot take.",
+        "[V] Viewport is the atlas: every system you have charted, and what you know of each.",
+        "Every sector's docks tell its story in three parts, as you dock at more of its stations. The whole story "
+        "marks that sector's markets on your chart. [N] Contacts, [A] Archive, [F] Files keeps what you have heard.",
+        section("FIGHTING"),
+        "A raider shows the move it is set up for. From tier 2 it may jump its pattern; the panel says how likely. A "
+        "scanner reads it better. Evasion can fail, and a bribe can be refused.",
+        "OUTCLASSED means two hits can break your hull: [D] Dump gives up half the hold and usually ends it.",
+        "Crew have stations, once a fight each: the gunner's [C] Called shot, the engineer's [M] Mend, the "
+        "navigator's [N] Slip. Spend the slip on the volley.",
+        "A beaten raider is yours to decide about. [S] strips it, [C] takes its cargo, [H] hands it to the Navy, [L] "
+        "lets it go and leaves it owing you a favour.",
+        "Raiders remember. One that got the better of you may be back a tier stronger; destroying it pays double. "
+        "[S] Status lists scores to settle and favours owed.",
+        section("WORK"),
+        "The Board ([B] on the deck) shows a contract's full terms. One delivery in three leads to a second and a "
+        "final leg for the same client, each paying more.",
+        "A faction posts work for its members: Navy warrants for the commissioned, Cartel runs from Havens for the "
+        "made. [N] Contacts shows how far you are from either.",
+        "Ranks are kept once reached: a fourth contract slot at Independent Trader, half as much again on contracts at "
+        "Merchant Captain, a fifth slot at Void Baron, double pay at Legend of the Frontier.",
     ]
     if dispatch_order(world) is not None:
-        lines.append("The Daily Dispatch ([J] on the station deck) is one order a day, the same for every pilot on "
-                     "every board. Do what it asks today and it pays, a tenth more for each day in a row.")
+        lines.append("The Daily Dispatch ([J] on the deck) is one order a day, the same for every pilot on every "
+                     "board. Do what it asks today and it pays, a tenth more for each day in a row.")
+    lines += [
+        section("TROUBLE"),
+        "Losing the ship costs its cargo and a tug's fee, never the career.",
+        f"Lose everything and Freeport still has work: with less than {DOCK_WORK_BELOW}cr, [F] on Freeport's deck is a "
+        f"day on the docks for {DOCK_WORK_PAY}cr, a hull patched to half, and whatever the dockers were saying.",
+        "[Q] on the deck saves and leaves the game.",
+    ]
     return lines
+
+
+def pilot_guide_lines(world: World) -> list[str]:
+    """The whole guide, First Flight and then the Reference, as one text."""
+    return first_flight_lines(world) + guide_reference_lines(world)
 
 
 def _opening_next_step(world: World, offer: Mission) -> str:
@@ -16784,18 +16829,26 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
 
 
 def screen_pilot_guide(p: Palette, world: World) -> None:
+    """First Flight for a career's first days, the Reference after; [R] and [F] turn between them."""
+    view = "F" if not world.save.pilot.retirements and world.save.turn < GUIDE_FIRST_DAYS else "R"
     page = 0
     while True:
-        pages = _mission_text_pages(pilot_guide_lines(world), overhead=5 + _page_frame_rows("Pilot Guide"))
+        title = "Pilot Guide" if view == "F" else "Pilot Guide: Reference"
+        lines = first_flight_lines(world) if view == "F" else guide_reference_lines(world)
+        pages = _mission_text_pages(lines, overhead=5 + _page_frame_rows(title))
         page = min(page, len(pages) - 1)
-        offer = opening_assignment_offer(world)
-        draw_page(p, "Pilot Guide", pages[page], page, len(pages))
-        out_prompt(single_page_footer(("[O] Offer " if offer is not None else "") + "[N] Next [P] Prev [B] Back: ", len(pages)))
+        offer = opening_assignment_offer(world) if view == "F" else None
+        draw_page(p, title, pages[page], page, len(pages))
+        turn = "[R] Reference " if view == "F" else "[F] First Flight "
+        out_prompt(single_page_footer(("[O] Offer " if offer is not None else "") + turn + "[N] Next [P] Prev [B] Back: ",
+                                      len(pages)))
         key = read_command_at_prompt()
         if key in ("B", "Q"):
             return
         if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
             page = moved
+        elif key in ("R", "F") and key != view:
+            view, page = key, 0
         elif key == "O" and offer is not None:
             if _screen_opening_offer(p, world, offer):
                 return  # Straight back to the deck, which shows the next step as a result.

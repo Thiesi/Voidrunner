@@ -199,6 +199,7 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # Today's order, the pilot's record and the board's flight line.
         ("Daily Dispatch", b"J"),
         ("Pilot Guide", b"G"),
+        ("Pilot Guide, reference", b"GR"),
         # A new career at Freeport on day zero is offered First Flight.
         ("First Flight offer", b"GO"),
         ("Trading Ledger", b"T"),

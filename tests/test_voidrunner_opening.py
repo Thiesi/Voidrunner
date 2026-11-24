@@ -103,11 +103,11 @@ def test_the_guide_opens_on_the_game_and_says_what_arrives_later(terminal):
     terminal(80, 24)
     world = _world_with_seed(42)
     rows = [plain(row) for row in vr.pilot_guide_lines(world)]
-    assert rows[0].startswith("Your ship is your livelihood.") and "[B] goes back" in rows[1]
+    assert rows[0].startswith("Your ship is your livelihood.") and "[B] is Back" in rows[1]
     assert any("The deck fills in as you fly" in row and "[N] Contacts after your third" in row for row in rows)
     # First flight above the rule, reference below it.
-    later = next(number for number, row in enumerate(rows) if "ONCE YOU HAVE FLOWN A FEW DAYS" in row)
-    assert any(row.startswith("5. First upgrade") for row in rows[:later])
+    later = next(number for number, row in enumerate(rows) if "TRADING" in row)
+    assert any(row.startswith("5. Upgrade") for row in rows[:later])
     assert any(row.startswith("Danger is a risk rating") for row in rows[later:])
     world.save.turn = 3
     assert not any("The deck fills in" in plain(row) for row in vr.pilot_guide_lines(world))
