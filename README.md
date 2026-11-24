@@ -178,7 +178,9 @@ python tools/check_careers.py build/careers.json   # after career_sim.py --json 
 
 A change to a screen comes with gallery pictures: the tests can prove that a
 screen fits, never that it looks right. The game's design (rules, saves,
-presentation) is in [docs/design.md](docs/design.md).
+presentation) is in [docs/design.md](docs/design.md). Neither tests nor
+simulated pilots can say whether it is fun: [docs/playtest.md](docs/playtest.md)
+is a sheet for watching two or three people play it.
 
 ### What CI runs
 
