@@ -529,6 +529,10 @@ def test_raider_tiers_follow_destination_danger_and_preserve_rng_draw_order(dang
         expected_ships = []
         for _ in range(count):
             tier = max(0, min(4, danger + expected.randint(-1, 1)))
+            # One more draw, and only for a lone raider in the most dangerous space: it may be an elite.
+            if count == 1 and danger >= vr.ELITE_DANGER and expected.random() < vr.ELITE_CHANCE:
+                expected_ships.append((vr.ELITE_TIER, expected.choice(vr.ELITE_NAMES)))
+                continue
             expected_ships.append((tier, expected.choice(vr.PIRATE_NAMES)))
         pirates = vr.generate_pirate_squadron(world, destination)
         assert [(p.tier, p.name) for p in pirates] == expected_ships

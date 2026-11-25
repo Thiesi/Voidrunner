@@ -32,10 +32,10 @@ def _fight(*roles, tier=2, name="Hollow Fang", version=None, hull=None, **ship):
     return world, pirate, tactics
 
 
-def test_a_new_fight_is_ruleset_five_and_starts_with_nothing_spent():
+def test_a_new_fight_has_stations_and_starts_with_nothing_spent():
     world, pirate, tactics = _fight()
-    assert vr.TACTICAL_RULESET_VERSION == vr.CREW_STATION_RULESET_VERSION == 5
-    assert tactics == {"version": 5, "profile": vr.tactical_profile(pirate.name), "step": 0, "brace_ready": True, "spent": ""}
+    assert vr.CREW_STATION_RULESET_VERSION == 5 and vr.TACTICAL_RULESET_VERSION == 6  # stations came with five
+    assert tactics == {"version": 6, "profile": vr.tactical_profile(pirate.name), "step": 0, "brace_ready": True, "spent": ""}
     assert vr.crew_stations(world, pirate, tactics) == []  # nobody aboard, nothing to call on
     assert vr.TACTICAL_THREAT_BONUS_BY_VERSION[5] == vr.TACTICAL_THREAT_BONUS_BY_VERSION[4]  # the same damage
 
@@ -205,6 +205,6 @@ def test_a_real_fight_takes_the_keys_and_keeps_the_state(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()), pytest.raises(KeyboardInterrupt):
         vr.screen_combat(vr.Palette(False), world, vr.Pirate("Hollow Fang", 1, 400, 400))
     combat = world.save.pending_travel["encounter"]["combat"]
-    assert sorted(combat["tactics"]["spent"]) == ["C", "M", "N"] and combat["tactics"]["version"] == 5
+    assert sorted(combat["tactics"]["spent"]) == ["C", "M", "N"] and combat["tactics"]["version"] == vr.TACTICAL_RULESET_VERSION
     assert combat["pirate"]["hp"] < 400  # the slip and the called shot both landed
     vr.SaveData.from_dict(world.save.to_dict())  # and the fight is a save that loads

@@ -2024,6 +2024,63 @@ cached careers would otherwise have more jumps to show tomorrow. The suite's
 launched doors run with the allowance on, as a caller's does; a walk that
 needs more than twelve jumps has to set `DOOR_JUMPS=0`.
 
+**Elite raiders (review).** The strongest raider was tier 4, and a finished
+ship does not have a fight with tier 4. Staged with the door and flown by
+`tools/fight_sim.py`, a Carrier with every module at its top beats a tier-4
+raider every time for 13% of its hull with nobody aboard and 9% with a full
+crew. The last third of a career, the part flown in that ship, had no fight
+left in it.
+
+Danger 5, which is less than one system a galaxy, now also sends elites
+(`ELITE_TIER`, tier 5). A lone raider met there by chance is one 35% of the
+time (`ELITE_CHANCE`); a squadron never has one, a bounty or any other raider
+whose tier is given never is one, and no other danger rating sends one. The
+hard charter does not make more of them. That roll is one more draw on the
+event sequence and is taken only in danger 5, so every encounter elsewhere is
+on the sequence it always had.
+
+An elite is known by its name, as the pattern and hull of every raider are:
+six captains (`ELITE_NAMES`) who are not on the ordinary list, and
+`tactical_profile` reads `Ace` for them. Nothing is saved to say so. The Ace
+pattern is the volley, the volley again, then a recovery. One Guard covers one
+volley and is not ready again until a shot has been fired, so the second
+volley has to be slipped, mended through or taken, and the recovery is where
+the called shot goes. It is read at 50%, the floor, and 70% with the scanner
+at its top. The pattern is kept apart from `TACTICAL_PROFILES`, which stay the
+three any ship may meet and the three every fairness test is about.
+
+Tactical ruleset 6 is ruleset 5 with a sixth threat figure and that pattern.
+Tiers 0 to 4 deal exactly what they dealt. A fight saved under an older
+ruleset finishes under it, as always, and none of them has an elite in it; a
+save that claims an Ace under an older ruleset is refused.
+
+The figures are from staged fights, 900 for each row, a sensible pilot at the
+keys. Threat 90 against tier 4 at 34, and 60 hull more than its tier would
+have (155):
+
+    ship      crew     won   hull a win costs
+    finished  none     53%   80%
+    finished  gunner   93%   67%
+    finished  all      99%   59%
+    mid       any       0%   outclassed
+    starter   any       0%   outclassed
+
+A full crew is what the fight wants; alone it is a coin weighted by the
+pilot. Softer figures
+(threat 48) left a finished ship winning every time; harder ones (threat 100
+and 100 hull more) had a full crew losing a third. A ship that is outclassed
+has the way out it always had: dumping half the hold breaks contact three
+times in four.
+
+Beating one pays three times the scrap of its tier, 1,020cr, counts toward two
+achievements (one, and five), and the silver one goes on the wire like any
+other. An elite that got away comes back as a rival at the tier it already
+is. The chart warns a ship it would outclass, a finished ship is not warned,
+and the Reference has one sentence. Its hull in the glass is a trident with
+two lit muzzles, the size of the other three. Flown through the career
+simulator the medians do not move: danger 5 is rare, and this is a fight for
+the end of a career, not a change to its economy.
+
 **The hard charter (review).** The game is forgiving by design: a lost ship is
 a fee and a tow, a broke pilot has the docks, and a raider is the danger of
 its system give or take a tier. That is right for a first career and leaves a

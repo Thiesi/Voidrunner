@@ -1715,6 +1715,23 @@ PIRATE_NAMES = [
     "Rust Wraith", "Ashclaw", "Blacktide", "Hollow Fang", "Grimwire",
     "Static Ghost", "Void Jackal", "Cinder Raider", "Nullshade", "Ravage",
 ]
+# Elite raiders (review). The strongest raider was tier 4, and a finished
+# ship with a full crew beats tier 4 nearly every time: the last third of a
+# career had no fight left in it. Danger 5 -- less than one system a galaxy --
+# now also sends elites: a fifth tier, flown by a handful of named captains in
+# a pattern of their own, two volleys back to back and then a recovery. One
+# Guard covers one volley, so the second has to be slipped, mended through or
+# taken. They fly alone, never in a squadron, and are met nowhere else. An
+# elite is known by its name, as every raider's pattern and hull are: nothing
+# is saved to say so. Fights begun before tactical ruleset 6 finish under the
+# ruleset they started with, and none of them has an elite in it.
+ELITE_NAMES = ["Pale Admiral", "Red Marshal", "Widowmaker", "Black Regent", "Iron Saint", "Last Word"]
+ELITE_TIER = 5
+ELITE_DANGER = 5          # the only danger rating that sends one
+ELITE_CHANCE = 0.35       # of a lone raider met there
+ELITE_SCRAP = 3           # an elite's scrap, against what its tier would fetch
+ELITE_HULL = 60           # hull on top of what its tier would have
+RAIDER_TIER_MOST = ELITE_TIER
 
 # What kind of random travel encounter fires, once the overall "does
 # anything happen at all" roll already succeeds (screen_travel's own
@@ -2045,9 +2062,11 @@ def _validate_tactics(value: dict) -> None:
     _validate_versioned(value, fields, "tactical combat",
                         supported=tuple(TACTICAL_THREAT_BONUS_BY_VERSION),
                         unsupported="This fight uses an unsupported tactical ruleset.")
-    if (type(value.get("profile")) is not str or value["profile"] not in TACTICAL_PROFILES
+    if (type(value.get("profile")) is not str or value["profile"] not in ALL_PROFILES
             or type(value.get("step")) is not int or not 0 <= value["step"] < 3
-            or type(value.get("brace_ready")) is not bool):
+            or type(value.get("brace_ready")) is not bool
+            # An elite's pattern came with ruleset 6: no older fight can be flying it.
+            or (value["profile"] in ELITE_PROFILES and value["version"] < ELITE_RULESET_VERSION)):
         raise ValueError("invalid tactical state")
     if stations:
         spent = value.get("spent")
@@ -2134,7 +2153,7 @@ def _load_pending_travel(value: dict | None) -> dict | None:
             _reject_unknown_save_fields(data, {f.name for f in dataclasses.fields(Pirate)}, "opponent")
             pirate = Pirate(**data)
             if (any(type(data[key]) is not int for key in ("tier", "hp", "hp_max"))
-                    or not isinstance(pirate.name, str) or not 0 <= pirate.tier <= 4
+                    or not isinstance(pirate.name, str) or not 0 <= pirate.tier <= RAIDER_TIER_MOST
                     or not 0 <= pirate.hp <= pirate.hp_max or pirate.hp_max <= 0):
                 raise ValueError("invalid opponent")
         if "result" in state and (not isinstance(state["result"], list)
@@ -2532,7 +2551,7 @@ def _validate_save_document(data: dict) -> None:
     for item in rivals:
         require(isinstance(item, dict) and set(item) == {"name", "tier", "day", "how"}, "rival")
         require(isinstance(item["name"], str) and 0 < len(item["name"]) <= 40, "rival name")
-        integer(item["tier"], "rival tier", maximum=4)
+        integer(item["tier"], "rival tier", maximum=RAIDER_TIER_MOST)
         integer(item["day"], "rival day", maximum=data["turn"])
         require(item["how"] in RIVAL_HOW, "rival history")
     require(len({item["name"] for item in rivals}) == len(rivals), "rivals")
@@ -4541,12 +4560,24 @@ class Pirate:
     hp_max: int
 
 
-def generate_pirate(world: World, tier: int | None = None, *, danger: int | None = None) -> Pirate:
+def raider_hull(tier: int) -> int:
+    """The hull a raider of this tier flies."""
+    return 20 + tier * 15 + (ELITE_HULL if tier >= ELITE_TIER else 0)
+
+
+def generate_pirate(world: World, tier: int | None = None, *, danger: int | None = None, alone: bool = True) -> Pirate:
+    """A raider for a system of this danger; `tier` fixes its tier, as a bounty
+    does. A lone raider met by chance in the most dangerous space may be an
+    elite: that is one more draw, taken only there, so every other encounter
+    is on the random sequence it always had."""
     rng = world.event_rng
     danger = world.here.danger if danger is None else danger
     t = tier if tier is not None else harder_tier(world, max(0, min(4, danger + rng.randint(-1, 1))))
-    hp = 20 + t * 15
-    return Pirate(name=rng.choice(PIRATE_NAMES), tier=t, hp=hp, hp_max=hp)
+    names = PIRATE_NAMES
+    if tier is None and alone and danger >= ELITE_DANGER and rng.random() < ELITE_CHANCE:
+        t, names = ELITE_TIER, ELITE_NAMES
+    hp = raider_hull(t)
+    return Pirate(name=rng.choice(names), tier=t, hp=hp, hp_max=hp)
 
 
 # Rivals (review). A raider was a name from a list of ten, a tier and a hull:
@@ -4600,8 +4631,8 @@ def returning_rival(world: World) -> dict | None:
 
 def rival_ship(item: dict) -> Pirate:
     """The rival as it comes back: a tier stronger, up to the strongest there is."""
-    tier = min(4, item["tier"] + 1)
-    hull = 20 + tier * 15
+    tier = min(ELITE_TIER if item["name"] in ELITE_NAMES else 4, item["tier"] + 1)  # an elite is already the strongest
+    hull = raider_hull(tier)
     return Pirate(name=item["name"], tier=tier, hp=hull, hp_max=hull)
 
 
@@ -4609,7 +4640,7 @@ def settle_rival(world: World, pirate: Pirate) -> list[str]:
     """Close the score against a raider just destroyed: its salvage over again."""
     save = world.save
     save.rivals = [item for item in save.rivals if item["name"] != pirate.name]
-    bonus = 40 + pirate.tier * 60
+    bonus = prize_loot(pirate)
     save.pilot.credits += bonus
     bump_accolade(save, "scores")
     world.hop_events.add("settled")
@@ -4652,8 +4683,8 @@ FAVOUR_MEMORY_DAYS = 40
 
 
 def prize_loot(pirate: Pirate) -> int:
-    """What a beaten raider's scrap is worth."""
-    return 40 + pirate.tier * 60
+    """What a beaten raider's scrap is worth; an elite's is worth three of its tier's."""
+    return (40 + pirate.tier * 60) * (ELITE_SCRAP if pirate.tier >= ELITE_TIER else 1)
 
 
 def prize_cargo(world: World, pirate: Pirate) -> tuple[str, int]:
@@ -4802,7 +4833,7 @@ def generate_pirate_squadron(world: World, dest: GalaxySystem) -> list[Pirate]:
     stored opponents retain their stats; ships fight sequentially without healing.
     """
     if dest.danger >= SQUADRON_MIN_DANGER and world.event_rng.random() < SQUADRON_CHANCE:
-        return [generate_pirate(world, danger=dest.danger) for _ in range(SQUADRON_SIZE)]
+        return [generate_pirate(world, danger=dest.danger, alone=False) for _ in range(SQUADRON_SIZE)]
     return [generate_pirate(world, danger=dest.danger)]
 
 
@@ -4836,6 +4867,11 @@ TACTICAL_PROFILES = {
     # patterns lost 95, and which pattern a raider flies is a hash of its name.
     "Skirmisher": ("harry", "volley", "recover"),
 }
+#: An elite's pattern, from ruleset 6: the volley, the volley again, then the
+#: recovery. Kept apart from the three a raider's name draws from, which are
+#: the ones any ship may meet.
+ELITE_PROFILES = {"Ace": ("volley", "volley", "recover")}
+ALL_PROFILES = {**TACTICAL_PROFILES, **ELITE_PROFILES}
 #: The patterns a fight saved before ruleset 4 keeps to its end.
 TACTICAL_PROFILES_BEFORE_4 = dict(TACTICAL_PROFILES, Skirmisher=("harry", "attack", "volley"))
 # Outgoing/incoming percentages; the displayed intent uses this same calculation.
@@ -4889,9 +4925,13 @@ TACTICAL_INTENTS = {"attack": (100, 100), "volley": (100, 160),
 # and 97 with all three aboard, and still loses over half its hull doing it. At
 # double strength and a clean miss the same full crew won every time and lost a
 # third: tier 4 has to stay a fight.
+#
+# Version 6 keeps version 5 and adds the fifth tier (`ELITE_TIER`) and the Ace
+# pattern for it. Nothing about tiers 0 to 4 changes.
 TACTICAL_THREAT_BONUS_BY_VERSION = {1: (0, 3, 6, 20, 55), 2: (0, 3, 6, 8, 34), 3: (0, 3, 6, 8, 34),
-                                    4: (0, 3, 6, 8, 34), 5: (0, 3, 6, 8, 34)}
-TACTICAL_RULESET_VERSION = 5
+                                    4: (0, 3, 6, 8, 34), 5: (0, 3, 6, 8, 34), 6: (0, 3, 6, 8, 34, 90)}
+TACTICAL_RULESET_VERSION = 6
+ELITE_RULESET_VERSION = 6
 CREW_STATION_RULESET_VERSION = 5
 #: A station's key in a fight: whose it is, and the verb the action bar names.
 CREW_STATIONS = {"C": ("gunner", "Called shot"), "M": ("engineer", "Mend"), "N": ("navigator", "Slip")}
@@ -4990,13 +5030,15 @@ def mend_amount(ship: Ship) -> int:
 def tactical_profile(name: str) -> str:
     """The pattern a contact flies, from its name: the one draw the fight, the
     panel and the picture of its hull all make."""
+    if name in ELITE_NAMES:
+        return "Ace"
     return list(TACTICAL_PROFILES)[sum(map(ord, name)) % len(TACTICAL_PROFILES)]
 
 
 def tactical_steps(tactics: dict) -> tuple[str, ...]:
     """The three moves a contact cycles through, under the ruleset its fight
     started with: a Skirmisher's pattern changed at ruleset 4."""
-    table = TACTICAL_PROFILES if tactics["version"] >= READ_RULESET_VERSION else TACTICAL_PROFILES_BEFORE_4
+    table = ALL_PROFILES if tactics["version"] >= READ_RULESET_VERSION else TACTICAL_PROFILES_BEFORE_4
     return table[tactics["profile"]]
 
 
@@ -5614,7 +5656,8 @@ def harder_tier(world: "World", tier: int) -> int:
 
 def raider_tier_span(world: "World", danger: int) -> tuple[int, int]:
     """The weakest and the strongest raider a system of this danger sends this pilot."""
-    return harder_tier(world, max(0, min(4, danger - 1))), harder_tier(world, max(0, min(4, danger + 1)))
+    worst = ELITE_TIER if danger >= ELITE_DANGER else harder_tier(world, max(0, min(4, danger + 1)))
+    return harder_tier(world, max(0, min(4, danger - 1))), worst
 
 
 def tug_fee(world: "World") -> int:
@@ -6131,7 +6174,7 @@ ACCOLADE_VERSION = 1
 ACCOLADE_COUNTERS = ("squadrons", "flawless", "giant_slayer", "close_calls", "escapes", "raider_bribes", "scores",
                      "patrol_kills", "wrong_bounties", "deliveries", "surveys", "bounties", "escorts",
                      "distress", "derelicts", "ships_lost", "tows", "shifts", "busts", "customs_bribes",
-                     "dispatches", "dispatch_best", "chains", "sector_tales", "spared", "favours")
+                     "dispatches", "dispatch_best", "chains", "sector_tales", "spared", "favours", "elites")
 ACCOLADE_GROUPS = ("Travel", "Exploration", "Combat", "Contracts", "Dispatch", "Encounters", "Trading", "Wealth",
                    "Ranks", "Factions", "Ship", "Legacy", "Misfortune")
 # The id pattern a newer build's accolade may use; this build keeps those it
@@ -6180,6 +6223,8 @@ ACCOLADES: tuple[Accolade, ...] = tuple([
     Accolade("squadron", "Combat", "Two for One", "Destroy both ships of a raider squadron.", "squadrons", tier=2),
     Accolade("flawless", "Combat", "Untouched", "Win a fight without taking hull damage.", "flawless", tier=2),
     Accolade("giant_slayer", "Combat", "Giant Slayer", "Destroy a raider that outclassed your ship.", "giant_slayer"),
+    Accolade("elite_1", "Combat", "Ace Down", "Beat an elite raider.", "elites", tier=2),
+    Accolade("elite_5", "Combat", "Ace of Aces", "Beat 5 elite raiders.", "elites", 5),
     Accolade("score", "Combat", "Unfinished Business", "Destroy a raider that got the better of you before.", "scores",
              tier=2),
     Accolade("mercy", "Combat", "Quarter Given", "Let a beaten raider limp home.", "spared", tier=1),
@@ -9415,6 +9460,16 @@ _SCENE_SKIRMISHER = (".....rrk.....",
                      ".yrrrrrrrk...",
                      "...rrrk......",
                      ".....rrk.....")
+# An elite's: a trident. Two gun arms reach past the hull with a lit muzzle
+# each, a spine of dark plating runs the ship's length to a ram at the bow,
+# and it has two engines where the others have one.
+_SCENE_ACE = ("..yrrrk......",
+              "....krrrrkk..",
+              ".skkrrrrrrrkg",
+              "rrrrkkkkkkrrk",
+              ".skkrrrrrrrkg",
+              "....krrrrkk..",
+              "..yrrrk......")
 _SCENE_PATROL = ("......oooo....",
                  "...wwwwwwoo...",
                  ".xwbbbbbbbbooo",
@@ -9431,7 +9486,7 @@ def _hostile_art(name: str | None, patrol: bool = False) -> tuple[str, ...]:
     if patrol:
         return _SCENE_PATROL
     return {"Raider": _SCENE_RAIDER, "Bulwark": _SCENE_BULWARK,
-            "Skirmisher": _SCENE_SKIRMISHER}[tactical_profile(name or "")]
+            "Skirmisher": _SCENE_SKIRMISHER, "Ace": _SCENE_ACE}[tactical_profile(name or "")]
 
 
 _SCENE_COLORS = dict(_SPLASH_SHIP_COLORS,
@@ -16769,7 +16824,8 @@ def guide_reference_lines(world: World) -> list[str]:
            "but a jump is free, and [Z] on the deck lays up: what tomorrow brings and what to settle first."] if flight_left(world) is not None else []),
         "Danger is a risk rating, not a guarantee you can win a fight. The chart warns before a jump that could meet "
         "a raider your hull cannot take. Danger 4 and 5 pay for it: what such a station does not make sells dearer "
-        "there, and a contract that ends there carries hazard pay.",
+        "there, and a contract that ends there carries hazard pay. Danger 5 also sends elite raiders: tier 5, two "
+        "volleys running, then a recovery.",
         "[V] Viewport is the atlas: every system you have charted, and what you know of each.",
         "Every sector's docks tell its story in three parts, as you dock at more of its stations. The whole story "
         "marks that sector's markets on your chart. [N] Contacts, [A] Archive, [F] Files keeps what you have heard.",
@@ -19643,6 +19699,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
                 # Counted with the kill, in the commit below: a resumed fight
                 # returns its kept outcome and never reaches here again.
                 if patrol: bump_accolade(world.save, "patrol_kills")
+                if not patrol and pirate.tier >= ELITE_TIER: bump_accolade(world.save, "elites")
                 if was_outclassed: bump_accolade(world.save, "giant_slayer")
                 if ship.hull_hp >= hull_before: bump_accolade(world.save, "flawless")
                 if 0 < ship.hull_hp * 20 < hull_hp_max(ship): bump_accolade(world.save, "close_calls")
