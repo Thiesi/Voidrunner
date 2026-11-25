@@ -78,7 +78,7 @@ FUTURES_WORTH_IT = 0.14
 #: Orders a pilot keeps open at once, each at a different station.
 FUTURES_OPEN = 2
 #: Careers are flown to a real day: the dispatch changes once for every this many jumps.
-JUMPS_PER_REAL_DAY = 8
+JUMPS_PER_REAL_DAY = 12
 #: More keys than any one journey needs; past it the pilot has met a prompt it cannot read.
 KEYS_PER_JOURNEY = 600
 #: Below this a pilot cannot fill a Shuttle's hold with anything worth carrying.

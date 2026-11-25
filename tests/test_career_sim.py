@@ -152,7 +152,7 @@ def test_the_summary_says_when_each_milestone_is_first_reached(sim):
     day = sim.statistics.median(career["firsts"]["Freighter"] for career in careers)
     assert rows[1].split()[:3] == ["trader", f"{day:.0f}", "(2)"]
     lines = sim.summarize(careers, 60)
-    assert rows[0] in lines and "these 60 days are 7.5 real days" in lines[-1]
+    assert rows[0] in lines and "these 60 days are 5.0 real days" in lines[-1]
     assert sim.milestone_rows([dict(career, firsts={}) for career in careers]) == []
 
 
@@ -210,7 +210,7 @@ def test_futures_are_for_an_older_build_and_do_nothing_on_this_one(sim):
     """`--futures` measured the exchange before it closed: every pilot ended
     poorer. This build has none, so the switch changes nothing; with `--door`
     and a build that still has one, the pilots use it."""
-    with_it = sim.fly_one((DOOR, "careful", 1001, 30, {}, True, True, "S", 8, {"futures": True}))
+    with_it = sim.fly_one((DOOR, "careful", 1001, 30, {}, True, True, "S", sim.JUMPS_PER_REAL_DAY, {"futures": True}))
     without = sim.fly_one((DOOR, "careful", 1001, 30, {}, True, True))
     assert with_it["orders"] == {} and with_it["marks"] == without["marks"] and with_it["outcome"] == "flew"
     assert not any("futures:" in line for line in sim.summarize([with_it], 30))
@@ -231,3 +231,9 @@ def test_a_fixed_nerve_keeps_a_pilot_out_of_or_sends_it_into_dangerous_space(sim
     cautious = sim.fly_one((DOOR, "trader", 1005, 40, {}, True, True, "S", 8, {"nerve": 2}))
     daring = sim.fly_one((DOOR, "trader", 1005, 40, {}, True, True, "S", 8, {"nerve": 5}))
     assert cautious["charted"] <= daring["charted"] and cautious["outcome"] == daring["outcome"] == "flew"
+
+
+def test_a_real_day_is_the_twelve_jumps_a_caller_has(sim):
+    """The simulator turns the dispatch over as often as the door lets a caller fly."""
+    vr = sim.load_door(DOOR)
+    assert sim.JUMPS_PER_REAL_DAY == vr.FLIGHT_PER_DAY == 12

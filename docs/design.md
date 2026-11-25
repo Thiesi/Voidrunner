@@ -2024,6 +2024,35 @@ cached careers would otherwise have more jumps to show tomorrow. The suite's
 launched doors run with the allowance on, as a caller's does; a walk that
 needs more than twelve jumps has to set `DOOR_JUMPS=0`.
 
+**What the dispatch pays (review).** An order paid 600cr and 400cr more a
+rank: 600cr to a Rookie Hauler, 2,200cr at the top rank. Against what a jump
+earns that is small change. The simulated careers make about 1,800cr a jump in
+their first ten days and about 4,000cr a jump from day twenty on, so an order
+was worth a third to a half of one jump. While a caller could fly any number
+of jumps in a real day that did not matter. With twelve it does: an order that
+takes a jump out of the way has to pay for that jump and then some, or the
+right play is to ignore it and the door has no daily reason to call.
+
+It now pays by rank (`DISPATCH_REWARD`): 1,000cr, 3,000cr, 5,000cr, 6,000cr
+and 7,000cr, about what a jump and a half earns at that rank. The streak is
+left as it was, a tenth more for each day running up to half as much again,
+which is now worth most of a jump at its top instead of a few hundred credits.
+The streak still ends with a missed day although unflown jumps carry over; it
+counts days running, the Hall of Fame ranks it, and a run that forgave a day
+would not be one.
+
+The simulator now flies twelve jumps to a real day (`JUMPS_PER_REAL_DAY`, was
+eight), which is what a caller has. Over 200 careers a pilot the day-100
+medians are trader 385,462, smuggler 418,240, contractor 300,993, explorer
+365,190 and careful 395,546, and the pilots fly six or seven orders in those
+eight real days without planning for them. Over 100 careers with the dispatch
+switched off the same pilots end at 351,138, 401,982, 223,022, 323,504 and
+347,096, against 387,206, 424,970, 291,484, 372,114 and 394,174 with it: the
+dispatch is 5% to 13% of a trading career and 23% of a contractor's, whose
+income is the lowest and whom an early thousand credits helps the most. `tools/check_careers.py` carries the new
+medians as its baselines. Contract deadlines, crew wages, dock pay and stake
+income count game days and are unchanged.
+
 **Laying up (review).** With the jumps of the day flown the door had an alert
 and nothing more to say, and a caller logging off with jumps left was told
 nothing about what they were leaving. `[Z]` on the deck is now the last page of
@@ -2215,9 +2244,10 @@ in the ordinary course of play, flies it: `World.commit` compares the kills,
 contracts and charted systems with what the last commit saw, and the sales
 made since, and the commit that saves the action pays the reward and extends
 the streak. What a career did before the session does not count, and a resumed
-session cannot fly an order twice. The reward is 600cr plus 400cr a rank, a
-tenth more for each day of an unbroken streak up to half as much again; it is
-there to be noticed, not to be a living.
+session cannot fly an order twice. The reward is set by rank (see the
+dispatch pay note above; it was 600cr plus 400cr a rank), a tenth more for
+each day of an unbroken streak up to half as much again; it is there to be
+noticed, not to be a living.
 
 **Nothing new is saved for it.** The account's record -- the day last flown,
 the streak, the best streak, the count and the time -- is five integers among

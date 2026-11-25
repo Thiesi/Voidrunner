@@ -6330,7 +6330,14 @@ def _validate_accolades(value, retirements: int) -> None:
 
 DISPATCH_HAUL_UNITS = 12          # fits a starting Shuttle's hold twice over
 DISPATCH_SALE_VALUE = 2000        # a Shuttle's hold of Machinery where it is wanted
-DISPATCH_REWARD_BASE, DISPATCH_REWARD_PER_RANK = 600, 400
+# What an order pays, by rank (review). It paid 600cr and 400cr more a rank,
+# which was a fraction of one jump: a simulated career earns about 1,800cr a
+# jump in its first ten days and about 4,000cr from day twenty on. While a
+# caller could fly any number of jumps in a real day that did not matter. With
+# twelve, an order that takes a jump out of the way has to pay for the jump and
+# then some, or the right play is to ignore it. It now pays about what a jump
+# and a half earns at that rank, and up to half as much again for a streak.
+DISPATCH_REWARD = (1_000, 3_000, 5_000, 6_000, 7_000)
 DISPATCH_STREAK_BONUS, DISPATCH_STREAK_CAP = 0.1, 5
 #: The account's dispatch record among the accolade counters: the last day
 #: flown (a date's ordinal), the streak as of that day, and when (epoch seconds).
@@ -6539,7 +6546,7 @@ def dispatch_streak(record: dict, day: int) -> int:
 def dispatch_reward(save: SaveData, streak: int) -> int:
     """What flying today's order pays: more for a higher rank, and a tenth more
     for each day of an unbroken streak, up to half as much again."""
-    base = DISPATCH_REWARD_BASE + DISPATCH_REWARD_PER_RANK * career_rank_index(save.pilot)
+    base = DISPATCH_REWARD[min(career_rank_index(save.pilot), len(DISPATCH_REWARD) - 1)]
     return round(base * (1 + DISPATCH_STREAK_BONUS * min(max(0, streak - 1), DISPATCH_STREAK_CAP)))
 
 
