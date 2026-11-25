@@ -2024,6 +2024,49 @@ cached careers would otherwise have more jumps to show tomorrow. The suite's
 launched doors run with the allowance on, as a caller's does; a walk that
 needs more than twelve jumps has to set `DOOR_JUMPS=0`.
 
+**The hard charter (review).** The game is forgiving by design: a lost ship is
+a fee and a tow, a broke pilot has the docks, and a raider is the danger of
+its system give or take a tier. That is right for a first career and leaves a
+regular with nothing to prove. A career can now be launched on a hard charter
+(`SaveData.charter`, written only when it is not `standard`):
+
+- raiders are a tier stronger wherever they are met (`harder_tier`: the rolled
+  tier and one more, up to the top one; a tier that is given, such as a
+  bounty or a rival, is what it was given). The chart warns of the raiders
+  this pilot will meet, and a hulk states the same span;
+- Freeport has no dock work (`dock_work_open`);
+- the salvage tug charges double (`tug_fee`), and a pilot who cannot pay the
+  doubled fee gets the hull its share buys.
+
+It pays nothing extra. What it earns is a seventh Hall of Fame table, which
+ranks careers flown on it by credits, and three achievements: Merchant Captain
+on a hard charter, the top rank on one, and retiring one. A stranded pilot is
+still rescued at no charge: the charter is harder, not a way to lose a career.
+
+It is chosen when a career is launched and at no other time. The launch
+question names a third key (`... or [H] for the hard charter? [Y/N, Esc=No]`);
+`H` reads out the terms and asks again, and declining there returns to the
+first question. `confirm` takes that one extra key as `other`, so every caller
+that stubs or scripts the question with Y still launches a standard career and
+no scripted flow gains a page. A pilot who retires chooses the charter of the
+next career with `[H]` on the Career Finale page, which starts on the charter
+the retiring career flew. The Pilot Record carries a `HARD CHARTER` badge and
+the terms in one row; a dossier says `hard charter`.
+
+A dossier and a score record carry `charter: hard` for such a career and
+nothing for a standard one, so every record written before this reads as it
+did. A score record with a field this build does not know is still treated as
+a newer build and left alone.
+
+Flown through the simulator (`--charter hard`, 100 careers a pilot, day 100):
+a ship is lost in half of hard careers where a quarter of standard ones lose
+one (a mean of 0.9 to 1.6 ships against 0.3 to 0.8), the median career ends
+1% to 6% poorer, and the unluckiest tenth end 16% to 24% poorer; a ruined
+contractor can end with almost nothing (23,635 against 90,104). The simulated
+contractor also shows what the docks were for: without them it spends some
+careers being rescued, 326 free tows in 100 careers. A caller has the board
+for that, where a survey to the next system pays more than a shift did.
+
 **What the dispatch pays (review).** An order paid 600cr and 400cr more a
 rank: 600cr to a Rookie Hauler, 2,200cr at the top rank. Against what a jump
 earns that is small change. The simulated careers make about 1,800cr a jump in

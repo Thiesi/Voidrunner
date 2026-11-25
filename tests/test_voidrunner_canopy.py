@@ -398,7 +398,7 @@ def test_a_new_pilot_is_commissioned_on_the_canopy(canopy, monkeypatch):
     # The page is drawn before the question, and again with the answer on it.
     assert "COMMISSION" in plain(written[:prompt]) and "enter it below" in plain(written[:prompt])
     second = plain(written[prompt:])
-    assert "Callsign Nova" in second and "Launch Nova's career?" in second
+    assert "Callsign Nova" in second and "Launch Nova's career, or [H] for the hard charter? [Y/N, Esc=No]" in second
 
 
 def test_escape_at_the_commission_saves_no_career(canopy, monkeypatch):
@@ -564,3 +564,21 @@ def test_new_game_plus_starts_with_an_empty_results_log(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_career_finale(vr.Palette(False), world)
     assert not any(entry["text"] == "Bought 8 Food for 152cr." for entry in vr._RESULT_LOG)
+
+
+@pytest.mark.parametrize("width,height", [(120, 36), (80, 24), (40, 24)])
+def test_the_hard_charter_is_read_out_on_the_commission_page_inside_its_frame(canopy, monkeypatch, width, height):
+    """`H` at the launch question redraws the commission with the terms under it, wrapped to the page."""
+    canopy(width, height)
+    stream = iter(["\r", "H", "Y"])
+    monkeypatch.setattr(vr, "read_key", lambda: next(stream))
+    info = {"handle": "Nib"}
+    written = _written(lambda: vr.create_career(vr.pal(), info))
+    assert info["charter"] == "hard"
+    page = plain(written[written.rindex("HARD CHARTER"):])
+    text = " ".join(page.split())
+    assert all(" ".join(term.split()) in " ".join(text.replace("\u2502", " ").split()) for term in vr.HARD_TERMS)
+    assert "on the hard charter? [Y/N, Esc=No]" in text
+    rows = vr.hard_term_rows()
+    assert all(vr._visible_width(row) <= vr._page_content_width() for row in rows)
+    assert len(rows) == len(vr.HARD_TERMS) if width >= 80 else len(rows) > len(vr.HARD_TERMS)
