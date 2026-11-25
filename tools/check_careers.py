@@ -29,8 +29,8 @@ import sys
 
 #: Median day-100 net worth per pilot on `main` when this check was written
 #: (`career_sim.py --seeds 50`, 2026-11-23).
-BASELINE = {"trader": 355_000, "smuggler": 387_000, "contractor": 257_000, "explorer": 340_000,
-            "careful": 358_000}
+BASELINE = {"trader": 385_000, "smuggler": 418_000, "contractor": 301_000, "explorer": 365_000,
+            "careful": 396_000}
 #: How far a median may move from its baseline, as factors: half fails, double fails.
 BAND = (0.6, 1.6)
 #: Tows a career may need; it is 0 in every career on `main`.

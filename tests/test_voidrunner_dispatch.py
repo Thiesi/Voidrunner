@@ -225,11 +225,13 @@ def test_a_streak_is_consecutive_days_and_a_missed_day_starts_it_again():
 def test_the_reward_grows_with_rank_and_with_the_streak_up_to_half_again():
     world = _world_with_seed(42)
     base = vr.dispatch_reward(world.save, 1)
-    assert base == vr.DISPATCH_REWARD_BASE
-    assert [vr.dispatch_reward(world.save, streak) for streak in (2, 6, 7, 40)] == [660, 900, 900, 900]
+    assert vr.DISPATCH_REWARD == (1_000, 3_000, 5_000, 6_000, 7_000) and len(vr.DISPATCH_REWARD) == len(vr.RANKS)
+    assert base == vr.DISPATCH_REWARD[0]
+    assert [vr.dispatch_reward(world.save, streak) for streak in (2, 6, 7, 40)] == [1_100, 1_500, 1_500, 1_500]
     world.save.pilot.credits = 20_000
     vr.check_rank_up(world)
-    assert vr.dispatch_reward(world.save, 1) == base + 2 * vr.DISPATCH_REWARD_PER_RANK
+    assert vr.dispatch_reward(world.save, 1) == vr.DISPATCH_REWARD[2]
+    assert vr.dispatch_reward(world.save, 6) == 7_500  # most of a jump on top, where it was a few hundred credits
 
 
 # --- nothing new is saved -------------------------------------------------------
@@ -318,7 +320,7 @@ def test_the_deck_says_todays_order_in_one_row_and_the_page_fits(terminal, width
     world = _world_with_seed(42)
     set_day = _on(world, _order_day("haul", commodity="electronics", economy="Agricultural"))
     row = plain(vr.dispatch_deck_row(world))
-    assert "DISPATCH" in row and "Sell 12+ Electronics at an Agricultural station" in row and "+600cr" in row
+    assert "DISPATCH" in row and "Sell 12+ Electronics at an Agricultural station" in row and "+1,000cr" in row
     assert ("J", "Dispatch") in vr.deck_service_entries(world)
     deck = vr.station_deck_lines(world)
     pages = vr._service_pages(deck, "Command Deck: 1,200cr", "[X] Expand [Q] Exit: ")
@@ -361,3 +363,19 @@ def test_the_door_a_test_launches_has_no_dispatch(tmp_path):
     with _door_stopped_at(tmp_path, b"S", b"Pilot Record") as output:
         text = vr._ANSI_RE.sub("", bytes(output).decode("utf-8", "replace"))
         assert "DISPATCH" not in text and "[J] Dispatch" not in text
+
+
+def test_the_decks_row_fits_at_the_top_rank_with_the_longest_streak(terminal):
+    """The pay is five figures now: the widest order still leaves the row inside the deck."""
+    terminal(80, 24)
+    world = _world_with_seed(42)
+    world.save.pilot.credits = 400_000
+    vr.check_rank_up(world)
+    set_day = _on(world, DAY)
+    counters = vr._accolade_record(world.save)["counters"]
+    assert vr.dispatch_reward(world.save, 31) == 10_500
+    for day in range(DAY, DAY + 120):
+        set_day(day)
+        counters.update(dispatch_day=day - 1, dispatch_streak=30)
+        row = plain(vr.dispatch_deck_row(world))
+        assert "+10,500cr" in row and vr._visible_width(row) <= vr._page_content_width()

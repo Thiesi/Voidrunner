@@ -65,18 +65,18 @@ def test_the_page_says_what_tomorrow_brings(monkeypatch):
     rows = _rows(vr.lay_up_tomorrow_rows(world))
     assert rows["JUMPS"] == ("12 to fly after midnight, in 5h 12m", None) and "BANK" not in rows
     tomorrow = vr.daily_dispatch(DAY + 1)
-    assert rows["ORDER"][0] == f"{vr.dispatch_text(tomorrow, short=True)} +600cr"
+    assert rows["ORDER"][0] == f"{vr.dispatch_text(tomorrow, short=True)} +1,000cr"
     assert rows["STREAK"] == ("none running; today's is still open [J] dispatch", "info")
     # Today's flown: tomorrow's is the second day of a run, and pays as one.
     vr.fly_dispatch(world, vr.dispatch_order(world))
     rows = _rows(vr.lay_up_tomorrow_rows(world))
     assert rows["STREAK"] == ("1 day running; tomorrow's makes it 2", "good")
-    assert rows["ORDER"][0].endswith(f"+{vr.dispatch_reward(world.save, 2):,}cr") and vr.dispatch_reward(world.save, 2) > 600
+    assert rows["ORDER"][0].endswith(f"+{vr.dispatch_reward(world.save, 2):,}cr") and vr.dispatch_reward(world.save, 2) == 1_100
     # The next day, not yet flown: the run is alive and about to end.
     today[0] += 1
     rows = _rows(vr.lay_up_tomorrow_rows(world))
     assert rows["STREAK"] == ("1 day running; today's is still open [J] dispatch", "bad")
-    assert rows["ORDER"][0].endswith("+600cr")  # tomorrow's would start a new run
+    assert rows["ORDER"][0].endswith("+1,000cr")  # tomorrow's would start a new run
     # A bank about to overflow is said, in the tone of a loss.
     world.save.flight = {"day": today[0], "left": 20}
     rows = _rows(vr.lay_up_tomorrow_rows(world))
