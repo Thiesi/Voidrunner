@@ -6420,26 +6420,32 @@ def _node_now() -> datetime:
     return datetime.now(_NODE_ZONE) if _NODE_ZONE is not None else datetime.now()
 
 
+def _pinned_flight_day() -> int | None:
+    """`DOOR_JUMPS_DAY` as a date's ordinal, or None: unset, or unreadable."""
+    pinned = os.environ.get("DOOR_JUMPS_DAY", "").strip()
+    try:
+        return datetime.strptime(pinned, "%Y-%m-%d").date().toordinal() if pinned else None
+    except ValueError:
+        return None  # an unreadable pin is no pin
+
+
 def flight_day() -> int:
     """Today on the node's calendar as a date's ordinal. Not the dispatch's day:
     a pinned or switched-off dispatch does not stop the allowance turning over.
     `DOOR_JUMPS_DAY` pins it to an ISO date, which the gallery does so that a
     cached career shows the same figure tomorrow; a board has no use for it."""
-    pinned = os.environ.get("DOOR_JUMPS_DAY", "").strip()
-    if pinned:
-        try:
-            return datetime.strptime(pinned, "%Y-%m-%d").date().toordinal()
-        except ValueError:
-            pass  # an unreadable pin is no pin
-    return _node_now().date().toordinal()
+    pinned = _pinned_flight_day()
+    return _node_now().date().toordinal() if pinned is None else pinned
 
 
 def flight_wait() -> str:
     """How long until the node's midnight, as a caller would say it: `5h 12m`."""
+    if _pinned_flight_day() is not None:
+        return "12h 0m"  # a pinned day stands at noon, so a gallery panel compares
     now = _node_now()
     seconds = 86_400 - (now.hour * 3600 + now.minute * 60 + now.second)
-    hours, minutes = seconds // 3600, max(1, seconds % 3600 // 60)
-    return f"{hours}h {minutes}m" if hours else f"{minutes}m"
+    hours, minutes = seconds // 3600, seconds % 3600 // 60
+    return f"{hours}h {minutes}m" if hours else f"{max(1, minutes)}m"
 
 
 def flight_left(world: "World") -> int | None:
@@ -6467,11 +6473,32 @@ def spend_jump(world: "World") -> None:
     world.save.flight = {"day": day, "left": max(0, left - 1)}
 
 
+def flight_tomorrow(world: "World") -> tuple[int, int] | None:
+    """(jumps to fly once the day turns, jumps of today's that will not carry
+    over because the bank is full), or None where flying is not rationed."""
+    left = flight_left(world)
+    if left is None:
+        return None
+    bank, total = world.flight_per_day * FLIGHT_BANK_DAYS, left + world.flight_per_day
+    return min(bank, total), max(0, total - bank)
+
+
+def flight_farewell(world: "World") -> str | None:
+    """What a caller leaving is told about the jumps: `3 jumps left today; 15
+    to fly after midnight, in 5h 12m.` None where flying is not rationed."""
+    tomorrow = flight_tomorrow(world)
+    if tomorrow is None:
+        return None
+    left = flight_left(world)
+    today = "No jumps left today" if not left else f"{plural(left, 'jump')} left today"
+    return f"{today}; {tomorrow[0]} to fly after midnight, in {flight_wait()}."
+
+
 def flight_blocker(world: "World") -> str | None:
     """Why this caller cannot fly another jump today, or None."""
     if flight_left(world) == 0:
         return (f"No jumps left today. {plural(world.flight_per_day, 'more jump')} at midnight, in {flight_wait()}. "
-                "Trading and planning cost nothing.")
+                "Trading and planning cost nothing; [Z] on the deck lays up.")
     return None
 
 
@@ -6522,8 +6549,11 @@ def dispatch_order(world: World) -> dict | None:
     One order for everybody, with one allowance: a pilot with nothing left to
     chart is asked for a contract instead, since the order has to be flyable."""
     day = world.dispatch_clock() if world.dispatch_clock is not None else None
-    if day is None:
-        return None
+    return None if day is None else dispatch_order_on(world, day)
+
+
+def dispatch_order_on(world: World, day: int) -> dict:
+    """The order of `day` as this pilot would be given it."""
     order = daily_dispatch(day)
     if order["kind"] == "chart" and all(system.discovered for system in world.galaxy):
         order = dict(order, kind="contract")
@@ -11946,7 +11976,7 @@ def deck_alert_rows(world: World) -> list[str]:
                           key_label("Y", f"refuel {FUEL_PRICE}cr/unit")))
     if (blocker := flight_blocker(world)) is not None:
         rows.append(alert("caution", "No jumps left today",
-                          f"{world.flight_per_day} more at midnight, in {flight_wait()}; trading is free"))
+                          f"{world.flight_per_day} more at midnight, in {flight_wait()}", key_label("Z", "lay up")))
     if dock_work_open(world):
         rows.append(alert("note", "Dock work", f"a day's shift pays {DOCK_WORK_PAY}cr and patches the hull",
                           key_label("F", "foreman")))
@@ -12218,7 +12248,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
         elif choice == "X": expanded, page = not expanded, 0
         # Every key the deck advertises is a key the deck answers -- `K` opens
         # the roster the crew alert names, rather than redrawing (#493 review).
-        elif choice in "MYBCSHGTQKLDPWONVJF" and len(choice) == 1:
+        elif choice in "MYBCSHGTQKLDPWONVJFZ" and len(choice) == 1:
             return choice
 
 
@@ -16616,7 +16646,7 @@ def guide_reference_lines(world: World) -> list[str]:
         section("FLYING"),
         *([f"You have {plural(world.flight_per_day, 'jump')} a real day. Unflown jumps carry over, up to "
            f"{world.flight_per_day * FLIGHT_BANK_DAYS}; the deck's Jumps figure says how many are left. Everything "
-           "but a jump is free."] if flight_left(world) is not None else []),
+           "but a jump is free, and [Z] on the deck lays up: what tomorrow brings and what to settle first."] if flight_left(world) is not None else []),
         "Danger is a risk rating, not a guarantee you can win a fight. The chart warns before a jump that could meet "
         "a raider your hull cannot take. Danger 4 and 5 pay for it: what such a station does not make sells dearer "
         "there, and a contract that ends there carries hazard pay.",
@@ -17553,7 +17583,8 @@ def dispatch_lines(world: World, entries: list[dict], user_id: int) -> list[str]
     lines = [section("TODAY'S ORDER")]
     lines += _sheet_rows([("ORDER", dispatch_text(order), None),
                           ("PAYS", f"{p.gold}+{reward:,}cr{p.ink}; a tenth more for each day running, up to half again", None),
-                          ("STATUS", status[0], status[1])])
+                          ("STATUS", status[0], status[1]),
+                          ("TOMORROW", dispatch_text(dispatch_order_on(world, day + 1), short=True), None)])
     lines.append(section("YOUR RECORD"))
     running = (f"{gauge(min(streak, 7), 7, 7, tone='good')} {plural(streak, 'day')} running" if streak
                else "none: fly today's to start one" if not record["total"] else "broken: fly today's to start again")
@@ -17573,6 +17604,127 @@ def dispatch_lines(world: World, entries: list[dict], user_id: int) -> list[str]
         lines += table(["", ""], [[wire_date(item), wire_line(item)] for item in wire], "ll",
                        styles=[["label", "value"] for _ in wire], repeat_header=False)[1:]
     return lines
+
+
+# Laying up (review). With the day's jumps flown the door had an alert and
+# nothing else to say, and a caller logging off with jumps left had nothing to
+# tell them what they were leaving. The lay-up page is the last page of a call:
+# what tomorrow brings -- the jumps there will be to fly, whether any of
+# today's are about to be lost to a full bank, tomorrow's order and what the
+# streak stands at -- and what is worth settling tonight, each with the deck
+# key that settles it. Nothing on it costs a jump, and the keys it names are
+# answered from it. `Z`, since `L` is a landmark's.
+LAY_UP_KEYS = "MYBCJ"
+
+
+def lay_up_open(world: World) -> bool:
+    """Whether there is a tomorrow to speak of: a board with a calendar."""
+    return flight_left(world) is not None or dispatch_order(world) is not None
+
+
+def lay_up_tomorrow_rows(world: World) -> list[tuple[str, str, str | None]]:
+    """What the next real day brings: jumps, the order, the streak."""
+    p = pal()
+    rows: list[tuple[str, str, str | None]] = []
+    tomorrow = flight_tomorrow(world)
+    if tomorrow is not None:
+        jumps, lost = tomorrow
+        rows.append(("JUMPS", f"{jumps} to fly after midnight, in {flight_wait()}", None))
+        if lost:
+            rows.append(("BANK", f"full: {plural(lost, 'jump')} of today's will not carry over", "bad"))
+    order = dispatch_order(world)
+    if order is not None:
+        record, flown = dispatch_record(world.save), dispatch_flown(world, order)
+        streak = dispatch_streak(record, order["day"])
+        reward = dispatch_reward(world.save, streak + 1 if flown else 1)
+        rows.append(("ORDER", f"{dispatch_text(dispatch_order_on(world, order['day'] + 1), short=True)}  "
+                              f"{p.gold}+{reward:,}cr{p.ink}", None))
+        if flown:
+            rows.append(("STREAK", f"{plural(streak, 'day')} running; tomorrow's makes it {streak + 1}", "good"))
+        elif streak:
+            rows.append(("STREAK", f"{plural(streak, 'day')} running; today's is still open  "
+                                   f"{key_label('J', 'dispatch')}", "bad"))
+        else:
+            rows.append(("STREAK", f"none running; today's is still open  {key_label('J', 'dispatch')}", "info"))
+    return rows
+
+
+def lay_up_ready_rows(world: World) -> list[tuple[str, str, str | None]]:
+    """What is worth settling before the caller goes, each with its key."""
+    save, ship = world.save, world.save.ship
+    rows: list[tuple[str, str, str | None]] = []
+    fuel, tank = ship.fuel, fuel_capacity(ship)
+    rows.append(("FUEL", f"{fuel}/{tank}" + ("" if fuel >= tank else f"  {key_label('Y', 'refuel')}"),
+                 "good" if fuel >= tank else "info"))
+    hull, plating = ship.hull_hp, hull_hp_max(ship)
+    rows.append(("HULL", f"{hull}/{plating}" + ("" if hull >= plating else f"  {key_label('Y', 'repair')}"),
+                 "good" if hull >= plating else "bad" if hull * 5 <= plating else "info"))
+    used, room = sum(save.cargo.values()), cargo_capacity(ship)
+    held = [commodity for commodity in COMMODITIES if spare_cargo(world, commodity)]
+    hint = next((row for row in market_memory_hints(world, held) if row[1] == "sells"), None)
+    if not used:
+        rows.append(("HOLD", f"0/{room}: load tomorrow's first run  {key_label('M', 'market')}", "info"))
+    elif hint is not None:
+        commodity, _what, unit, sid, _day = hint
+        jumps = bfs_hops(world.by_id, world.here.id).get(sid)
+        rows.append(("HOLD", f"{used}/{room}; {COMMODITIES[commodity]['label']} sold for {unit}cr at "
+                             f"{_mission_plain(world.by_id[sid].name)}" + (f", {plural(jumps, 'jump')}" if jumps else ""),
+                     "good"))
+    else:
+        rows.append(("HOLD", f"{used}/{room} loaded", "good"))
+    live = [mission for mission in save.active_missions if not mission_expired(world, mission)]
+    if not live:
+        rows.append(("CONTRACTS", f"none accepted  {key_label('B', 'board')}", "info"))
+    else:
+        dated = [mission.deadline_turn for mission in live if mission.deadline_turn is not None]
+        due = f"; next due day {min(dated)}, today is day {save.turn}" if dated else ""
+        rows.append(("CONTRACTS", f"{len(live)} accepted{due}", None))
+    mission = tracked_mission(world)
+    path = mission_route(world, mission) if mission is not None else []
+    if path:
+        stops = [world.here.id, *path]
+        burn = sum(fuel_cost_for_jump(world.by_id[a], world.by_id[b], ship) for a, b in zip(stops, stops[1:]))
+        enough = fuel >= burn
+        rows.append(("ROUTE", f"#{mission.id} to {_mission_plain(world.by_id[mission.target_system].name)}: "
+                              f"{plural(len(path), 'jump')}, {burn} fuel" + ("" if enough else f", {fuel} aboard"),
+                     "good" if enough else "bad"))
+    else:
+        rows.append(("ROUTE", f"nothing tracked: plan one  {key_label('C', 'chart')}", "info"))
+    return rows
+
+
+def _lay_up_rows(entries: list[tuple[str, str, str | None]]) -> list[str]:
+    """Mark, label, value. The mark leads, as an alert's does, so a row that
+    wraps keeps the marks a column; a data sheet's trailing mark wrapped onto a
+    row of its own as soon as one value was long."""
+    p = pal()
+    label_w = max(_visible_width(label) for label, _, _ in entries)
+    return [f"{sheet_mark(tone or 'info')} {p.slate}{_pad(label, label_w)}{RESET}  {p.ink}{value}{RESET}"
+            for label, value, tone in entries]
+
+
+def lay_up_lines(world: World) -> list[str]:
+    """The lay-up page: tomorrow, then what to settle tonight."""
+    p = pal()
+    lines = [section("TOMORROW")] + _lay_up_rows(lay_up_tomorrow_rows(world))
+    lines += [section("BEFORE YOU GO")] + _lay_up_rows(lay_up_ready_rows(world))
+    lines.append(f"{p.slate}None of this costs a jump; the ship is safe in dock.{RESET}")
+    return lines
+
+
+def screen_lay_up(p: Palette, world: World) -> str | None:
+    """The last page of a call. Returns the deck key a caller pressed here, so
+    the row that says `[Y] refuel` goes to the yard; None for back."""
+    page = 0
+    while True:
+        key, page, count = _draw_service_page(p, "Lay-up", lay_up_lines(world),
+                                              "[M] Market [Y] Yard [B] Board [C] Chart [J] Dispatch [Q] Back: ", page)
+        if key == "Q":
+            return None
+        if len(key) == 1 and key in LAY_UP_KEYS:
+            return key
+        if (moved := page_step(key, page, count)) is not None:
+            page = moved
 
 
 def screen_dispatch(p: Palette, world: World, save_dir: Path, user_id: int) -> None:
@@ -19858,6 +20010,12 @@ def _run_game(info: dict) -> int:
 
         while True:
             choice = screen_station_menu(p, world)
+            if choice == "Z":
+                # The lay-up page names deck keys and answers them: what it
+                # hands back is dealt with below as if pressed on the deck.
+                choice = screen_lay_up(p, world) if lay_up_open(world) else None
+                if choice is None:
+                    continue
             if choice == "O":
                 screen_display_options(p, world)
                 continue
@@ -19914,6 +20072,8 @@ def _run_game(info: dict) -> int:
             elif choice == "Q":
                 world.commit()
                 out_line(f"{p.muted}Docking clamps engaged. Fly safe, {world.save.pilot.handle}.{RESET}")
+                if (farewell := flight_farewell(world)) is not None:
+                    out_line(f"{p.muted}{farewell}{RESET}")
                 return 0
             else:
                 continue
