@@ -56,7 +56,7 @@ def test_a_jump_spends_one_and_the_thirteenth_is_refused():
     assert not _jump(world)
     assert (world.save.turn, world.save.current_system) == (day, here) and world.save.pending_travel is None
     assert vr.flight_blocker(world).startswith("No jumps left today. 12 more jumps at midnight, in ")
-    assert vr.flight_blocker(world).endswith("Trading and planning cost nothing.")
+    assert "Trading and planning cost nothing" in vr.flight_blocker(world)
 
 
 def test_the_day_turns_and_unflown_jumps_carry_over_up_to_two_days_worth():
@@ -144,7 +144,7 @@ def test_the_deck_the_chart_and_the_guide_say_how_many_are_left():
     world.save.flight = {"day": 1000, "left": 0}
     assert plain(vr.status_band(world)[1]).endswith("Jumps 0")
     alerts = " ".join(" ".join(plain(row).split()) for row in vr.deck_alert_rows(world))
-    assert "No jumps left today 12 more at midnight, in " in alerts and "trading is free" in alerts
+    assert "No jumps left today 12 more at midnight, in " in alerts and "[Z] lay up" in alerts
     # Where nothing is rationed, nothing is said.
     free = _world_with_seed(42)
     assert "Jumps" not in plain(vr.status_band(free)[1]) and "jump" not in vr.departure_terms(free, target)
@@ -195,6 +195,7 @@ def test_a_pinned_day_holds_the_calendar_still_and_nonsense_is_no_pin(monkeypatc
     import datetime as real
     monkeypatch.setenv("DOOR_JUMPS_DAY", "2026-11-22")
     assert vr.flight_day() == real.date(2026, 11, 22).toordinal()
+    assert vr.flight_wait() == "12h 0m"  # and stands at noon
     monkeypatch.setenv("DOOR_JUMPS_DAY", "someday")
     assert vr.flight_day() == vr._node_now().date().toordinal()
 
@@ -205,3 +206,17 @@ def test_the_executable_binds_the_calendar_and_the_sysops_figure(monkeypatch):
     assert "world.flight_clock, world.flight_per_day = flight_day, flight_setting()" in inspect.getsource(vr._run_game)
     world = _world_with_seed(42)
     assert world.flight_clock is None and world.flight_per_day == 0
+
+
+def test_the_wait_on_the_hour_and_in_the_last_minute(monkeypatch):
+    import datetime as real
+
+    def at(hour, minute, second):
+        class Frozen(real.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 11, 24, hour, minute, second)
+        monkeypatch.setattr(vr, "datetime", Frozen)
+        return vr.flight_wait()
+
+    assert at(18, 0, 0) == "6h 0m" and at(23, 30, 0) == "30m" and at(23, 59, 40) == "1m" and at(0, 0, 0) == "24h 0m"

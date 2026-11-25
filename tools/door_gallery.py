@@ -198,6 +198,9 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Hall of Fame, dispatch", b"H6", "played"),
         # Today's order, the pilot's record and the board's flight line.
         ("Daily Dispatch", b"J"),
+        # What tomorrow brings and what to settle before logging off.
+        ("Lay-up", b"Z"),
+        ("Lay-up, played", b"Z", "played"),
         ("Pilot Guide", b"G"),
         ("Pilot Guide, reference", b"GR"),
         # A new career at Freeport on day zero is offered First Flight.

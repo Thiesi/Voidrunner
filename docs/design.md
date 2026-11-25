@@ -2024,6 +2024,40 @@ cached careers would otherwise have more jumps to show tomorrow. The suite's
 launched doors run with the allowance on, as a caller's does; a walk that
 needs more than twelve jumps has to set `DOOR_JUMPS=0`.
 
+**Laying up (review).** With the jumps of the day flown the door had an alert
+and nothing more to say, and a caller logging off with jumps left was told
+nothing about what they were leaving. `[Z]` on the deck is now the last page of
+a call. Its first half is the next real day: how many jumps there will be to
+fly after midnight and how long that is; a `BANK` row, in the tone of a loss,
+when the bank is full and some of the jumps left will not carry over; the order
+the dispatch gives the next day and what it will pay; and the streak, which
+says when it is about to end because the order of the day is still open. Its
+second half is what is worth settling before going: fuel, hull, the hold (where
+what is aboard sold best, from the price memory, or that it is empty), the
+contracts and the nearest deadline, and the tracked route with the fuel it
+burns against the fuel aboard. Each row names the deck key that settles it,
+and the page answers those keys (`M`, `Y`, `B`, `C`, `J`), so `[Y] repair`
+goes to the yard. Every row leads with its mark, as an alert does: the data
+sheet layout puts the mark last, and one long value sent every mark onto a row
+of its own.
+
+It is offered where there is a next day to speak of, which is a board with a
+calendar. The alert a caller gets with no jumps left names `[Z]`, the chart
+says so when it refuses, the Reference has a clause on it, and the Dispatch
+page gains a `TOMORROW` row with the next order, so the page is not the only
+way to learn it. Showing the next order is deliberate: it is the same for every
+pilot, it is a reason to come back, and a caller can load for it the night
+before. Leaving the door adds one line under the farewell: the jumps left and
+the jumps the next day holds. The key is `Z` because `L` is a landmark.
+Nothing is saved for any of it.
+
+The plan also listed placing orders as something to do with no jumps left.
+That was the futures desk, which is gone, and nothing replaces it here:
+trading, the yard, the board and the route planner were already free.
+
+A pinned `DOOR_JUMPS_DAY` stands at noon, so the gallery panels of this page
+read `in 12h 0m` on every run.
+
 **Danger pays (review).** A system's danger was a cost and nothing else: more
 raiders, of higher tiers, for the same prices and the same contract pay as calm
 space. The right way to play was to stay out of it, and the handful of

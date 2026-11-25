@@ -127,7 +127,12 @@ jumps left, the chart says when the last one is being flown, and with none
 left it says how long until midnight on the node's calendar. A SysOp sets the
 figure with `DOOR_JUMPS` in the door's environment: `DOOR_JUMPS=20` for twenty a
 day, `DOOR_JUMPS=0` for no limit. The allowance belongs to the caller, not the
-career, so retiring does not refill it.
+career, so retiring does not refill it. `[Z]` on the deck is the **lay-up**
+page, the last page of a call: the jumps there will be to fly after midnight,
+the order for the next day and what the streak stands at, and what is worth
+settling first (fuel, hull, hold, contracts, route), each with the key that
+settles it. Leaving the door says how many jumps are left and how many the
+next day holds.
 
 Once a pilot has flown the day's order, that deck row carries **the wire**
 instead: the newest thing another pilot on the board did, such as a promotion,
