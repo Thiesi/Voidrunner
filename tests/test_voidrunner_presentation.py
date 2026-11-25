@@ -687,7 +687,7 @@ def test_screen_title_renders_full_splash_with_tagline_and_exact_box_width():
 def test_create_career_box_rows_fit_79_column_border(monkeypatch):
     p = vr.Palette(truecolor=False)
     monkeypatch.setattr(vr, "read_line_raw", lambda max_len=16, allowed=None: "TestPilot")
-    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p, **kw: True)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         callsign = vr.create_career(p, {"handle": "SixteenCharHandl"})
@@ -711,7 +711,7 @@ def test_create_career_greeting_holds_one_color_and_highlights_the_callsign(monk
     terminal(64, 24, "auto")
     p, handle = vr.Palette(truecolor=False), "SixteenCharHandl"
     monkeypatch.setattr(vr, "read_line_raw", lambda max_len=16, allowed=None: "")
-    monkeypatch.setattr(vr, "confirm", lambda prompt, palette: True)
+    monkeypatch.setattr(vr, "confirm", lambda prompt, palette, **kw: True)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         assert vr.create_career(p, {"handle": handle}) == handle
@@ -1475,7 +1475,7 @@ def test_wording_uses_singular_forms_and_names_the_offer_refresh():
     ("[R] Route [N] Next [P] Prev [B] Back", "[R] Route [B] Back"),
     ("[1-9] Details [N] Next [P] Prev [B] Back > ", "[1-9] Details [B] Back > "),
     ("[A] Accept [N] Next [P] Prev [B] Back: ", "[A] Accept [B] Back: "),
-    ("[1-6] View [N] Next [P] Prev [B] Back: ", "[1-6] View [B] Back: "),  # the Hall of Fame spelling
+    ("[1-7] View [N] Next [P] Prev [B] Back: ", "[1-7] View [B] Back: "),  # the Hall of Fame spelling
     ("[E] Edit draft [B] Back: ", "[E] Edit draft [B] Back: "),
 ])
 def test_single_page_footers_drop_every_spelling_of_the_paging_tokens(footer, expected):

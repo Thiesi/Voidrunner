@@ -1410,12 +1410,17 @@ def read_quantity(limit: int, default: int = 0, *, max_len: int = 5) -> int:
     return min(int(raw), limit) if raw.isascii() and raw.isdigit() else 0
 
 
-def confirm(prompt: str, p: Palette, *, enter: bool = False) -> bool:
+def confirm(prompt: str, p: Palette, *, enter: bool = False, other: str | None = None) -> bool | str:
     """Yes/No as the last keystroke before an irreversible action; Escape is No (issue #413).
 
     `enter=True` lets Return accept, for an offer the pilot nearly always takes,
     such as a repair to the most they can afford (issue #36). Otherwise Return
     does nothing: an irreversible action wants a deliberate Y.
+
+    `other` is one more key the question takes, which the prompt itself has to
+    name (`..., or [H] for the hard charter?`): the question is still yes or
+    no, with a third answer that is returned as its key. Only a caller that
+    passes it has to look for it.
     """
     out_prompt(f"{p.muted}{prompt} [Y/N, {'Enter=Yes, ' if enter else ''}Esc=No] {RESET}")
     while True:
@@ -1433,6 +1438,9 @@ def confirm(prompt: str, p: Palette, *, enter: bool = False) -> bool:
         if key == "N":
             out_line("N")
             return False
+        if other and key == other:
+            out_line(key)
+            return key
 
 
 def pause(p: Palette, msg: str = "Press any key to continue...") -> None:
@@ -2208,6 +2216,9 @@ class SaveData:
     # reckoned on and the jumps left then; see `flight_left`. Absent until a
     # jump is flown on a board that rations them.
     flight: dict = field(default_factory=dict)
+    # The charter this career is flown on, chosen when it was launched and
+    # fixed from then on; see `CHARTERS`. Written only when it is not standard.
+    charter: str = "standard"
     # Raiders this career let limp home, each owing one favour; see `take_prize`.
     # Absent until there is one.
     favours: list[dict] = field(default_factory=list)
@@ -2247,6 +2258,7 @@ class SaveData:
             **({"rivals": self.rivals} if self.rivals else {}),
             **({"tales": self.tales} if self.tales else {}),
             **({"flight": self.flight} if self.flight else {}),
+            **({"charter": self.charter} if self.charter != "standard" else {}),
             **({"favours": self.favours} if self.favours else {}),
         }
 
@@ -2292,6 +2304,7 @@ class SaveData:
             rivals=[dict(item) for item in d.get("rivals", [])],
             tales=dict(d.get("tales", {})),
             flight=dict(d.get("flight", {})),
+            charter=d.get("charter", "standard"),
             favours=[dict(item) for item in d.get("favours", [])],
         )
 
@@ -2523,6 +2536,7 @@ def _validate_save_document(data: dict) -> None:
         integer(item["day"], "rival day", maximum=data["turn"])
         require(item["how"] in RIVAL_HOW, "rival history")
     require(len({item["name"] for item in rivals}) == len(rivals), "rivals")
+    require(data.get("charter", "standard") in CHARTERS, "charter")
     flight = data.get("flight", {})
     require(isinstance(flight, dict) and (not flight or set(flight) == {"day", "left"}), "flight allowance")
     if flight:
@@ -2547,6 +2561,9 @@ def _validate_save_document(data: dict) -> None:
         if type(dossier.get("version")) is int and dossier["version"] != 1:
             raise UnsupportedSave("The retired career uses an unsupported dossier version.")
         optional_fields = {"failed", "expired"}  # Recorded from #403 onward; earlier dossiers lack both.
+        # A career flown on a hard charter says so; a standard one says nothing.
+        require(dossier.get("charter", "hard") == "hard", "dossier charter")
+        dossier = {key: value for key, value in dossier.items() if key != "charter"}
         _reject_unknown_save_fields(dossier, dossier_fields | optional_fields, "career dossier")
         require(dossier_fields <= set(dossier) and (set(dossier) & optional_fields) in (set(), optional_fields), "career dossier fields")
         for key in optional_fields & set(dossier): integer(dossier[key], "dossier " + key)
@@ -4527,7 +4544,7 @@ class Pirate:
 def generate_pirate(world: World, tier: int | None = None, *, danger: int | None = None) -> Pirate:
     rng = world.event_rng
     danger = world.here.danger if danger is None else danger
-    t = tier if tier is not None else max(0, min(4, danger + rng.randint(-1, 1)))
+    t = tier if tier is not None else harder_tier(world, max(0, min(4, danger + rng.randint(-1, 1))))
     hp = 20 + t * 15
     return Pirate(name=rng.choice(PIRATE_NAMES), tier=t, hp=hp, hp_max=hp)
 
@@ -5562,13 +5579,56 @@ def bounty_reward_for(world: World, base_reward: int) -> int:
 SALVAGE_FEE_BASE = 200
 
 
+# The hard charter (review). The game is forgiving by design: a lost ship is a
+# fee and a tow, a broke pilot has the docks, and a raider is the system's
+# danger give or take a tier. That is right for a caller's first career and it
+# leaves a regular with nothing to prove. A career can now be launched on a
+# hard charter instead: raiders are a tier stronger wherever they are met,
+# Freeport's foreman has no shifts, and the tug charges double. It pays
+# nothing extra. What it earns is a table of its own in the Hall of Fame and
+# three achievements. It is chosen when the career is launched -- `H` at the
+# launch question, or on the Career Finale page for the career after this one
+# -- and cannot be changed afterwards. A stranded pilot is still rescued: the
+# charter is harder, not a way to lose a career.
+CHARTERS = ("standard", "hard")
+HARD_RAIDER_TIERS = 1     # added to every raider's tier, up to the top one
+HARD_TUG_FACTOR = 2       # what the salvage fee is multiplied by
+HARD_TERMS = (
+    "Raiders are a tier stronger, wherever you meet them.",
+    "Freeport's foreman has no shifts for you.",
+    "The salvage tug charges double.",
+    "No extra pay: its own Hall of Fame table and achievements.",
+    "It cannot be changed once the career is launched.",
+)
+
+
+def is_hard(save: "SaveData") -> bool:
+    """Whether this career is flown on the hard charter."""
+    return save.charter == "hard"
+
+
+def harder_tier(world: "World", tier: int) -> int:
+    """A raider's rolled tier as this pilot meets it: a tier up on the hard charter, to the top one."""
+    return min(4, tier + HARD_RAIDER_TIERS) if is_hard(world.save) else tier
+
+
+def raider_tier_span(world: "World", danger: int) -> tuple[int, int]:
+    """The weakest and the strongest raider a system of this danger sends this pilot."""
+    return harder_tier(world, max(0, min(4, danger - 1))), harder_tier(world, max(0, min(4, danger + 1)))
+
+
+def tug_fee(world: "World") -> int:
+    """What the salvage tug charges this pilot for this ship."""
+    return salvage_fee(world.save.ship) * (HARD_TUG_FACTOR if is_hard(world.save) else 1)
+
+
 def salvage_fee(ship: Ship) -> int:
     """Always dearer than repairing before the fight: a full repair from zero
     costs four credits per hull point, so the fee is that plus a fixed base."""
     return SALVAGE_FEE_BASE + hull_hp_max(ship) * 4
 
 
-def salvage_hull(ship: Ship, paid: int, hull_before: int | None = None) -> int:
+def salvage_hull(ship: Ship, paid: int, hull_before: int | None = None, fee: int | None = None) -> int:
     """Hull after a tow: full only when the fee is paid in full; otherwise the
     flyable quarter of maximum plus the share of the rest that the paid fraction
     of the fee buys, which stays below maximum until the whole fee is paid
@@ -5580,7 +5640,7 @@ def salvage_hull(ship: Ship, paid: int, hull_before: int | None = None) -> int:
     the paid share still buys less hull than the same credits buy at the yard
     (issue #402 review round 3)."""
     maximum = hull_hp_max(ship)
-    fee = salvage_fee(ship)
+    fee = salvage_fee(ship) if fee is None else fee  # `tug_fee`, where a charter doubles it
     if paid >= fee:
         return maximum
     floor = max(1, maximum // 4)
@@ -5612,13 +5672,13 @@ def destroy_ship(world: World, *, patrol: bool = False, hull_before: int | None 
     world.wire("lost", f"lost a {ship.hull_class} to {'a Concord patrol' if patrol else 'raiders'}")
     for commodity, quantity in list(world.save.cargo.items()):
         _dispose_cargo(world, commodity, quantity)
-    fee = salvage_fee(ship)
+    fee = tug_fee(world)
     fine = notoriety_fine_cost(world.save.pilot.notoriety) if patrol else 0
     due = fee + fine
     penalty = min(world.save.pilot.credits, due)
     world.save.pilot.credits -= penalty
     towards_fee = min(penalty, fee)
-    ship.hull_hp = salvage_hull(ship, towards_fee, hull_before)
+    ship.hull_hp = salvage_hull(ship, towards_fee, hull_before, fee)
     world.save.current_system = 0
     cleared = patrol and penalty >= due
     if cleared:
@@ -5634,7 +5694,7 @@ def destroy_ship(world: World, *, patrol: bool = False, hull_before: int | None 
             + ("" if not patrol else " Notoriety cleared." if cleared
                else f" The {fine}cr fine went unpaid, so your notoriety stands.")
             + (" Freeport's docks have work for a pilot with nothing: [F] on the deck."
-               if world.save.pilot.credits < DOCK_WORK_BELOW else ""))
+               if world.save.pilot.credits < DOCK_WORK_BELOW and not is_hard(world.save) else ""))
 
 
 def customs_check_chance(system: GalaxySystem) -> float:
@@ -5756,7 +5816,7 @@ def dock_work_open(world: World) -> bool:
     save = world.save
     # A shift is a day, and a day is a jump's worth of the allowance.
     return (save.current_system == 0 and save.pending_travel is None and save.pilot.credits < DOCK_WORK_BELOW
-            and flight_left(world) != 0)
+            and flight_left(world) != 0 and not is_hard(save))
 
 
 def dock_work_hull(ship: Ship) -> int:
@@ -5953,7 +6013,7 @@ def career_finale_blocker(save: SaveData, finale: str) -> str | None:
     return None if ready else "Requires " + CAREER_FINALES[finale]["requirement"] + "."
 
 
-def finish_career(save: SaveData, finale: str) -> SaveData:
+def finish_career(save: SaveData, finale: str, charter: str = "standard") -> SaveData:
     """Validate the deliberate ending; archive and reset share one saved payload.
 
     Contracts still active at retirement end unpaid, so the dossier counts them
@@ -5970,7 +6030,10 @@ def finish_career(save: SaveData, finale: str) -> SaveData:
                "failed":save.pilot.missions_failed + len(abandoned), "expired":save.pilot.missions_expired,
                "charted":len(save.discovered), "market_margin":career_accomplishments(save)["trader"],
                "highlights":list(save.pilot.highlights)}
+    if is_hard(save):
+        dossier["charter"] = "hard"
     fresh = retire_pilot(save)
+    fresh.charter = charter if charter in CHARTERS else "standard"  # the next career's, chosen on the finale page
     fresh.retired_careers = [dict(item, highlights=list(item["highlights"])) for item in save.retired_careers] + [dossier]
     info = CAREER_FINALES[finale]
     if info["tier"] is not None: setattr(fresh.ship, info["tier"] + "_tier", 1)
@@ -5988,14 +6051,15 @@ def career_dossier_lines(save: SaveData) -> list[str]:
     for item in reversed(save.retired_careers):
         info = CAREER_FINALES[item["finale"]]
         lines += [f"Career #{item['number']}: {info['label']}. {show_date(item['started']) or 'Unknown start'} to {show_date(item['ended'])}.",
-                  f"Seed {item['seed']}; {item['days']} days; {RANKS[item['rank']][1]}; {item['ship']}.",
+                  f"Seed {item['seed']}; {item['days']} days; {RANKS[item['rank']][1]}; {item['ship']}"
+                  + ("; hard charter." if item.get("charter") == "hard" else "."),
                   f"Final credits {item['credits']:,}cr; market margin {item['market_margin']:+,}cr; {item['charted']}/{GALAXY_SYSTEM_COUNT} charted; {item['kills']} victories; "
                   f"{item['missions']} missions completed" + (f", {item['failed']} failed, {item['expired']} expired." if "failed" in item else "."), info["closing"]]
         lines.extend("* " + entry for entry in item["highlights"])
     return lines
 
 
-def career_finale_lines(save: SaveData, selected: str) -> list[str]:
+def career_finale_lines(save: SaveData, selected: str, charter: str = "standard") -> list[str]:
     p = pal()
     lines = [f"{p.plasma}{BOLD}{_mission_plain(save.pilot.handle)}{RESET}  "
              f"{p.slate}{career_rank(save.pilot)}{RESET}  {p.gold}{glyph('credits')} {save.pilot.credits:,}cr{RESET}  "
@@ -6022,6 +6086,9 @@ def career_finale_lines(save: SaveData, selected: str) -> list[str]:
     credits = STARTING_CREDITS + (save.pilot.retirements+1)*RETIREMENT_STARTING_CREDITS_BONUS
     gear = f"{info['tier'].title()} tier 1" if info["tier"] else "ordinary starting modules"
     lines += ["Selected ending: " + info["closing"],
+              (f"Next career's charter: {p.ink}{BOLD}{charter}{RESET}. {key_label('H', 'changes it')}."
+               + (" Hard: raiders a tier stronger, no dock work, a doubled tug fee; its own Hall of Fame table."
+                  if charter == "hard" else "")),
               f"New Game+: a fresh galaxy, Shuttle with {gear}, full starting hull/fuel and {credits:,}cr including the accumulated retirement bonus.",
               "Current cargo, contracts, faction/crew/story progress and career rank reset. Display style, lifetime score, retirement count and dossiers remain."
               + (f" {len(save.active_missions)} active contract(s) count as abandoned in the dossier." if save.active_missions else ""),
@@ -6179,6 +6246,10 @@ ACCOLADES: tuple[Accolade, ...] = tuple([
     Accolade("retire_5", "Legacy", "Legend Reborn", "Retire 5 careers.", "retirements", 5),
     *[Accolade(f"finale_{key}", "Legacy", info["label"], f"End a career as {info['label']}.", f"finale_{key}")
       for key, info in CAREER_FINALES.items()],
+    Accolade("hard_rank_2", "Legacy", "Hard Bargain", f"Reach {RANKS[2][1]} on a hard charter.", "hard_rank", 2, tier=1),
+    Accolade("hard_rank_4", "Legacy", "Iron Charter", f"Reach {RANKS[-1][1]} on a hard charter.", "hard_rank",
+             len(RANKS) - 1, tier=2),
+    Accolade("hard_retired", "Legacy", "Signed in Iron", "Retire a career flown on a hard charter.", "hard_retired"),
     Accolade("lost_1", "Misfortune", "Scrap Metal", "Lose your ship.", "ships_lost", tier=1, hidden=True),
     Accolade("lost_5", "Misfortune", "Tow Truck Regular", "Lose your ship 5 times.", "ships_lost", 5, tier=2, hidden=True),
     Accolade("towed", "Misfortune", "Running on Fumes", "Get towed home with an empty tank and empty pockets.",
@@ -6245,6 +6316,9 @@ def accolade_metrics(save: SaveData) -> dict[str, int]:
         stake_steps=sum(stakes(save).values()),
         carrier=int("Carrier" in flown),
         hulls=len(flown & set(HULL_CLASSES)),
+        hard_rank=max([career_rank_index(pilot) if is_hard(save) else 0]
+                      + [d["rank"] for d in dossiers if d.get("charter") == "hard"]),
+        hard_retired=sum(1 for d in dossiers if d.get("charter") == "hard"),
         **{f"finale_{key}": int(key in finales) for key in CAREER_FINALES},
     )
     return metrics
@@ -7089,20 +7163,23 @@ def replace_unsupported_career(save_dir: Path, user_id: int, save: SaveData) -> 
 HALL_OF_FAME_SIZE = 20
 
 SCORE_CATEGORIES = {"wealth": "Wealth", "trading": "Trading", "exploration": "Exploration",
-                    "combat": "Combat", "careers": "Completed careers", "dispatch": "Daily dispatch"}
+                    "combat": "Combat", "careers": "Completed careers", "dispatch": "Daily dispatch",
+                    "hard": "Hard charter"}
 SCORE_CAREER_FIELDS = ("number", "seed", "started", "ended", "finale", "days", "credits",
                        "market_margin", "kills", "missions", "charted")
 
 
 def score_achievements(save: SaveData) -> dict:
     """Repairable summaries; the career save and its dossiers remain authority."""
-    careers = [{key: dossier[key] for key in SCORE_CAREER_FIELDS} for dossier in save.retired_careers]
+    # A career flown on a hard charter carries `charter`; a standard one has no such key.
+    careers = [{key: dossier[key] for key in (*SCORE_CAREER_FIELDS, "charter") if key in dossier}
+               for dossier in save.retired_careers]
     careers.append({"number": save.pilot.retirements + 1, "seed": save.seed,
                     "started": save.pilot.career_started, "ended": None, "finale": None,
                     "days": save.turn, "credits": save.pilot.credits,
                     "market_margin": career_accomplishments(save)["trader"],
                     "kills": save.pilot.kills, "missions": save.pilot.missions_completed,
-                    "charted": len(save.discovered)})
+                    "charted": len(save.discovered), **({"charter": "hard"} if is_hard(save) else {})})
     return {"version": 1, "careers": careers}
 
 
@@ -7116,7 +7193,9 @@ def _score_achievements(data, retirements: int) -> dict | None:
         return None
     previous = 0
     for index, record in enumerate(careers):
-        if not isinstance(record, dict) or set(record) != set(SCORE_CAREER_FIELDS):
+        if not isinstance(record, dict) or set(record) - {"charter"} != set(SCORE_CAREER_FIELDS):
+            return None
+        if record.get("charter", "hard") != "hard":
             return None
         for key in ("number", "days", "credits", "kills", "missions", "charted"):
             if type(record[key]) is not int or record[key] < 0:
@@ -7152,7 +7231,7 @@ def _future_score_achievements(data) -> bool:
         return True
     records = summary.get("careers")
     return isinstance(records, list) and any(
-        isinstance(record, dict) and bool(set(record) - set(SCORE_CAREER_FIELDS)) for record in records)
+        isinstance(record, dict) and bool(set(record) - set(SCORE_CAREER_FIELDS) - {"charter"}) for record in records)
 
 
 
@@ -7391,10 +7470,10 @@ def achievement_ranking(entries: list[dict], category: str) -> list[dict]:
         metric = "best_credits" if category == "wealth" else "retirements"
         candidates = [entry for entry in entries if category == "wealth" or entry[metric] > 0]
         return sorted(candidates, key=lambda entry: (-entry[metric], entry["user_id"]))[:HALL_OF_FAME_SIZE]
-    metric = {"trading": "market_margin", "exploration": "charted", "combat": "kills"}[category]
+    metric = {"trading": "market_margin", "exploration": "charted", "combat": "kills", "hard": "credits"}[category]
     candidates = [dict(record, user_id=entry["user_id"], handle=entry["handle"])
                   for entry in entries for record in entry.get("achievements", {}).get("careers", [])
-                  if record[metric] > 0]
+                  if record[metric] > 0 and (category != "hard" or record.get("charter") == "hard")]
     return sorted(candidates, key=lambda record: (-record[metric], record["user_id"], record["number"]))[:HALL_OF_FAME_SIZE]
 
 
@@ -11724,7 +11803,31 @@ def _commission_lines(p: Palette, welcome: str, callsign: str | None) -> list[st
     return lines + beside(terms, pixel_hull(ship), overhang=True)
 
 
+def launch_choice(p: Palette, callsign: str, show_terms: Callable[[], None]) -> str | None:
+    """The last question of a commission: Y launches on the standard charter,
+    H reads out the hard charter's terms and asks again for that, N or Escape
+    launches nothing. Returns the charter, or None."""
+    while True:
+        answer = confirm(f"Launch {p.gold}{callsign}{p.muted}'s career, or {p.gold}{BOLD}[H]{RESET}{p.muted} for the "
+                         "hard charter?", p, other="H")
+        if answer != "H":
+            return "standard" if answer else None
+        show_terms()
+        if confirm(f"Launch {p.gold}{callsign}{p.muted}'s career on the hard charter?", p):
+            return "hard"
+
+
+def hard_term_rows() -> list[str]:
+    """The hard charter's terms, one to a row where the page is wide enough
+    and wrapped under their mark where it is not."""
+    p = pal()
+    return [row for term in HARD_TERMS
+            for row in wrap_styled(f"{p.slate}{glyph('dot')}{RESET} {p.ink}{term}{RESET}", _page_content_width(), 2)]
+
+
 def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str | None:
+    """Register a career; returns the callsign, or None if the caller declined.
+    The charter the caller chose is left in `info["charter"]`."""
     if canopy_active():
         # On a canopy terminal the commission is a page of its own (#30): the
         # same questions, asked on the strip under it.
@@ -11739,7 +11842,10 @@ def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str 
         entered = read_line_raw(max_len=16, allowed=lambda c: c.isalnum() or bool(unicodedata.combining(c)) or c == " ").strip()
         callsign = entered or handle
         draw_page(p, title, _commission_lines(p, welcome, callsign), 0, 1)
-        if confirm(f"Launch {p.gold}{callsign}{p.muted}'s career?", p):
+        charter = launch_choice(p, callsign, lambda: draw_page(
+            p, title, _commission_lines(p, welcome, callsign) + [section("HARD CHARTER")] + hard_term_rows(), 0, 1))
+        if charter is not None:
+            info["charter"] = charter
             return callsign
         out_line(f"{p.muted}Career launch cancelled. No career was saved.{RESET}")
         return None
@@ -11767,7 +11873,14 @@ def create_career(p: Palette, info: dict, *, welcome: str | None = None) -> str 
     out_line()
     out_line(f"{p.muted}  Starting deployment: {HOME_STATION_NAME}{RESET}")
     out_line(f"{p.muted}  Vessel: Battered {starting_ship().hull_class}  │  Starting Bank: {STARTING_CREDITS:,} cr  │  Cargo: Empty Hold{RESET}")
-    if confirm(f"Launch {p.gold}{callsign}{p.muted}'s career?", p):
+    def read_out() -> None:
+        out_line(f"{p.muted}  The hard charter:{RESET}")
+        for term in HARD_TERMS:
+            out_line(f"{p.muted}    {glyph('dot')} {term}{RESET}")
+
+    charter = launch_choice(p, callsign, read_out)
+    if charter is not None:
+        info["charter"] = charter
         return callsign
     out_line(f"{p.muted}Career launch cancelled. No career was saved.{RESET}")
     return None
@@ -11976,7 +12089,7 @@ def deck_alert_rows(world: World) -> list[str]:
     rows: list[str] = []
     if ship.hull_hp * 5 <= hull_hp_max(ship):
         rows.append(alert("danger", "CRITICAL HULL",
-                          f"destruction costs {salvage_fee(ship)}cr salvage", key_label("Y", "repair")))
+                          f"destruction costs {tug_fee(world)}cr salvage", key_label("Y", "repair")))
     costs = [fuel_cost_for_jump(here, world.by_id[sid], ship) for sid in here.connections]
     if costs and ship.fuel < min(costs):
         rows.append(alert("danger", "LOW FUEL", f"cheapest jump needs {min(costs)}",
@@ -17220,7 +17333,10 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
     cells = _gauge_cells()
     lines.append(f"{p.plasma}{BOLD}{_mission_plain(pilot.handle)}{RESET}  "
                  f"{p.slate}Rank{RESET} {p.plasma}{career_rank(pilot)}{RESET}  "
-                 f"{p.gold}{glyph('credits')} {pilot.credits:,}cr{RESET}")
+                 f"{p.gold}{glyph('credits')} {pilot.credits:,}cr{RESET}"
+                 + (f"  {badge('HARD CHARTER', 'caution')}" if is_hard(world.save) else ""))
+    if is_hard(world.save):
+        lines.append(f"{p.slate}charter{RESET} {p.ink}raiders a tier stronger, no dock work, a doubled tug fee{RESET}")
     # From the rank the career has kept, not from the balance: rank is permanent
     # here, so a Void Baron who has spent down to 1,200cr is not working toward
     # Independent Trader again (issue #493 review).
@@ -17378,16 +17494,18 @@ def screen_career_ending(p: Palette, fresh: SaveData, retired_ship: Ship) -> Non
 def screen_career_finale(p: Palette, world: World) -> str | None:
     selected = next((key for key in CAREER_FINALES if career_finale_blocker(world.save, key) is None), "legend")
     page, result = 0, None
+    charter = world.save.charter  # the next career's: as this one was flown, unless [H] says otherwise
     while True:
-        lines = ([result] if result else []) + career_finale_lines(world.save, selected)
-        key, page, count = _draw_service_page(p, "Career Finale", lines, "[1-4] Choose [S] Retire [<>] Page [B] Back: ", page)
+        lines = ([result] if result else []) + career_finale_lines(world.save, selected, charter)
+        key, page, count = _draw_service_page(p, "Career Finale", lines, "[1-4] Choose [S] Retire [H] Charter [<>] Page [B] Back: ", page)
         if key in ("B", "Q"): return result
+        if key == "H": charter = "standard" if charter == "hard" else "hard"; continue
         if (moved := page_step(key, page, count)) is not None: page = moved; continue
         if key in ("1", "2", "3", "4"): selected, page = list(CAREER_FINALES)[int(key)-1], 0; continue
         if key != "S": continue
         if blocker := career_finale_blocker(world.save, selected): result, page = blocker, 0; continue
         try:
-            fresh = World(finish_career(world.save, selected))
+            fresh = World(finish_career(world.save, selected, charter))
             fresh.checkpoint()
             fresh.save.best_credits = max(fresh.save.best_credits, fresh.save.pilot.credits)
             _encode_career_checkpoint(fresh.save)
@@ -17523,6 +17641,10 @@ def achievement_lines(entries: list[dict], category: str, user_id: int) -> list[
         explanations.append(f"Charted systems out of {GALAXY_SYSTEM_COUNT}; all discoveries count, including surveys and assignments.")
     elif category == "combat":
         explanations.append("Recorded combat victories include patrol ships and each defeated squadron member.")
+    elif category == "hard":
+        lines = [f"Top {plural(len(ranked), 'local career')} flown on a hard charter, by credits. [YOU] marks your pilot."]
+        explanations.append("A hard charter: raiders a tier stronger, no dock work, a doubled tug fee. Chosen with [H] when a "
+                            "career is launched.")
     else:
         explanations.append("Completed career counts include earlier retirements without dossiers; missing details are not reconstructed.")
     if not ranked:
@@ -17545,6 +17667,7 @@ def achievement_lines(entries: list[dict], category: str, user_id: int) -> list[
             state = CAREER_FINALES[record["finale"]]["label"] if record["finale"] else "Current career"
             metric = (f"{record['market_margin']:+,}cr known-cost market margin" if category == "trading" else
                       f"{record['charted']}/{GALAXY_SYSTEM_COUNT} systems charted" if category == "exploration" else
+                      f"{record['credits']:,}cr" if category == "hard" else
                       f"{record['kills']} combat victories")
             lines.append(f"{prefix}, career {record['number']}: {metric}. {state}; seed {record['seed']}; day {record['days']}.")
     return lines + explanations
@@ -17942,7 +18065,7 @@ def departure_terms(world: World, dest_id: int) -> str:
     # The rating alone did not say what it meant for *this* ship (issue #647).
     # Raider tier is the destination's danger give or take one, so the worst one
     # there is what the warning is about.
-    outmatched = dest.discovered and raider_outclasses(world.save.ship, min(4, dest.danger + 1))
+    outmatched = dest.discovered and raider_outclasses(world.save.ship, raider_tier_span(world, dest.danger)[1])
     warning = " Raiders there can outclass this hull." if outmatched else ""
     # The chart's own header carries the count; the question speaks up only when it is the last one.
     last = " Your last jump today." if flight_left(world) == 1 else ""
@@ -18692,7 +18815,7 @@ def derelict_terms(world: World) -> list[str]:
         f"{p.tone(danger_tone(danger))}{danger}/5{RESET}",
         section("OPTIONS"),
         f"{key_label('S', 'Salvage')}: {odds(0.70)} recovers {gain(f'60-{100 + max(0, danger) * 120}cr')}; "
-        f"{harm('30%')} ambush by one tier {span(max(0, danger - 1), min(4, danger + 1))} opponent.",
+        f"{harm('30%')} ambush by one tier {span(*raider_tier_span(world, danger))} opponent.",
         f"{key_label('I', 'Ignore')}: no reward or penalty; continue your journey.",
         section("NOTES"),
         f"{p.slate}Boarding costs no fuel; fuel {ship.fuel}/{fuel_capacity(ship)}. "
@@ -19294,9 +19417,9 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         # show it, but only to a pilot who knows what their hull is worth.
         lines.append(alert("danger", "OUTCLASSED", "two hits can break this hull; it wants your cargo"))
     if ship.hull_hp * 3 <= hull_hp_max(ship):
-        paid = min(pilot.credits, salvage_fee(ship))
+        paid = min(pilot.credits, tug_fee(world))
         lines.append(f"LOW HULL: one third of maximum hull or less. Destruction: {paid}cr salvage fee, all cargo lost, tow to Freeport"
-                     + (f" with hull patched to {salvage_hull(ship, paid, hull_before)}/{hull_hp_max(ship)} (the fee is {salvage_fee(ship)}cr)." if paid < salvage_fee(ship) else "."))
+                     + (f" with hull patched to {salvage_hull(ship, paid, hull_before, tug_fee(world))}/{hull_hp_max(ship)} (the fee is {tug_fee(world)}cr)." if paid < tug_fee(world) else "."))
     lines.append(section("OPTIONS"))
     lines += combat_option_rows(world, pirate, patrol=patrol, tactics=tactics)
     travel = world.save.pending_travel
@@ -19327,7 +19450,7 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                   "  ".join([chip("Fuel", f"{ship.fuel}/{fuel_capacity(ship)}"),
                              chip("Hold", f"{used}/{cargo_capacity(ship)}", tone="value") + f" {p.slate}{lots}{RESET}",
                              chip("day", str(world.save.turn))]),
-                  f"Destruction: {salvage_fee(ship)}cr salvage fee, all cargo lost, tow to Freeport; paying less than the fee leaves the hull "
+                  f"Destruction: {tug_fee(world)}cr salvage fee, all cargo lost, tow to Freeport; paying less than the fee leaves the hull "
                   f"at a quarter of maximum plus the paid share of the rest, never full and never above the hull you brought into the fight; "
                   + (f"this patrol also collects your {notoriety_fine_cost(pilot.notoriety)}cr fine and clears notoriety only once both are paid."
                      if patrol else "notoriety stays."),
@@ -19982,6 +20105,7 @@ def _run_game(info: dict) -> int:
             if callsign is None:
                 return 0
             save.pilot.handle = callsign
+            save.charter = info.get("charter", "standard")
             if outdated:
                 # The refused career keeps its slot until its replacement is
                 # confirmed; a cancelled registration changes nothing (#421).

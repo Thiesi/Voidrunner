@@ -196,6 +196,7 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Hall of Fame, combat", b"H4", "played"),
         ("Hall of Fame, careers", b"H5", "played"),
         ("Hall of Fame, dispatch", b"H6", "played"),
+        ("Hall of Fame, hard charter", b"H7", "played"),
         # Today's order, the pilot's record and the board's flight line.
         ("Daily Dispatch", b"J"),
         # What tomorrow brings and what to settle before logging off.

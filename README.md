@@ -134,6 +134,13 @@ settling first (fuel, hull, hold, contracts, route), each with the key that
 settles it. Leaving the door says how many jumps are left and how many the
 next day holds.
 
+A career can be launched on a **hard charter**: `H` at the launch question
+reads out its terms and asks again. Raiders are a tier stronger, Freeport has
+no dock work, and the salvage tug charges double. It pays nothing extra; hard
+careers have a Hall of Fame table of their own and three achievements. The
+charter is fixed once the career is launched. A pilot who retires chooses the
+charter of the next career on the Career Finale page.
+
 Once a pilot has flown the day's order, that deck row carries **the wire**
 instead: the newest thing another pilot on the board did, such as a promotion,
 a silver or gold achievement, a retirement or a lost ship. Each pilot's last

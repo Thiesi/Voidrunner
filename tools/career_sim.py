@@ -115,7 +115,7 @@ class Pilot:
 
     def __init__(self, vr, kind: str, seed: int, *, dispatch: bool = True, stakes: bool = True, prize: str = "S",
                  jumps_per_day: int = JUMPS_PER_REAL_DAY, factions: bool = False, futures: bool = False,
-                 nerve: int | None = None):
+                 nerve: int | None = None, charter: str = "standard"):
         self.vr, self.kind, self.buy_stakes = vr, kind, stakes
         self.fixed_nerve = nerve    # the most dangerous harbor flown to by choice, whatever the ship; None is by the ship
         self.factions, self.futures = factions, futures
@@ -128,6 +128,8 @@ class Pilot:
         vr.apply_display_style("plain")
         save = vr._new_career("Sim")
         save.seed = seed
+        if charter != "standard" and hasattr(save, "charter"):
+            save.charter = charter  # raiders a tier stronger, no dock work, a doubled tug fee
         self.world = vr.World(save)
         self.world.event_rng.seed(seed)  # a career's luck is its own; here it follows the seed, to fly it again
         if hasattr(self.world, "dispatch_clock"):
@@ -640,7 +642,7 @@ def fly_one(job: tuple) -> dict:
     apply_settings(vr, settings)
     result = Pilot(vr, kind, seed, dispatch=dispatch, stakes=stakes, prize=prize, jumps_per_day=jumps_per_day,
                    factions=bool(ways.get("factions")), futures=bool(ways.get("futures")),
-                   nerve=ways.get("nerve")).fly(days)
+                   nerve=ways.get("nerve"), charter=ways.get("charter") or "standard").fly(days)
     result.update(pilot=kind, seed=seed, jumps_per_day=jumps_per_day)
     return result
 
@@ -732,6 +734,8 @@ def main() -> None:
     parser.add_argument("--nerve", type=int, choices=range(0, 6), metavar="0-5",
                         help="the most dangerous harbor every pilot flies to by choice, whatever its ship: "
                              "2 is a cautious caller, 5 a bold one; left out, a pilot's nerve follows its ship")
+    parser.add_argument("--charter", choices=("standard", "hard"), default="standard",
+                        help="the charter every career is flown on")
     parser.add_argument("--jumps-per-day", type=int, default=JUMPS_PER_REAL_DAY,
                         help="jumps flown in one real day: it turns the dispatch over, and the summary's "
                              "days into real days")
@@ -740,7 +744,8 @@ def main() -> None:
     args = parser.parse_args()
     settings = dict(item.split("=", 1) for item in args.set)
     jobs = [(args.door, kind, 1000 + seed, args.days, settings, not args.no_dispatch, not args.no_stakes, args.prize,
-             args.jumps_per_day, {"factions": args.factions, "futures": args.futures, "nerve": args.nerve})
+             args.jumps_per_day, {"factions": args.factions, "futures": args.futures, "nerve": args.nerve,
+                                  "charter": args.charter})
             for kind in args.pilots for seed in range(args.seeds)]
     if args.jobs > 1:
         with multiprocessing.Pool(args.jobs) as pool:

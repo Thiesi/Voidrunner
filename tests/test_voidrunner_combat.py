@@ -1139,7 +1139,7 @@ def test_title_large_composition_is_unchanged_at_eighty_columns(monkeypatch):
 def test_registration_box_fits_its_width_and_keeps_the_handle(monkeypatch, width, handle):
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
     monkeypatch.setattr(vr, "read_line_raw", lambda max_len=16, allowed=None: "")
-    monkeypatch.setattr(vr, "confirm", lambda prompt, p: False)
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p, **kw: False)
     with contextlib.redirect_stdout(io.StringIO()) as output:
         assert vr.create_career(vr.Palette(False), {"handle": handle}) is None
     rows = _box_rows(output.getvalue())

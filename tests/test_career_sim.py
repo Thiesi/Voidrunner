@@ -237,3 +237,12 @@ def test_a_real_day_is_the_twelve_jumps_a_caller_has(sim):
     """The simulator turns the dispatch over as often as the door lets a caller fly."""
     vr = sim.load_door(DOOR)
     assert sim.JUMPS_PER_REAL_DAY == vr.FLIGHT_PER_DAY == 12
+
+
+def test_a_career_can_be_flown_on_the_hard_charter(sim):
+    """`--charter hard`: the same pilot and seed, with raiders a tier stronger, no dock work and a doubled tug fee."""
+    vr = sim.load_door(DOOR)
+    assert sim.Pilot(vr, "trader", 1005, charter="hard").world.save.charter == "hard"
+    assert sim.Pilot(vr, "trader", 1005).world.save.charter == "standard"
+    hard = sim.fly_one((DOOR, "contractor", 1009, 40, {}, True, True, "S", sim.JUMPS_PER_REAL_DAY, {"charter": "hard"}))
+    assert hard["outcome"] == "flew" and hard["shifts"] == 0  # the foreman has nothing for a hard pilot
