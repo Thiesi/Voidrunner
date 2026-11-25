@@ -231,7 +231,7 @@ def test_the_panel_says_what_it_is_and_how_it_fights(terminal):
 
 def test_a_finished_ship_walks_through_tier_four_and_has_a_fight_with_an_elite(fights):
     sim_vr = fights.load_door()
-    assert set(fights.ships(sim_vr)) == {"starter", "mid", "finished"}
+    assert {"starter", "mid", "finished"} <= set(fights.ships(sim_vr))
     easy = fights.run(sim_vr, "finished", "none", 4, 90)
     assert easy["won"] == easy["fights"] and easy["cost"] < 0.2 * easy["hull"]      # what was wrong
     alone = fights.run(sim_vr, "finished", "none", 5, 120)

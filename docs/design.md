@@ -2024,6 +2024,47 @@ cached careers would otherwise have more jumps to show tomorrow. The suite's
 launched doors run with the allowance on, as a caller's does; a walk that
 needs more than twelve jumps has to set `DOOR_JUMPS=0`.
 
+**Three flagships (review).** A Shuttle became a Freighter or a Cutter, which
+was a real choice, and then either became a Carrier, which undid it: every
+career ended in the same ship. Each line now has a flagship of its own beside
+the Carrier, at the same 45,000cr, so the second refit is a choice too.
+
+    hull       hold   fuel   hull    from
+    Carrier     160     60    260    Freighter or Cutter
+    Argosy      240     50    200    Freighter
+    Frigate      64     72    340    Cutter
+
+The Argosy is a Freighter carried to its end: half as much hold again as a
+Carrier on three quarters of its hull. The Frigate is a Cutter carried to its
+end: a third more hull than a Carrier and little more hold than a Shuttle and
+a half. Nothing follows a flagship. The four hulls there were are what they
+were, and a save needs nothing new: two more hull names are valid.
+
+Each has every picture a hull is drawn in: the pixel sprite every scene, the
+deck and the Viewport fly (`_SCENE_HULLS`), and a large and a compact portrait
+for a terminal without pixels (`PORTRAITS`). A sprite is no wider than the
+Carrier, twenty pixels, because a scene draws a hull at twice its size and
+gives it half an 80-column sky; the first Argosy was twenty-two and a test said
+so. The Argosy is five holds a side on one spine; the Frigate keeps the swept
+fins of the Cutter and gains a gun mount above and below and a third engine.
+
+What they are worth was measured both ways. In staged fights against an elite
+(`tools/fight_sim.py`, 900 each, every module at its top): alone, the Frigate
+wins 78%, the Carrier 53% and the Argosy 27%; with a full crew, 100%, 99% and
+90%. In whole careers (`tools/career_sim.py --flagship line`, 100 a pilot, day
+100) a hauler in an Argosy ends within 4% of one in a Carrier either way, and
+a contractor in a Frigate ends 11% poorer. The hold of the Argosy is more than
+a station has stock to fill, and the hold of the Frigate is too small for
+most deliveries. On these figures alone the Carrier is still the better buy
+for income, the Frigate is bought for the fight, and the Argosy is not worth
+choosing: that is what the trait of each line is for, which is the next
+change and should go in with this one.
+
+`all_hulls`, flying every hull class, now means six and takes three careers;
+a pilot who earned it when there were four keeps it. Sentences that name a
+hull take the article the name takes (`a_or_an`): an Argosy, and, where a rank
+is named, an Independent Trader, which had been wrong before this.
+
 **Elite raiders (review).** The strongest raider was tier 4, and a finished
 ship does not have a fight with tier 4. Staged with the door and flown by
 `tools/fight_sim.py`, a Carrier with every module at its top beats a tier-4

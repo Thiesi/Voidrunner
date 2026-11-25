@@ -1654,6 +1654,13 @@ HULL_CLASSES: dict[str, dict] = {
     "Freighter": {"cargo_base": 100, "fuel_base": 40, "hull_base": 140},
     "Cutter": {"cargo_base": 40, "fuel_base": 50, "hull_base": 180},
     "Carrier": {"cargo_base": 160, "fuel_base": 60, "hull_base": 260},
+    # The two specialised flagships (review): what a line becomes if it stays
+    # what it was. The Argosy is a Freighter carried to its end, half as much
+    # hold again as a Carrier on three quarters of its hull. The Frigate is a
+    # Cutter carried to its end, a third more hull than a Carrier and little
+    # more hold than a Shuttle and a half.
+    "Argosy": {"cargo_base": 240, "fuel_base": 50, "hull_base": 200},
+    "Frigate": {"cargo_base": 64, "fuel_base": 72, "hull_base": 340},
 }
 
 # current hull class -> [(target class, refit cost), ...] refits available
@@ -1664,11 +1671,21 @@ HULL_CLASSES: dict[str, dict] = {
 # into Carrier later, unifying back into one endgame hull. No refit ever
 # goes backward, matching the existing "flagship refit" tone this
 # generalizes (a permanent commissioning, not a reversible choice).
+#
+# Three flagships (review). The Carrier was the only place either line led,
+# so the choice a pilot made at 15,000cr was undone at 45,000cr: every career
+# ended in the same ship. Each line now has a flagship of its own beside it,
+# at the same price, so the second refit is a choice too: the Carrier, which
+# does both things well, or the ship that does one thing better than
+# anything else and the other worse.
+FLAGSHIPS = ("Carrier", "Argosy", "Frigate")
 HULL_REFITS: dict[str, list[tuple[str, int]]] = {
     "Shuttle": [("Freighter", 15_000), ("Cutter", 15_000)],
-    "Freighter": [("Carrier", 45_000)],
-    "Cutter": [("Carrier", 45_000)],
+    "Freighter": [("Carrier", 45_000), ("Argosy", 45_000)],
+    "Cutter": [("Carrier", 45_000), ("Frigate", 45_000)],
     "Carrier": [],
+    "Argosy": [],
+    "Frigate": [],
 }
 
 RANKS = [
@@ -5712,7 +5729,7 @@ def destroy_ship(world: World, *, patrol: bool = False, hull_before: int | None 
     the fight, so seeking destruction is never a free repair."""
     ship = world.save.ship
     lost_cargo = sum(world.save.cargo.values())
-    world.wire("lost", f"lost a {ship.hull_class} to {'a Concord patrol' if patrol else 'raiders'}")
+    world.wire("lost", f"lost {a_or_an(ship.hull_class)} to {'a Concord patrol' if patrol else 'raiders'}")
     for commodity, quantity in list(world.save.cargo.items()):
         _dispose_cargo(world, commodity, quantity)
     fee = tug_fee(world)
@@ -9434,6 +9451,24 @@ _SCENE_HULLS = {
                 "fhddddddddddddddhh..",
                 "..hhhhhhhhhhhhhh....",
                 ".....dddddd........."),
+    # A Freighter carried to its end: five holds a side on one spine and three
+    # engines. No longer than a Carrier, which is as long as a scene has room for.
+    "Argosy": ("..ddd.ddd.ddd.ddd...",
+               ".hhhhhhhhhhhhhhhhh..",
+               "fhlldlldlldlldllhhc.",
+               "fhhhhhhhhhhhhhhhhhhn",
+               "fhddhddhddhddhddhh..",
+               ".hhhhhhhhhhhhhhhhh..",
+               "..ddd.ddd.ddd.ddd..."),
+    # A Cutter grown long: the same swept fins, a gun mount above and below,
+    # and a third engine on the spine.
+    "Frigate": ("ff......dd........",
+                ".ffhhl.hhhh.......",
+                "..hhllllllllllcc..",
+                "fhhhhhhhhhhhhhhhhn",
+                "..dddddddddddddd..",
+                ".ffdd..dddd.......",
+                "ff......dd........"),
 }
 _SCENE_RAIDER = ("rr...........",
                  ".rrk....s....",
@@ -12957,6 +12992,34 @@ PORTRAITS = {
                 " <|==[][][]==|>",
                 "   ==      =="
             ]
+        },
+        "Argosy": {
+            "large": [
+                "    [##] [##] [##] [##] [##]",
+                "  __|__|_|__|_|__|_|__|_|__|___",
+                " /  []     A R G O S Y      []  >",
+                " \\_____   ____________   ______/",
+                "    [====]     [====]    [====]"
+            ],
+            "compact": [
+                "  [#][#][#][#]",
+                " <|==========|>",
+                "   ==  ==  =="
+            ]
+        },
+        "Frigate": {
+            "large": [
+                "             ___/\\___",
+                "      ______/_[]||[]_\\______===>",
+                " <===|____   FRIGATE   ____|====>",
+                "      \\_____  _||_  ________/===>",
+                "            \\_/__\\_/"
+            ],
+            "compact": [
+                "     __/\\__  =>",
+                " <==|_[]|[]_|==>",
+                "     \\_||_/  =>"
+            ]
         }
     },
     "port": {
@@ -16265,16 +16328,21 @@ def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -
         if key!="C":continue
         if world.save.pending_travel is not None:result,page="Finish the current journey first.",0;continue
         if world.save.pilot.credits<cost:result,page=f"Need {cost}cr for the {target_class} refit.",0;continue
-        if not confirm(f"Commission a {target_class}-class refit for {cost}cr? This is a permanent hull upgrade.",p):continue
+        if not confirm(f"Commission {a_or_an(target_class)}-class refit for {cost}cr? This is a permanent hull upgrade.",p):continue
         previous_class=ship.hull_class
         world.save.pilot.credits-=cost;ship.hull_class=target_class;ship.hull_hp=hull_hp_max(ship)
-        world.save.pilot.note(f"Commissioned a {target_class}-class hull refit.")
-        world.save.pilot.highlight(f"Commissioned a {target_class}-class hull refit.")
+        world.save.pilot.note(f"Commissioned {a_or_an(target_class)}-class hull refit.")
+        world.save.pilot.highlight(f"Commissioned {a_or_an(target_class)}-class hull refit.")
         world.commit()
         play_scene(lambda w, h: _RefitScene(w, h, old=previous_class, new=target_class, hull_hp=ship.hull_hp,
                                             seed=_scene_seed(world, "refit")))
-        out_line(f"{p.gold}{BOLD}Your {previous_class} is towed into drydock and emerges a {target_class}.{RESET}")
-        return f"Commissioned a {target_class} hull for {cost}cr."
+        out_line(f"{p.gold}{BOLD}Your {previous_class} is towed into drydock and emerges {a_or_an(target_class)}.{RESET}")
+        return f"Commissioned {a_or_an(target_class)} hull for {cost}cr."
+
+
+def a_or_an(noun: str) -> str:
+    """"a Carrier", "an Argosy": a name with the article it takes."""
+    return f"{'an' if noun[:1].upper() in 'AEIOU' else 'a'} {noun}"
 
 
 def plural(count: int, noun: str) -> str:
@@ -17492,7 +17560,7 @@ def career_ending_lines(fresh: SaveData) -> tuple[list[str], list[str]]:
     details += _sheet_rows([
         ("SPAN", f"{plural(dossier['days'], 'day')}, {show_date(dossier['started']) or 'an unrecorded start'} "
                  f"to {show_date(dossier['ended'])}", None),
-        ("RETIRED", f"a {RANKS[dossier['rank']][1]} in a {dossier['ship']}", None),
+        ("RETIRED", f"{a_or_an(RANKS[dossier['rank']][1])} in {a_or_an(dossier['ship'])}", None),
         ("CREDITS", f"{p.gold}{dossier['credits']:,}cr{p.ink} final; market margin "
                     f"{p.tone('good' if dossier['market_margin'] > 0 else 'danger' if dossier['market_margin'] < 0 else 'info')}"
                     f"{dossier['market_margin']:+,}cr", None),

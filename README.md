@@ -141,6 +141,13 @@ careers have a Hall of Fame table of their own and three achievements. The
 charter is fixed once the career is launched. A pilot who retires chooses the
 charter of the next career on the Career Finale page.
 
+A Shuttle is refitted into a Freighter or a Cutter, and either of those into
+a flagship: the **Carrier**, which either line can become, or the flagship of
+its own line, at the same price. A Freighter can become an **Argosy**, with
+half as much hold again as a Carrier on three quarters of its hull. A Cutter
+can become a **Frigate**, with a third more hull than a Carrier and well under
+half its hold. No refit is ever undone.
+
 The most dangerous space, danger 5, also sends **elite raiders**: a fifth
 tier, flown by a handful of named captains in a pattern of their own, two
 volleys back to back and then a recovery. They fly alone and are met nowhere
