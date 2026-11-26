@@ -71,7 +71,8 @@ DRAINED_PER_UNIT = 8
 SECOND_LEG_WEIGHT = 0.5
 CHECKPOINTS = (10, 20, 40, 60, 80, 100, 150, 200, 300)
 #: What a career works toward, in the order the summary lists them: the day each is first reached.
-MILESTONES = ("Freighter", "Cutter", "Carrier", "fitted", "rank 2", "rank 3", "rank 4", "stake", "all stakes",
+MILESTONES = ("Freighter", "Cutter", "Carrier", "Argosy", "Frigate", "fitted", "rank 2", "rank 3", "rank 4", "stake",
+              "all stakes",
               "Concord", "Blackwake")
 #: A futures order is placed when the season will carry the price up by more than this by the day it is collected.
 FUTURES_WORTH_IT = 0.14
@@ -115,8 +116,9 @@ class Pilot:
 
     def __init__(self, vr, kind: str, seed: int, *, dispatch: bool = True, stakes: bool = True, prize: str = "S",
                  jumps_per_day: int = JUMPS_PER_REAL_DAY, factions: bool = False, futures: bool = False,
-                 nerve: int | None = None, charter: str = "standard"):
+                 nerve: int | None = None, charter: str = "standard", flagship: str = "carrier"):
         self.vr, self.kind, self.buy_stakes = vr, kind, stakes
+        self.flagship = flagship    # "carrier", or "line": the Argosy for a hauler and the Frigate for a fighter
         self.fixed_nerve = nerve    # the most dangerous harbor flown to by choice, whatever the ship; None is by the ship
         self.factions, self.futures = factions, futures
         self.joined = {}            # the day each faction was joined
@@ -270,8 +272,11 @@ class Pilot:
                 tier = getattr(ship, f"{key}_tier")
                 if tier < upgrade["max_tier"] and (key == "cargo" or tier < 1 or ship.hull_class != "Shuttle"):
                     offers.append((0 if key == "cargo" else 1, upgrade["cost"](tier), "upgrade", key))
+            fighter = self.kind == "contractor"
+            wanted = ("Cutter" if fighter else "Freighter",
+                      ("Frigate" if fighter else "Argosy") if self.flagship == "line" else "Carrier")
             for target, cost in vr.HULL_REFITS[ship.hull_class]:
-                if target in ("Carrier", "Cutter" if self.kind == "contractor" else "Freighter"):
+                if target in wanted:
                     offers.append((0, cost, "refit", target))
             for role, info in vr.CREW_ROLES.items():
                 if not getattr(ship, f"has_{role}"):
@@ -642,7 +647,8 @@ def fly_one(job: tuple) -> dict:
     apply_settings(vr, settings)
     result = Pilot(vr, kind, seed, dispatch=dispatch, stakes=stakes, prize=prize, jumps_per_day=jumps_per_day,
                    factions=bool(ways.get("factions")), futures=bool(ways.get("futures")),
-                   nerve=ways.get("nerve"), charter=ways.get("charter") or "standard").fly(days)
+                   nerve=ways.get("nerve"), charter=ways.get("charter") or "standard",
+                   flagship=ways.get("flagship") or "carrier").fly(days)
     result.update(pilot=kind, seed=seed, jumps_per_day=jumps_per_day)
     return result
 
@@ -734,6 +740,9 @@ def main() -> None:
     parser.add_argument("--nerve", type=int, choices=range(0, 6), metavar="0-5",
                         help="the most dangerous harbor every pilot flies to by choice, whatever its ship: "
                              "2 is a cautious caller, 5 a bold one; left out, a pilot's nerve follows its ship")
+    parser.add_argument("--flagship", choices=("carrier", "line"), default="carrier",
+                        help="the flagship a pilot buys: the Carrier, or its own line's (the Argosy for a "
+                             "hauler, the Frigate for a contractor)")
     parser.add_argument("--charter", choices=("standard", "hard"), default="standard",
                         help="the charter every career is flown on")
     parser.add_argument("--jumps-per-day", type=int, default=JUMPS_PER_REAL_DAY,
@@ -745,7 +754,7 @@ def main() -> None:
     settings = dict(item.split("=", 1) for item in args.set)
     jobs = [(args.door, kind, 1000 + seed, args.days, settings, not args.no_dispatch, not args.no_stakes, args.prize,
              args.jumps_per_day, {"factions": args.factions, "futures": args.futures, "nerve": args.nerve,
-                                  "charter": args.charter})
+                                  "charter": args.charter, "flagship": args.flagship})
             for kind in args.pilots for seed in range(args.seeds)]
     if args.jobs > 1:
         with multiprocessing.Pool(args.jobs) as pool:

@@ -49,9 +49,14 @@ def ships(vr) -> dict[str, dict]:
     """The ships fights are flown in: where a career starts, where it is in its
     middle, and a finished one -- the biggest hull with every module at its top."""
     finished = {f"{key}_tier": upgrade["max_tier"] for key, upgrade in vr.UPGRADES.items()}
-    return {"starter": {"hull_class": "Shuttle"},
-            "mid": {"hull_class": "Freighter", "weapon_tier": 2, "shield_tier": 1, "hull_tier": 2},
-            "finished": {"hull_class": "Carrier", **finished}}
+    fleet = {"starter": {"hull_class": "Shuttle"},
+             "mid": {"hull_class": "Freighter", "weapon_tier": 2, "shield_tier": 1, "hull_tier": 2},
+             "finished": {"hull_class": "Carrier", **finished}}
+    # The other flagships, finished the same way, where the door has them.
+    for hull in getattr(vr, "FLAGSHIPS", ()):
+        if hull != "Carrier":
+            fleet[hull.lower()] = {"hull_class": hull, **finished}
+    return fleet
 
 
 def volley_chance(vr, world, pirate, tactics) -> float:
@@ -139,7 +144,8 @@ def main() -> int:
     parser.add_argument("--door", type=pathlib.Path, default=DOOR)
     parser.add_argument("--fights", type=int, default=600, help="fights flown for each row")
     parser.add_argument("--tiers", type=int, nargs="+", default=[3, 4, 5])
-    parser.add_argument("--ships", nargs="+", default=["starter", "mid", "finished"])
+    parser.add_argument("--ships", nargs="+", default=["starter", "mid", "finished"],
+                        help="starter, mid, finished (a Carrier), argosy, frigate")
     parser.add_argument("--crews", nargs="+", default=["none", "all"], choices=list(CREWS))
     parser.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
                         help="override one of the door's figures for this run, e.g. ELITE_HULL=30")

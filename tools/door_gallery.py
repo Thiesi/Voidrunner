@@ -212,6 +212,13 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Viewport", b"V"),
         ("Viewport, atlas", b"VN", "played"),
         ("Viewport, ship", b"V1"),
+        # The two specialised flagships, on the deck and in the glass, and the
+        # yard of the Freighter that can become one of them.
+        ("Engineering Yard, two flagships", b"Y", "freighter"),
+        ("Command Deck, Argosy", b"OB", "argosy"),
+        ("Viewport, Argosy", b"V1", "argosy"),
+        ("Command Deck, Frigate", b"OB", "frigate"),
+        ("Viewport, Frigate", b"V1", "frigate"),
         ("Viewport, discovery", b"V3"),
         ("Display Options", b"O"),
         ("Contacts", b"N"),
@@ -929,7 +936,30 @@ def build_voidrunner_retiring(door_name: str, door: pathlib.Path, state: pathlib
         save.write_text(json.dumps(data), encoding="utf-8")
 
 
+def build_voidrunner_hull(hull: str):
+    """A new career whose ship is `hull`, for the panels a hull is drawn on.
+
+    A refit costs 15,000 credits and a flagship 45,000 more, which play inside a
+    build does not reach. As with `retiring`, the career is the door's own and
+    one thing in its save is raised: the ship's class, with the hull and the
+    tank that class starts with."""
+    def build(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
+        _onboard(door_name, door, state)
+        game = load_door(door)
+        for save in (state / "saves").glob("*.json"):
+            if ".previous" in save.name or "recovery" in save.name or save.parent.name == "scores":
+                continue
+            data = json.loads(save.read_text(encoding="utf-8"))
+            data["ship"].update(hull_class=hull, hull_hp=game.HULL_CLASSES[hull]["hull_base"],
+                                fuel=game.HULL_CLASSES[hull]["fuel_base"])
+            save.write_text(json.dumps(data), encoding="utf-8")
+    return build
+
+
 FIXTURE_BUILDERS = {
+    ("voidrunner", "freighter"): build_voidrunner_hull("Freighter"),
+    ("voidrunner", "argosy"): build_voidrunner_hull("Argosy"),
+    ("voidrunner", "frigate"): build_voidrunner_hull("Frigate"),
     ("voidrunner", "outclassed"): build_voidrunner_outclassed,
     ("voidrunner", "combat"): build_voidrunner_combat,
     ("voidrunner", "played"): build_voidrunner_played,

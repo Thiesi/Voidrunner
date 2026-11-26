@@ -1069,9 +1069,9 @@ def test_hull_refits_branch_from_shuttle_into_freighter_or_cutter():
     assert targets == {"Freighter", "Cutter"}
 
 
-def test_hull_refits_from_freighter_or_cutter_only_offer_carrier():
-    assert [target for target, _cost in vr.HULL_REFITS["Freighter"]] == ["Carrier"]
-    assert [target for target, _cost in vr.HULL_REFITS["Cutter"]] == ["Carrier"]
+def test_hull_refits_from_freighter_or_cutter_offer_the_carrier_and_the_lines_own_flagship():
+    assert [target for target, _cost in vr.HULL_REFITS["Freighter"]] == ["Carrier", "Argosy"]
+    assert [target for target, _cost in vr.HULL_REFITS["Cutter"]] == ["Carrier", "Frigate"]
 
 
 def test_carrier_has_no_further_refits():
@@ -2072,9 +2072,9 @@ def test_ship_portrait_damage_matches_real_hull_without_changing_ship(monkeypatc
 def test_every_portrait_has_distinct_complete_bounded_composition(monkeypatch, terminal,width,height,style):
     terminal(width, height, style)
     portraits=[art for category in vr.PORTRAITS.values() for art in category.values()]
-    assert len(portraits)==13
+    assert len(portraits)==15  # thirteen, and the two flagships
     for layout in ("large","compact"):
-        assert len({tuple(art[layout]) for art in portraits})==13
+        assert len({tuple(art[layout]) for art in portraits})==15
         assert all(row.isascii() and len(row)<=(38 if layout=="large" else 18) for art in portraits for row in art[layout])
     for art in portraits:
         details=["Real station information follows the complete portrait.", "Fuel 7/24; cargo 3/24 used."]
