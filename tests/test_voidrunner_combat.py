@@ -711,6 +711,7 @@ def test_preexisting_bounty_target_has_no_new_controls_or_undisclosed_penalty(mo
     assert world.save.pilot.missions_completed == 1
 
 
+@pytest.mark.usefixtures("plain_sectors")
 @pytest.mark.parametrize("danger", range(6))
 @pytest.mark.parametrize("ambush", [False, True])
 def test_derelict_reward_and_opponent_match_destination_terms(monkeypatch, danger, ambush):
@@ -1301,6 +1302,7 @@ def test_a_cautious_starter_shuttle_usually_survives_the_raider_that_used_to_kil
     assert old < 0.55 < 0.85 < new, (old, new)
 
 
+@pytest.mark.usefixtures("plain_sectors")
 def test_the_departure_prompt_warns_a_hull_that_can_be_outclassed_and_only_that_hull():
     world = _world_with_seed(42)
     dest = world.by_id[sorted(world.here.connections)[0]]

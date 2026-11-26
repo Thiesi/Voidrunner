@@ -2021,6 +2021,7 @@ def _world_at_faction_customs_phase(phase):
     return world, destination
 
 
+@pytest.mark.usefixtures("plain_sectors")
 @pytest.mark.parametrize("standing", [-51, -50, -49, 75])
 def test_faction_customs_suspension_changes_real_inspection_dispatch(monkeypatch, tmp_path, standing):
     import copy
@@ -2240,6 +2241,7 @@ def test_faction_case_checkpoint_failure_prevents_acknowledgement(monkeypatch, s
     with contextlib.redirect_stdout(output), pytest.raises(vr.SaveError): vr.screen_faction_story(vr.Palette(False), world, vr.FACTION_CONCORD)
 
 
+@pytest.mark.usefixtures("plain_sectors")
 @pytest.mark.parametrize("faction", vr.FACTIONS)
 @pytest.mark.parametrize("choice", ["hardline", "aid"])
 def test_faction_case_real_route_completes_both_legs_with_ordinary_costs(monkeypatch, tmp_path, faction, choice):

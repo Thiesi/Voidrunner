@@ -68,7 +68,8 @@ def test_a_trait_moves_both_sides_of_the_counter_and_only_its_own_good(kind):
     assert vr.sell_price_for(world, system.id, commodity) == round(round(base * vr.TRAIT_PRICE[kind]) * vr.SELL_SPREAD)
     plain_twin = next(s for s in world.galaxy if s.economy == system.economy and s.id not in world.traits)
     for other in vr.LEGAL_COMMODITIES:
-        if other != commodity:
+        # The twin may be in another sector: where a sector's own rule moves a good, that is not the trait's doing.
+        if other != commodity and vr.sector_price_factor(system, other) == vr.sector_price_factor(plain_twin, other):
             assert vr.price_for(world, system.id, other) == vr.price_for(world, plain_twin.id, other)
     assert (vr.price_for(world, system.id, commodity) < base) == (kind == "surplus")
 

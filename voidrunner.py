@@ -3179,6 +3179,108 @@ def sector_for(system: GalaxySystem) -> str:
     return SECTOR_NAMES[row * SECTOR_COLS + col]
 
 
+# A rule for each sector (review). A sector was a name, a filter on the star
+# map, a season and, since the sector stories, something its docks say about
+# themselves. Nothing was different about flying in one. Each now has one rule
+# of its own, taken from its story, that changes what is worth doing there:
+#
+#   Auroral Span     the lights turn before a season does: seasons swing
+#                    twice as far.
+#   Farrider's Edge  as far as the names go: a survey into the sector pays
+#                    double, and its yards, a long way from their suppliers,
+#                    charge half as much again for repairs.
+#   Hollow Reach     mined hollow and lived in: its yards repair at half
+#                    price, and raw ore and refined metals are always in glut.
+#   Coreward Verge   still keeping the core's hours: raiders are half as
+#                    common, customs twice as strict, and a contract finished
+#                    there earns one more Concord standing.
+#   The Long Dark    the lamp: every jump into the sector burns one more fuel,
+#                    and every dock there tops the tank up by a jump's worth.
+#   Outer Fringe     nobody's: no customs anywhere, and raiders a tier stronger.
+#
+# A rule is the sector's and not a station's, so it is learned once: the docks
+# say it with the first part of the sector's story, the sector file keeps it,
+# and wherever it moves a figure the page that shows the figure says why.
+# Nothing is saved for it: a system's position gives its sector.
+SECTOR_RULES: dict[str, tuple[str, str]] = {
+    "Coreward Verge": ("Patrolled", "Raiders are half as common here, customs twice as strict, and a contract finished "
+                                    "here earns one more Concord standing."),
+    "Auroral Span": ("Restless seasons", "Seasons swing twice as far here."),
+    "Farrider's Edge": ("Far out", "A survey into this sector pays double, and its yards charge half as much again "
+                                   "for repairs."),
+    "Hollow Reach": ("Old workings", "Yards here repair at half price, and raw ore and refined metals are always in glut."),
+    "The Long Dark": ("The lamp", "Every jump into this sector burns one more fuel, and every dock here tops the tank up "
+                                  "by a jump's worth, free."),
+    "Outer Fringe": ("Lawless", "No customs anywhere in this sector, and its raiders are a tier stronger."),
+}
+SPAN_SEASON_SWING = 2             # times the swing a season has elsewhere
+EDGE_SURVEY_PAY = 2               # times a survey's reward
+EDGE_REPAIR_PERCENT = 150         # of the yard's price for a hull point
+REACH_REPAIR_PERCENT = 50
+REACH_GLUT = ("ore", "metals")    # always in glut at every station of the Reach
+REACH_GLUT_PRICE = 0.7            # what a standing glut does to a price anywhere
+VERGE_RAIDERS = 2                 # one raider in this many that would have come does
+VERGE_CUSTOMS = 2                 # times the chance of an inspection
+VERGE_STANDING = 1                # more Concord standing for a contract finished there
+DARK_FUEL = 1                     # more fuel for a jump into the sector
+FRINGE_RAIDER_TIERS = 1           # added to a raider's tier, up to the top one a system rolls
+
+
+def sector_raider_tiers(system: "GalaxySystem | None") -> int:
+    """Tiers a sector adds to the raiders its systems send."""
+    return FRINGE_RAIDER_TIERS if system is not None and sector_for(system) == "Outer Fringe" else 0
+
+
+def encounter_kinds(system: "GalaxySystem") -> tuple[list[str], list[float]]:
+    """What a jump's encounter may be, and how likely each is, at this
+    destination. In the Verge half the raiders never come: the same one draw
+    decides it, so the event sequence is the length it always was."""
+    kinds, weights = list(TRAVEL_ENCOUNTER_WEIGHTS), [float(weight) for weight in TRAVEL_ENCOUNTER_WEIGHTS.values()]
+    if sector_for(system) == "Coreward Verge":
+        kept = weights[kinds.index("pirate")] / VERGE_RAIDERS
+        weights[kinds.index("pirate")] = kept
+        kinds.append("none")
+        weights.append(TRAVEL_ENCOUNTER_WEIGHTS["pirate"] - kept)
+    return kinds, weights
+
+
+def lamp_top_up(world: "World") -> list[str]:
+    """The Long Dark's lamp: a dock there puts a jump's worth of fuel in the
+    tank, free, as far as the tank has room. Returns the line that says so."""
+    here, ship = world.here, world.save.ship
+    if sector_for(here) != "The Long Dark" or not here.connections:
+        return []
+    worth = min(fuel_cost_for_jump(here, world.by_id[sid], ship) for sid in here.connections)
+    given = min(worth, fuel_capacity(ship) - ship.fuel)
+    if given <= 0:
+        return []
+    ship.fuel += given
+    return [f"The Long Dark keeps its lamp lit: {plural(given, 'unit')} of fuel on the dock, no charge."]
+
+
+def sector_rule_line(sector: str) -> str | None:
+    """`Hollow Reach, old workings: Yards here repair at half price...`, or None."""
+    if sector not in SECTOR_RULES:
+        return None
+    name, text = SECTOR_RULES[sector]
+    return f"{sector}, {name.lower()}: {text}"
+
+
+def sector_season_swing(sector: str) -> float:
+    """How far a season swings a price in this sector, either way."""
+    return SEASON_SWING * (SPAN_SEASON_SWING if sector == "Auroral Span" else 1)
+
+
+def sector_price_factor(system: GalaxySystem, commodity: str) -> float:
+    """What a sector's own rule does to a good's price at every one of its stations."""
+    return REACH_GLUT_PRICE if sector_for(system) == "Hollow Reach" and commodity in REACH_GLUT else 1.0
+
+
+def sector_repair_percent(system: GalaxySystem) -> int:
+    """What a yard in this sector charges for a hull point, against the usual price."""
+    return {"Hollow Reach": REACH_REPAIR_PERCENT, "Farrider's Edge": EDGE_REPAIR_PERCENT}.get(sector_for(system), 100)
+
+
 # Sector stories (review). A sector was a name on the star map and a filter on
 # it: six of them, and nothing about any one that was not true of the rest.
 # Each now has a story its docks tell about themselves, in three parts, written
@@ -3258,6 +3360,8 @@ def sector_tale(world: World) -> list[str]:
         return []
     save.tales[sector] = told + 1
     lines = [f"{sector}, {SECTOR_NUMERALS[told]}: {SECTOR_STORIES[sector][1][told]}"]
+    if told == 0 and (rule := sector_rule_line(sector)) is not None:
+        lines.append(rule)  # with the first part of its story: what is different about flying here
     if told + 1 == len(SECTOR_STORY_AT):
         bump_accolade(save, "sector_tales")
         save.pilot.highlight(f"Heard the whole story of {sector}.")
@@ -3291,6 +3395,9 @@ def sector_file_lines(world: World) -> list[str]:
             continue
         character, parts = SECTOR_STORIES[sector]
         lines.append(f"{p.hull}{character}{RESET}")
+        if sector in SECTOR_RULES:
+            name, text = SECTOR_RULES[sector]
+            lines.append(f"{p.gold}{name}.{RESET} {p.ink}{text}{RESET}")
         lines += [f"{SECTOR_NUMERALS[index]}. {parts[index]}" for index in range(told)]
         if not whole:
             more = sector_story_marks(world, sector)[told] - docked
@@ -3387,12 +3494,14 @@ REPAIR_COST_PER_HP = 4
 FUEL_PRICE = 6
 
 
-def repair_cost_per_hp(ship: Ship) -> int:
-    """Yard repair price per hull point; an engineer aboard cuts it by their service level.
+def repair_cost_per_hp(ship: Ship, system: "GalaxySystem | None" = None) -> int:
+    """Yard repair price per hull point; an engineer aboard cuts it by their
+    service level, and the yard's sector may halve it or raise it by half.
 
     Fuel savings alone were worth well under a credit per jump because most
     adjacent jumps cost one unit (issue #409); repairs are where the role pays."""
-    return REPAIR_COST_PER_HP - (1 + crew_level(ship, "engineer") // 2 if ship.has_engineer else 0)
+    price = REPAIR_COST_PER_HP - (1 + crew_level(ship, "engineer") // 2 if ship.has_engineer else 0)
+    return price if system is None else max(1, price * sector_repair_percent(system) // 100)
 
 
 def navigator_bonus(ship: Ship) -> int:
@@ -3406,10 +3515,12 @@ def crew_effect(role: str, level: int) -> str:
 
 
 def fuel_cost_for_jump(a: GalaxySystem, b: GalaxySystem, ship: Ship | None = None) -> int:
+    """Fuel a jump from `a` to `b` burns: by distance, less an engineer's
+    share, and one more into the Long Dark, which no engineer saves."""
     cost = max(1, round(_distance(a, b) / 6))
     if ship is not None and ship.has_engineer:
         cost = max(1, cost - (cost * engineer_discount(ship) + 99) // 100)
-    return cost
+    return cost + (DARK_FUEL if sector_for(b) == "The Long Dark" else 0)
 
 
 def bfs_path(by_id: dict[int, GalaxySystem], start_id: int, dest_id: int) -> list[int]:
@@ -3493,6 +3604,13 @@ def hazard_price_factor(system: GalaxySystem, commodity: str) -> float:
 def hazard_pay(world: World, target_system: int, reward: int) -> int:
     """A contract's reward with the hazard pay its destination carries."""
     return reward * (100 + HAZARD_PAY.get(world.by_id[target_system].danger, 0)) // 100
+
+
+def sector_pay(world: World, mission: "Mission") -> int:
+    """A contract's reward with what its destination's sector adds: a survey
+    into Farrider's Edge pays double."""
+    doubled = mission.kind == "scan" and sector_for(world.by_id[mission.target_system]) == "Farrider's Edge"
+    return mission.reward * (EDGE_SURVEY_PAY if doubled else 1)
 
 
 def system_traits(seed: int, galaxy: list[GalaxySystem]) -> dict[int, dict]:
@@ -3629,9 +3747,10 @@ def season_factor(world: World, system_id: int, commodity: str, day: int | None 
     """What the season does to a good's price at a station on `day` (today)."""
     if not SEASON_SWING or not COMMODITIES[commodity]["legal"]:
         return 1.0
-    period, sign = _season_of(world.save.seed, sector_for(world.by_id[system_id]), commodity)
+    sector = sector_for(world.by_id[system_id])
+    period, sign = _season_of(world.save.seed, sector, commodity)
     day = world.save.turn if day is None else day
-    return 1.0 + SEASON_SWING * sign * math.sin(2 * math.pi * day / period)
+    return 1.0 + sector_season_swing(sector) * sign * math.sin(2 * math.pi * day / period)
 
 
 def season_trend(world: World, system_id: int, commodity: str) -> tuple[bool, int] | None:
@@ -3675,6 +3794,7 @@ def _quote(world: World, system_id: int, commodity: str, *, selling: bool) -> in
         mult *= TRAIT_PRICE[trait["kind"]]
     mult *= season_factor(world, system_id, commodity)
     mult *= hazard_price_factor(system, commodity)
+    mult *= sector_price_factor(system, commodity)
     drift = world.save.market_drift.get(system_id, {}).get(commodity, 1.0)
     rest = _market_rest(world, system_id, commodity)
     drift = min(drift, rest) if selling else max(drift, rest)
@@ -3712,6 +3832,9 @@ def price_reasons(world: World, system_id: int, commodity: str) -> list[tuple[st
     hazard = hazard_price_factor(system, commodity)
     if hazard != 1.0:
         reasons.append(("dangerous space", hazard))
+    workings = sector_price_factor(system, commodity)
+    if workings != 1.0:
+        reasons.append((f"{sector_for(system)}'s old workings", workings))
     drift = max(world.save.market_drift.get(system_id, {}).get(commodity, 1.0), _market_rest(world, system_id, commodity))
     if round(drift, 3) != 1.0:
         reasons.append(("your own buying", drift))
@@ -4273,6 +4396,7 @@ def post_chain_legs(world: World, board: dict) -> None:
         if offer is None:
             continue
         offer.reward = hazard_pay(world, offer.target_system, offer.reward)
+        offer.reward = sector_pay(world, offer)
         ordinary = [item for item in board["offers"] if chain_leg(Mission.from_dict(item)) == 1]
         if len(board["offers"]) >= 4 and ordinary:
             board["offers"].remove(ordinary[-1])
@@ -4355,11 +4479,13 @@ def generate_mission_board(world: World) -> list[Mission]:
             mission = _generate_mission(world, kind, hops, rng=rng)
             if mission is not None:
                 mission.reward = hazard_pay(world, mission.target_system, mission.reward)
+                mission.reward = sector_pay(world, mission)
                 offers.append(mission.to_dict())
                 world.save.next_mission_id += 1
         special = faction_offer(world, sid)
         if special is not None:
             special.reward = hazard_pay(world, special.target_system, special.reward)
+            special.reward = sector_pay(world, special)
             del offers[3:]  # a full board gives up its last place
             offers.append(special.to_dict())
             world.save.next_mission_id += 1
@@ -4584,10 +4710,13 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
             world.save.pilot.credits += paid
             # A cartel run is the Cartel's work: its standing, and none with Concord.
             cartel = faction_contract(m) == FACTION_BLACKWAKE
+            # The Verge is Concord's own ground: its work finished there counts for one more.
+            concord = CONCORD_STANDING_PER_CONTRACT + (
+                VERGE_STANDING if sector_for(world.by_id[m.target_system]) == "Coreward Verge" else 0)
             standing = (f"+{FACTION_CONTRACT_STANDING} Blackwake standing" if cartel
-                        else f"+{CONCORD_STANDING_PER_CONTRACT} Concord standing")
+                        else f"+{concord} Concord standing")
             adjust_reputation(world, FACTION_BLACKWAKE if cartel else FACTION_CONCORD,
-                              FACTION_CONTRACT_STANDING if cartel else CONCORD_STANDING_PER_CONTRACT)
+                              FACTION_CONTRACT_STANDING if cartel else concord)
             if m.opening_assignment:
                 world.save.flags["opening_assignment_completed"] = True
             if world.save.pilot.missions_completed == 0:
@@ -4633,14 +4762,17 @@ def raider_hull(tier: int) -> int:
     return 20 + tier * 15 + (ELITE_HULL if tier >= ELITE_TIER else 0)
 
 
-def generate_pirate(world: World, tier: int | None = None, *, danger: int | None = None, alone: bool = True) -> Pirate:
+def generate_pirate(world: World, tier: int | None = None, *, danger: int | None = None, alone: bool = True,
+                    system: "GalaxySystem | None" = None) -> Pirate:
     """A raider for a system of this danger; `tier` fixes its tier, as a bounty
     does. A lone raider met by chance in the most dangerous space may be an
     elite: that is one more draw, taken only there, so every other encounter
-    is on the random sequence it always had."""
+    is on the random sequence it always had. `system` is where it is met, for
+    the sector that sends stronger raiders."""
     rng = world.event_rng
     danger = world.here.danger if danger is None else danger
-    t = tier if tier is not None else harder_tier(world, max(0, min(4, danger + rng.randint(-1, 1))))
+    t = tier if tier is not None else min(4, harder_tier(world, max(0, min(4, danger + rng.randint(-1, 1))))
+                                          + sector_raider_tiers(system))
     names = PIRATE_NAMES
     if tier is None and alone and danger >= ELITE_DANGER and rng.random() < ELITE_CHANCE:
         t, names = ELITE_TIER, ELITE_NAMES
@@ -4901,8 +5033,8 @@ def generate_pirate_squadron(world: World, dest: GalaxySystem) -> list[Pirate]:
     stored opponents retain their stats; ships fight sequentially without healing.
     """
     if dest.danger >= SQUADRON_MIN_DANGER and world.event_rng.random() < SQUADRON_CHANCE:
-        return [generate_pirate(world, danger=dest.danger, alone=False) for _ in range(SQUADRON_SIZE)]
-    return [generate_pirate(world, danger=dest.danger)]
+        return [generate_pirate(world, danger=dest.danger, alone=False, system=dest) for _ in range(SQUADRON_SIZE)]
+    return [generate_pirate(world, danger=dest.danger, system=dest)]
 
 
 def generate_concord_patrol(world: World) -> Pirate:
@@ -5751,10 +5883,12 @@ def harder_tier(world: "World", tier: int) -> int:
     return min(4, tier + HARD_RAIDER_TIERS) if is_hard(world.save) else tier
 
 
-def raider_tier_span(world: "World", danger: int) -> tuple[int, int]:
-    """The weakest and the strongest raider a system of this danger sends this pilot."""
-    worst = ELITE_TIER if danger >= ELITE_DANGER else harder_tier(world, max(0, min(4, danger + 1)))
-    return harder_tier(world, max(0, min(4, danger - 1))), worst
+def raider_tier_span(world: "World", danger: int, system: "GalaxySystem | None" = None) -> tuple[int, int]:
+    """The weakest and the strongest raider a system of this danger sends this
+    pilot; `system` says which system, for the sector that sends stronger ones."""
+    more = sector_raider_tiers(system)
+    worst = ELITE_TIER if danger >= ELITE_DANGER else min(4, harder_tier(world, max(0, min(4, danger + 1))) + more)
+    return min(4, harder_tier(world, max(0, min(4, danger - 1))) + more), worst
 
 
 def tug_fee(world: "World") -> int:
@@ -5838,7 +5972,11 @@ def destroy_ship(world: World, *, patrol: bool = False, hull_before: int | None 
 
 
 def customs_check_chance(system: GalaxySystem) -> float:
-    return max(0.0, 0.15 + (5 - system.danger) * 0.03)
+    """How likely contraband is inspected on arrival: likelier in safer space,
+    never in the Fringe, and twice as likely in the Verge."""
+    chance = max(0.0, 0.15 + (5 - system.danger) * 0.03)
+    sector = sector_for(system)
+    return 0.0 if sector == "Outer Fringe" else min(0.95, chance * VERGE_CUSTOMS) if sector == "Coreward Verge" else chance
 
 
 def customs_risk_for(world: World, system: GalaxySystem) -> float:
@@ -15311,7 +15449,10 @@ def shipyard_lines(world: World) -> list[str]:
     cells = _gauge_cells()
     lines = [f"{p.hull}{BOLD}{world.here.station_name.upper()}{RESET}  "
              + "  ".join([chip("refuel", f"{FUEL_PRICE}cr/unit"),
-                          chip("repair", f"{repair_cost_per_hp(ship)}cr/HP")])
+                          chip("repair", f"{repair_cost_per_hp(ship, world.here)}cr/HP")])
+             + ("" if sector_repair_percent(world.here) == 100 else
+                f"  {p.slate}{sector_for(world.here)}: repairs at "
+                f"{'half price' if sector_repair_percent(world.here) < 100 else 'half as much again'}{RESET}")
              + (f"  {p.mint}{crew_name(world, 'engineer')} discounts repairs{RESET}" if ship.has_engineer else "")]
     lines.append(section("SHIP"))
     lines += beside(table(["", "", "", ""], [
@@ -16378,7 +16519,7 @@ def _repair(p: Palette, world: World) -> str | None:
     missing = hull_hp_max(ship) - ship.hull_hp
     if missing <= 0:
         return set_status("Hull is already at full integrity.", "info")
-    unit = repair_cost_per_hp(ship)
+    unit = repair_cost_per_hp(ship, world.here)
     cost = missing * unit
     if world.save.pilot.credits < cost:
         affordable_hp = world.save.pilot.credits // unit
@@ -16762,6 +16903,10 @@ def mission_details(world: World, mission: Mission) -> list[str]:
     if target.discovered:
         if target.danger in HAZARD_PAY:
             checks.append(("HAZARD", f"+{HAZARD_PAY[target.danger]}% hazard pay, in the payout", "good"))
+    if mission.kind == "scan" and sector_for(target) == "Farrider's Edge":
+        # Said whether or not the bearing is charted: the sector is known from the map.
+        checks.append(("SECTOR", "Farrider's Edge: a survey pays double, in the payout", "good"))
+    if target.discovered:
         checks.append(("DANGER", f"danger {target.danger}",
                        {"good": "good", "caution": "info", "danger": "bad"}[danger_tone(target.danger)]))
     else:
@@ -16984,8 +17129,8 @@ def guide_reference_lines(world: World) -> list[str]:
         "there, and a contract that ends there carries hazard pay. Danger 5 also sends elite raiders: tier 5, two "
         "volleys running, then a recovery.",
         "[V] Viewport is the atlas: every system you have charted, and what you know of each.",
-        "Every sector's docks tell its story in three parts, as you dock at more of its stations. The whole story "
-        "marks that sector's markets on your chart. [N] Contacts, [A] Archive, [F] Files keeps what you have heard.",
+        "Every sector has one rule of its own and a story in three parts, told as you dock at more of its stations. "
+        "The whole story marks that sector's markets on your chart. [N] Contacts, [A] Archive, [F] Files keeps both.",
         section("FIGHTING"),
         "A raider shows the move it is set up for. From tier 2 it may jump its pattern; the panel says how likely. A "
         "scanner reads it better. Evasion can fail, and a bribe can be refused.",
@@ -18278,7 +18423,7 @@ def departure_terms(world: World, dest_id: int) -> str:
     # The rating alone did not say what it meant for *this* ship (issue #647).
     # Raider tier is the destination's danger give or take one, so the worst one
     # there is what the warning is about.
-    outmatched = dest.discovered and raider_outclasses(world.save.ship, raider_tier_span(world, dest.danger)[1])
+    outmatched = dest.discovered and raider_outclasses(world.save.ship, raider_tier_span(world, dest.danger, dest)[1])
     warning = " Raiders there can outclass this hull." if outmatched else ""
     # The chart's own header carries the count; the question speaks up only when it is the last one.
     last = " Your last jump today." if flight_left(world) == 1 else ""
@@ -18944,9 +19089,8 @@ def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySyste
     if "kind" not in state:
         kind = "none"
         if world.event_rng.random() < 0.08 + dest.danger * 0.05:
-            kind = world.event_rng.choices(
-                list(TRAVEL_ENCOUNTER_WEIGHTS), weights=list(TRAVEL_ENCOUNTER_WEIGHTS.values())
-            )[0]
+            kinds, weights = encounter_kinds(dest)
+            kind = world.event_rng.choices(kinds, weights=weights)[0]
         state["kind"] = kind
         if kind == "pirate":
             state["pirates"] = [dataclasses.asdict(ship) for ship in generate_pirate_squadron(world, dest)]
@@ -18998,9 +19142,14 @@ def _resolve_random_travel_encounter(p: Palette, world: World, dest: GalaxySyste
         _encounter_result(p, world, state, [])
 
 
-def encounter_danger(world: World) -> int:
+def encounter_system(world: World) -> GalaxySystem:
+    """The system an encounter on this jump belongs to: where the jump ends."""
     travel = world.save.pending_travel
-    return world.by_id[travel["destination"]].danger if travel is not None else world.here.danger
+    return world.by_id[travel["destination"]] if travel is not None else world.here
+
+
+def encounter_danger(world: World) -> int:
+    return encounter_system(world).danger
 
 
 def exploration_choice(p: Palette, world: World, title: str, lines: list[str], actions: str) -> str:
@@ -19028,7 +19177,7 @@ def derelict_terms(world: World) -> list[str]:
         f"{p.tone(danger_tone(danger))}{danger}/5{RESET}",
         section("OPTIONS"),
         f"{key_label('S', 'Salvage')}: {odds(0.70)} recovers {gain(f'60-{100 + max(0, danger) * 120}cr')}; "
-        f"{harm('30%')} ambush by one tier {span(*raider_tier_span(world, danger))} opponent.",
+        f"{harm('30%')} ambush by one tier {span(*raider_tier_span(world, danger, encounter_system(world)))} opponent.",
         f"{key_label('I', 'Ignore')}: no reward or penalty; continue your journey.",
         section("NOTES"),
         f"{p.slate}Boarding costs no fuel; fuel {ship.fuel}/{fuel_capacity(ship)}. "
@@ -19071,7 +19220,8 @@ def _encounter_derelict(p: Palette, world: World) -> None:
             _encounter_result(p, world, state, [f"Salvage recovered: {reward}cr."], scene=lambda w, h: _SalvageScene(
                 w, h, hull=world.save.ship.hull_class, credits=reward, site=None, seed=_scene_seed(world, "salvage")))
             return
-        state["ambush"] = dataclasses.asdict(generate_pirate(world, danger=encounter_danger(world)))
+        state["ambush"] = dataclasses.asdict(generate_pirate(world, danger=encounter_danger(world),
+                                                             system=encounter_system(world)))
         world.commit()
     out_line(f"{p.wrong}The wreck's defenses weren't as dead as they looked!{RESET}")
     screen_combat(p, world, Pirate(**state["ambush"]))
@@ -19392,6 +19542,7 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
             if rumour:
                 lines.append(rumour)
             lines += sector_tale(world)
+            lines += lamp_top_up(world)
             if has_contraband(world) and dest.economy != "Haven":
                 chance = customs_risk_for(world, dest)
                 inspect = world.event_rng.random() < chance

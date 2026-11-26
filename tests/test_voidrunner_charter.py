@@ -52,6 +52,7 @@ def test_a_raider_is_a_tier_stronger_and_the_luck_is_the_same():
     assert vr.generate_pirate(_hard(), 2).tier == 2
 
 
+@pytest.mark.usefixtures("plain_sectors")
 def test_the_chart_and_the_hulk_speak_of_the_raiders_this_pilot_will_meet():
     standard, hard = _world_with_seed(42), _hard()
     assert [vr.raider_tier_span(standard, danger) for danger in range(6)] == [(0, 1), (0, 2), (1, 3), (2, 4), (3, 4), (4, 5)]

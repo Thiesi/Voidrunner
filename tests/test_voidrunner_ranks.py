@@ -120,8 +120,10 @@ def test_every_offer_on_a_board_is_priced_by_the_named_figures():
             away = hops[mission.target_system]
 
             def paid(figure: int) -> int:
-                """The named figure, with the hazard pay a dangerous destination carries on top."""
-                return vr.hazard_pay(world, mission.target_system, figure)
+                """The named figure, with the hazard pay a dangerous destination carries on top
+                and what its sector adds: a survey into Farrider's Edge pays double."""
+                edge = mission.kind == "scan" and vr.sector_for(world.by_id[mission.target_system]) == "Farrider's Edge"
+                return vr.hazard_pay(world, mission.target_system, figure) * (vr.EDGE_SURVEY_PAY if edge else 1)
 
             if mission.kind == "scan":
                 assert mission.reward == paid(vr.SURVEY_PAY[0] + away * vr.SURVEY_PAY[1])

@@ -231,7 +231,7 @@ def test_random_encounter_uses_destination_threat_before_arrival(monkeypatch):
     captured_tiers = []
     real_generate_pirate = vr.generate_pirate
 
-    def spy_generate_pirate(w, tier=None, *, danger=None):
+    def spy_generate_pirate(w, tier=None, *, danger=None, **where):
         assert w.here.id == origin.id
         pirate = real_generate_pirate(w, tier=tier, danger=danger)
         captured_tiers.append(pirate.tier)
@@ -1277,7 +1277,7 @@ def test_auto_route_checkpoints_each_completed_hop_before_next_hop(tmp_path, mon
     ],
 )
 def test_every_travel_checkpoint_resumes_to_the_same_career(
-    tmp_path, monkeypatch, scenario, seed, keys, evidence,
+    tmp_path, monkeypatch, plain_sectors, scenario, seed, keys, evidence,
 ):
     strip_prizes(monkeypatch)
     import json
