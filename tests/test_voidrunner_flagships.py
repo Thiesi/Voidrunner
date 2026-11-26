@@ -44,9 +44,9 @@ def test_each_line_has_a_flagship_of_its_own_beside_the_carrier():
 def test_a_specialised_flagship_does_one_thing_better_than_the_carrier_and_the_other_worse():
     carrier, argosy, frigate = (vr.HULL_CLASSES[hull] for hull in vr.FLAGSHIPS)
     assert argosy == {"cargo_base": 240, "fuel_base": 50, "hull_base": 200}
-    assert frigate == {"cargo_base": 64, "fuel_base": 72, "hull_base": 340}
+    assert frigate == {"cargo_base": 96, "fuel_base": 72, "hull_base": 340}
     assert argosy["cargo_base"] == carrier["cargo_base"] * 3 // 2 and argosy["hull_base"] < carrier["hull_base"]
-    assert frigate["hull_base"] > carrier["hull_base"] * 1.3 and frigate["cargo_base"] < carrier["cargo_base"] // 2
+    assert frigate["hull_base"] > carrier["hull_base"] * 1.3 and frigate["cargo_base"] * 5 == carrier["cargo_base"] * 3
     # And each is its own line carried further, in the thing the line is for and in hull.
     freighter, cutter = vr.HULL_CLASSES["Freighter"], vr.HULL_CLASSES["Cutter"]
     assert all(argosy[key] > freighter[key] for key in argosy)

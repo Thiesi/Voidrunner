@@ -145,8 +145,14 @@ A Shuttle is refitted into a Freighter or a Cutter, and either of those into
 a flagship: the **Carrier**, which either line can become, or the flagship of
 its own line, at the same price. A Freighter can become an **Argosy**, with
 half as much hold again as a Carrier on three quarters of its hull. A Cutter
-can become a **Frigate**, with a third more hull than a Carrier and well under
-half its hold. No refit is ever undone.
+can become a **Frigate**, with a third more hull than a Carrier and three
+fifths of its hold. No refit is ever undone.
+
+Each line also does something the others cannot. A hauler is dealt more of a
+station's stock and demand than other ships: a tenth more for a Freighter, a
+quarter more for an Argosy. A warship's crew can be called on a second time in
+a fight: one station for a Cutter, two for a Frigate. The Carrier has neither,
+which is the price of doing both jobs.
 
 The most dangerous space, danger 5, also sends **elite raiders**: a fifth
 tier, flown by a handful of named captains in a pattern of their own, two

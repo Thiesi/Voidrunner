@@ -794,8 +794,9 @@ def test_market_depth_route_refuses_unavailable_procurement_and_labels_sale_limi
 @pytest.mark.parametrize("depth", [
     [], {"99": {}}, {"0": {}, "00": {}}, {"0": {"gold": {}}},
     {"0": {"food": {"day": 1, "stock": 1, "demand": 1}}},
-    {"0": {"food": {"day": 0, "stock": 49, "demand": 1}}},
-    {"0": {"food": {"day": 0, "stock": 1, "demand": 97}}},
+    # Past what the hull with the longest reach is dealt: twice the public floor of 48 and of 96.
+    {"0": {"food": {"day": 0, "stock": 97, "demand": 1}}},
+    {"0": {"food": {"day": 0, "stock": 1, "demand": 193}}},
     {"0": {"food": {"day": 0, "stock": -1, "demand": 1}}},
     {"0": {"food": {"day": False, "stock": 1, "demand": 1}}},
     {"0": {"food": {"day": 0, "stock": 1}}},
@@ -863,7 +864,7 @@ def test_market_depth_contract_delivery_preserves_signed_terms_when_spot_demand_
     assert world.save.market_depth[0]["food"] == {"day": 0, "stock": 0, "demand": 0}
 
 
-@pytest.mark.parametrize("quantity_fields", [{"stock": 1}, {"demand": 1}, {"stock": True, "demand": 1}, {"stock": 1, "demand": 97}])
+@pytest.mark.parametrize("quantity_fields", [{"stock": 1}, {"demand": 1}, {"stock": True, "demand": 1}, {"stock": 1, "demand": 193}])
 def test_market_depth_observed_quantities_are_paired_and_bounded(quantity_fields):
     world = _world_with_seed(42)
     world.save.market_memory[0] = {"food": {"day": 0, "buy": 12, "sell": 11, **quantity_fields}}
@@ -877,7 +878,8 @@ def test_market_depth_remembered_quantities_respect_each_station_ceiling(tmp_pat
     world = _world_with_seed(0)
     sid = next(s.id for s in world.galaxy if s.economy == economy)
     if sid not in world.save.discovered: world.save.discovered.append(sid)
-    limits = vr.market_depth_limits(economy, "food")
+    # A remembered quantity is whatever hull saw it: the bound is the longest reach there is.
+    limits = vr.market_depth_limits(economy, "food", vr.HULL_REACH_MOST)
     quote = {"day": 0, "buy": 12, "sell": 11, "stock": limits["stock"], "demand": limits["demand"]}
     world.save.market_memory[sid] = {"food": quote}
     assert not world.save.market_depth  # Price memory also validates without materialized pools.
