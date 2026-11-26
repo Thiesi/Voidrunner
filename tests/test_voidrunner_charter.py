@@ -172,7 +172,8 @@ def test_the_finale_page_chooses_the_next_careers_charter(monkeypatch):
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     seen = []
     real = vr.finish_career
-    monkeypatch.setattr(vr, "finish_career", lambda save, finale, charter="standard": seen.append(charter) or real(save, finale, charter))
+    monkeypatch.setattr(vr, "finish_career",
+                        lambda save, finale, charter="standard", *more: seen.append(charter) or real(save, finale, charter, *more))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_career_finale(vr.Palette(False), world)
     assert seen == ["hard"] and len(asked) == 1 and "[H] Charter" in plain(output.getvalue())

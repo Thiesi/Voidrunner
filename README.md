@@ -154,6 +154,12 @@ quarter more for an Argosy. A warship's crew can be called on a second time in
 a fight: one station for a Cutter, two for a Frigate. The Carrier has neither,
 which is the price of doing both jobs.
 
+A pilot who retires **passes one thing on** to the next career, chosen with
+`[L]` on the Career Finale page: the first step of a stake at Freeport, one
+specialist of the crew at the level they have reached, or half the standing of
+the faction that thought best of them (up to 40). It is one thing, never
+credits, and nothing unless the pilot chooses.
+
 The galaxy has six sectors, and **each sector has one rule of its own**,
 taken from the story its docks tell:
 
