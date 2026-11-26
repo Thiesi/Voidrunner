@@ -202,7 +202,9 @@ A change to a screen comes with gallery pictures: the tests can prove that a
 screen fits, never that it looks right. The game's design (rules, saves,
 presentation) is in [docs/design.md](docs/design.md). Neither tests nor
 simulated pilots can say whether it is fun: [docs/playtest.md](docs/playtest.md)
-is a sheet for watching two or three people play it.
+is a sheet for watching two or three people play it. One proposal is written
+up and not built: [docs/month-galaxy.md](docs/month-galaxy.md), a galaxy every
+caller flies in the same month.
 
 ### What CI runs
 
