@@ -34,8 +34,8 @@ def _fight(*roles, tier=2, name="Hollow Fang", version=None, hull=None, **ship):
 
 def test_a_new_fight_has_stations_and_starts_with_nothing_spent():
     world, pirate, tactics = _fight()
-    assert vr.CREW_STATION_RULESET_VERSION == 5 and vr.TACTICAL_RULESET_VERSION == 6  # stations came with five
-    assert tactics == {"version": 6, "profile": vr.tactical_profile(pirate.name), "step": 0, "brace_ready": True, "spent": ""}
+    assert vr.CREW_STATION_RULESET_VERSION == 5 and vr.TACTICAL_RULESET_VERSION == 7  # stations came with five
+    assert tactics == {"version": 7, "profile": vr.tactical_profile(pirate.name), "step": 0, "brace_ready": True, "spent": ""}
     assert vr.crew_stations(world, pirate, tactics) == []  # nobody aboard, nothing to call on
     assert vr.TACTICAL_THREAT_BONUS_BY_VERSION[5] == vr.TACTICAL_THREAT_BONUS_BY_VERSION[4]  # the same damage
 

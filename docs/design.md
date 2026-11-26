@@ -2024,6 +2024,60 @@ cached careers would otherwise have more jumps to show tomorrow. The suite's
 launched doors run with the allowance on, as a caller's does; a walk that
 needs more than twelve jumps has to set `DOOR_JUMPS=0`.
 
+**A trait for each line (review).** A hull was three numbers, and the numbers
+did not do what they said. A station holds 48 or 96 units of a good, so a hold
+past a hundred and sixty could not be filled, and more hull only made the same
+fight last longer. With the two new flagships that was measured: the Argosy
+earned a hauler about what a Carrier did, and the Frigate cost a contractor a
+tenth of its income. Each line now does something the others cannot.
+
+A hauler is dealt more of a station than the public floor (`HULL_REACH`): a
+tenth more of its stock and demand for a Freighter, a quarter more for an
+Argosy. The pool is deeper and refills at the station's own rate. The market
+says why its figures are larger with a `HAULER x1.25` badge beside the hold.
+A Freighter that becomes a Carrier gives the reach up, and the refit preview
+says so. A saved pool is checked against the longest reach there is, because
+a pool is the hull's that filled it and the career may since have changed hull.
+
+A warship's crew can be called on a second time in a fight (`HULL_ENCORES`):
+one station for a Cutter, two for a Frigate, the pilot's choice which. The
+panel says `once or twice` of a station that still can be, and `once more` of
+one already used. That is tactical ruleset 7, which is ruleset 6 with a
+station allowed twice among those a fight has spent; damage is unchanged, a
+ship that is not a warship fights as it did, and a fight begun under an older
+ruleset keeps one call each. The Shuttle and the Carrier have no trait, which
+is the Carrier's price for doing both jobs.
+
+The reach is small on purpose, because income follows stock almost one for
+one. A simulated trader in an Argosy ended 57% richer than one in a Carrier
+at twice the floor with the rates raised to match, 38% at twice the floor with
+the rates left alone, and 22% at half as much again. At a tenth for the
+Freighter and a quarter for the Argosy, over 100 careers a pilot to day 100,
+it is:
+
+    pilot        in a Carrier   in its own flagship
+    trader          390,978     434,790  Argosy   +11%
+    smuggler        433,818     492,070  Argosy   +13%
+    explorer        374,789     418,525  Argosy   +12%
+    careful         391,338     444,650  Argosy   +14%
+    contractor      292,283     274,968  Frigate   -6%
+
+The Frigate still costs income: it is bought for the fight. Its hold went from
+64 to 96 here, which took that cost from 10% to 6%. Against an elite, staged
+900 times a row with every module at its top:
+
+    flagship   alone   gunner        full crew
+    Carrier     53%    93% for 67%   99% for 59% of its hull
+    Argosy      27%    63% for 63%   90% for 67%
+    Frigate     78%   100% for 50%  100% for 29%
+
+So the three flagships are three answers. The Argosy earns the most and is the
+worst place to meet an elite; the Frigate earns the least and is the one ship
+that can meet two; the Carrier is between them on both counts and needs no
+plan. A pilot who goes by the Carrier still gets a small part of the hauler's
+reach while in the Freighter, which moves the default simulated careers by 2%
+or less and leaves `tools/check_careers.py` at 0 problems on its baselines.
+
 **Three flagships (review).** A Shuttle became a Freighter or a Cutter, which
 was a real choice, and then either became a Carrier, which undid it: every
 career ended in the same ship. Each line now has a flagship of its own beside
@@ -2032,12 +2086,12 @@ the Carrier, at the same 45,000cr, so the second refit is a choice too.
     hull       hold   fuel   hull    from
     Carrier     160     60    260    Freighter or Cutter
     Argosy      240     50    200    Freighter
-    Frigate      64     72    340    Cutter
+    Frigate      96     72    340    Cutter
 
 The Argosy is a Freighter carried to its end: half as much hold again as a
 Carrier on three quarters of its hull. The Frigate is a Cutter carried to its
-end: a third more hull than a Carrier and little more hold than a Shuttle and
-a half. Nothing follows a flagship. The four hulls there were are what they
+end: a third more hull than a Carrier and three fifths of its hold (it was 64
+until the traits note below). Nothing follows a flagship. The four hulls there were are what they
 were, and a save needs nothing new: two more hull names are valid.
 
 Each has every picture a hull is drawn in: the pixel sprite every scene, the
@@ -2057,8 +2111,7 @@ a contractor in a Frigate ends 11% poorer. The hold of the Argosy is more than
 a station has stock to fill, and the hold of the Frigate is too small for
 most deliveries. On these figures alone the Carrier is still the better buy
 for income, the Frigate is bought for the fight, and the Argosy is not worth
-choosing: that is what the trait of each line is for, which is the next
-change and should go in with this one.
+choosing: that is what the trait of each line is for (the note above).
 
 `all_hulls`, flying every hull class, now means six and takes three careers;
 a pilot who earned it when there were four keeps it. Sentences that name a

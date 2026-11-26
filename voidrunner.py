@@ -1657,10 +1657,11 @@ HULL_CLASSES: dict[str, dict] = {
     # The two specialised flagships (review): what a line becomes if it stays
     # what it was. The Argosy is a Freighter carried to its end, half as much
     # hold again as a Carrier on three quarters of its hull. The Frigate is a
-    # Cutter carried to its end, a third more hull than a Carrier and little
-    # more hold than a Shuttle and a half.
+    # Cutter carried to its end, a third more hull than a Carrier and three
+    # fifths of its hold. (It was 64 at first: flown through the simulator that
+    # cost a contractor a tenth of its income, and at 96 it costs 6%.)
     "Argosy": {"cargo_base": 240, "fuel_base": 50, "hull_base": 200},
-    "Frigate": {"cargo_base": 64, "fuel_base": 72, "hull_base": 340},
+    "Frigate": {"cargo_base": 96, "fuel_base": 72, "hull_base": 340},
 }
 
 # current hull class -> [(target class, refit cost), ...] refits available
@@ -1679,6 +1680,39 @@ HULL_CLASSES: dict[str, dict] = {
 # does both things well, or the ship that does one thing better than
 # anything else and the other worse.
 FLAGSHIPS = ("Carrier", "Argosy", "Frigate")
+# A trait for each line (review). A hull was three numbers, and the numbers
+# did not do what they said: a station has 48 or 96 units of a good, so a hold
+# past a hundred and sixty could not be filled, and a warship's extra hull only
+# made the same fight last longer. Each line now does something the others
+# cannot. A hauler is dealt more of a station's stock and demand than the
+# public floor: a tenth more for a Freighter, a quarter more for an Argosy. The
+# deeper pool refills at the station's own pace. A warship's crew can be called
+# on a second time in a fight: one station for a Cutter, two for a Frigate. The
+# Shuttle and the Carrier have neither, which is the Carrier's price for doing
+# both jobs.
+#
+# The reach is small on purpose. Income follows stock almost one for one: at
+# twice the floor a simulated trader in an Argosy ended 38% to 57% richer than
+# one in a Carrier, and at half as much again 22%. At a quarter more it is 11%
+# to 14%, which is a reason to choose the Argosy and not the only choice.
+HULL_REACH = {"Freighter": 110, "Argosy": 125}   # per cent of a station's public stock and demand
+HULL_ENCORES = {"Cutter": 1, "Frigate": 2}       # crew stations that can be called on twice in a fight
+HULL_TRAITS = {
+    "Freighter": "Hauler: stations deal it a tenth more of their stock and demand.",
+    "Argosy": "Hauler: stations deal it a quarter more of their stock and demand.",
+    "Cutter": "Warship: one crew station can be called on a second time in a fight.",
+    "Frigate": "Warship: two crew stations can be called on a second time in a fight.",
+}
+
+
+def hull_reach(ship: "Ship") -> int:
+    """How much of a station's public stock and demand this hull is dealt, per cent."""
+    return HULL_REACH.get(ship.hull_class, 100)
+
+
+def station_encores(ship: "Ship") -> int:
+    """How many crew stations this hull may call on a second time in a fight."""
+    return HULL_ENCORES.get(ship.hull_class, 0)
 HULL_REFITS: dict[str, list[tuple[str, int]]] = {
     "Shuttle": [("Freighter", 15_000), ("Cutter", 15_000)],
     "Freighter": [("Carrier", 45_000), ("Argosy", 45_000)],
@@ -2087,7 +2121,12 @@ def _validate_tactics(value: dict) -> None:
         raise ValueError("invalid tactical state")
     if stations:
         spent = value.get("spent")
-        if type(spent) is not str or len(set(spent)) != len(spent) or not set(spent) <= set(CREW_STATIONS):
+        # From ruleset 7 a warship may have called on a station twice, and on no
+        # more of them than the best warship can.
+        twice = [key for key in set(spent) if spent.count(key) > 1] if type(spent) is str else []
+        allowed = max(HULL_ENCORES.values()) if value["version"] >= ENCORE_RULESET_VERSION else 0
+        if (type(spent) is not str or not set(spent) <= set(CREW_STATIONS) or len(twice) > allowed
+                or any(spent.count(key) > 2 for key in twice)):
             raise ValueError("invalid crew stations")
 
 
@@ -2496,7 +2535,7 @@ def _validate_save_document(data: dict) -> None:
             _reject_unknown_save_fields(pool, {"day", "stock", "demand"}, "station stock")
             require(set(pool) == {"day", "stock", "demand"}, "station stock")
             integer(pool["day"], "stock day", maximum=data["turn"])
-            caps = market_depth_limits(economies[sid], commodity)
+            caps = market_depth_limits(economies[sid], commodity, HULL_REACH_MOST)
             integer(pool["stock"], "station stock", maximum=caps["stock"])
             integer(pool["demand"], "station demand", maximum=caps["demand"])
     memory = data.get("market_memory", {})
@@ -2516,7 +2555,7 @@ def _validate_save_document(data: dict) -> None:
             require(("stock" in quote) == ("demand" in quote), "remembered quantities")
             if "stock" in quote:
                 economies = economies or galaxy_economies(data["seed"])
-                caps = market_depth_limits(economies[sid], commodity)
+                caps = market_depth_limits(economies[sid], commodity, HULL_REACH_MOST)
                 for quantity in ("stock", "demand"):
                     integer(quote[quantity], "remembered " + quantity, maximum=caps[quantity])
             integer(quote["day"], "quote observation day", maximum=data["turn"])
@@ -3773,17 +3812,29 @@ def buy_stake(world: World) -> str:
             f"its stock and demand return {level + 1} times as fast for you.")
 
 
-def market_depth_limits(economy: str, commodity: str) -> dict[str, int]:
-    """Public spot-market ceilings and replenishment per game day."""
+def market_depth_limits(economy: str, commodity: str, reach: int = 100) -> dict[str, int]:
+    """Spot-market ceilings and replenishment per game day: the public floor,
+    or what a hull with `reach` per cent of it is dealt (`hull_reach`). The
+    rates are the station's own, so a deeper pool takes longer to refill."""
     stock_rate = 6 if commodity in ECONOMY_PRODUCES[economy] else 3
     demand_rate = 6 if commodity in ECONOMY_DEMANDS[economy] else 3
-    return {"stock": stock_rate * 16, "demand": demand_rate * 16,
+    return {"stock": stock_rate * 16 * reach // 100, "demand": demand_rate * 16 * reach // 100,
             "stock_rate": stock_rate, "demand_rate": demand_rate}
+
+
+#: The largest pool any hull is dealt: what a saved pool is checked against, since
+#: a pool is the hull's that filled it and a save may since have changed hull.
+HULL_REACH_MOST = max(HULL_REACH.values())
+
+
+def station_depth_limits(world: World, system_id: int, commodity: str) -> dict[str, int]:
+    """A station's ceilings and rates for the ship this pilot flies."""
+    return market_depth_limits(world.by_id[system_id].economy, commodity, hull_reach(world.save.ship))
 
 
 def market_depth_quote(world: World, system_id: int, commodity: str) -> dict[str, int]:
     """Read-only lazy replenishment; neither browsing nor restart creates stock."""
-    limits = market_depth_limits(world.by_id[system_id].economy, commodity)
+    limits = station_depth_limits(world, system_id, commodity)
     # A stake brings stock and demand back faster; the ceilings are the station's.
     faster = 1 + stake_level(world.save, system_id)
     limits.update(stock_rate=limits["stock_rate"] * faster, demand_rate=limits["demand_rate"] * faster)
@@ -3800,7 +3851,7 @@ def _consume_market_depth(world: World, commodity: str, quantity: int, *, buying
         pool["stock"] -= quantity
     else:
         pool["demand"] -= quantity
-        pool["stock"] = min(market_depth_limits(world.here.economy, commodity)["stock"], pool["stock"] + quantity)
+        pool["stock"] = min(station_depth_limits(world, world.here.id, commodity)["stock"], pool["stock"] + quantity)
     world.save.market_depth.setdefault(world.here.id, {})[commodity] = {
         key: pool[key] for key in ("day", "stock", "demand")}
 
@@ -3808,7 +3859,7 @@ def _consume_market_depth(world: World, commodity: str, quantity: int, *, buying
 def _release_market_depth(world: World, system_id: int, commodity: str, quantity: int) -> None:
     """Return reserved units to a station's stock pool, bounded by its ceiling."""
     pool = market_depth_quote(world, system_id, commodity)
-    pool["stock"] = min(market_depth_limits(world.by_id[system_id].economy, commodity)["stock"], pool["stock"] + quantity)
+    pool["stock"] = min(station_depth_limits(world, system_id, commodity)["stock"], pool["stock"] + quantity)
     world.save.market_depth.setdefault(system_id, {})[commodity] = {
         key: pool[key] for key in ("day", "stock", "demand")}
 
@@ -4945,10 +4996,17 @@ TACTICAL_INTENTS = {"attack": (100, 100), "volley": (100, 160),
 #
 # Version 6 keeps version 5 and adds the fifth tier (`ELITE_TIER`) and the Ace
 # pattern for it. Nothing about tiers 0 to 4 changes.
+#
+# Version 7 keeps version 6 and lets a warship call on a crew station a second
+# time (`HULL_ENCORES`): a fight under it may list a station twice among those
+# it has spent. Damage is unchanged, and a ship that is not a warship fights as
+# it did.
 TACTICAL_THREAT_BONUS_BY_VERSION = {1: (0, 3, 6, 20, 55), 2: (0, 3, 6, 8, 34), 3: (0, 3, 6, 8, 34),
-                                    4: (0, 3, 6, 8, 34), 5: (0, 3, 6, 8, 34), 6: (0, 3, 6, 8, 34, 90)}
-TACTICAL_RULESET_VERSION = 6
+                                    4: (0, 3, 6, 8, 34), 5: (0, 3, 6, 8, 34), 6: (0, 3, 6, 8, 34, 90),
+                                    7: (0, 3, 6, 8, 34, 90)}
+TACTICAL_RULESET_VERSION = 7
 ELITE_RULESET_VERSION = 6
+ENCORE_RULESET_VERSION = 7
 CREW_STATION_RULESET_VERSION = 5
 #: A station's key in a fight: whose it is, and the verb the action bar names.
 CREW_STATIONS = {"C": ("gunner", "Called shot"), "M": ("engineer", "Mend"), "N": ("navigator", "Slip")}
@@ -5027,16 +5085,38 @@ def new_tactics(pirate: Pirate, version: int = TACTICAL_RULESET_VERSION) -> dict
 
 def crew_stations(world: World, pirate: Pirate, tactics: dict) -> list[str]:
     """The stations a pilot can still call on this turn, by key: one for each
-    specialist aboard who has not been used this fight. A patch is offered
-    only to a hull that has something to mend."""
+    specialist aboard who has not been used this fight, and on a warship one
+    who has, while it has a second call left. A patch is offered only to a
+    hull that has something to mend."""
     if tactics["version"] < CREW_STATION_RULESET_VERSION:
         return []
     ship = world.save.ship
     keys = [key for key, (role, _label) in CREW_STATIONS.items()
-            if getattr(ship, f"has_{role}") and key not in tactics["spent"]]
+            if getattr(ship, f"has_{role}") and station_calls_left(ship, tactics, key)]
     if "M" in keys and ship.hull_hp >= hull_hp_max(ship):
         keys.remove("M")
     return keys
+
+
+def encores_left(ship: Ship, tactics: dict) -> int:
+    """Second calls this warship still has in this fight; none under a ruleset before 7."""
+    if tactics["version"] < ENCORE_RULESET_VERSION:
+        return 0
+    return max(0, station_encores(ship) - sum(1 for key in CREW_STATIONS if tactics["spent"].count(key) > 1))
+
+
+def station_calls_left(ship: Ship, tactics: dict, key: str) -> int:
+    """How many more times this station can be called on in this fight: 0, 1 or 2."""
+    used = tactics["spent"].count(key)
+    if used == 0:
+        return 2 if encores_left(ship, tactics) else 1
+    return 1 if used == 1 and encores_left(ship, tactics) else 0
+
+
+def station_calls_text(ship: Ship, tactics: dict, key: str) -> str:
+    """`once`, `once or twice`, `once more`: what the panel says of a station."""
+    left, used = station_calls_left(ship, tactics, key), tactics["spent"].count(key)
+    return "once more" if used else "once or twice" if left > 1 else "once"
 
 
 def mend_amount(ship: Ship) -> int:
@@ -14116,6 +14196,9 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
         head += "   " + badge(trait_label(trait).upper(), "good" if trait["kind"] == "surplus" else "caution")
     if stake_level(world.save, system.id):
         head += "   " + badge(f"STAKE {stake_level(world.save, system.id)}/{len(STAKE_COSTS)}", "brand")
+    if hull_reach(world.save.ship) > 100:
+        # Why STOCK and DEMAND are larger than another pilot sees here.
+        head += "   " + badge(f"HAULER x{hull_reach(world.save.ship) / 100:g}", "info")
     lines = [head]
     rows, styles = [], []
     needs = mission_cargo_needs(world)
@@ -15275,6 +15358,8 @@ def shipyard_lines(world: World) -> list[str]:
         lines.append(f"{p.slate}A refit is a permanent hull change.{RESET}")
     else:
         lines.append(f"{p.slate}Hull: best available class ({p.ink}{ship.hull_class}{p.slate}).{RESET}")
+    if ship.hull_class in HULL_TRAITS:
+        lines.append(f"{p.slate}This {ship.hull_class}: {p.ink}{HULL_TRAITS[ship.hull_class]}{RESET}")
     local = next((WORKSHOPS[key] for key, sid in specialist_stations(world).items() if sid == world.here.id), None)
     if local:
         lines.append(alert("note", f"Local specialist: {local['name']}", local["owner"],
@@ -16318,6 +16403,10 @@ def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -
         details=[f"Refit preview: {ship.hull_class} to {target_class} for {cost:,}cr. Credits {world.save.pilot.credits:,}cr.",
                  f"Hull restored to {hull_hp_max(preview)}. Cargo capacity {cargo_capacity(preview)}; fuel capacity {fuel_capacity(preview)}.",
                  f"Existing cargo and modules stay. Fuel stays at {ship.fuel}; commissioning does not fill the larger tank.",
+                 *([HULL_TRAITS[target_class]] if target_class in HULL_TRAITS else
+                   [f"A {target_class} has no trait of its own: it gives up "
+                    f"{'the hauler' if ship.hull_class == 'Freighter' else 'the warship'}'s."]
+                   if ship.hull_class in HULL_TRAITS else []),
                  "This permanent hull upgrade cannot be reversed. [C] Commission asks for final confirmation."]
         if world.save.pilot.credits<cost:details.append(f"Need {cost}cr for the {target_class} refit.")
         if world.save.pending_travel is not None:details.append("Finish the current journey first.")
@@ -19430,16 +19519,18 @@ def combat_option_rows(world: World, pirate: Pirate, *, patrol: bool, tactics: d
     stations = crew_stations(world, pirate, tactics)
     if "C" in stations:
         weak, strong = (_tactical_outgoing_damage(ship, intent, roll, called=True) for roll in (9, 14))
-        shot = [key_label("C", "Called shot"), f"{p.slate}deal{RESET} {cost(span(weak, strong))}", f"{taken}{p.slate}; once{RESET}"]
+        shot = [key_label("C", "Called shot"), f"{p.slate}deal{RESET} {cost(span(weak, strong))}",
+                f"{taken}{p.slate}; {station_calls_text(ship, tactics, 'C')}{RESET}"]
         if weak >= pirate.hp:
             shot[2] = gain("destroys it")
         rows.append(shot)
     if "M" in stations:
-        rows.append([key_label("M", "Mend"), f"{gain(f'+{mend_amount(ship)} hull')}", f"{taken}{p.slate}; once, no shot{RESET}"])
+        rows.append([key_label("M", "Mend"), f"{gain(f'+{mend_amount(ship)} hull')}", f"{taken}{p.slate}; {station_calls_text(ship, tactics, 'M')}, no shot{RESET}"])
     if "N" in stations:
         low_n, high_n = (low * SLIP_TAKEN_PERCENT // 100, high * SLIP_TAKEN_PERCENT // 100)
         rows.append([key_label("N", "Slip"), dealt(False),
-                     f"{p.slate}take{RESET} {harm(span(low_n, high_n))}{p.slate}; once{RESET}"])
+                     f"{p.slate}take{RESET} {harm(span(low_n, high_n))}{p.slate}; "
+                     f"{station_calls_text(ship, tactics, 'N')}{RESET}"])
     rows.append([key_label("E", "Evade"),
                  escape(combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics, patrol=patrol)), missed])
     if patrol:
@@ -19567,7 +19658,9 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                   "Fire: one shot; a surviving enemy returns fire. Guard: your shot at 55%, incoming cut to a quarter; Fire recharges Guard.",
                   "Crew stations, each once a fight: a gunner's Called shot is a Fire at half as much again that cover and harrying "
                   "do not blunt; an engineer's Mend gives back a quarter of the hull for the turn's shot; a navigator's Slip is a Fire "
-                  "at full strength that the contact's move only grazes, a quarter of it landing.",
+                  "at full strength that the contact's move only grazes, a quarter of it landing."
+                  + (f" This {ship.hull_class} can call on {'one' if station_encores(ship) == 1 else 'two'} of them a second time."
+                     if station_encores(ship) and tactics["version"] >= ENCORE_RULESET_VERSION else ""),
                   "Dump jettisons an eighth of the hold, one unit at least, chosen at random. A failed Evade or Dump draws "
                   "enemy fire; a bribe's refusal draws it too. A bribe is charged only if accepted, and earns Blackwake +2."
                   if not patrol else "A failed Evade draws enemy fire. Surrender: pay the fine, clear notoriety, Concord +2 and escape.",

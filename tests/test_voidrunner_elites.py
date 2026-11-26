@@ -57,7 +57,7 @@ def test_an_elite_is_known_by_its_name_and_flies_a_pattern_of_its_own():
     assert "Ace" not in vr.TACTICAL_PROFILES and vr.ELITE_PROFILES == {"Ace": ("volley", "volley", "recover")}
     assert set(vr.ALL_PROFILES) == set(vr.TACTICAL_PROFILES) | {"Ace"}
     tactics = vr.new_tactics(_elite())
-    assert tactics["profile"] == "Ace" and tactics["version"] == vr.ELITE_RULESET_VERSION == vr.TACTICAL_RULESET_VERSION == 6
+    assert tactics["profile"] == "Ace" and tactics["version"] == vr.TACTICAL_RULESET_VERSION >= vr.ELITE_RULESET_VERSION == 6
     assert vr.tactical_steps(tactics) == ("volley", "volley", "recover")
     assert vr.raider_hull(5) == 20 + 5 * 15 + vr.ELITE_HULL == 155 and vr.raider_hull(4) == 80
 
