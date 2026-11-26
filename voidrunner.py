@@ -2294,6 +2294,10 @@ class SaveData:
     # The charter this career is flown on, chosen when it was launched and
     # fixed from then on; see `CHARTERS`. Written only when it is not standard.
     charter: str = "standard"
+    # The month whose Regatta this career is flown in, `2026-11`; empty for a
+    # caller's own career. Its galaxy is that month's and its file is kept apart
+    # from the caller's own career; see `regatta_dir`.
+    regatta: str = ""
     # Raiders this career let limp home, each owing one favour; see `take_prize`.
     # Absent until there is one.
     favours: list[dict] = field(default_factory=list)
@@ -2334,6 +2338,7 @@ class SaveData:
             **({"tales": self.tales} if self.tales else {}),
             **({"flight": self.flight} if self.flight else {}),
             **({"charter": self.charter} if self.charter != "standard" else {}),
+            **({"regatta": self.regatta} if self.regatta else {}),
             **({"favours": self.favours} if self.favours else {}),
         }
 
@@ -2380,6 +2385,7 @@ class SaveData:
             tales=dict(d.get("tales", {})),
             flight=dict(d.get("flight", {})),
             charter=d.get("charter", "standard"),
+            regatta=d.get("regatta", ""),
             favours=[dict(item) for item in d.get("favours", [])],
         )
 
@@ -2618,6 +2624,9 @@ def _validate_save_document(data: dict) -> None:
         require(item["how"] in RIVAL_HOW, "rival history")
     require(len({item["name"] for item in rivals}) == len(rivals), "rivals")
     require(data.get("charter", "standard") in CHARTERS, "charter")
+    regatta = data.get("regatta", "")
+    require(isinstance(regatta, str) and (not regatta or (
+        regatta_month_valid(regatta) and data["seed"] == regatta_seed(regatta))), "regatta career")
     flight = data.get("flight", {})
     require(isinstance(flight, dict) and (not flight or set(flight) == {"day", "left"}), "flight allowance")
     if flight:
@@ -2753,6 +2762,11 @@ class World:
         # every domain-only world, and a board whose SysOp switched it off.
         self.flight_clock: Callable[[], int] | None = None
         self.flight_per_day: int = 0
+        # The caller's other career's flight record, where they have two (their
+        # own and the month's Regatta): the allowance is the caller's, so it is
+        # whichever record says fewer. A callable, because a record is replaced
+        # each time a jump is spent.
+        self.flight_sibling: Callable[[], dict] | None = None
         # What this session did that the board's wire should carry; written
         # into the pilot's own score record by the save that follows. Live only
         # once the executable says so, after the launch tick: a career first
@@ -6447,6 +6461,7 @@ def career_path_lines(save: SaveData, *, notes: bool = True) -> list[str]:
 
 def career_finale_blocker(save: SaveData, finale: str) -> str | None:
     if finale not in CAREER_FINALES: return "Choose a listed career conclusion."
+    if save.regatta: return "A Regatta career ends with its month; it does not retire."
     if save.pending_travel is not None: return "Finish the current journey first."
     if len(save.retired_careers) >= MAX_RETIRED_CAREERS:
         return f"Career archive full ({MAX_RETIRED_CAREERS} dossiers). Retirement is unavailable; this career can continue."
@@ -7064,11 +7079,17 @@ def flight_left(world: "World") -> int | None:
     per_day = world.flight_per_day
     if not per_day or world.flight_clock is None:
         return None
-    record = world.save.flight
-    if not record:
+    # A caller with two careers has two records of one allowance. Each says
+    # what was left when it was last written, as if nothing had been flown
+    # since; the one that was written last is the true one, and it is always
+    # the one that says fewer.
+    records = [record for record in (world.save.flight, world.flight_sibling() if world.flight_sibling else None)
+               if record]
+    if not records:
         return per_day
-    days = max(0, world.flight_clock() - record["day"])
-    return min(per_day * FLIGHT_BANK_DAYS, record["left"] + days * per_day)
+    today = world.flight_clock()
+    return min(min(per_day * FLIGHT_BANK_DAYS, record["left"] + max(0, today - record["day"]) * per_day)
+               for record in records)
 
 
 def spend_jump(world: "World") -> None:
@@ -7078,8 +7099,9 @@ def spend_jump(world: "World") -> None:
     if left is None:
         return
     today = world.flight_clock()
-    day = max(today, world.save.flight.get("day", today))
-    world.save.flight = {"day": day, "left": max(0, left - 1)}
+    seen = [record["day"] for record in (world.save.flight, world.flight_sibling() if world.flight_sibling else None)
+            if record]
+    world.save.flight = {"day": max([today, *seen]), "left": max(0, left - 1)}
 
 
 def flight_tomorrow(world: "World") -> tuple[int, int] | None:
@@ -7109,6 +7131,131 @@ def flight_blocker(world: "World") -> str | None:
         return (f"No jumps left today. {plural(world.flight_per_day, 'more jump')} at midnight, in {flight_wait()}. "
                 "Trading and planning cost nothing; [Z] on the deck lays up.")
     return None
+
+
+# The Regatta (review). Every career is flown in a galaxy of its own. Two
+# callers can compare credits in the Hall of Fame, but not what they did: one
+# had a rich lane beside Freeport and the other started in the Long Dark. Once
+# a month there is one galaxy for everybody: the same stations, markets,
+# sectors and seasons for every pilot on every board, and a table of its own,
+# ranked by net worth and final when the month turns.
+#
+# A caller flies it in a second career beside their own, so anybody can enter
+# in any month and nobody gives up a career to do it. That career is an
+# ordinary career file kept in a directory of its own, `regatta/2026-11` under
+# the save directory, with its own score records beside it: the storage layer
+# is asked for a different directory and is otherwise untouched. The session
+# still holds the caller's one lock, which is in the save directory itself.
+# What makes it the same galaxy is its seed, which follows from the month
+# alone; the luck of encounters is each career's own, as it always was.
+#
+# The jumps are the caller's, not a career's, so both careers draw on the one
+# allowance (`flight_left`). A Regatta career ends with its month: it is not
+# retired, and when the month turns the next month's galaxy is a new career.
+# A SysOp switches it off with `DOOR_REGATTA=0`.
+REGATTA_DIR = "regatta"
+REGATTA_TELL_DAY = 3      # a career's own day from which it is told the Regatta is open
+_REGATTA_MONTH = re.compile(r"[0-9]{4}-(0[1-9]|1[0-2])")
+MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "August", "September",
+               "October", "November", "December")
+
+
+def regatta_month_valid(month: object) -> bool:
+    return isinstance(month, str) and _REGATTA_MONTH.fullmatch(month) is not None
+
+
+def regatta_month() -> str | None:
+    """This month on the node's calendar as `2026-11`; a pinned month where the
+    SysOp or a gallery pinned one with `DOOR_REGATTA`; None where it is off."""
+    value = os.environ.get("DOOR_REGATTA", "").strip().lower()
+    if value in ("0", "off", "no", "false"):
+        return None
+    if value:
+        return value if regatta_month_valid(value) else None  # an unreadable pin is off, not a guess
+    now = _node_now()
+    return f"{now.year:04d}-{now.month:02d}"
+
+
+def regatta_name(month: str) -> str:
+    """`November 2026`."""
+    return f"{MONTH_NAMES[int(month[5:]) - 1]} {month[:4]}"
+
+
+def regatta_month_name(month: str) -> str:
+    """`November`: the month alone, where the year would only be noise."""
+    return MONTH_NAMES[int(month[5:]) - 1]
+
+
+def regatta_seed(month: str) -> int:
+    """The galaxy every pilot flies in `month`: a seed from the month alone."""
+    return zlib.crc32(f"voidrunner-regatta:{month}".encode("utf-8")) % (2**31 - 2) + 1
+
+
+def regatta_dir(save_dir: Path, month: str) -> Path:
+    """Where a month's Regatta careers and score records are kept."""
+    return save_dir / REGATTA_DIR / month
+
+
+def previous_month(month: str) -> str:
+    year, number = int(month[:4]), int(month[5:])
+    return f"{year - 1:04d}-12" if number == 1 else f"{year:04d}-{number - 1:02d}"
+
+
+def regatta_days_left(month: str) -> int | None:
+    """Days of the month still to come after today, on the node's calendar;
+    None where the month is pinned and the calendar is not asked."""
+    if os.environ.get("DOOR_REGATTA", "").strip():
+        return None
+    now = _node_now()
+    first_of_next = datetime(now.year + (now.month == 12), now.month % 12 + 1, 1)
+    return (first_of_next.date() - now.date()).days - 1
+
+
+#: What it cost to refit a Shuttle into each hull, the way the yard sells it.
+def _hull_prices() -> dict[str, int]:
+    prices, frontier = {"Shuttle": 0}, ["Shuttle"]
+    while frontier:
+        hull = frontier.pop()
+        for target, cost in HULL_REFITS[hull]:
+            if target not in prices:
+                prices[target] = prices[hull] + cost
+                frontier.append(target)
+    return prices
+
+
+def career_worth(save: SaveData) -> int:
+    """What a career is worth: credits, cargo at what it cost, and what was put
+    into the ship's modules, its hull and stakes. The figure the career
+    simulator has always compared careers by, so a pilot who bought a flagship
+    is not ranked below one who sat on the credits."""
+    ship = save.ship
+    cargo = sum(paid for lots in save.cargo_basis.values() for _units, paid in lots)
+    modules = sum(upgrade["cost"](tier) for key, upgrade in UPGRADES.items()
+                  for tier in range(getattr(ship, key + "_tier")))
+    held = sum(sum(STAKE_COSTS[:level]) for level in stakes(save).values())
+    return save.pilot.credits + cargo + modules + _hull_prices().get(ship.hull_class, 0) + held
+
+
+def new_regatta_career(own: SaveData, month: str) -> SaveData:
+    """A career in `month`'s galaxy for the pilot of `own`: the same callsign
+    and display, a Shuttle and a rookie's purse, and the month's seed."""
+    save = _new_career(own.pilot.handle)
+    save.seed, save.regatta = regatta_seed(month), month
+    save.display_style, save.display_encoding = own.display_style, own.display_encoding
+    return save
+
+
+def peek_flight(save_dir: Path, user_id: int) -> dict:
+    """The flight record in a career file, read without opening the career: {}
+    where there is no file, no record, or nothing that reads as one."""
+    try:
+        record = json.loads(_read_save_bytes(_save_path(save_dir, user_id)).decode("utf-8")).get("flight")
+    except (OSError, ValueError, AttributeError, ResumeError):
+        return {}  # nothing there, or nothing that reads: it puts no limit on the other career
+    if (isinstance(record, dict) and set(record) == {"day", "left"}
+            and all(type(record[key]) is int and record[key] >= 0 for key in record)):
+        return record
+    return {}
 
 
 def dispatch_setting() -> str:
@@ -7787,7 +7934,18 @@ def _score_entry(data, user_id: int | None = None) -> dict | None:
     wire = _score_wire(data.get("wire"))
     if wire is not None:
         entry["wire"] = wire
+    regatta = _score_regatta(data.get("regatta"))
+    if regatta is not None:
+        entry["regatta"] = regatta
     return entry
+
+
+def _score_regatta(data) -> dict | None:
+    """A Regatta career's standing as its score record lists it, or None."""
+    if (not isinstance(data, dict) or set(data) != {"month", "worth", "days"} or not regatta_month_valid(data["month"])
+            or any(type(data[key]) is not int or not 0 <= data[key] < 2**63 for key in ("worth", "days"))):
+        return None
+    return dict(data)
 
 
 #: The wire (review): what the pilots of one board have lately done, a
@@ -8024,6 +8182,11 @@ def update_hall_of_fame(save_dir: Path, user_id: int, save: SaveData, events: li
              "accolades": sorted((save.accolades or {}).get("unlocked", {}))}
     if dispatch_record(save)["total"]:
         entry["dispatch"] = dispatch_record(save)
+    if save.regatta:
+        # Its standing is taken at every save while its month lasts, and is
+        # final when the month turns: after that the last figure stands.
+        standing = {"month": save.regatta, "worth": career_worth(save), "days": save.turn}
+        entry["regatta"] = standing if regatta_month() == save.regatta else prior.get("regatta", standing)
     wire = (prior.get("wire", []) + list(events or []))[-WIRE_KEEP:]
     if wire:
         entry["wire"] = wire
@@ -12650,6 +12813,10 @@ def deck_alert_rows(world: World) -> list[str]:
     if costs and ship.fuel < min(costs):
         rows.append(alert("danger", "LOW FUEL", f"cheapest jump needs {min(costs)}",
                           key_label("Y", f"refuel {FUEL_PRICE}cr/unit")))
+    if world.save.regatta:
+        # Which career this is, on every deck of it, and the way back.
+        rows.append(alert("note", "Regatta", f"{regatta_name(world.save.regatta)}; your own career waits",
+                          key_label("R", "table")))
     if (blocker := flight_blocker(world)) is not None:
         rows.append(alert("caution", "No jumps left today",
                           f"{world.flight_per_day} more at midnight, in {flight_wait()}", key_label("Z", "lay up")))
@@ -12924,7 +13091,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
         elif choice == "X": expanded, page = not expanded, 0
         # Every key the deck advertises is a key the deck answers -- `K` opens
         # the roster the crew alert names, rather than redrawing (#493 review).
-        elif choice in "MYBCSHGTQKLDPWONVJFZ" and len(choice) == 1:
+        elif choice in "MYBCSHGTQKLDPWONVJFZR" and len(choice) == 1:
             return choice
 
 
@@ -18546,6 +18713,136 @@ def screen_lay_up(p: Palette, world: World) -> str | None:
             page = moved
 
 
+def regatta_standings(entries: list[dict], month: str) -> list[dict]:
+    """The careers on a month's table, richest first; among equals, the one
+    that got there in fewer days."""
+    rows = [entry for entry in entries if entry.get("regatta", {}).get("month") == month]
+    return sorted(rows, key=lambda entry: (-entry["regatta"]["worth"], entry["regatta"]["days"], entry["user_id"]))
+
+
+def ordinal(number: int) -> str:
+    """`1st`, `2nd`, `3rd`, `11th`, `22nd`."""
+    suffix = "th" if 10 <= number % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
+
+
+def regatta_lines(world: World, home_dir: Path, user_id: int) -> list[str]:
+    """The Regatta's page: what it is, this month's table, where this caller
+    stands and the key that enters or leaves, and last month's first three."""
+    p = pal()
+    month = regatta_month()
+    standings = regatta_standings(_load_score_records(regatta_dir(home_dir, month)), month)
+    inside = world.save.regatta == month
+    left = regatta_days_left(month)
+    lines = [f"{p.hull}{BOLD}{regatta_name(month).upper()}{RESET}  "
+             f"{p.slate}One galaxy this month, the same for every pilot on every board.{RESET}",
+             "Ranked by net worth: credits, cargo at cost, and what went into the ship and stakes. "
+             + ("" if left is None else "It ends tonight. " if left <= 0 else f"{plural(left, 'more day')} after today. ")
+             + "The table is final when the month turns.",
+             section("STANDINGS")]
+    if standings:
+        rows, styles = [], []
+        for place, entry in enumerate(standings[:HALL_OF_FAME_SIZE], 1):
+            mine = entry["user_id"] == user_id
+            rows.append([f"{place}", _mission_plain(str(entry["handle"])) + (" [YOU]" if mine else ""),
+                         f"{entry['regatta']['worth']:,}cr", f"{entry['regatta']['days']}", rank_for(entry["regatta"]["worth"])])
+            styles.append(["label", "key" if mine else "value", "value", "label", "label"])
+        lines += table(["#", "PILOT", "NET WORTH", "DAY", "RANK"], rows, "rlrrl", styles=styles, optional=(4,))
+    else:
+        lines.append(f"{p.slate}Nobody has entered this month yet.{RESET}")
+    place = next((index for index, entry in enumerate(standings, 1) if entry["user_id"] == user_id), None)
+    lines.append(section("YOU"))
+    if inside:
+        lines.append(f"You are flying it"
+                     + (f": {ordinal(place)} of {len(standings)}" if place else "")
+                     + f". {key_label('E', 'returns to your own career')}, which waits where you left it.")
+    elif place:
+        lines.append(f"You have entered: {ordinal(place)} of {len(standings)}. {key_label('E', 'flies your Regatta career')}.")
+    else:
+        lines.append(f"You have not entered. {key_label('E', 'enters')}: a second career in this month's galaxy, in a "
+                     "Shuttle with a rookie's purse. Your own career waits where it is.")
+    lines.append("Both careers fly on your one daily allowance of jumps." if flight_left(world) is not None else
+                 "This board sets no limit on jumps, so the table also measures time spent.")
+    last = previous_month(month)
+    before = regatta_standings(_load_score_records(regatta_dir(home_dir, last)), last)[:3]
+    if before:
+        lines.append(section(regatta_name(last).upper()))
+        lines += [f"{ordinal(index)}  {_mission_plain(str(entry['handle']))}  "
+                  f"{p.gold}{entry['regatta']['worth']:,}cr{RESET}" for index, entry in enumerate(before, 1)]
+    return lines
+
+
+def screen_regatta(p: Palette, world: World, home_dir: Path, user_id: int) -> bool:
+    """The Regatta's page. True when the caller asks to change career: into
+    the month's from their own, or back."""
+    page = 0
+    while True:
+        key, page, count = _draw_service_page(p, "The Regatta", regatta_lines(world, home_dir, user_id),
+                                              "[E] Enter or return [<>] Page [B] Back: ", page)
+        if key in ("B", "Q"):
+            return False
+        if key == "E":
+            return True
+        if (moved := page_step(key, page, count)) is not None:
+            page = moved
+
+
+def enter_regatta(p: Palette, home: World, home_dir: Path, user_id: int) -> World | None:
+    """This month's Regatta career for the pilot of `home`, made new once they
+    agree to it. None where they decline or it cannot be opened, which the
+    status line then says. The career is an ordinary one in every other way:
+    its file and its score record are in the month's own directory."""
+    month = regatta_month()
+    if month is None:
+        return None
+    target = regatta_dir(home_dir, month)
+    try:
+        save, is_new, _notice = load_or_create_save(target, user_id, home.save.pilot.handle)
+    except (ResumeError, OSError) as exc:
+        set_status(f"This month's Regatta career cannot be opened: {exc}", "bad")
+        return None
+    if is_new:
+        if not confirm(f"Enter {regatta_month_name(month)}'s Regatta? A second career, in the galaxy every "
+                       "pilot flies this month.", p):
+            return None
+        save = new_regatta_career(home.save, month)
+    elif save.regatta != month:
+        set_status("This month's Regatta career cannot be opened: it is not this month's.", "bad")
+        return None
+    world = World(save, checkpoint=lambda current: persist(current, target, user_id))
+    world.dispatch_clock = home.dispatch_clock
+    world.flight_clock, world.flight_per_day = home.flight_clock, home.flight_per_day
+    # One allowance, two records of it: each career reads the other's.
+    world.flight_sibling = lambda: home.save.flight
+    home.flight_sibling = lambda: world.save.flight
+    world.checkpoint()
+    world.wire_events.clear()
+    world.wire_live, world.wire_user = True, user_id
+    world.wire_source = lambda: board_wire(_load_score_records(target))
+    world.launch_notes = ([f"{regatta_month_name(month)}'s Regatta. [R] is its table, and the way back to your own career."]
+                          + (launch_notes(world, is_new=True) if is_new else []))
+    return world
+
+
+def regatta_over(world: World) -> bool:
+    """Whether this is a Regatta career whose month is no longer the month:
+    it has turned, or the SysOp has switched the Regatta off since."""
+    return bool(world.save.regatta) and world.save.regatta != regatta_month()
+
+
+def regatta_notice(world: World) -> str | None:
+    """Tell a caller's own career once a month that the Regatta is open: not
+    in a career's first days, and not twice."""
+    month = regatta_month()
+    if month is None or world.save.regatta or world.save.turn < REGATTA_TELL_DAY:
+        return None
+    flag = f"regatta_told_{month}"
+    if world.save.flags.get(flag):
+        return None
+    world.save.flags[flag] = True
+    return f"{regatta_month_name(month)}'s Regatta is open: one galaxy for every pilot. [R] on the deck."
+
+
 def screen_dispatch(p: Palette, world: World, save_dir: Path, user_id: int) -> None:
     """Today's order and this board's flight line. Read-only: an order is flown by play."""
     entries = _load_score_records(save_dir)
@@ -18573,9 +18870,12 @@ def hall_view_rows() -> list[str]:
         [(str(number), label) for number, label in enumerate(SCORE_CATEGORIES.values(), 1)])
 
 
-def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) -> None:
+def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) -> str | None:
+    """The Hall's tables. Returns `R` when the caller asks for the Regatta,
+    which is a page of its own; None otherwise."""
     entries = _load_score_records(save_dir)
-    footer = f"[1-{len(SCORE_CATEGORIES)}] View [N] Next [P] Prev [B] Back: "
+    regatta = regatta_month() is not None
+    footer = f"[1-{len(SCORE_CATEGORIES)}] View [N] Next [P] Prev {'[R] Regatta ' if regatta else ''}[B] Back: "
     category, page, cache = "wealth", 0, {}
     while True:
         # The same rule the registration box follows: a screen whose title will
@@ -18594,7 +18894,8 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
             cache[category] = _service_pages(lines, title, footer)
         key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[category])
         if key == RESIZE_KEY: cache, page = {}, 0  # the cached pages were cut for the old terminal
-        if key in ("B", "Q"): return
+        if key in ("B", "Q"): return None
+        if key == "R" and regatta: return "R"
         if len(key) == 1 and key.isdigit() and 1 <= int(key) <= len(SCORE_CATEGORIES):
             category, page = list(SCORE_CATEGORIES)[int(key) - 1], 0
         elif (moved := page_step(">" if key == "N" else "<" if key == "P" else key, page, count)) is not None:
@@ -20818,9 +21119,16 @@ def _run_game(info: dict) -> int:
                 # The refused career keeps its slot until its replacement is
                 # confirmed; a cancelled registration changes nothing (#421).
                 replace_unsupported_career(save_dir, user_id, save)
+        # `save_dir` is the caller's own career's from here to the end of the
+        # session; a Regatta career has a directory of its own (`active_dir`).
         world = World(save, checkpoint=lambda current: persist(current, save_dir, user_id))
         world.dispatch_clock = dispatch_day
         world.flight_clock, world.flight_per_day = flight_day, flight_setting()
+        if (month := regatta_month()) is not None:
+            # The allowance is the caller's: what their Regatta career last
+            # recorded of it counts here before that career is ever opened.
+            recorded = peek_flight(regatta_dir(save_dir, month), user_id)
+            world.flight_sibling = lambda: recorded
         set_canopy_world(world)
         world.checkpoint()  # the launch tick prepares the station this career opens at
         # After that tick, never before: it is where a career first opened by
@@ -20836,6 +21144,9 @@ def _run_game(info: dict) -> int:
         # checkpoint). It waits for the first deck with the rest, even when a
         # resumed journey comes first.
         world.launch_notes = ([notice] if notice else []) + launch_notes(world, is_new=is_new)
+        if not is_new and (told := regatta_notice(world)) is not None:
+            world.launch_notes.append(told)
+        own, active_dir = world, save_dir   # the caller's own career, and the directory of the one being flown
         if world.save.pending_travel is not None:
             # Held on a screen of its own: what follows is the encounter the
             # caller was cut off in, and its first panel clears the terminal.
@@ -20848,7 +21159,41 @@ def _run_game(info: dict) -> int:
             # panel they had scrolled off the top (issue #643).
 
         while True:
+            if world is not own and regatta_over(world):
+                # The month turned with its career open: the table is final, and
+                # the caller is back where their own career was left.
+                world.commit()
+                ended = regatta_month_name(world.save.regatta)
+                world, active_dir = own, save_dir
+                set_canopy_world(world)
+                apply_display_style(world.save.display_style)
+                set_status(f"{ended}'s Regatta has ended; your standing is final. This is your own career.", "info")
             choice = screen_station_menu(p, world)
+            if choice == "H":
+                choice = screen_hall_of_fame(p, world, active_dir, user_id)
+                if choice is None:
+                    continue
+            if choice == "R":
+                if regatta_month() is None or not screen_regatta(p, world, save_dir, user_id):
+                    continue
+                world.commit()
+                if world is own:
+                    entered = enter_regatta(p, own, save_dir, user_id)
+                    if entered is None:
+                        continue
+                    world, active_dir = entered, regatta_dir(save_dir, entered.save.regatta)
+                else:
+                    world, active_dir = own, save_dir
+                    set_status("Back in your own career.", "info")
+                set_canopy_world(world)
+                apply_display_style(world.save.display_style)
+                apply_display_encoding(world.save.display_encoding)
+                if world.save.pending_travel is not None:
+                    # A Regatta career left mid-journey: finished before its deck, as at any launch.
+                    draw_page(p, "Journey Resumed", journey_resumed_lines(world), 0, 1)
+                    pause(p)
+                    screen_travel(p, world, world.save.pending_travel["destination"])
+                continue
             if choice == "Z":
                 # The lay-up page names deck keys and answers them: what it
                 # hands back is dealt with below as if pressed on the deck.
@@ -20881,14 +21226,11 @@ def _run_game(info: dict) -> int:
                 if dest is not None:
                     screen_travel(p, world, dest)
             elif choice == "S":
-                screen_status(p, world, save_dir)
-                continue
-            elif choice == "H":
-                screen_hall_of_fame(p, world, save_dir, user_id)
+                screen_status(p, world, active_dir)
                 continue
             elif choice == "J":
                 if dispatch_order(world) is not None:
-                    screen_dispatch(p, world, save_dir, user_id)
+                    screen_dispatch(p, world, active_dir, user_id)
                 continue
             elif choice == "N":
                 screen_contacts(p, world)

@@ -40,6 +40,10 @@ def _no_door_splash(monkeypatch):
     # date, and a test that sells or fights would be paid for it on the days
     # the order happened to ask for that. The dispatch's own tests pin a day.
     monkeypatch.setenv("DOOR_DISPATCH", "0")
+    # No Regatta either, for the same reason: its month is the calendar's, and
+    # a door a test launches would greet a returning pilot with it. Its own
+    # tests pin a month.
+    monkeypatch.setenv("DOOR_REGATTA", "0")
     # The status line is session state (issue #38): one test's result must not
     # be drawn in the next test's border.
     vr.clear_status()

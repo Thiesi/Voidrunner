@@ -154,6 +154,15 @@ quarter more for an Argosy. A warship's crew can be called on a second time in
 a fight: one station for a Cutter, two for a Frigate. The Carrier has neither,
 which is the price of doing both jobs.
 
+Once a month there is **the Regatta**: one galaxy that every pilot on every
+board can fly, with a table of its own. A caller flies it in a second career
+beside their own (`[R]` on the deck, then `[E]`), in a Shuttle with a rookie's
+purse; their own career waits where it was left. Both careers draw on the one
+daily allowance of jumps. The table ranks by net worth, is final when the
+month turns, and a Regatta career ends with its month. Regatta careers are
+kept under `regatta/<month>/` in the save directory, so **a backup has to copy
+the save directory's subdirectories**. `DOOR_REGATTA=0` switches it off.
+
 A pilot who retires **passes one thing on** to the next career, chosen with
 `[L]` on the Career Finale page: the first step of a stake at Freeport, one
 specialist of the crew at the level they have reached, or half the standing of
@@ -244,9 +253,9 @@ A change to a screen comes with gallery pictures: the tests can prove that a
 screen fits, never that it looks right. The game's design (rules, saves,
 presentation) is in [docs/design.md](docs/design.md). Neither tests nor
 simulated pilots can say whether it is fun: [docs/playtest.md](docs/playtest.md)
-is a sheet for watching two or three people play it. One proposal is written
-up and not built: [docs/month-galaxy.md](docs/month-galaxy.md), a galaxy every
-caller flies in the same month.
+is a sheet for watching two or three people play it.
+[docs/month-galaxy.md](docs/month-galaxy.md) is the Regatta: what it is, where
+its careers are kept and what a backup has to copy.
 
 ### What CI runs
 

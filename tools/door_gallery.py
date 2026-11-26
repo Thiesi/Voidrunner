@@ -199,6 +199,11 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Hall of Fame, hard charter", b"H7", "played"),
         # Today's order, the pilot's record and the board's flight line.
         ("Daily Dispatch", b"J"),
+        # The month's galaxy: its page from a caller's own career, the deck of
+        # the second career it opens, and the page again from inside.
+        ("The Regatta", b"R"),
+        ("Command Deck, Regatta", b"REYOB"),
+        ("The Regatta, entered", b"REYR"),
         # What tomorrow brings and what to settle before logging off.
         ("Lay-up", b"Z"),
         ("Lay-up, played", b"Z", "played"),
@@ -339,6 +344,9 @@ class Door:
                    # And one fixed day's flight allowance, for the same reason:
                    # a cached career would have more jumps to show tomorrow.
                    DOOR_JUMPS_DAY="2026-11-22",
+                   # And one fixed month's Regatta: its galaxy and its table's
+                   # heading are the month's.
+                   DOOR_REGATTA="2026-11",
                    PYTHONIOENCODING="utf-8")
         self.encoding = GALLERY_ENCODING
         command = [sys.executable, str(door)]

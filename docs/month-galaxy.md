@@ -1,140 +1,131 @@
-# The month's galaxy: a design note
+# The Regatta: the month's galaxy
 
-Build plan item 5.3. This is a proposal, not a description of anything built.
-It asks for three decisions, each with a recommendation.
+Build plan item 5.3. This began as a proposal with three open decisions. They
+were taken on 26 November 2026, and this is what was built.
+
+| Decision | Taken |
+| --- | --- |
+| How a caller gets in | A second career beside their own |
+| Which galaxy | The same on every board |
+| What the table ranks | Net worth on the last day of the month |
 
 ## What it is for
 
 Every career is flown in a galaxy of its own. Two callers on a board can
 compare credits in the Hall of Fame, but not what they did: one had a rich
 lane next to Freeport and the other started in the Long Dark. The daily
-dispatch is the only thing every pilot shares.
+dispatch was the only thing every pilot shared.
 
-The month's galaxy is one galaxy that every caller can fly in the same
-calendar month, with a table of its own. Same stations, same markets, same
-sectors, same seasons. What differs is the pilot, and the luck of encounters.
+The Regatta is one galaxy that every caller can fly in the same calendar
+month, with a table of its own. Same stations, same markets, same sectors,
+same seasons. What differs is the pilot, and the luck of encounters.
 
-It was put after pacing on purpose. With twelve jumps a real day everyone has
-the same number of jumps to spend in a month, so the table measures what was
-done with them. Without a limit it would measure hours.
+It came after pacing on purpose. With twelve jumps a real day everyone has the
+same number of jumps to spend in a month, so the table measures what was done
+with them. Without a limit it would measure hours, and on a board with no
+limit the page says so.
 
-## What is already there
+## A second career
 
-Most of it. A galaxy is made from one number, the career's seed
-(`SaveData.seed`): systems, links, economies, market traits and seasons all
-follow from it. A career's luck does not: encounters draw from an event
-generator that is seeded by the system, so two careers on one seed meet
-different raiders.
+A caller flies the Regatta in a second career beside their own. Anybody can
+enter in any month, and nobody gives up a career to do it.
 
-So a shared galaxy needs no new world code. It needs a seed that everyone
-gets, a way to choose it, something to remember that a career is in it, and a
-table.
+- `[R]` on the deck, or `[R]` from the Hall of Fame, opens the Regatta's page.
+- `[E]` on that page enters, after one question, and from inside it returns.
+- The Regatta career starts as every career does: a Shuttle and a rookie's
+  purse, at Freeport, in the month's galaxy.
+- The caller's own career waits where it was left. Its file is not touched.
+- A Regatta career's deck says which career it is on every deck, in a row of
+  its own with the key that leads back.
 
-## Decision 1: how a caller gets in
+A caller's own career is told once a month that the Regatta is open, from its
+third day on. A new pilot has enough to read.
 
-**A. At launch, like the hard charter (recommended).** The launch question
-gains a key: `[M]` for the month's galaxy. A pilot who retires can choose it
-for the next career on the Career Finale page. The career is an ordinary
-career in every way; its seed is the month's.
+## One allowance of jumps
 
-- Smallest change. It reuses the pattern #115 built for the hard charter, and
-  the two can be combined: a hard career in the month's galaxy.
-- One career per caller, as now.
-- A caller in the middle of a long career cannot join until that career
-  retires. A new caller can join at once.
+The jumps are the caller's, not a career's. Both careers draw on the one
+daily allowance, and a jump flown in either is gone from both.
 
-**B. A second career beside the first.** Every caller has their own career
-and, separately, a career in the month's galaxy, and chooses which to fly at
-launch.
+Each career file keeps its own record of the allowance: the day it was last
+written and what was left then. Read later, a record says what would be left
+if nothing had been flown since. The record that was written last is the true
+one, and it is always the one that says fewer, so the allowance is the lesser
+of the two. Neither career ever writes the other's file.
 
-- Everyone can join in any month, which is the point of a monthly event.
-- It is a large change. The door, the save layer, recovery, the backup
-  import NetBBS uses and the score records all assume one career per caller.
-- The flight allowance is the caller's, so the two careers would share
-  twelve jumps a day. That is right, but it means the monthly career competes
-  with the caller's own for jumps.
+## The same galaxy on every board
 
-**C. A, and a leave of absence later.** Ship A now. If callers ask to join
-mid-career, add a way to park the current career and come back to it, which
-is B's storage work without B's menu.
+A galaxy is made from one number, the career's seed: systems, links,
+economies, market traits and seasons all follow from it. The Regatta's seed
+follows from the month alone, as the dispatch follows from the day. Two boards
+running Voidrunner fly the same galaxy in November, and nothing is configured.
 
-Recommendation: **A now, C if it is wanted.** B is the better event and the
-riskier change, and A will show whether anyone flies it.
+A career's luck does not follow from the seed. Encounters draw from a
+generator seeded by the system, so two pilots in one galaxy meet different
+raiders.
 
-## Decision 2: one galaxy for every board, or one each
+## The table
 
-**The same on every board (recommended).** The seed follows from the month
-alone, as the dispatch follows from the day. Two boards running Voidrunner
-are flying the same galaxy in November, and a caller on both can compare.
-Nothing is configured.
+The table lists the month's careers by net worth: credits, cargo at what it
+cost, and what was put into the ship's modules, its hull and stakes. It is the
+figure the career simulator has always compared careers by. A pilot who bought
+an Argosy is not ranked below one who sat on the credits.
 
-**One per board.** The seed also takes something of the board's. Boards
-cannot compare; a caller cannot look the month's galaxy up from another
-board. I see no advantage unless SysOps want it.
+- Among equals, the career that got there in fewer days is ahead.
+- The table shows the day each career has reached, because a caller who
+  joined on the 20th has had fewer.
+- A career's standing is taken at every save while its month lasts. When the
+  month turns the last figure stands.
+- Last month's first three stay on the page.
 
-A SysOp switch turns the month's galaxy off, as `DOOR_DISPATCH=0` does for
-the dispatch.
+## When the month turns
 
-## Decision 3: what the table ranks
+A Regatta career ends with its month. It does not retire, and there is no New
+Game+ from it. When the month turns, the next month's galaxy is a new career.
 
-The table lists careers launched in this month's galaxy.
+The month turns at midnight on the node's calendar. A caller who is flying
+their Regatta career at that moment is returned to their own career at the
+next deck, with a line that says the table is final.
 
-**Net worth on the last day of the month (recommended).** Credits, cargo at
-cost, and what was put into the ship, the crew and stakes, as the career
-simulator already counts it. A pilot who bought an Argosy is not ranked below
-one who sat on credits. The figure is taken at each save while the month
-lasts and is final when the month turns.
+## Where it is kept
 
-**Credits.** Simpler, and it is what the Wealth table shows. It punishes
-spending, which is the wrong lesson.
+A Regatta career is an ordinary career file. It is kept in a directory of its
+own under the save directory, with its own score records beside it:
 
-**Day reached, or contracts, or systems charted.** Each rewards one way of
-playing. A later version could show all of them as columns.
+    saves/
+      77.json                      the caller's own career
+      scores/77.json
+      regatta/
+        2026-11/
+          77.json                  the same caller's November career
+          scores/77.json           and its standing
 
-Whatever is ranked, the table should say how many jumps the career has flown,
-because a caller who joined on the 20th has had fewer.
+The storage layer is asked for a different directory and is otherwise
+untouched: checkpoints, the previous copy, recovery and the score record all
+work as they do for any career. The session holds the caller's one lock, which
+is in the save directory itself, for both.
 
-## What a career would record
+A save gains one field, `regatta`, the month, written only for a Regatta
+career. A score record gains `regatta`: the month, the net worth and the day.
+Every save and record written before this reads as it did.
 
-- `league`: the month it was launched in, `2026-11`. Absent for every other
-  career, so every save written before this reads as it did.
-- `league_worth`: the net worth at the last save made inside that month.
+**For a board's backups:** the save directory now has a subtree. A backup that
+copies only the top level will miss Regatta careers.
 
-A retired career's dossier and the board's score record would carry both, as
-they carry `charter`. A career goes on after its month ends; it is an
-ordinary career, and only its place on that month's table is fixed.
+## SysOp settings
 
-## What it would not do
+- `DOOR_REGATTA=0` switches the Regatta off. The door then has no such page,
+  and a caller who was inside one is returned to their own career.
+- `DOOR_REGATTA=2026-11` pins the month. The gallery uses it; a board has no
+  use for it.
+
+## What it does not do
 
 - **No shared state.** Pilots do not meet, and one pilot's trading does not
-  move another's prices. Markets are each career's own. That would be a
-  different game, and the door's one-file-per-caller storage is not built
-  for it.
-- **No prizes.** A table and, I would suggest, one achievement for finishing
-  a month in the top three with at least three pilots on the table.
-- **No change for a board with one caller.** They would see a table with
-  their own name on it. The month's galaxy is still the same galaxy next
-  door.
-
-## Where a board has no jump limit
-
-With `DOOR_JUMPS=0` a caller can fly as many jumps as they like, and the table
-becomes a measure of time spent. The table should say so on such a board. I
-would not hide it.
-
-## Size and risk
-
-With decisions A, same-on-every-board and net worth: a medium change, about
-the size of the hard charter (#115). New save field, one more key at launch
-and on the finale page, one more Hall of Fame table, the SysOp switch, and a
-net worth function in the door that matches the simulator's.
-
-The risk is in the calendar. A month turns at midnight on the node's clock;
-a career launched at 23:59 on the last day is in the old month. The dispatch
-already solved the same problems for the day, and this would use its clock.
-
-## Questions for you
-
-1. A, B or C for joining?
-2. The same galaxy on every board, or one per board?
-3. Net worth, or credits?
+  move another's prices. Markets are each career's own.
+- **No prizes and no achievement.** A table, and last month's first three.
+- **Achievements, the dispatch streak and the wire are each career's own.**
+  What a Regatta career earns is recorded in that career and shown in its own
+  Hall of Fame, not added to the caller's own Pilot Record.
+- **No hard charter.** Every Regatta career is on the standard charter, so
+  the table compares like with like.
+- **NetBBS game events are sent for a caller's own career only.**
