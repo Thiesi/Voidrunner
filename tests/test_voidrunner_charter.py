@@ -38,7 +38,7 @@ def test_the_charters_and_what_the_hard_one_says_of_itself():
 
 
 def test_a_raider_is_a_tier_stronger_and_the_luck_is_the_same():
-    for danger in range(6):
+    for danger in range(5):  # danger 5 also sends elites, whose tier is their own; see the elite tests
         for seed in range(40):
             standard, hard = _world_with_seed(42), _hard()
             standard.event_rng.seed(seed)
@@ -54,8 +54,8 @@ def test_a_raider_is_a_tier_stronger_and_the_luck_is_the_same():
 
 def test_the_chart_and_the_hulk_speak_of_the_raiders_this_pilot_will_meet():
     standard, hard = _world_with_seed(42), _hard()
-    assert [vr.raider_tier_span(standard, danger) for danger in range(6)] == [(0, 1), (0, 2), (1, 3), (2, 4), (3, 4), (4, 4)]
-    assert [vr.raider_tier_span(hard, danger) for danger in range(6)] == [(1, 2), (1, 3), (2, 4), (3, 4), (4, 4), (4, 4)]
+    assert [vr.raider_tier_span(standard, danger) for danger in range(6)] == [(0, 1), (0, 2), (1, 3), (2, 4), (3, 4), (4, 5)]
+    assert [vr.raider_tier_span(hard, danger) for danger in range(6)] == [(1, 2), (1, 3), (2, 4), (3, 4), (4, 4), (4, 5)]
     # A Shuttle is warned off a danger-1 lane on the hard charter where the standard one says nothing.
     for world in (standard, hard):
         target = sorted(world.here.connections)[0]

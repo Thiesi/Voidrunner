@@ -141,6 +141,13 @@ careers have a Hall of Fame table of their own and three achievements. The
 charter is fixed once the career is launched. A pilot who retires chooses the
 charter of the next career on the Career Finale page.
 
+The most dangerous space, danger 5, also sends **elite raiders**: a fifth
+tier, flown by a handful of named captains in a pattern of their own, two
+volleys back to back and then a recovery. They fly alone and are met nowhere
+else. A finished ship with a full crew wins nearly every such fight and leaves
+it with well under half its hull; a lesser ship is outclassed, and can still
+buy its way out by dumping cargo.
+
 Once a pilot has flown the day's order, that deck row carries **the wire**
 instead: the newest thing another pilot on the board did, such as a promotion,
 a silver or gold achievement, a retirement or a lost ship. Each pilot's last
@@ -196,6 +203,7 @@ python tools/door_gallery.py --encoding cp437 --out build/gallery-cp437
 python tools/door_gallery.py --check  # also fail on overflow, ragged boxes, undecodable bytes
 python tools/career_sim.py              # whole careers flown by simple pilots; --help for switching a rule off
 python tools/check_careers.py build/careers.json   # after career_sim.py --json build/careers.json
+python tools/fight_sim.py               # staged fights by ship, crew and raider tier: who wins, at what cost in hull
 ```
 
 A change to a screen comes with gallery pictures: the tests can prove that a
