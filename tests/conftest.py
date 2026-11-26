@@ -50,6 +50,16 @@ def _no_door_splash(monkeypatch):
 
 
 @pytest.fixture
+def plain_sectors(monkeypatch):
+    """Put every system in the Auroral Span, whose rule moves seasons and nothing else.
+
+    For a test that pins raiders, customs, fuel or standing in a fixed galaxy
+    and is about something other than what a sector does to them: the station
+    it happens to stand at may be in the Fringe or the Verge."""
+    monkeypatch.setattr(vr, "sector_for", lambda system: "Auroral Span")
+
+
+@pytest.fixture
 def without_action_bar(monkeypatch):
     """Removes the action bar from the frame that has just been drawn.
 

@@ -154,6 +154,21 @@ quarter more for an Argosy. A warship's crew can be called on a second time in
 a fight: one station for a Cutter, two for a Frigate. The Carrier has neither,
 which is the price of doing both jobs.
 
+The galaxy has six sectors, and **each sector has one rule of its own**,
+taken from the story its docks tell:
+
+| Sector | Rule |
+| --- | --- |
+| Coreward Verge | Patrolled: raiders half as common, customs twice as strict, one more Concord standing for a contract finished there |
+| Auroral Span | Restless seasons: seasons swing twice as far |
+| Farrider's Edge | Far out: a survey into the sector pays double; its yards charge half as much again for repairs |
+| Hollow Reach | Old workings: yards repair at half price; raw ore and refined metals are always in glut |
+| The Long Dark | The lamp: a jump into the sector burns one more fuel; a dock there tops the tank up by a jump's worth, free |
+| Outer Fringe | Lawless: no customs anywhere; raiders a tier stronger |
+
+A sector's docks say its rule the first time a pilot arrives there, and the
+Archive's sector files keep it.
+
 The most dangerous space, danger 5, also sends **elite raiders**: a fifth
 tier, flown by a handful of named captains in a pattern of their own, two
 volleys back to back and then a recovery. They fly alone and are met nowhere

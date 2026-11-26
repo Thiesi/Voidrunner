@@ -76,7 +76,8 @@ def test_every_offer_a_board_posts_into_dangerous_space_is_paid_for_it():
             if world.by_id[mission.target_system].danger != 5 or mission.kind != "scan":
                 continue
             base = vr.SURVEY_PAY[0] + hops[mission.target_system] * vr.SURVEY_PAY[1]
-            assert mission.reward == base * 150 // 100
+            edge = vr.sector_for(world.by_id[mission.target_system]) == "Farrider's Edge"  # where a survey pays double
+            assert mission.reward == base * 150 // 100 * (vr.EDGE_SURVEY_PAY if edge else 1)
             paid += 1
     assert paid >= 3
 

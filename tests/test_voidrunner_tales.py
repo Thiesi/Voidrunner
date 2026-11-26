@@ -59,7 +59,7 @@ def test_the_parts_come_in_order_one_a_docking_as_the_sector_is_learned():
     stations = [system.id for system in vr.sector_stations(world, sector)]
     parts = vr.SECTOR_STORIES[sector][1]
     heard = [_dock(world, sid) for sid in stations[:6]]
-    assert heard[0] == [f"{sector}, I: {parts[0]}"]
+    assert heard[0] == [f"{sector}, I: {parts[0]}", vr.sector_rule_line(sector)]  # the rule, with the first part
     assert heard[1] == []
     assert heard[2] == [f"{sector}, II: {parts[1]}"]
     assert heard[3] == []
@@ -79,7 +79,7 @@ def test_a_small_sector_tells_its_story_over_as_many_dockings_as_it_takes():
         if system.id not in keep:
             system.x, system.y = world.by_id[0].x, world.by_id[0].y  # moved out of the sector
     assert vr.sector_story_marks(world, sector) == (1, 2, 2)
-    assert len(_dock(world, keep[0])) == 1 and len(_dock(world, keep[1])) == 1
+    assert len(_dock(world, keep[0])) == 2 and len(_dock(world, keep[1])) == 1  # the first part comes with the rule
     assert _dock(world, keep[0])[0].startswith(f"{sector}, III: ")
     assert world.save.tales[sector] == 3
 
@@ -91,7 +91,7 @@ def test_freeports_own_sector_begins_its_story_at_the_first_arrival_there():
     assert world.save.tales == {}
     neighbour = next(system.id for system in vr.sector_stations(world, home) if system.id)
     lines = _dock(world, neighbour)
-    assert lines == [f"{home}, I: {vr.SECTOR_STORIES[home][1][0]}"]
+    assert lines == [f"{home}, I: {vr.SECTOR_STORIES[home][1][0]}", vr.sector_rule_line(home)]
     # And coming home is a docking like any other.
     third = next(system.id for system in vr.sector_stations(world, home) if system.id not in (0, neighbour))
     _dock(world, third)

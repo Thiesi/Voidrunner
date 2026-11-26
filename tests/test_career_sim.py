@@ -196,7 +196,7 @@ def test_a_pilot_told_to_works_toward_a_faction_and_joins_it(sim):
     """`--factions`: a smuggler lets beaten raiders go for the Cartel, a
     contractor hands them to the Navy, and each joins the day the door allows."""
     ways = {"factions": True}
-    smuggler = sim.fly_one((DOOR, "smuggler", 1012, 30, {}, True, True, "S", 8, ways))
+    smuggler = sim.fly_one((DOOR, "smuggler", 1007, 30, {}, True, True, "S", 8, ways))
     assert smuggler["firsts"]["Blackwake"] <= 30 and "Concord" not in smuggler["firsts"]
     assert smuggler["earned"]["grants"] == 2000 and smuggler["standing"]["blackwake"] >= 75
     contractor = sim.fly_one((DOOR, "contractor", 1170, 45, {}, True, True, "S", 8, ways))

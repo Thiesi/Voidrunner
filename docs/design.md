@@ -2024,6 +2024,82 @@ cached careers would otherwise have more jumps to show tomorrow. The suite's
 launched doors run with the allowance on, as a caller's does; a walk that
 needs more than twelve jumps has to set `DOOR_JUMPS=0`.
 
+**A rule for each sector (review).** A sector was a name, a filter on the star
+map, a season, and, since the sector stories, something its docks say about
+themselves. Nothing was different about flying in one. Each of the six now has
+one rule of its own, taken from its story, that changes what is worth doing
+there:
+
+    Coreward Verge    patrolled         raiders half as common, customs twice as
+                                        strict, one more Concord standing for a
+                                        contract finished there
+    Auroral Span      restless seasons  seasons swing twice as far
+    Farrider's Edge   far out           a survey into the sector pays double;
+                                        its yards charge half as much again
+    Hollow Reach      old workings      yards repair at half price; raw ore and
+                                        refined metals are always in glut
+    The Long Dark     the lamp          a jump into the sector burns one more
+                                        fuel; a dock there gives a jump's worth
+    Outer Fringe      lawless           no customs anywhere; raiders a tier
+                                        stronger
+
+A rule is the sector's and not a station's, so it is learned once. The docks
+say it with the first part of the sector's story (`sector_tale`), the sector
+file keeps it, and wherever it moves a figure the page that shows the figure
+says why: the price's own reasons name `Hollow Reach's old workings`, a
+contract's sheet has a `SECTOR` row for a doubled survey, the yard's header
+says `repairs at half price`, the chart warns of the Fringe's raiders as it
+warns of any, and the dock in the Long Dark reports the fuel it left. Nothing
+is saved: a system's position gives its sector. The Reference spends no words
+on it: the sentence about sector stories now says each sector has a rule and
+a story.
+
+How each is done, where that is not obvious. In the Verge half the raiders
+never come, and it is the same one draw that decides it: the encounter that
+would have been a raider is nothing half the time (`encounter_kinds`), so the
+event sequence is the length it always was and everything else is exactly as
+likely as it was. In the Fringe the customs roll is still taken and can never
+succeed, for the same reason. The Fringe's extra tier stops at the top named
+tier, as the hard charter's does, and the two together still do; elites are
+danger 5's and no sector's. The Long Dark's unit is added after an engineer's
+saving, and the lamp gives the cheapest jump out of that station, as far as
+the tank has room.
+
+Three proposals changed in the building. The Edge was to have dearer fuel:
+the fuel price is one constant read in more than twenty places, most of them
+planners and estimates, and a price that differs by station would have made
+those wrong, so its cost
+is in the yard instead, the mirror of the Reach. The Fringe was to sell
+contraband at every station: prohibition is checked in about twenty places, and
+contraband already sells at half as much again outside a Haven, which with no
+customs is the rule a smuggler wanted. And the Reach's glut is the same 0.7 a
+station's own standing glut is, not a new figure.
+
+Measured over 200 careers a pilot to day 100, with all six rules. The day-100
+medians are within 2% of where they were and `tools/check_careers.py` reports
+0 problems. The simulator now reports trade margin a docking by sector, which
+was this change's own check (no sector more than 25% above the average):
+
+    Auroral Span      3,594   +9%
+    The Long Dark     3,547   +8%
+    Outer Fringe      3,239   -2%
+    Coreward Verge    3,174   -4%
+    Farrider's Edge   3,128   -5%
+    Hollow Reach      3,091   -6%
+
+Before the rules the spread was +7% to -9%, so the rules did not make any
+sector the place to trade. Freeport can be in any sector, so the sector a
+career starts in is now a difference between careers. It is a small one: by
+starting sector the day-100 median runs from 370,327 (Hollow Reach) to 383,780
+(the Long Dark), the day-20 median from 34,206 to 45,866, and ships lost from
+0.38 (the Verge) to 0.63 (the Long Dark). A start in the Fringe, where raiders
+are a tier stronger from the first jump, is not the worst of them.
+
+The suite has a fixture, `plain_sectors`, that puts every system in the Span,
+whose rule moves only seasons. It is for tests that pin raiders, customs,
+fuel or standing in a fixed galaxy and are about something else; the station
+such a test stands at may now be in the Fringe or the Verge.
+
 **A trait for each line (review).** A hull was three numbers, and the numbers
 did not do what they said. A station holds 48 or 96 units of a good, so a hold
 past a hundred and sixty could not be filled, and more hull only made the same

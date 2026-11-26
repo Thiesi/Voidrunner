@@ -126,6 +126,8 @@ def test_a_quote_and_the_ladder_it_is_judged_against_use_one_rule():
         if system.id in world.traits:
             continue
         for commodity in vr.COMMODITIES:
+            if vr.sector_price_factor(system, commodity) != 1.0:
+                continue  # a sector's standing glut is a rule of its own, like a trait
             assert vr.price_for(world, system.id, commodity) in vr.price_ladder(commodity)
 
 

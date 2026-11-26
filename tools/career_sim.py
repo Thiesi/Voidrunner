@@ -140,6 +140,8 @@ class Pilot:
         self.palette = vr.Palette(False)
         self.screen = io.StringIO()
         self.keys = 0
+        self.sector_margin = Counter()   # what sales made over cost, by the sector they were made in
+        self.sector_docked = Counter()   # dockings, by sector
         self.spent = Counter()      # credits put into the ship, the crew and stations
         self.earned = Counter()     # credits by where they came from
         self.lost = 0               # ships
@@ -224,15 +226,22 @@ class Pilot:
 
     def trade(self, commodity: str, quantity: int, *, buying: bool, account: str = "trade") -> bool:
         credits = self.world.save.pilot.credits
+        ledger = self.world.save.trading_ledger
+        before = ledger.sales_revenue - ledger.sales_cost
         try:
             self.vr.trade_cargo(self.world, commodity, quantity, buying=buying)
         except self.vr.TradeError:
             return False
         self.earned[account] += self.world.save.pilot.credits - credits
+        if not buying and hasattr(self.vr, "sector_for"):
+            # What the sale made over what the goods cost, to the sector it was made in.
+            self.sector_margin[self.vr.sector_for(self.world.here)] += ledger.sales_revenue - ledger.sales_cost - before
         return True
 
     def sell_hold(self) -> None:
         world, vr = self.world, self.vr
+        if hasattr(vr, "sector_for"):
+            self.sector_docked[vr.sector_for(world.here)] += 1
         reserved = self.reserved() + self.keep
         for commodity, held in list(world.save.cargo.items()):
             free = held - reserved[commodity]
@@ -634,6 +643,8 @@ class Pilot:
             "stakes": sum(vr.stakes(save).values()) if hasattr(vr, "stakes") else 0,
             "dispatches": vr.dispatch_record(save)["total"] if hasattr(vr, "dispatch_record") else 0,
             "earned": dict(self.earned), "spent": dict(self.spent), "fights": dict(self.fights),
+            "sector_margin": dict(self.sector_margin), "sector_docked": dict(self.sector_docked),
+            "home": vr.sector_for(world.by_id[0]) if hasattr(vr, "sector_for") else "",
             "hull": save.ship.hull_class, "rank": vr.career_rank_index(save.pilot),
         }
 
@@ -677,6 +688,29 @@ def milestone_rows(results: list[dict]) -> list[str]:
     return lines
 
 
+def sector_margins(results: list[dict]) -> dict[str, float]:
+    """What a docking's sales make over cost in each sector, in credits: every
+    career's sales there over every career's dockings there."""
+    margin, docked = Counter(), Counter()
+    for result in results:
+        margin.update(result.get("sector_margin", {}))
+        docked.update(result.get("sector_docked", {}))
+    return {sector: margin[sector] / docked[sector] for sector in docked if docked[sector] >= 30}
+
+
+def sector_rows(results: list[dict]) -> list[str]:
+    """Trade margin a docking, by sector, against the average of the sectors:
+    no sector should be the place to trade."""
+    margins = sector_margins(results)
+    if len(margins) < 2:
+        return []
+    average = sum(margins.values()) / len(margins)
+    rows = [f"{'sector':<17}{'margin a docking':>17}{'against the average':>21}"]
+    for sector, value in sorted(margins.items(), key=lambda item: -item[1]):
+        rows.append(f"{sector:<17}{value:>17,.0f}{(value / average - 1) * 100:>+20.0f}%")
+    return rows
+
+
 def summarize(results: list[dict], days: int) -> list[str]:
     lines = []
     marks = [mark for mark in CHECKPOINTS if mark <= days]
@@ -709,6 +743,10 @@ def summarize(results: list[dict], days: int) -> list[str]:
     lines.append("")
     lines.append("Net worth (credits, cargo at cost, and what went into upgrades, hulls and stakes), median by day.")
     lines.append("ships: lost per career, mean.  jobs: contracts completed.  chart: systems charted.  disp: dispatches flown.")
+    sectors = sector_rows(results)
+    if sectors:
+        lines.append("")
+        lines += sectors
     milestones = milestone_rows(results)
     if milestones:
         jumps = results[0].get("jumps_per_day", JUMPS_PER_REAL_DAY)
