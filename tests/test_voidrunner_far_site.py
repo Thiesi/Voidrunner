@@ -87,11 +87,12 @@ def test_the_second_site_pays_more_and_gives_its_own_record():
     before = world.save.pilot.credits
     lines = vr.investigate_landmark(world)
     assert world.save.pilot.credits == before + vr.FAR_SITE_REWARD
-    assert lines == [f"Salvage recovered: +{vr.FAR_SITE_REWARD}cr.", vr.ARCHIVE_RECORDS[far["label"]][0]]
+    assert lines[:2] == [f"Salvage recovered: +{vr.FAR_SITE_REWARD}cr.", vr.ARCHIVE_RECORDS[far["label"]][0]]
+    assert len(lines) == 3 and lines[2].startswith("Its record carries one more bearing, the last: ")
     assert world.save.flags["landmark2_investigated"] is True
-    # Claimed once, and the bearing is spent.
-    assert vr.landmark_here(world) is None and vr.far_site_bearing(world) is None and vr.far_site_lead(world) is None
-    assert not any(label.startswith("Site bearing") for _sid, label in vr.route_choices(world))
+    # Claimed once; its own bearing is spent, and its record points on to the last site.
+    assert vr.landmark_here(world) is None and vr.far_site_bearing(world) == world.last_site["system_id"] and "the last" in vr.far_site_lead(world)
+    assert [sid for sid, label in vr.route_choices(world) if label.startswith("Site bearing")] in ([], [world.last_site["system_id"]])
     with pytest.raises(ValueError):
         vr.investigate_landmark(world)
     # The Discovery view now shows the second site, claimed.

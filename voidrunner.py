@@ -2589,7 +2589,13 @@ def _validate_save_document(data: dict) -> None:
     require(isinstance(stories, dict) and set(stories) <= set(FACTIONS), "faction stories")
     for faction, story in stories.items():
         require(isinstance(story, dict), "faction story")
-        _reject_unknown_save_fields(story, {"version", "stage", "choice"}, "faction story")
+        _reject_unknown_save_fields(story, {"version", "stage", "choice", "day", "epilogue"}, "faction story")
+        # When a case closed, and whether word of what came of it has reached the
+        # pilot. Both are a closed case's alone; a case closed before this has neither.
+        if "day" in story:
+            integer(story["day"], "faction story day", maximum=data["turn"])
+        require(story.get("epilogue", True) is True, "faction story epilogue")
+        require(story.get("stage") == "complete" or not ({"day", "epilogue"} & set(story)), "faction story epilogue")
         if type(story.get("version")) is int and story["version"] != 1:
             raise UnsupportedSave("The saved faction story uses an unsupported version.")
         require(type(story.get("version")) is int and story["version"] == 1, "faction story version")
@@ -2877,6 +2883,7 @@ class World:
                 self.by_id[sid].discovered = True
         self.landmark: dict = generate_landmark(save.seed, self.galaxy)
         self.far_site: dict = generate_far_site(save.seed, self.galaxy, self.landmark)
+        self.last_site: dict = generate_last_site(save.seed, self.galaxy, self.landmark, self.far_site)
         self.traits: dict[int, dict] = system_traits(save.seed, self.galaxy)
         self.event_rng = random.Random()
         if save.event_rng_state is not None:
@@ -3117,6 +3124,35 @@ LANDMARK_FLAVORS = [
         "reward_credits": 3000,
     },
 ]
+
+
+# The last site (review). The first site's record leads to a second, and there
+# it stopped: a pilot with a finished ship had no place left to go to. The
+# second site's record now carries one more bearing, to a place that is not one
+# of the four: a beacon past the charted lanes, in the most dangerous system the
+# galaxy has that is not already a site. It is worth going to in the ship a
+# career ends in and not before. Its record is the last, and says so.
+LAST_SITE = {
+    "label": "the Last Beacon",
+    "flavor": "A relay buoy far past the last charted lane, its lamp still turning. No station claims it and no "
+              "ledger pays for it. The service hatch has been opened recently, and closed again with care.",
+    "reward_credits": 15000,
+}
+
+
+def generate_last_site(seed: int, galaxy: list[GalaxySystem], first: dict, far: dict) -> dict:
+    """The third site of a galaxy: its own `random.Random`, like the others',
+    so neither the galaxy's nor the event RNG's sequence is touched. Never
+    home and never either earlier site's system; the most dangerous system
+    left, in a sector neither earlier site is in where there is one."""
+    rng = random.Random((seed ^ _LANDMARK_SEED_OFFSET) + 0x4C415354)  # ASCII "LAST"
+    by_id = {system.id: system for system in galaxy}
+    taken = (0, first["system_id"], far["system_id"])
+    elsewhere = [system for system in galaxy if system.id not in taken]
+    sectors = {sector_for(by_id[first["system_id"]]), sector_for(by_id[far["system_id"]])}
+    candidates = [system for system in elsewhere if sector_for(system) not in sectors] or elsewhere
+    worst = max(system.danger for system in candidates)
+    return {"system_id": rng.choice(sorted(system.id for system in candidates if system.danger == worst)), **LAST_SITE}
 
 
 def generate_landmark(seed: int, galaxy: list[GalaxySystem]) -> dict:
@@ -5641,6 +5677,52 @@ FACTION_STORIES = {
 }
 
 
+# Epilogues (review). A faction's case ended on its closing line and was never
+# heard of again: the choice a pilot made between two people's needs had a
+# sentence of consequence and then nothing. Twelve days after a case closes,
+# word of what came of it reaches the pilot at whatever dock they are at, once,
+# and stays on the case's page. Each ending has its own, and none of them says
+# the pilot chose wrongly: each says what that choice cost and bought.
+EPILOGUE_DAYS = 12
+FACTION_EPILOGUES = {
+    FACTION_CONCORD: {
+        "who": "Edda Ro",
+        "hardline": "The official took a plea and named two more. The ledger stays sealed until the trials end. Far "
+                    "Lantern's clinic got its medicine in the end, eleven weeks late, from a carrier nobody will name.",
+        "aid": "Dr. Parn's clinic has not run short since. The inquiry is slower without the ledger sealed, and the "
+               "official still has a desk. Edda says she can live with slow. She has asked the carriers to keep flying.",
+    },
+    FACTION_BLACKWAKE: {
+        "who": "Rook Talan",
+        "hardline": "The false beacon is scrap and its captain is somebody's deckhand now. Crews on that corridor pay "
+                    "Rook's people instead, and less. Concord has a patrol sitting on the approach, counting hulls.",
+        "aid": "The public beacon has been knocked out twice and rebuilt twice, the second time by crews who never met "
+               "Oren. Nobody collects on that corridor now. Rook calls it bad business and has not touched it.",
+    },
+}
+
+
+def faction_epilogue(faction: str, choice: str) -> str:
+    """`Word from Edda Ro: ...`: what came of a case that ended this way."""
+    told = FACTION_EPILOGUES[faction]
+    return f"Word from {told['who']}: {told[choice]}"
+
+
+def faction_epilogues_due(world: World) -> list[str]:
+    """The epilogues that reach the pilot at this docking: each case closed at
+    least `EPILOGUE_DAYS` ago whose word has not come yet. Each comes once."""
+    lines = []
+    for faction in FACTIONS:
+        story = world.save.faction_stories.get(faction)
+        if (story is None or story["stage"] != "complete" or story.get("epilogue")
+                or world.save.turn < story.get("day", 0) + EPILOGUE_DAYS):
+            continue
+        story["epilogue"] = True
+        lines.append(faction_epilogue(faction, story["choice"]))
+        world.save.pilot.note(f"Word came of {FACTION_STORIES[faction]['title']}.")
+    return lines
+
+
 def faction_story_haven(world: World) -> int | None:
     candidates = sorted(system.id for system in world.galaxy if system.economy == "Haven")
     return random.Random(f"faction-stories-v1:{world.save.seed}").choice(candidates) if candidates else None
@@ -5709,6 +5791,7 @@ def faction_story_action(world: World, faction: str, action: str) -> str:
         for group, amount in ending["standing"].items(): adjust_reputation(world, group, amount)
         world.save.pilot.missions_completed += 1
         story["stage"] = "complete"
+        story["day"] = world.save.turn  # when it closed: word of what came of it follows
         result = f"Case complete: {info['title']}. +{ending['reward']:,}cr; {terms}."
         world.save.pilot.highlight(f"{info['title']}: {ending['label']}.")
     else: raise ValueError("That action is unavailable at this case stage; completed cases cannot pay again.")
@@ -5757,7 +5840,10 @@ def faction_story_lines(world: World, faction: str) -> list[str]:
     stage = story["stage"] if story is not None else None
     lines = [f"{p.ink}{BOLD}{info['title']}{RESET} {p.deep}{glyph('dot')}{RESET} {p.slate}{FACTION_LABEL[faction]}{RESET}"]
     if stage == "complete":
-        return lines + [info[story["choice"]]["closing"], "Case complete. Reward and recognition cannot be claimed again."]
+        lines += [info[story["choice"]]["closing"], "Case complete. Reward and recognition cannot be claimed again."]
+        if story.get("epilogue"):
+            lines += [section("SINCE THEN"), faction_epilogue(faction, story["choice"])]
+        return lines
     lines.append(info["intro"] if stage in (None, "accepted") else info["evidence"])
     target = world.by_id[faction_story_target(world, faction)]
     stages = {None: "open", "accepted": "accepted; evidence not yet found", "evidence": "evidence in hand; choose an ending",
@@ -6608,6 +6694,7 @@ ACCOLADES: tuple[Accolade, ...] = tuple([
     Accolade("landmark", "Exploration", "Into the Silence", "Investigate a landmark.", "landmark", tier=2),
     Accolade("far_site", "Exploration", "Where the Record Led", "Follow a landmark's record to the second site.",
              "far_site", tier=3),
+    Accolade("last_site", "Exploration", "Light Kept", "Follow the records to the last site.", "last_site", tier=3),
     Accolade("tale", "Exploration", "Local Knowledge", "Hear the whole of a sector's story.", "sector_tales", tier=1),
     Accolade("tales_all", "Exploration", "What the Ledgers Leave Out", "Hear the whole story of all six sectors.",
              "sector_tales", len(SECTOR_NAMES), tier=3),
@@ -6745,6 +6832,7 @@ def accolade_metrics(save: SaveData) -> dict[str, int]:
         docked=docked_systems(save),
         landmark=int(bool(save.flags.get("landmark_investigated"))),
         far_site=int(bool(save.flags.get("landmark2_investigated"))),
+        last_site=int(bool(save.flags.get("landmark3_investigated"))),
         concord=int(pilot.has_concord_commission),
         blackwake=int(pilot.has_blackwake_made),
         story_concord=int(stories.get(FACTION_CONCORD, {}).get("stage") == "complete"),
@@ -12997,12 +13085,22 @@ def screen_display_options(p: Palette, world: World) -> None:
             result, page = f"{label}: {DISPLAY_STYLES[style]}.", 0
 
 
-def far_site_bearing(world: World) -> int | None:
-    """The system the first site's record points to, while that is still worth
-    going to: after the first is investigated and until the second is."""
+def next_site(world: World) -> dict | None:
+    """The site the last record a pilot read points to, while that is still
+    worth going to: the second once the first is investigated, the last once
+    the second is, and nothing after that or before the first."""
     flags = world.save.flags
-    known = flags.get("landmark_investigated") and not flags.get("landmark2_investigated")
-    return world.far_site["system_id"] if known else None
+    if not flags.get("landmark_investigated"):
+        return None
+    if not flags.get("landmark2_investigated"):
+        return world.far_site
+    return None if flags.get("landmark3_investigated") else world.last_site
+
+
+def far_site_bearing(world: World) -> int | None:
+    """The system the last record read points to; see `next_site`."""
+    site = next_site(world)
+    return None if site is None else site["system_id"]
 
 
 def landmark_here(world: World) -> dict | None:
@@ -13010,7 +13108,7 @@ def landmark_here(world: World) -> dict | None:
     if world.here.id == world.landmark["system_id"] and not world.save.flags.get("landmark_investigated"):
         return world.landmark
     if world.here.id == far_site_bearing(world):
-        return world.far_site
+        return next_site(world)
     return None
 
 
@@ -13024,6 +13122,8 @@ def discovery_site(world: World) -> tuple[dict, bool] | None:
     here = landmark_here(world)
     if here is not None:
         return here, False
+    if world.save.flags.get("landmark3_investigated"):
+        return world.last_site, True
     if world.save.flags.get("landmark2_investigated"):
         return world.far_site, True
     if world.save.flags.get("landmark_investigated"):
@@ -13037,7 +13137,8 @@ def far_site_lead(world: World) -> str | None:
     if bearing is None:
         return None
     system = world.by_id[bearing]
-    return f"Its record carries a second bearing: {system.x},{system.y} in {sector_for(system)}. The route planner will take it."
+    which = "one more bearing, the last" if next_site(world) is world.last_site else "a second bearing"
+    return f"Its record carries {which}: {system.x},{system.y} in {sector_for(system)}. The route planner will take it."
 
 
 def screen_dump_contraband(p: Palette, world: World) -> None:
@@ -13070,6 +13171,10 @@ ARCHIVE_RECORDS = {
         "The listening post recorded unregistered rescue corridors long after the authorities declared them empty. Its final operator kept the beacons lit for whoever still needed them.",
         "Mara's annotation: a public edition can preserve the rescue story while protecting the passengers' names.",
     ],
+    "the Last Beacon": [
+        "The buoy's log is one line a day for sixty-one years, in a dozen hands: light kept, all well. Under the last entry someone has written the next date and left the line blank.",
+        "Nobody was posted here. Whoever passed kept it lit and wrote the line. There is a pen on a cord beside the log.",
+    ],
 }
 
 
@@ -13090,15 +13195,19 @@ def investigate_landmark(world: World) -> list[str]:
     if world.save.pending_travel is not None: raise ValueError("Finish the current journey first.")
     if not landmark_available_here(world): raise ValueError("This site has no unclaimed salvage here.")
     landmark = landmark_here(world)
-    far = landmark is world.far_site
-    world.save.flags["landmark2_investigated" if far else "landmark_investigated"] = True
+    far, last = landmark is world.far_site, landmark is world.last_site
+    world.save.flags["landmark3_investigated" if last else "landmark2_investigated" if far else "landmark_investigated"] = True
     world.save.pilot.credits += landmark["reward_credits"]
     world.save.pilot.note(f"Investigated {landmark['label']} (+{landmark['reward_credits']}cr)")
     world.save.pilot.highlight(f"Investigated {landmark['label']} (+{landmark['reward_credits']}cr).")
     lines = [f"Salvage recovered: +{landmark['reward_credits']}cr."]
+    if last:
+        # The last record is the whole of it: there is nowhere further to send a pilot.
+        return lines + ARCHIVE_RECORDS[landmark["label"]]
     if far:
-        # The second site keeps its own record: what happened here, in the place's own words.
-        return lines + [ARCHIVE_RECORDS[landmark["label"]][0]]
+        # The second site keeps its own record: what happened here, in the place's
+        # own words, and where it says to go next.
+        return lines + [ARCHIVE_RECORDS[landmark["label"]][0], far_site_lead(world)]
     lines.append(far_site_lead(world))
     if world.save.flags.get("archive_v1_started"):
         world.save.flags["archive_v1_recovered"] = True
@@ -13536,6 +13645,21 @@ PORTRAITS = {
                 "    \\__|__/",
                 "    ___|___",
                 "  ==[_____] =="
+            ]
+        },
+        "the Last Beacon": {
+            "large": [
+                "              \\  |  /",
+                "            --  (@)  --",
+                "              /  |  \\",
+                "                [=]",
+                "           ____/[=]\\____",
+                "          <____[===]____>"
+            ],
+            "compact": [
+                "   \\ (@) /",
+                "     [=]",
+                "  <_[===]_>"
             ]
         }
     }
@@ -13988,8 +14112,9 @@ class _ViewportStation(_ViewportScene):
 class _ViewportSite(_ViewportScene):
     """A landmark, each drawn as itself: the colony ship and its wound, the
     cathedral's rose window still lit, the shipyard's broken cradles and the
-    field they shed, the listening post with its dish still turned outward.
-    With no landmark recorded, the scanner sweeps empty space."""
+    field they shed, the listening post with its dish still turned outward,
+    the last beacon and its turning lamp. With no landmark recorded, the
+    scanner sweeps empty space."""
 
     def __init__(self, width: int, height: int, *, site: str | None, items: list, prose: str, seed: str):
         title = _scene_text(site).upper() if site else "NO DISCOVERY RECORDED"
@@ -14005,8 +14130,48 @@ class _ViewportSite(_ViewportScene):
     def draw(self, stage: _Stage, index: int, t: float) -> None:
         self.twinkle(stage, index)
         painter = {"the Derelict Ark": self.ark, "the Silent Cathedral": self.cathedral,
-                   "the Shattered Yard": self.yard, "the Long Watch": self.watch}.get(self.site or "", self.scanner)
+                   "the Shattered Yard": self.yard, "the Long Watch": self.watch,
+                   "the Last Beacon": self.beacon}.get(self.site or "", self.scanner)
         painter(stage, index)
+
+    def beacon(self, stage: _Stage, index: int) -> None:
+        """A buoy and its lamp: a drum with a band of hazard paint and a solar
+        wing either side, a mast held by two stays, and a light that turns --
+        full on toward the pilot, a beam to one side and then the other."""
+        s = self.scale * 0.6
+        cx, cy = self.width * 0.5, self.mid + s * 0.15   # the lamp to the drum's foot, centered in the sky
+        hull = (176, 182, 196)
+        for y in range(math.floor(cy), math.ceil(cy + s * 0.5)):
+            for x in range(math.floor(cx - s * 0.3), math.ceil(cx + s * 0.3)):
+                stage.plot(x, y, _mix(hull, (64, 68, 84), (x - cx + s * 0.3) / (s * 0.6)))
+        band = math.floor(cy + s * 0.22)
+        for x in range(math.floor(cx - s * 0.3), math.ceil(cx + s * 0.3)):
+            stage.plot(x, band, (230, 170, 60) if (x // 2) % 2 else (40, 40, 48))
+        for side in (-1, 1):
+            for x in range(int(s * 0.36), int(s * 0.82)):
+                for y in range(math.floor(cy + s * 0.06), math.ceil(cy + s * 0.18)):
+                    stage.plot(cx + side * x, y, (150, 170, 200) if x % 4 == 0 else (36, 64, 140))
+        top = math.floor(cy - s * 0.8)
+        for y in range(top, math.floor(cy)):
+            stage.plot(cx, y, (150, 156, 170))
+        stays = max(2, int(s * 0.45))
+        for side in (-1, 1):
+            for step in range(stays):
+                stage.plot(cx + side * s * 0.3 * (1 - step / stays), cy - step, (110, 116, 132))
+        turn = (index // 3) % 4
+        lamp = ((255, 240, 190), (255, 204, 96), (150, 110, 50), (255, 204, 96))[turn]
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                stage.plot(cx + dx, top + dy, lamp if dx == 0 or dy == 0 else _scale(lamp, 0.6))
+        reach = max(4, int(s * 1.1))
+        sides = {0: (-1, 1), 1: (1,), 3: (-1,)}.get(turn, ())
+        for side in sides:
+            for step in range(2, reach if turn == 0 else reach * 2 // 3):
+                fade = 1 - step / reach
+                stage.plot(cx + side * step, top, _scale((255, 240, 190), 0.15 + 0.6 * fade))
+                if step < reach // 2:   # the beam widens near the lamp
+                    for dy in (-1, 1):
+                        stage.plot(cx + side * step, top + dy, _scale((255, 220, 140), 0.1 + 0.3 * fade))
 
     def ark(self, stage: _Stage, index: int) -> None:
         cx, cy, s = self.width * 0.5, self.mid, self.scale
@@ -14218,7 +14383,8 @@ def viewport_scene(world: World, view: str, width: int, height: int, *, system: 
         items = [status]
         if (bearing := far_site_bearing(world)) is not None:
             far = world.by_id[bearing]
-            items.append([("Second bearing: ", _SCENE_SLATE), (f"{far.x},{far.y}", _SCENE_INK),
+            items.append([("Last bearing: " if next_site(world) is world.last_site else "Second bearing: ", _SCENE_SLATE),
+                          (f"{far.x},{far.y}", _SCENE_INK),
                           (f" in {_scene_text(sector_for(far))}", _SCENE_SLATE)])
         return _ViewportSite(width, height, site=site["label"], items=items,
                              prose=site["flavor"], seed=seed)
@@ -19709,7 +19875,9 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
             told = sector_tale(world)
             lines += told
             lines += lamp_top_up(world)
-            if not (voice or rumour or told):
+            news = faction_epilogues_due(world)
+            lines += news
+            if not (voice or rumour or told or news):
                 # A quiet arrival: what the dock is like, now and then.
                 heard = dock_voice(world)
                 if heard:

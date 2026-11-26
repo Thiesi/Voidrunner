@@ -53,7 +53,7 @@ def every_picture(width: int, height: int) -> dict[str, "vr._ViewportScene"]:
     for economy in vr.ECONOMIES:
         pictures[economy] = vr._ViewportStation(width, height, station="Harbor Lights", economy=economy,
                                                 items=[[("Kepler Reach", vr._SCENE_INK)]], seed="t")
-    for site in vr.LANDMARK_FLAVORS:
+    for site in (*vr.LANDMARK_FLAVORS, vr.LAST_SITE):
         pictures[site["label"]] = vr._ViewportSite(width, height, site=site["label"], items=[],
                                                    prose=site["flavor"], seed="t")
     pictures["nothing"] = vr._ViewportSite(width, height, site=None, items=[], prose="Nothing yet.", seed="t")
