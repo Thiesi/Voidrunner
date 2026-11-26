@@ -2024,6 +2024,43 @@ cached careers would otherwise have more jumps to show tomorrow. The suite's
 launched doors run with the allowance on, as a caller's does; a walk that
 needs more than twelve jumps has to set `DOOR_JUMPS=0`.
 
+**The Regatta (review).** One galaxy a month for every pilot on every board,
+flown in a second career beside a caller's own, ranked by net worth. The whole
+of it is in [month-galaxy.md](month-galaxy.md); what matters for the code is
+here.
+
+A second career sounds like a second save system and is not one. Every
+function of the storage layer takes the directory it works in, so a Regatta
+career is the same file in another directory, `regatta/<month>/` under the
+save directory, with its own score records beside it. Nothing in the storage
+layer changed. The session holds the caller's one lock, which is in the save
+directory itself, for both careers; the door keeps the caller's own world in
+memory and swaps which one the deck is drawn for (`own`, `active_dir`). The
+checkpoint of each world is bound to its own directory when the world is made,
+never to a variable that changes.
+
+The allowance of jumps is the caller's. Each career file keeps its own record
+of it and reads the other's (`World.flight_sibling`); the allowance is the
+lesser of the two, which is always the one written last, since a record read
+later says what would be left had nothing been flown since. Neither career
+writes the other's file, so no save is ever written for a career that is not
+being flown. Before the Regatta career is opened in a session its record is
+read from its file without opening the career (`peek_flight`).
+
+The galaxy is the month's: its seed follows from the month alone
+(`regatta_seed`), and a save that claims a Regatta month with another seed is
+refused. Net worth (`career_worth`) is derived from the save, not counted as
+it is spent: credits, cargo at cost, the price of every module tier fitted,
+the yard's price of the hull, and the stakes held. A Regatta career's score
+record carries the month, that figure and the day, updated at every save
+while the month lasts and left alone after it.
+
+A career whose month is no longer the month is over (`regatta_over`): the
+main loop returns the caller to their own career at the next deck. Retiring is
+refused in one. Game events for NetBBS are bound to the caller's own career
+only. The suite and the gallery pin or switch off the month with
+`DOOR_REGATTA`, as they do the dispatch's day.
+
 **Epilogues, and the last site (review).** Two of the game's stories stopped
 a step early.
 
