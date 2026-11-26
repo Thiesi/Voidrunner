@@ -2024,6 +2024,30 @@ cached careers would otherwise have more jumps to show tomorrow. The suite's
 launched doors run with the allowance on, as a caller's does; a walk that
 needs more than twelve jumps has to set `DOOR_JUMPS=0`.
 
+**Legacy (review).** Retiring began a new career that owed the old one a few
+hundred credits and a module tier. Everything a pilot had built became a line
+in a dossier, and the second career was the first one again. A retiring pilot
+now passes one thing on, chosen with `[L]` on the Career Finale page, and the
+next career begins with it:
+
+- a stake: the first step of a stake at Freeport, where every career begins;
+- a veteran: one specialist aboard signs on again, as who they were and at
+  the service level they reached. Their errand, if they had one, belonged to
+  the old galaxy and stays there;
+- a name: the faction that thought best of the pilot remembers. Half that
+  standing, up to 40, and none below 20. It opens no membership by itself.
+
+One thing, not all three, and none of it is credits: the next career still
+starts in a Shuttle with a rookie's purse. Nothing is passed on unless the
+pilot chooses; `[L]` goes round what this career has to give, so a career
+with no crew and no standing is offered a stake or nothing. The plan's third
+option was a charter unlocked. The hard charter was built open to everyone,
+so there was nothing to unlock, and a name took its place.
+
+The dossier records what was passed on (`legacy`, absent for nothing), and
+says it. A dossier written before this has no such field and reads as it did.
+The board's score record does not carry it.
+
 **A rule for each sector (review).** A sector was a name, a filter on the star
 map, a season, and, since the sector stories, something its docks say about
 themselves. Nothing was different about flying in one. Each of the six now has

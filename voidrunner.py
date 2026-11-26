@@ -2638,7 +2638,11 @@ def _validate_save_document(data: dict) -> None:
         optional_fields = {"failed", "expired"}  # Recorded from #403 onward; earlier dossiers lack both.
         # A career flown on a hard charter says so; a standard one says nothing.
         require(dossier.get("charter", "hard") == "hard", "dossier charter")
-        dossier = {key: value for key, value in dossier.items() if key != "charter"}
+        legacy = dossier.get("legacy", "stake")
+        require(isinstance(legacy, str) and (
+            legacy == "stake" or legacy in {f"veteran:{role}" for role in CREW_ROLES}
+            or legacy in {f"name:{faction}" for faction in FACTIONS}), "dossier legacy")
+        dossier = {key: value for key, value in dossier.items() if key not in ("charter", "legacy")}
         _reject_unknown_save_fields(dossier, dossier_fields | optional_fields, "career dossier")
         require(dossier_fields <= set(dossier) and (set(dossier) & optional_fields) in (set(), optional_fields), "career dossier fields")
         for key in optional_fields & set(dossier): integer(dossier[key], "dossier " + key)
@@ -6291,7 +6295,79 @@ def career_finale_blocker(save: SaveData, finale: str) -> str | None:
     return None if ready else "Requires " + CAREER_FINALES[finale]["requirement"] + "."
 
 
-def finish_career(save: SaveData, finale: str, charter: str = "standard") -> SaveData:
+# Legacy (review). Retiring began a new career that owed the old one a few
+# hundred credits and a module tier: everything a pilot had built was a line
+# in a dossier. A retiring pilot now passes one thing on, chosen on the finale
+# page, and the next career begins with it:
+#
+#   a stake    the first step of a stake at Freeport, where every career begins;
+#   a veteran  one specialist aboard signs on again, at the level they reached;
+#   a name     the faction that thought best of the pilot remembers: half that
+#              standing, up to 40. It opens no membership by itself.
+#
+# One thing, not all three, and none of it is credits: the new career still
+# starts in a Shuttle with a rookie's purse. What a career is worth is still
+# earned in it. The dossier records what was passed on (`legacy`).
+LEGACY_WORDS = {"stake": "a stake", "veteran": "a veteran", "name": "a name"}
+LEGACY_NAME_SHARE = 2      # the standing carried is the old standing over this
+LEGACY_NAME_MOST = 40
+LEGACY_NAME_LEAST = 20     # a faction that hardly knew the pilot has nothing to remember
+
+
+def legacy_options(save: SaveData) -> list[str]:
+    """What this career could pass on, as ids: `none`, `stake`, `veteran:<role>`
+    for each specialist aboard, `name:<faction>` for the faction that thinks
+    best of the pilot, if it thinks well enough."""
+    options = ["none", "stake"]
+    options += [f"veteran:{role}" for role in CREW_ROLES if getattr(save.ship, f"has_{role}")]
+    faction = max(FACTIONS, key=lambda name: save.pilot.reputation.get(name, 0))
+    if save.pilot.reputation.get(faction, 0) >= LEGACY_NAME_LEAST:
+        options.append(f"name:{faction}")
+    return options
+
+
+def legacy_standing(save: SaveData, faction: str) -> int:
+    """The standing a name carries into the next career."""
+    return min(LEGACY_NAME_MOST, max(0, save.pilot.reputation.get(faction, 0)) // LEGACY_NAME_SHARE)
+
+
+def legacy_text(save: SaveData, legacy: str) -> str:
+    """What a legacy is, said to the pilot choosing it."""
+    kind, _, detail = legacy.partition(":")
+    if kind == "stake":
+        return f"a stake: step one at {HOME_STATION_NAME}"
+    if kind == "veteran":
+        identity = save.ship.crew_records.get(detail, {}).get(
+            "identity", random.Random(f"crew-v1:{save.seed}:{detail}").randrange(len(CREW_CANDIDATES[detail])))
+        level = CREW_SERVICE_LEVELS[crew_level(save.ship, detail)][1]
+        return f"a veteran: {CREW_CANDIDATES[detail][identity][0]}, {CREW_ROLES[detail]['label'].lower()}, {level}"
+    if kind == "name":
+        return f"a name: +{legacy_standing(save, detail)} standing with the {FACTION_LABEL[detail]}"
+    return "nothing"
+
+
+def apply_legacy(old: SaveData, fresh: SaveData, legacy: str) -> str | None:
+    """Give the new career what the old one passed on; returns the line its log
+    opens with, or None for nothing."""
+    kind, _, detail = legacy.partition(":")
+    if kind == "stake":
+        fresh.flags["stake_0_1"] = True
+        return f"Passed on from your last career: a stake at {HOME_STATION_NAME}."
+    if kind == "veteran":
+        record = old.ship.crew_records.get(detail, {})
+        identity = record.get("identity", random.Random(f"crew-v1:{old.seed}:{detail}").randrange(len(CREW_CANDIDATES[detail])))
+        setattr(fresh.ship, f"has_{detail}", True)
+        # Who they are and how long they have served; an errand from the old galaxy stays there.
+        fresh.ship.crew_records[detail] = {"version": 1, "identity": identity, "paid_jumps": record.get("paid_jumps", 0)}
+        return f"Passed on from your last career: {CREW_CANDIDATES[detail][identity][0]} signs on again."
+    if kind == "name":
+        fresh.pilot.reputation[detail] = legacy_standing(old, detail)
+        return (f"Passed on from your last career: the {FACTION_LABEL[detail]} remembers your name, "
+                f"+{fresh.pilot.reputation[detail]} standing.")
+    return None
+
+
+def finish_career(save: SaveData, finale: str, charter: str = "standard", legacy: str = "none") -> SaveData:
     """Validate the deliberate ending; archive and reset share one saved payload.
 
     Contracts still active at retirement end unpaid, so the dossier counts them
@@ -6310,12 +6386,19 @@ def finish_career(save: SaveData, finale: str, charter: str = "standard") -> Sav
                "highlights":list(save.pilot.highlights)}
     if is_hard(save):
         dossier["charter"] = "hard"
+    if legacy not in legacy_options(save):
+        legacy = "none"  # what cannot be passed on is not: a specialist who has since left, say
+    if legacy != "none":
+        dossier["legacy"] = legacy
     fresh = retire_pilot(save)
     fresh.charter = charter if charter in CHARTERS else "standard"  # the next career's, chosen on the finale page
+    passed = apply_legacy(save, fresh, legacy)
     fresh.retired_careers = [dict(item, highlights=list(item["highlights"])) for item in save.retired_careers] + [dossier]
     info = CAREER_FINALES[finale]
     if info["tier"] is not None: setattr(fresh.ship, info["tier"] + "_tier", 1)
     fresh.pilot.log = [f"Retired as {info['label']} (retirement #{fresh.pilot.retirements}); a new career begins."]
+    if passed is not None:
+        fresh.pilot.note(passed)
     for entry in abandoned:
         fresh.pilot.note(entry)
     fresh.pilot.highlights = [info["closing"]]
@@ -6330,14 +6413,15 @@ def career_dossier_lines(save: SaveData) -> list[str]:
         info = CAREER_FINALES[item["finale"]]
         lines += [f"Career #{item['number']}: {info['label']}. {show_date(item['started']) or 'Unknown start'} to {show_date(item['ended'])}.",
                   f"Seed {item['seed']}; {item['days']} days; {RANKS[item['rank']][1]}; {item['ship']}"
-                  + ("; hard charter." if item.get("charter") == "hard" else "."),
+                  + ("; hard charter." if item.get("charter") == "hard" else ".")
+                  + (f" Passed on: {LEGACY_WORDS[item['legacy'].partition(':')[0]]}." if "legacy" in item else ""),
                   f"Final credits {item['credits']:,}cr; market margin {item['market_margin']:+,}cr; {item['charted']}/{GALAXY_SYSTEM_COUNT} charted; {item['kills']} victories; "
                   f"{item['missions']} missions completed" + (f", {item['failed']} failed, {item['expired']} expired." if "failed" in item else "."), info["closing"]]
         lines.extend("* " + entry for entry in item["highlights"])
     return lines
 
 
-def career_finale_lines(save: SaveData, selected: str, charter: str = "standard") -> list[str]:
+def career_finale_lines(save: SaveData, selected: str, charter: str = "standard", legacy: str = "none") -> list[str]:
     p = pal()
     lines = [f"{p.plasma}{BOLD}{_mission_plain(save.pilot.handle)}{RESET}  "
              f"{p.slate}{career_rank(save.pilot)}{RESET}  {p.gold}{glyph('credits')} {save.pilot.credits:,}cr{RESET}  "
@@ -6364,13 +6448,15 @@ def career_finale_lines(save: SaveData, selected: str, charter: str = "standard"
     credits = STARTING_CREDITS + (save.pilot.retirements+1)*RETIREMENT_STARTING_CREDITS_BONUS
     gear = f"{info['tier'].title()} tier 1" if info["tier"] else "ordinary starting modules"
     lines += ["Selected ending: " + info["closing"],
+              # One row, whatever is chosen: the page is two pages at 80x24 and should stay two.
+              f"You pass on {p.ink}{BOLD}{legacy_text(save, legacy)}{RESET}. {key_label('L', 'change')}.",
               (f"Next career's charter: {p.ink}{BOLD}{charter}{RESET}. {key_label('H', 'changes it')}."
                + (" Hard: raiders a tier stronger, no dock work, a doubled tug fee; its own Hall of Fame table."
                   if charter == "hard" else "")),
               f"New Game+: a fresh galaxy, Shuttle with {gear}, full starting hull/fuel and {credits:,}cr including the accumulated retirement bonus.",
               "Current cargo, contracts, faction/crew/story progress and career rank reset. Display style, lifetime score, retirement count and dossiers remain."
               + (f" {len(save.active_missions)} active contract(s) count as abandoned in the dossier." if save.active_missions else ""),
-              f"Archive space: {len(save.retired_careers)}/{MAX_RETIRED_CAREERS}. The full current dossier and new career save together before acknowledgement.",
+              f"Archive space: {len(save.retired_careers)}/{MAX_RETIRED_CAREERS}; the dossier and the new career save together.",
               "[S] Retire opens the final confirmation. [B] Back retains this career."]
     return lines
 
@@ -17853,17 +17939,22 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
     selected = next((key for key in CAREER_FINALES if career_finale_blocker(world.save, key) is None), "legend")
     page, result = 0, None
     charter = world.save.charter  # the next career's: as this one was flown, unless [H] says otherwise
+    legacy = "none"               # what this career passes on: nothing, until [L] says what
     while True:
-        lines = ([result] if result else []) + career_finale_lines(world.save, selected, charter)
-        key, page, count = _draw_service_page(p, "Career Finale", lines, "[1-4] Choose [S] Retire [H] Charter [<>] Page [B] Back: ", page)
+        lines = ([result] if result else []) + career_finale_lines(world.save, selected, charter, legacy)
+        key, page, count = _draw_service_page(p, "Career Finale", lines, "[1-4] Choose [S] Retire [L] Legacy [H] Charter [<>] Page [B] Back: ", page)
         if key in ("B", "Q"): return result
         if key == "H": charter = "standard" if charter == "hard" else "hard"; continue
+        if key == "L":
+            options = legacy_options(world.save)
+            legacy = options[(options.index(legacy) + 1) % len(options)] if legacy in options else options[0]
+            continue
         if (moved := page_step(key, page, count)) is not None: page = moved; continue
         if key in ("1", "2", "3", "4"): selected, page = list(CAREER_FINALES)[int(key)-1], 0; continue
         if key != "S": continue
         if blocker := career_finale_blocker(world.save, selected): result, page = blocker, 0; continue
         try:
-            fresh = World(finish_career(world.save, selected, charter))
+            fresh = World(finish_career(world.save, selected, charter, legacy))
             fresh.checkpoint()
             fresh.save.best_credits = max(fresh.save.best_credits, fresh.save.pilot.credits)
             _encode_career_checkpoint(fresh.save)
