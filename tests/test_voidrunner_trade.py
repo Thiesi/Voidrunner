@@ -2074,9 +2074,9 @@ def test_ship_portrait_damage_matches_real_hull_without_changing_ship(monkeypatc
 def test_every_portrait_has_distinct_complete_bounded_composition(monkeypatch, terminal,width,height,style):
     terminal(width, height, style)
     portraits=[art for category in vr.PORTRAITS.values() for art in category.values()]
-    assert len(portraits)==15  # thirteen, and the two flagships
+    assert len(portraits)==16  # thirteen, the two flagships and the last site
     for layout in ("large","compact"):
-        assert len({tuple(art[layout]) for art in portraits})==15
+        assert len({tuple(art[layout]) for art in portraits})==16
         assert all(row.isascii() and len(row)<=(38 if layout=="large" else 18) for art in portraits for row in art[layout])
     for art in portraits:
         details=["Real station information follows the complete portrait.", "Fuel 7/24; cargo 3/24 used."]

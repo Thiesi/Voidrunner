@@ -2024,6 +2024,39 @@ cached careers would otherwise have more jumps to show tomorrow. The suite's
 launched doors run with the allowance on, as a caller's does; a walk that
 needs more than twelve jumps has to set `DOOR_JUMPS=0`.
 
+**Epilogues, and the last site (review).** Two of the game's stories stopped
+a step early.
+
+A faction's case ended on its closing line and was never heard of again: the
+choice between two people's needs had one sentence of consequence. Twelve days
+after a case closes (`EPILOGUE_DAYS`), word of what came of it reaches the
+pilot at whatever dock they are at, once, as `Word from Edda Ro: ...`, and
+stays on the case's page under `SINCE THEN`. Each of the four endings has its
+own. None says the pilot chose wrongly: each says what that choice cost and
+what it bought. The prosecution got its plea and the clinic its medicine
+eleven weeks late; the clinic that was put first has not run short since, and
+the official still has a desk. A closed case's record gains the day it closed
+and whether its word has come (`day`, `epilogue`); a case closed by an older
+build has neither, and its word is simply due. Word of a case counts as
+something said, so the dock itself stays quiet on that arrival.
+
+The first site's record leads to a second, and there the trail stopped: a
+pilot with a finished ship had no place left to go to. The second site's
+record now carries one more bearing, to a place that is not one of the four:
+the Last Beacon, a relay buoy past the charted lanes, in the most dangerous
+system the galaxy has that is not already a site and, where there is one, in a
+sector neither earlier site is in. Over a hundred galaxies that was danger 4
+in 64, danger 5, where the elite raiders are, in 25, and danger 3 in 11: it is
+a destination for the ship a career ends in. It
+pays 15,000cr, has its own achievement, and its record is the last and reads
+whole on the spot: a log of one line a day for sixty-one years, in a dozen
+hands, with the next date written under the last entry and the line left
+blank. It has every picture a site is drawn in: a portrait for terminals
+without pixels, and in the Viewport a buoy with a band of hazard paint, solar
+wings, a mast on two stays and a lamp that turns. Only the second site's
+record leads to it, and the route planner takes its bearing uncharted, as it
+does the second's. One more flag is saved (`landmark3_investigated`).
+
 **Dock voices (review).** An arrival reported what it cost and what it paid.
 Unless a crew member spoke, a rumour was going round or the sector had a part
 of its story to tell, a station said nothing, and one Industrial dock was the

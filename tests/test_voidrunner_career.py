@@ -1119,7 +1119,7 @@ def test_archive_record_depends_on_existing_landmark_and_never_awards_salvage_tw
         result = vr.archive_action(world, "I")
         assert all(line in result for line in vr.ARCHIVE_RECORDS[label])
         assert world.save.pilot.credits == 4200
-    assert seen == set(vr.ARCHIVE_RECORDS)
+    assert seen == set(vr.ARCHIVE_RECORDS) - {vr.LAST_SITE["label"]}  # the last site is never the first
 
 
 @pytest.mark.parametrize("ending", ["P", "S"])
@@ -2090,7 +2090,7 @@ def test_faction_case_four_endings_pay_once_without_membership_or_slots(faction,
     assert world.save.pilot.credits == before["pilot"]["credits"] + ending["reward"]
     assert world.save.pilot.missions_completed == 1
     assert world.save.pilot.reputation == ending["standing"]
-    assert world.save.faction_stories[faction] == {"version": 1, "stage": "complete", "choice": choice}
+    assert world.save.faction_stories[faction] == {"version": 1, "stage": "complete", "choice": choice, "day": world.save.turn}
     assert not world.save.cargo and not world.save.cargo_basis
     assert world.save.active_missions == missions and world.save.turn == before["turn"]
     assert world.save.ship.fuel == before["ship"]["fuel"] and world.event_rng.getstate() == rng
