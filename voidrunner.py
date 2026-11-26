@@ -3680,6 +3680,80 @@ RUMOUR_VOICES: dict[str, tuple[str, str]] = {
 RUMOUR_WHAT = {"surplus": "has a glut of something", "shortage": "is short of something"}
 
 
+# Dock voices (review). An arrival reported what it cost and what it paid.
+# Unless a crew member spoke, a rumour was going round or the sector had a part
+# of its story to tell, a station said nothing, and one Industrial dock was the
+# next Industrial dock. On about one quiet arrival in three a pilot now gets a
+# line of what the dock is like: eight for each kind of economy, written and
+# not generated. It is said only when nothing else was, so it never crowds out
+# something a pilot can act on, and it draws nothing from the event generator:
+# whether a dock speaks and what it says follow from the seed, the day and the
+# station.
+DOCK_VOICE_ONE_IN = 3
+DOCK_VOICES: dict[str, tuple[str, ...]] = {
+    "Agricultural": (
+        "The pad smells of cut stalks. Somebody is hosing chaff out of a hauler's intakes.",
+        "A weighbridge clerk waves you past without looking up from her tally.",
+        "Seed pallets are stacked three high along the apron, each chalked with a farm's mark.",
+        "The dock's dog inspects your landing gear and finds it acceptable.",
+        "Two growers are arguing about rainfall on a world that has never had weather.",
+        "Harvest crews sleep in the shade of the grain elevators, boots off, hats over their faces.",
+        "A child is selling fruit from a crate by the fuel line. It is good fruit.",
+        "The air scrubbers here leak a little. Everything smells faintly of green.",
+    ),
+    "Industrial": (
+        "A gantry swings a hull plate overhead and nobody looks up.",
+        "The shift horn goes as you set down. The dock empties and fills again inside a minute.",
+        "Welders work the next berth with their visors down, sparks falling through the grating.",
+        "A foreman checks your berth number against a clipboard that has outlived three stations.",
+        "Everything here is painted the same yellow, including, by accident, a cat.",
+        "The fuel crew couples your line in eleven seconds. One of them is timing it.",
+        "The noise from the foundry deck comes up through your boots before you hear it.",
+        "Someone has welded a bench out of scrap by the airlock. It is the best seat on the station.",
+    ),
+    "Mining": (
+        "Ore dust has settled on everything, the dockmaster included.",
+        "A hauler twice your size backs into the next berth by feel.",
+        "The assay office has a queue out of the door and a sign: no samples after the bell.",
+        "Rock crews come off shift grey to the eyebrows and walk straight to the water tap.",
+        "A drill head the size of your cockpit sits on the apron with a ribbon tied to it.",
+        "The dock lights flicker when the crushers start. Nobody remarks on it.",
+        "Somebody has scratched a tally into the berth wall. It goes all the way round.",
+        "The canteen's one window looks out on the tailings, and it is always full.",
+    ),
+    "Tech": (
+        "The berth tells you your landing was within tolerance.",
+        "A courier drone holds the airlock for you, which it is not supposed to do.",
+        "Everything on this dock is clean enough to make your ship look worse.",
+        "Three engineers are watching a fourth fail to fix the coffee machine.",
+        "The dock's status board lists your arrival before you have finished arriving.",
+        "A technician asks what your scanner is, listens to the answer, and is kind about it.",
+        "The floor lights lead you to customs whether you were going there or not.",
+        "Someone has left a prototype in the corridor with a note: works, do not ask how.",
+    ),
+    "Haven": (
+        "Nobody meets you at the berth. Somebody is watching it, all the same.",
+        "The dock fee is cash and the receipt is a nod.",
+        "A card game at the airlock pauses while you pass and resumes one seat different.",
+        "The berth numbers have been painted over more than once. Yours has two.",
+        "A stall sells fuel filters, hot food and no questions, in that order.",
+        "Half the ships on this dock have no registry. The other half have several.",
+        "Someone offers to watch your ship. Someone else offers to watch them.",
+        "The lights are low here on purpose. It is not to save power.",
+    ),
+}
+
+
+def dock_voice(world: World) -> str | None:
+    """A line of what this dock is like, on about one arrival in three; None
+    otherwise. For an arrival where nothing else was said."""
+    here, day, seed = world.here, world.save.turn, world.save.seed
+    if zlib.crc32(f"dock-voice:{seed}:{day}:{here.id}".encode("utf-8")) % DOCK_VOICE_ONE_IN:
+        return None
+    lines = DOCK_VOICES[here.economy]
+    return lines[zlib.crc32(f"dock-line:{seed}:{day}".encode("utf-8")) % len(lines)]
+
+
 def rumoured_trait(world: World, system_id: int) -> str | None:
     """`surplus` or `shortage` for a system the pilot has heard about and not
     yet docked at; None otherwise. The good is not part of what was heard."""
@@ -19632,8 +19706,14 @@ def screen_travel(p: Palette, world: World, dest_id: int) -> None:
             rumour = dock_rumour(world)
             if rumour:
                 lines.append(rumour)
-            lines += sector_tale(world)
+            told = sector_tale(world)
+            lines += told
             lines += lamp_top_up(world)
+            if not (voice or rumour or told):
+                # A quiet arrival: what the dock is like, now and then.
+                heard = dock_voice(world)
+                if heard:
+                    lines.append(heard)
             if has_contraband(world) and dest.economy != "Haven":
                 chance = customs_risk_for(world, dest)
                 inspect = world.event_rng.random() < chance

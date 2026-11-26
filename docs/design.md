@@ -2024,6 +2024,22 @@ cached careers would otherwise have more jumps to show tomorrow. The suite's
 launched doors run with the allowance on, as a caller's does; a walk that
 needs more than twelve jumps has to set `DOOR_JUMPS=0`.
 
+**Dock voices (review).** An arrival reported what it cost and what it paid.
+Unless a crew member spoke, a rumour was going round or the sector had a part
+of its story to tell, a station said nothing, and one Industrial dock was the
+next Industrial dock. On about one quiet arrival in three a pilot now gets a
+line of what the dock is like: eight for each of the five kinds of economy,
+forty in all and about 520 words, written and not generated. A Mining dock has
+ore dust on the dockmaster; a Tech berth tells you your landing was within
+tolerance; at a Haven the receipt is a nod.
+
+A dock speaks only when nothing else did, so a line of colour never takes a
+row from something a pilot can act on. Whether it speaks and what it says
+follow from the seed, the day and the station, and it draws nothing from the
+event generator, so no encounter changes because a dock had something to say.
+Every line is one row of an 80-column deck or two, and tests hold them to that.
+Nothing is saved.
+
 **Legacy (review).** Retiring began a new career that owed the old one a few
 hundred credits and a module tier. Everything a pilot had built became a line
 in a dossier, and the second career was the first one again. A retiring pilot
